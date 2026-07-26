@@ -1,5 +1,8 @@
 import { describe, expect, it } from '@effect/vitest'
 import { Effect } from 'effect'
+import { readFileSync, statSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   allowedDirectDependencies,
   checkDeclaredDependencies,
@@ -13,6 +16,7 @@ import {
   maskSource,
   parseImports,
   REPOSITORY_POLICY,
+  SCAN_ROOTS,
   type DeclaredDependencies,
 } from '../scripts/check-dependency-whitelist'
 
@@ -550,13 +554,118 @@ describe('the Date.now() ban', () => {
   )
 })
 
+/**
+ * RULE 6's SECOND HALF: the gate only bites where `isToolingOrTestPath` says
+ * "shipped".
+ *
+ * ---------------------------------------------------------------------------
+ * The defect this block was written against, which happened in a sibling
+ * ---------------------------------------------------------------------------
+ *
+ * `SCAN_ROOTS` and `isToolingOrTestPath` are two hand-maintained lists that must
+ * agree, and nothing connected them. mx-multiplayer's copy of this script had
+ * `stages` in `SCAN_ROOTS` but NOT in `isToolingOrTestPath`, so every file under
+ * `stages/` — shipped code, in its `package.json` `files` — was classified as
+ * tooling. The consequence is precise: rule 6 says mc-playground-kit may not be
+ * imported from shipped source, and `classifyImport` only raises
+ * `dev-only-package-in-shipped-source` when `isToolingOrTest` is false. So
+ * mx-multiplayer's first stage registration could have imported the dev-only kit
+ * and the gate would have passed it.
+ *
+ * That is not a hypothetical failure mode. It is rule 6's exact origin: the only
+ * input stage in the entire roster used to be mc-playground-kit's `input:sample`,
+ * kit is banned from `dependencies`, and the shipped build therefore had NO
+ * INPUT STAGE AT ALL (docs/architecture.md §5-2). A hole in the predicate is a
+ * licence to do it again, in the one directory where it would be done.
+ *
+ * ---------------------------------------------------------------------------
+ * What this repository's copy looks like
+ * ---------------------------------------------------------------------------
+ *
+ * mc-compose does NOT have that hole: it registers no stages (it composes other
+ * modules'), so it has no `stages/` directory, and its shipped set is exactly
+ * `index.ts` + `domain/` — which is exactly what the predicate says.
+ *
+ * Checking that by hand once is worth very little, because the hole opens when
+ * somebody adds a root LATER. So the assertions below derive the shipped set
+ * from `package.json`'s `files` — the single place that actually decides what
+ * gets published — instead of restating it. Add a shipped directory without
+ * teaching the predicate about it and this fails.
+ */
 describe('shipped vs tooling source classification', () => {
+  const repositoryRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
+  const manifest = JSON.parse(
+    readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'),
+  ) as { readonly files?: ReadonlyArray<string> }
+
+  /**
+   * The entries of `files` that can hold TypeScript source: `index.ts` itself,
+   * and every entry that is a directory on disk. Decided by looking rather than
+   * by a name heuristic — `LICENSE` has no extension and is not a directory.
+   */
+  const publishedSourceRoots = (manifest.files ?? []).filter(
+    (entry) => entry === 'index.ts' || statSync(path.join(repositoryRoot, entry)).isDirectory(),
+  )
+
   it.effect('treats index.ts and domain/ as shipped, and everything else as tooling or tests', () =>
     Effect.sync(() => {
       expect(isToolingOrTestPath('index.ts')).toBe(false)
       expect(isToolingOrTestPath('domain/stage-order.ts')).toBe(false)
       expect(isToolingOrTestPath('test/stage-order.test.ts')).toBe(true)
       expect(isToolingOrTestPath('scripts/check-dependency-whitelist.ts')).toBe(true)
+    }),
+  )
+
+  // THE ONE THAT WOULD HAVE CAUGHT mx-multiplayer's HOLE. Everything published
+  // must be classified as shipped, so rule 6 applies to it.
+  it.effect('classifies every published source root as shipped, derived from package.json', () =>
+    Effect.sync(() => {
+      expect(publishedSourceRoots).toStrictEqual(['index.ts', 'domain'])
+
+      const misclassified = publishedSourceRoots.filter((root) =>
+        isToolingOrTestPath(root === 'index.ts' ? root : `${root}/anything.ts`),
+      )
+
+      expect(
+        misclassified,
+        `${misclassified.join(', ')} is published in package.json "files" but isToolingOrTestPath ` +
+          'calls it tooling. Rule 6 (mc-playground-kit may not be imported from shipped source) is ' +
+          'only enforced where that predicate says "shipped", so this is a licence to put a ' +
+          'devDependency in the shipped build — which is how the roster ended up with no input stage.',
+      ).toStrictEqual([])
+    }),
+  )
+
+  // The other direction: shipped code that is never scanned is not checked at
+  // all. A root can be correctly classified and still invisible.
+  it.effect('scans every published source root', () =>
+    Effect.sync(() => {
+      const unscanned = publishedSourceRoots.filter((root) => !SCAN_ROOTS.includes(root))
+      expect(
+        unscanned,
+        `${unscanned.join(', ')} is published but absent from SCAN_ROOTS, so no import in it is ` +
+          'ever classified.',
+      ).toStrictEqual([])
+    }),
+  )
+
+  // And the converse, so the classification stays deliberate rather than
+  // accidental: a scanned root that is NOT published must be tooling. `apps/`
+  // is the one this pins — mc-compose has no `apps/` today, and if it grows one
+  // it will be a preview harness, which is exactly where importing the dev-only
+  // playground kit is legitimate.
+  it.effect('treats every scanned root that is not published as tooling', () =>
+    Effect.sync(() => {
+      const scannedButUnpublished = SCAN_ROOTS.filter(
+        (root) => !publishedSourceRoots.includes(root),
+      )
+      expect(scannedButUnpublished).toStrictEqual(['apps', 'scripts', 'test'])
+
+      for (const root of scannedButUnpublished) {
+        expect(isToolingOrTestPath(`${root}/anything.ts`), `${root} is treated as shipped`).toBe(
+          true,
+        )
+      }
     }),
   )
 })

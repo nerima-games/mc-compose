@@ -490,18 +490,21 @@ DN-3 は「ダングリングエッジは拒否せず**報告する**」と書�
 
 ---
 
-## DN-14: ロスターのリポジトリ間 `after` エッジは、**4 本とも宙に浮いている**
+## DN-14: ロスターのリポジトリ間 `after` エッジは、**4 本とも宙に浮いている** → **解決**
 
-**回帰テスト名**: `leaves the skeleton as the ONLY thing ordering one repository against another` /
-`drops exactly four edges, all of them naming sim:physics` /
-`stays consistent with §4.2 once mc-sim registers sim:physics`
+**状態**: **解決済み**(2026-07-27)。mc-sim が `sim:physics` を登録し、4 本すべてが繋がった。
+以下は当時の記述と、繋いだ結果の実測である。
+
+**回帰テスト名**: `binds every cross-repository edge, and they all point at mc-sim` /
+`drops nothing: no declared edge names a stage that is absent` /
+`binding mc-sim’s four edges did not move any other stage`
 **実装**: `test/e2e/roster-frame-order.test.ts`(実装済み)
 
 **実測**(2026-07-27、`test/e2e/roster.ts` の転記と `pnpm check:roster` による照合):
 
-ロスター全体で登録されている stage は **13 本**、宣言されている `after` エッジは **12 本**。
+当時、ロスター全体で登録されている stage は **13 本**、宣言されている `after` エッジは **12 本**。
 そのうち 8 本は**同一リポジトリ内**(自分の 2 本を並べているだけ)であり、
-リポジトリ境界をまたぐのは **4 本だけ**である:
+リポジトリ境界をまたぐのは **4 本だけ**であった:
 
 | 宣言している stage | `after` | 宣言箇所 |
 | --- | --- | --- |
@@ -526,23 +529,49 @@ mc-sim には `stages/` ディレクトリが存在せず、`docs/responsibility
 知る方法が無い。mc-sim は自分が何を求められているかを知らない。
 **合成層だけがこの数を数えられる。** plan.md §3.15 が E2E を最終ゲートと呼ぶ理由の実例である。
 
-**本実装での対処**: 強制しない、報告する — DN-3 / DN-13 のとおり。
-`ComposedGame.warnings` は今日 4 行を返し、そのすべてが stage 名と `sim:physics` を名指しする。
+**本実装での対処**: 強制しない、報告する — DN-3 / DN-13 のとおり。当時
+`ComposedGame.warnings` は 4 行を返し、そのすべてが stage 名と `sim:physics` を名指ししていた。
 加えて `stays consistent with §4.2 once mc-sim registers sim:physics` が
-**mc-sim が `sim:physics` を登録した日にフレームが動かないこと**を先に固定している。
-今日フレームが正しいのは偶然ではなく、宣言されたエッジ 4 本が骨格と同じ向きだからである
-— そしてもし向きが違っていたら、それは今日**見えない**。
+**mc-sim が `sim:physics` を登録した日にフレームが動かないこと**を先に固定していた。
 
-## DN-15: 骨格に `multiplayer:` を拾うフェーズが無い
+### DN-14 の決着(2026-07-27)
 
-**回帰テスト名**: `would schedule a multiplayer stage after the HUD, and says so`
+mc-sim が `stages/` を作り `sim:physics` を登録した
+(`mc-sim/stages/registration.ts:167`、`stages/stage-ids.ts:86`、`after` は無し)。
+`pnpm check:roster` の `compareSilentModule` がそれを検出して落ちた
+— **人間が気づいたのではなく、ゲートが気づいた**。
+
+**予測は当たっていた。フレームは動かなかった。**
+`sim:physics` は 1 本挿さり、他の 13 本は**順序を 1 つも変えなかった**
+(mx-multiplayer を含まない構成で index 1、含む構成で index 2)。
+ダングリングは 4 → 0、`warnings` は 4 行 → 0 行。
+
+**それでもこのエッジは冗長ではない。** 骨格を外すと差が出る:
+以前は骨格を外したフレームで 3 つの因果が壊れていたが、**エッジが繋がった今は 1 つが直っている**
+(`render:input` が `gameplay:interactions` と `render:draw` より前に来る。
+どちらも `sim:physics` 経由で到達されるようになったため)。
+残る破れは 2 つで、**どちらも体験モジュールの境界をまたぐ**ため §2.3-1 によりどのモジュールも
+`after` で表現できない — つまり **mc-compose にしか言えないことだけが残った**。
+「順序表が load-bearing のすべて」は、「順序表だけが言えることを言っている」に変わった。
+回帰テスト `without it, the frame breaks in exactly the ways no module may repair`。
+
+## DN-15: 骨格に `multiplayer:` を拾うフェーズが無い → **解決**
+
+**状態**: **解決済み**(2026-07-27)。骨格に `network:inbound` と `network:outbound` を足した。
+設計上の議論は [architecture.md](./architecture.md) §4.5 に置いてある(ここは経緯)。
+
+**回帰テスト名**: `without the two network phases, both multiplayer stages run after the HUD` /
+`has no position at all as a single `multiplayer:` namespace phase` /
+`applies remote state BEFORE the simulation reads it, as inbound asked` /
+`publishes settled state at the end of simulation, before any presentation` /
+`costs a build without mx-multiplayer nothing at all`
 **実装**: `test/e2e/roster-frame-order.test.ts`(実装済み)
 
-**実測**: plan.md §4.2 の骨格は 12 フェーズあり、そのどれも `multiplayer:` 名前空間も
+**当時の実測**: plan.md §4.2 の骨格は 12 フェーズあり、そのどれも `multiplayer:` 名前空間も
 `sync` のような名前も `members` に持たない。mx-multiplayer の stage 登録は
 未実装である(`mx-multiplayer/docs/responsibility.md:17`)ため、今日は表面化しない。
 
-**何が問題か**: mx-multiplayer が最初の 1 本 — たとえば `multiplayer:sync` — を登録した瞬間、
+**何が問題か**: mx-multiplayer が最初の 1 本を登録した瞬間、
 それはどのフェーズにも一致せず、`priorityOf` が `MAX_SAFE_INTEGER` を返し、
 **HUD の後ろ、フレームの最後尾で走る**。リモートピアの状態が毎フレーム 1 フレーム遅れて
 適用されるという症状になり、これは「バグ」ではなく「ラグ」に見えるので誰も報告しない。
@@ -550,11 +579,30 @@ mc-sim には `stages/` ディレクトリが存在せず、`docs/responsibility
 報告はされる(`unmatchedPhase` と `warnings`。DN-13)。それがリゾルバの正しい振る舞いである。
 **足りないのは報告ではなく、報告の読み手である。**
 
-**本実装での対処**: 今日この挙動をテストで固定した。
-mx-multiplayer が stage を登録するとき、compose 側の作業は
-「`STANDARD_STAGE_SKELETON` にネットワーク同期のフェーズをどこに置くか」であり、
-それは順序表の編集 — このリポジトリが所有する変更 — である。
-**プルリクエストに書かれた理由が要る種類の編集**([stage-skeleton.ts](../domain/stage-skeleton.ts) 参照)。
+### DN-15 の決着(2026-07-27)
+
+**予測は 1 文字も外れていなかった。** mx-multiplayer が `multiplayer:inbound` と
+`multiplayer:outbound` を登録し、実測でインデックス **14 と 15**、`ui:overlay-sync` の後ろに落ちた。
+`unmatchedPhase` は 2 本とも報告した。しかも mx-multiplayer は**自分の側から同じ数値を測って
+`stages/stage-ids.ts:36-51` に書いていた** — 両側が同じ欠陥を独立に測り、
+どちらも自分では直せなかった(`StageRegistration` に `before` が無いため)。
+
+対処は骨格への 2 フェーズ追加で、**プルリクエストに理由が要る種類の編集**である。
+理由は [architecture.md](./architecture.md) §4.5、
+コード上の論拠は [stage-skeleton.ts](../domain/stage-skeleton.ts) にある。要点だけ:
+
+1. **何もしないことは中立ではない。** この表に「未配置」は無く、拾われない stage は最後に走る。
+   待つことはフレームを未決にすることではなく、誤った答えを出荷し続けることである。
+2. **単一の `multiplayer:` 名前空間フェーズには置ける位置が 1 つも無い。**
+   physics より前は `multiplayer:outbound after sim:physics` と骨格の鎖が**循環**になり合成が失敗する。
+   physics より後は `inbound` が 1 フレーム遅れる。これは mx-multiplayer が書いた理由より強い。
+3. **早すぎるコストはゼロと実測した。** mx-multiplayer を含まないビルドではフレームが 1 本も変わらない。
+
+**DN-15 が残したもの**: `RESERVED_STAGE_PREFIXES` に `network:` を足した。
+このノートは「13 個目のフェーズを足すとその正規 id が予約されないままになる」と
+`test/modding.test.ts` の中で自分自身の使用例を予言していて、それがそのまま起きた
+(13 個目と 14 個目だった)。予約漏れは、**mx-multiplayer を含まないすべてのビルドで
+mod がそのフェーズになれる**ことを意味する。
 
 ---
 
@@ -567,9 +615,10 @@ mx-multiplayer が stage を登録するとき、compose 側の作業は
 | stage の障害処理(`Effect.catchAllCause` を誰が張るか) | 未決。plan.md §3.8 は sim に対して defect のログ出力を求めている |
 | 自動保存の `Schedule.spaced`(plan.md §3.8) | mc-sim 側。compose は stage 順序だけ |
 | フレーム予算 / adaptive quality | 参照実装は `frame-adaptive-quality.ts` を持つ。**compose には置かない** |
-| **`sim:physics` を誰が登録するのか** | **未決。DN-14。** 4 リポジトリが `after` で名指ししており、mc-sim には `stages/` が無い |
+| **`sim:physics` を誰が登録するのか** | **解決。DN-14。** mc-sim が登録した(`stages/registration.ts:167`)。4 本のエッジはすべて繋がり、フレームは動かなかった |
+| **mc-sim の `GameModule` を誰がホストに渡すのか** | **未決。** mc-compose は mc-sim を import できない(rule 3、`transitive-import`)。`InventoryService` の構築者問題(下)と同じ形で、stage を登録することと import 可能であることは別の性質である |
 | **`InventoryService` のインスタンスを誰が構築するのか** | **未決。[e2e-triage.md](./e2e-triage.md) §4.3。** mx-gameplay が書き mx-ui が読むので 1 インスタンスでなければならないが、mx-gameplay は登録時に acquire する必要があり(`RRegister`)、それを discharge するホストは mc-compose で、**mc-compose は mc-sim を import できない**(rule 3)。mc-render の `InputService` が成立するのは、それが mc-render 自身の `ROut` にありホワイトリストに入っているからで、この論法は mc-sim には効かない |
 | **`BlockId`(数値)から `ItemId`(文字列)への解決を誰が持つか** | **未決。[e2e-triage.md](./e2e-triage.md) §4.2。** mc-kernel は `BlockId` と `BlockType` と `resolveDropItem` を持つが、`ItemId` / `ItemType` を 1 つも定義していない。mc-sim の `ItemId = string` は自ら PROVISIONAL と書いている |
-| **ネットワーク同期のフェーズ位置** | **未決。DN-15。** 骨格に置き場が無い |
+| **ネットワーク同期のフェーズ位置** | **解決。DN-15。** `network:inbound`(input と physics の間)/ `network:outbound`(time-weather と camera-mirror の間)を骨格に追加。§4.2 の**拡張**であり転記ではない([architecture.md](./architecture.md) §4.5) |
 | E2E の (b) 側(振る舞いの相互作用) | publish 待ち。[testing.md](./testing.md) §3.4 |
 | E2E ハーネス(Playwright、SwiftShader、ポインタロック不可) | plan.md §3.10 の知見を流用。未着手 |

@@ -261,14 +261,21 @@ describe('the repositories that register nothing', () => {
   )
 
   /**
-   * REGRESSION — the finding this gate exists to escalate. `sim:physics` is
-   * named in an `after` edge by mx-gameplay, mx-redstone, mx-ui and mc-render,
-   * and mc-sim registers nothing, so all four dangle. The day that changes, the
-   * frame gains a phase and `test/e2e/roster.ts` is out of date in a way that
-   * `test/e2e/roster-frame-order.test.ts` alone would not notice, because a
-   * manifest that never mentions mc-sim composes perfectly happily.
+   * REGRESSION — and this one is no longer hypothetical: IT FIRED.
+   *
+   * mc-sim and mx-multiplayer were both listed under `ROSTER_REGISTERS_NOTHING`,
+   * both grew a `stages/` directory, and this is the check that caught it — the
+   * manifest was updated because the gate failed, not because anybody noticed.
+   * Both have since moved into `ROSTER`, so the fixture below is synthetic
+   * again; it keeps guarding mc-worldgen and mc-playground-kit.
+   *
+   * What makes the check worth its weight is stated in the negative: a manifest
+   * that simply never mentions a repository composes perfectly happily, so
+   * `test/e2e/roster-frame-order.test.ts` would have stayed green over a roster
+   * that had moved on. Being silent about a stage and there being no stage are
+   * indistinguishable from inside the composition.
    */
-  it.effect('fails loudly the day mc-sim registers sim:physics', () =>
+  it.effect('fails loudly the day a silent repository registers a stage', () =>
     Effect.sync(() => {
       const withPhysics = ioOf({
         '/roster/mc-sim/stages/stage-ids.ts': `export const SIM_STAGE_IDS = { physics: StageId('sim:physics') } as const\n`,
@@ -322,7 +329,7 @@ describe('finding the checkouts', () => {
     Effect.sync(() => {
       const { problems, stageCount } = run('/nowhere', ioOf({}))
       expect(problems).toHaveLength(ROSTER.length)
-      expect(stageCount).toBe(13)
+      expect(stageCount).toBe(16)
     }),
   )
 })

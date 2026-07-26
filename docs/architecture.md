@@ -148,26 +148,37 @@ kit のミニ世界ではなく本物の合成済みゲームを対象とする�
 **このリポジトリの中心。** [responsibility.md](./responsibility.md) §1.1 と
 [public-api.md](./public-api.md) §1 を参照。
 
-順序表(`STANDARD_STAGE_SKELETON`)は **12 個のフェーズの列**である。
+順序表(`STANDARD_STAGE_SKELETON`)は **14 個のフェーズの列**である。
 stage id のリストではない。フェーズは「フレーム内の位置」と「そこに入る仕事の種類」を名指し、
 stage id は自分の**名前部分**(最後の `:` より後ろ)でそこへの所属を宣言する
 (`members` の要素が `:` で終わるときだけ、名前空間まるごとが一致する)。
 
+**★ の 2 つは plan.md §4.2 に無い。** §4.2 の骨格はネットワークについて一言も述べていないので、
+この 2 フェーズは §4.2 の転記ではなく**拡張**である。理由は §4.5 に書いた。
+
 ```
-フェーズ                     ← 所属を宣言する id の例
-input                        ← input
+フェーズ                     ← 所属を宣言する実 id
+input                        ← render:input
+network:inbound          ★   ← multiplayer:inbound
 simulation:physics           ← sim:physics
 simulation:interactions      ← gameplay:interactions
 simulation:entities          ← gameplay:entities
 simulation:fluids            ← gameplay:fluids
 simulation:redstone          ← redstone:power, redstone:effects   （名前空間一致）
 simulation:time-weather      ← gameplay:time-weather
-camera-mirror                ← camera-mirror
-chunk-sync                   ← chunk-sync
-render                       ← render
-post-fx                      ← post-fx
+network:outbound         ★   ← multiplayer:outbound
+camera-mirror                ← render:camera-mirror
+chunk-sync                   ← render:chunk-sync
+render                       ← render:draw
+post-fx                      ← render:post-fx
 hud-sync                     ← ui:hud-sync, ui:overlay-sync       （名前空間一致）
 ```
+
+右の列は**例ではなく、6 リポジトリが実際に登録している 16 本**である
+(`test/e2e/roster.ts`、`pnpm check:roster` が兄弟のソースと 1 行ずつ照合する)。
+**空のフェーズは 1 つも無い。** かつて `simulation:physics` だけが空で、それは
+「4 リポジトリが `after` で名指ししている stage を誰も登録していない」という欠陥の姿だった
+(DN-14)。mc-sim が `sim:physics` を登録して埋まった。
 
 **この形が §2.3-3 の実装そのものである。** 名前空間は「誰が所有するか」しか言わず、
 名前は「どんな仕事か」しか言わない。モジュールが絶対位置を名乗る手段は増えていない。
@@ -182,6 +193,89 @@ compose がフェーズを並べ、モジュールは自分の `after` で**フ�
 `pnpm check:deps` は違反があれば必ず非ゼロ終了する。
 参照実装の `check-package-dag.ts` は警告を出して常に 0 で終了していた
 — 落ちないゲートはドキュメントであってゲートではない。
+
+### 4.5 骨格に `network:inbound` / `network:outbound` を足した(§4.2 の拡張)
+
+**これは plan.md §4.2 の読み取りではなく、§4.2 への追加である。**
+§4.2 の骨格は input → simulation → camera-mirror → chunk-sync → render → post-fx → hud-sync で、
+**ネットワークについて一言も述べていない**。フェーズも、名前空間も、
+ネットワーク stage が名乗りそうな名前も無い。
+だから「どこに置くか」ではなく「置くかどうか」から議論が要る。
+
+#### 4.5-1 なぜ延期できなかったか
+
+mx-multiplayer が `multiplayer:inbound` と `multiplayer:outbound` を登録した
+(`stages/registration.ts:188` / `:234`)。この 2 本は、**この 2 フェーズを足す前の実測で
+インデックス 14 と 15**、つまり `ui:overlay-sync` の**後ろ**に落ちた。
+どのフェーズにも一致しない stage に `priorityOf` は `MAX_SAFE_INTEGER` を返すからである。
+症状は「リモートの状態が毎フレーム 1 フレーム遅れて適用される」「ローカル位置が
+レンダラの描画後に送信される」で、**どちらもクラッシュしないしラグにしか見えない**。
+
+決め手は、**何もしないことが中立ではない**という点にある。
+この表に「未配置」という状態は無い。骨格が拾わない stage は保留されるのではなく**最後に走る**。
+mx-multiplayer のトランスポートの完成を待つことは、フレームを未決のまま置くことではなく、
+**その間ずっと誤った答えを出荷すること**である。
+
+「stage はあるがソケットはまだ無いリポジトリのためにフェーズを足すのは早すぎないか」
+という反論は、この非対称性で退けられる。加えて、フレーム位置が依存するのは id と `after` だけであり、
+mx-multiplayer は `stages/stage-ids.ts` でそれらを**確定済み**と明言している
+(FIRST CUT なのは `run` の中身、すなわち seam と `TransportPort` の実装である)。
+
+早すぎた場合のコストは実測してある: **mx-multiplayer を含まないビルドでは 2 フェーズとも空になり、
+空のフェーズは鎖を切らずに閉じる**ので、シングルプレイ / ヘッドレスのフレームは
+このフェーズが無かった頃と 1 本も変わらない
+(回帰テスト `costs a build without mx-multiplayer nothing at all`)。
+
+#### 4.5-2 なぜ 2 つで、なぜ `multiplayer:` 名前空間フェーズ 1 つではないのか
+
+mx-multiplayer 自身が「1 つでは両方を同じ位置に拾ってしまう」と書いているが、
+**実測はそれより強い結論を出した。単一の名前空間フェーズには、置ける位置が 1 つも無い。**
+
+| 名前空間フェーズの位置 | 結果 |
+| --- | --- |
+| `simulation:physics` より前 | **合成が失敗する**。骨格の鎖が `multiplayer:outbound -> sim:physics` を足す一方、`multiplayer:outbound` は `after: [sim:physics]` を宣言しているので**循環**になる |
+| `simulation:physics` より後 | 解決はするが `multiplayer:inbound` がシミュレーションの後ろに落ちる = 1 フレーム遅れ |
+
+つまり分割は好みの問題ではない。回帰テスト
+`has no position at all as a single `multiplayer:` namespace phase` が両方を固定している。
+
+`members` が名前部分(`inbound` / `outbound`)で名前空間(`multiplayer:`)ではないのは、
+この表の一貫した規則でもある — **名前空間は「誰が所有するか」、名前は「どんな仕事か」**しか言わない。
+この 2 フェーズは mx-multiplayer のためではなく**ネットワーク I/O という仕事のため**に名付けてある。
+
+#### 4.5-3 位置の理由
+
+- **`inbound` は `input` と `simulation:physics` の間。**
+  リモートの状態は、世界がシミュレートされる前に世界に入っていなければならない。
+  これは `input` がローカルの意図について主張しているのと同じ因果の主張を、ソケットの向こう側に向けたものである。
+  そして**この位置は mx-multiplayer からは宣言できない**: 要求は「`sim:physics` より前」であり、
+  `StageRegistration` に `before` は無い。`after: [render:input]` への反転は §2.3-3 が compose に留保する
+  グローバル順序の主張であり、入力 stage を登録しないヘッドレスビルドでは偽になる。
+
+  **強制されている部分とそうでない部分を区別しておく**: 「physics より前」は強制。
+  「`input` の *後*」は強制ではない — 両者は外界のサンプリングであり、触る状態は交わらない
+  (ローカル入力エッジ vs 受信キュー)ので、index 0 に置いても宣言に反しない。
+  mx-multiplayer の要求(「`STAGE_PHASE_INPUT` と `STAGE_PHASE_SIM_PHYSICS` の間」)の
+  狭い方の読みを採った。
+
+- **`outbound` は `simulation:time-weather` と `camera-mirror` の間。**
+  送る値が確定するのはここであり、これ以降はすべてローカルな提示
+  (カメラのミラー、メッシュ、描画、ポストエフェクト、DOM)で、権威ある状態を 1 つも変えない。
+  そして `render` / `post-fx` はフレーム最大のコストなので、その後ろで送ると
+  **既に確定していた値の送信レイテンシにフレームの最悪コストを上乗せする**ことになる。
+  スケジューリング由来のレイテンシはリポジトリの中からは見えず、プレイヤーには回線の遅さに見える。
+
+  なお `multiplayer:outbound` の `after: [sim:physics]` は「physics より後」しか言わないので、
+  フレーム末尾でもその宣言は満たされる。**シミュレーションの末尾に固定しているのはこの表であり、
+  mx-multiplayer ではない** — §2.3-3 の分担そのものである。
+
+#### 4.5-4 未確認
+
+plan.md はこのマシン上のどのチェックアウトにも存在しない。
+したがって「§4.2 はネットワークに触れていない」は、**このリポジトリが持つ §4.2 の転記**
+(`domain/stage-skeleton.ts` のうち §4.2 由来の 12 フェーズ、および本節の表)に対して確認したものであり、
+plan.md 本文に対してではない。§4.2 が実はネットワークについて何か述べているなら、
+本節はそれに合わせて書き直す必要がある。
 
 ## 5. 解決済み: mc-render は mc-compose から到達する
 

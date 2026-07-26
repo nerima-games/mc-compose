@@ -42,9 +42,19 @@ import { StageId } from './stage-order'
  */
 export const MODDING_API_VERSION = 1
 
-/** Namespace prefixes a mod may never register a stage under. */
+/**
+ * Namespace prefixes a mod may never register a stage under.
+ *
+ * Must cover the canonical id of every phase in `STANDARD_STAGE_SKELETON`; the
+ * two tables cannot see each other, so `test/modding.test.ts` asserts the
+ * agreement rather than trusting it. `network:` is the group prefix for the two
+ * network phases, exactly as `simulation:` is for the six simulation ones — one
+ * entry, so a later network phase is reserved the day it is added rather than
+ * the day somebody remembers this list.
+ */
 export const RESERVED_STAGE_PREFIXES: ReadonlyArray<string> = [
   'input',
+  'network:',
   'simulation:',
   'camera-mirror',
   'chunk-sync',

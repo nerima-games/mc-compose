@@ -44,7 +44,7 @@ Effect ランタイム上で走ることを既定にしておくと、後から 
 
 | 例 | なぜ E2E でしか見えないか |
 | --- | --- |
-| **13 本の stage が plan.md §4.2 の 1 本の全順序になる** | 4 リポジトリが互いを知らないまま宣言した id と `after` が、どう合成されるか。**これは今日検証できる**(§3.4) |
+| **16 本の stage が plan.md §4.2 のフレームに合成される** | 6 リポジトリが互いを知らないまま宣言した id と `after` が、どう合成されるか。**これは今日検証できる**(§3.4) |
 | 採掘 → インベントリに反映される | mx-gameplay が壊し、mc-sim が記録し、mx-ui が表示する。3 リポジトリにまたがる |
 | リモートピアのブロック破壊がローカルの世界に現れる | mx-multiplayer → mc-sim → mx-gameplay |
 | セーブ → タイトルへ戻る → ロードで状態が一致する | セッションライフサイクル全体 |
@@ -79,7 +79,7 @@ plan.md §3.15 の主張には**半分が 2 つある**。それを混ぜない�
 
 | 半分 | 内容 | 現状 |
 | --- | --- | --- |
-| **(a) フレーム** | 13 本の stage が 1 本の全順序になる。どの id が、どのフェーズに入り、どの順で走るか | **検証済み**。`test/e2e/roster-frame-order.test.ts` |
+| **(a) フレーム** | 16 本の stage が 1 本の全順序になる。どの id が、どのフェーズに入り、どの順で走るか | **検証済み**。`test/e2e/roster-frame-order.test.ts` |
 | **(b) 振る舞い** | 「採掘したらインベントリに入る」 | **未検証。今日は検証できない** |
 
 **(b) が今日できない理由は「まだ書いていない」ではない。**
@@ -99,7 +99,7 @@ mx-gameplay は mc-render の stage を見られないし、mc-render は自分�
 知ることを禁じられている(plan.md §2.3-3)。それがまさに compose の問いである。
 
 したがって現在の E2E の主語は `test/e2e/roster.ts` —
-**兄弟リポジトリが実際に登録している 13 本の id と 12 本の `after` エッジを、
+**兄弟リポジトリが実際に登録している 16 本の id と 13 本の `after` エッジを、
 `file:line` 付きで転記したもの**である。
 
 `run` の中身は本物ではない。id をログに追記するだけで、
@@ -114,11 +114,16 @@ mx-gameplay は mc-render の stage を見られないし、mc-render は自分�
 ロスターマニフェストができる前、`test/public-api.test.ts` と `test/stage-order.test.ts` の
 両方に「the stage ids the roster actually registers today」と書かれたリストがあり、
 そこには `input` / `sim:physics` / `camera-mirror` / `chunk-sync` / `render` / `post-fx` が
-並んでいた。**この 6 本はどれも誰も登録していない。**
+並んでいた。**当時この 6 本はどれも誰も登録していなかった。**
 mc-render が登録するのは `render:input` / `render:camera-mirror` / `render:chunk-sync` /
-`render:draw` / `render:post-fx` であり、mc-sim は 1 本も登録していない。
+`render:draw` / `render:post-fx` であり、mc-sim は 1 本も登録していなかった。
 それでもテストは通っていた — 架空の id が偶然、本物と同じフェーズに入るからである。
 **正しい性質を、存在しない世界について主張して、ずっと緑だった。**
+
+その後 mc-sim が `sim:physics` を登録したので、**6 本のうち 1 本は今や実在する**。
+これは当てずっぽうが正しかったという話ではなく、問題の最良の例示である:
+**後から真になる作り話も、偽である間はやはり作り話のテスト**であり、
+真になった日に何かが変わる仕掛けは、あのリストの側には 1 つも無かった。
 
 対処は 2 層である。
 
@@ -185,10 +190,13 @@ it.effect('has no edge from InGame straight to Title', ...)
 | `records no edge between any two experience modules` | plan.md §2.3-1 |
 | `never names mc-playground-kit as a runtime edge` | plan.md §2.3-2 |
 | `produces exactly the §4.2 order from the ids the roster really registers` | 順序表が**実在するロスター**に対して §4.2 を出すこと(DN-14) |
-| `leaves the skeleton as the ONLY thing ordering one repository against another` | ロスターのリポジトリ間エッジが 4 本とも dangling であるという実測(DN-14) |
-| `stays consistent with §4.2 once mc-sim registers sim:physics` | その 4 本が繋がった日にフレームが動かないこと |
-| `fails loudly the day mc-sim registers sim:physics` | 上の前提が変わったことをマニフェスト側で検出する |
-| `would schedule a multiplayer stage after the HUD, and says so` | 骨格に `multiplayer:` を拾うフェーズが無いという実測(DN-15) |
+| `binds every cross-repository edge, and they all point at mc-sim` | リポジトリ間エッジ 5 本がすべて `sim:physics` を名指しし、すべて繋がっていること(DN-14) |
+| `binding mc-sim's four edges did not move any other stage` | 宙に浮いていた 4 本が繋がってもフレームが動かないという、事前に固定してあった予測の答え合わせ(DN-14) |
+| `without it, the frame breaks in exactly the ways no module may repair` | 骨格を外したとき残る破れが、体験モジュール境界をまたぐ = どのモジュールも `after` で言えないものだけであること |
+| `fails loudly the day a silent repository registers a stage` | `ROSTER_REGISTERS_NOTHING` の前提が変わったことをマニフェスト側で検出する。**mc-sim と mx-multiplayer で実際に発火した** |
+| `without the two network phases, both multiplayer stages run after the HUD` | 骨格に `multiplayer:` を拾うフェーズが無いと index 14/15 に落ちるという実測 = 2 フェーズを足した理由(DN-15) |
+| `has no position at all as a single `multiplayer:` namespace phase` | 単一の名前空間フェーズは physics より前だと**循環**、後だと 1 フレーム遅れ。置ける位置が無い(DN-15) |
+| `fails, by name, if any registered stage matches no phase and would run last` | フェーズに落ちない stage は保留ではなく最後尾で走る。**この失敗モードがこの一連の作業を生んだ** |
 | `reserves the canonical id of every phase in the standard skeleton` | 順序表と `RESERVED_STAGE_PREFIXES` は互いを見られない 2 つの表であり、フェーズを 1 つ足すと予約から漏れる |
 
 **これらが落ちたときは、実装ではなく設計判断が変わったということである。**

@@ -158,12 +158,21 @@ describe('reserved stage namespaces', () => {
   /**
    * REGRESSION: `RESERVED_STAGE_PREFIXES` is written out by hand and
    * `STANDARD_STAGE_SKELETON` is written out by hand, and NOTHING connected
-   * them. Adding a thirteenth phase — a `multiplayer` slot is the one the
-   * roster is currently missing (docs/design-notes.md DN-15) — would leave its
-   * canonical id unreserved, and a mod registering that bare name would BE the
-   * phase in any build whose owning module is absent. That is the failure the
-   * test above describes for `simulation:physics`, reintroduced through the
-   * table rather than through the reserve list.
+   * them. This test predicted its own use case: "adding a thirteenth phase — a
+   * `multiplayer` slot is the one the roster is currently missing
+   * (docs/design-notes.md DN-15) — would leave its canonical id unreserved".
+   *
+   * A thirteenth AND a fourteenth were added, `network:inbound` and
+   * `network:outbound`, and this is the test that would have caught them going
+   * unreserved. `domain/modding.ts` grew one entry — `network:`, the group
+   * prefix, in the same shape as `simulation:` — so a later network phase is
+   * reserved the day it is added.
+   *
+   * The failure it prevents: a mod registering the bare canonical name would BE
+   * that phase in any build whose owning module is absent — and every build
+   * without mx-multiplayer is such a build. That is the failure the test above
+   * describes for `simulation:physics`, reintroduced through the table rather
+   * than through the reserve list.
    *
    * Two tables that must agree and cannot see each other is precisely what this
    * repository is for, so the agreement is asserted rather than remembered.

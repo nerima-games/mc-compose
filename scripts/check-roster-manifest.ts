@@ -6,7 +6,7 @@
  * ---------------------------------------------------------------------------
  *
  * `test/e2e/roster.ts` is a TRANSCRIPTION of every stage id and `after` edge
- * the fifteen sibling repositories register. It has to be a transcription:
+ * the sibling repositories register. It has to be a transcription:
  * plan.md §6 Step 3 publishes bottom-up, nothing is on GitHub Packages yet, and
  * mc-compose's `node_modules` contains no `@nerima-games/*` at all — so there is
  * no import that would give the real registrations.
@@ -330,11 +330,17 @@ export const compareModule = (
 /**
  * A repository the manifest says registers nothing must still register nothing.
  *
- * `mc-sim` is the one that matters. Four repositories declare
- * `after: [StageId('sim:physics')]` and mc-sim registers no such stage, so all
- * four edges dangle. The moment mc-sim grows a `stages/` directory, the frame
- * gains a phase and this file has to be re-read — which is what this check
- * turns into a failure rather than a surprise.
+ * THIS CHECK HAS ALREADY EARNED ITS KEEP, TWICE IN ONE DAY. `mc-sim` and
+ * `mx-multiplayer` were both listed under `ROSTER_REGISTERS_NOTHING`; both grew
+ * a `stages/` directory, and this function is what said so — parsing the new
+ * directories, naming `sim:physics` and then `multiplayer:inbound,
+ * multiplayer:outbound`, and failing. Neither was noticed by a human first.
+ *
+ * The failure is deliberately not "an id is missing from the manifest" but "the
+ * frame has changed": binding `sim:physics` turned four dangling cross-repository
+ * edges into real ones, and the two `multiplayer:` ids matched no phase at all,
+ * which is what put two new phases into `domain/stage-skeleton.ts`. A gate that
+ * only reported the ids would have made that look like a transcription chore.
  */
 export const compareSilentModule = (
   root: string,

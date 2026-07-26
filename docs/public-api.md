@@ -90,7 +90,7 @@ plan.md §4.2 の骨格は装飾であり、実ビルドでは `camera-mirror` �
 固定しているテストは `test/public-api.test.ts` の
 `pins how each phase claims a stage, which is what makes the table load-bearing` と
 `claims every stage id the roster actually registers`。
-前者は `members` を、後者は「今日ロスターが実際に登録する 14 個の id が全部どこかのフェーズに落ちる」ことを見る。
+前者は `members` を、後者は「今日ロスターが実際に登録する 16 個の id が全部どこかのフェーズに落ちる」ことを見る。
 
 ## 2. stage 順序表(`domain/stage-skeleton.ts`)
 
@@ -101,6 +101,8 @@ const SIMULATION_STAGES: ReadonlyArray<StageId>     // 各シミュレーショ�
 
 // フェーズ本体。`name` と、そこに所属を宣言できる `members`。
 const STAGE_PHASE_INPUT            // 'input'                    <- ['input']
+const STAGE_PHASE_NETWORK_INBOUND  // 'network:inbound'          <- ['inbound']    ★§4.2 外
+const STAGE_PHASE_NETWORK_OUTBOUND // 'network:outbound'         <- ['outbound']   ★§4.2 外
 const STAGE_PHASE_SIM_PHYSICS      // 'simulation:physics'       <- ['physics']
 const STAGE_PHASE_SIM_INTERACTIONS // 'simulation:interactions'  <- ['interactions']
 const STAGE_PHASE_SIM_ENTITIES     // 'simulation:entities'      <- ['entities']
@@ -117,6 +119,8 @@ const STAGE_PHASE_HUD_SYNC         // 'hud-sync'                 <- ['hud-sync',
 // そのまま登録できる名前であり、`domain/modding.ts` が mod に対して予約する名前でもある。
 // フェーズから導出しているので、表と id が食い違うことはない。
 const STAGE_INPUT              // 'input'
+const STAGE_NETWORK_INBOUND    // 'network:inbound'
+const STAGE_NETWORK_OUTBOUND   // 'network:outbound'
 const STAGE_SIM_PHYSICS        // 'simulation:physics'
 const STAGE_SIM_INTERACTIONS   // 'simulation:interactions'
 const STAGE_SIM_ENTITIES       // 'simulation:entities'
@@ -130,11 +134,13 @@ const STAGE_POST_FX            // 'post-fx'
 const STAGE_HUD_SYNC           // 'hud-sync'
 ```
 
-plan.md §4.2 の骨格:
+骨格(plan.md §4.2 + ★ の 2 フェーズ):
 
 ```
 input
+  -> network:inbound                                                          ★
   -> simulation (physics -> interactions -> entities -> fluids -> redstone -> time/weather)
+  -> network:outbound                                                         ★
   -> camera-mirror
   -> chunk-sync
   -> render
@@ -147,17 +153,26 @@ input
 | フェーズ | 実際に落ちる id | 所有者 |
 | --- | --- | --- |
 | `input` | `render:input` | mc-render |
+| `network:inbound` ★ | `multiplayer:inbound` | mx-multiplayer |
 | `simulation:physics` | `sim:physics` | mc-sim |
 | `simulation:interactions` | `gameplay:interactions` | mx-gameplay |
 | `simulation:entities` | `gameplay:entities` | mx-gameplay |
 | `simulation:fluids` | `gameplay:fluids` | mx-gameplay |
 | `simulation:redstone` | `redstone:power`、`redstone:effects` | mx-redstone |
 | `simulation:time-weather` | `gameplay:time-weather` | mx-gameplay |
+| `network:outbound` ★ | `multiplayer:outbound` | mx-multiplayer |
 | `camera-mirror` | `render:camera-mirror` | mc-render(正は mc-sim) |
 | `chunk-sync` | `render:chunk-sync` | mc-render |
 | `render` | `render:draw` | mc-render |
 | `post-fx` | `render:post-fx` | mc-render |
 | `hud-sync` | `ui:hud-sync`、`ui:overlay-sync` | mx-ui |
+
+**★ の 2 フェーズは plan.md §4.2 に無い。** §4.2 の骨格はネットワークに一言も触れていないので、
+これは転記ではなく**拡張**である。追加した理由・位置の論拠・単一の `multiplayer:` 名前空間
+フェーズでは駄目な理由(置ける位置が 1 つも無い)は
+[architecture.md](./architecture.md) §4.5 と `domain/stage-skeleton.ts` にある。
+
+**空のフェーズは 1 つも無い**(表の右列が全部埋まっている)。
 
 **この配列を変えるとゲームが変わる。**
 このリポジトリへの差分の中で、PR に理由の記述が要ると想定されている唯一のものである。

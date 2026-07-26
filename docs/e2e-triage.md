@@ -66,7 +66,7 @@ DEMOTE 43 本の降ろし先: **mx-ui 39 本 / mc-render 2 本 / mc-save 2 本**
 参照実装の E2E は 1 本残らずブラウザ・DOM・WebGL・IndexedDB のいずれかに触っており、
 「今日そのまま持ってこられる 1 本」は存在しない。
 だから `test/e2e/roster-frame-order.test.ts` は 70 本のどれかの移植ではなく、
-**70 本のどれも問えなかった問い**(13 本の stage が §4.2 の 1 本の全順序になるか)を問う
+**70 本のどれも問えなかった問い**(16 本の stage が §4.2 のフレームに合成されるか)を問う
 別のテストである。その区別は [testing.md](./testing.md) §3.4 にある。
 
 **compose に残るのは 25 本(36%)。** plan.md §3.15 が言う「E2E は最終ゲート」の
@@ -116,9 +116,12 @@ mx-multiplayer → mc-sim → mx-gameplay / mx-ui をまたぐので、定義上
 | 13 | `broadcasts chat messages to both connected players` | NEEDS-BROWSER | **mc-compose**。mx-multiplayer + mx-ui |
 | 14 | `syncs remote player positions after movement` | NEEDS-BROWSER | **mc-compose**。mx-multiplayer → mc-sim → mc-render |
 
-> **DN-15 に直結する。** この 3 本を書くには mx-multiplayer が stage を登録している必要があり、
-> 今日 `STANDARD_STAGE_SKELETON` にはそれを拾うフェーズが 1 つも無い
-> ([design-notes.md](./design-notes.md) DN-15)。**この triage が骨格の欠落を指している。**
+> **DN-15 に直結していた。解決済み(2026-07-27)。** この 3 本を書くには mx-multiplayer が
+> stage を登録している必要があり、当時 `STANDARD_STAGE_SKELETON` にはそれを拾うフェーズが
+> 1 つも無かった。**この triage が骨格の欠落を指していた。**
+> mx-multiplayer が `multiplayer:inbound` / `multiplayer:outbound` を登録し、骨格に
+> `network:inbound` / `network:outbound` を追加した([architecture.md](./architecture.md) §4.5)。
+> **残る前提はトランスポートとブラウザであって、フレーム位置ではない。**
 
 ### 3.5 `e2e/gameplay/` — 12 ファイル / 22 本 / 1,577 LOC
 
@@ -315,7 +318,7 @@ publish 待ちのリストに入れる前に、
 | mc-render + mc-sim publish + ブラウザエントリポイント | **#1, #3, #4, #7, #18, #20, #25, #26, #27, #28, #36** = 11 本 | 入力・物理・カメラ・フレーム計測。うち #18 / #20 / #36 はブラウザ不要 |
 | + mx-gameplay / mx-ui | **#30, #31, #33** + `hud: #fps-value` + `main-menu` 2 本 + `settings: persisted render distance` = 7 本 | ただし #32 は §4.3 の未決事項が先 |
 | + mc-save | **#10, #11** = 2 本 | セーブ / ロード |
-| + mx-multiplayer(および骨格へのフェーズ追加。DN-15) | **#12, #13, #14** = 3 本 | 2 クライアント |
+| + mx-multiplayer のトランスポート実体(骨格へのフェーズ追加は**完了**。DN-15) | **#12, #13, #14** = 3 本 | 2 クライアント |
 | + ビルド / publish パイプライン | **#70** = 1 本 | `dist` に対して走る唯一のテスト |
 | + `InventoryService` の所有者決定(§4.3) | **#32** = 1 本 | plan.md §3.15 の本丸 |
 | **compose 合計** | **25 本** | |

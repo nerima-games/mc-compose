@@ -46,7 +46,7 @@ E2E でしか検証できなくなった。**それが本計画全体の出発�
 | ファイル | 役割 |
 | --- | --- |
 | `domain/stage-order.ts` | **stage 全順序の解決器。** 決定論・循環検出・dangling 報告 |
-| `domain/stage-skeleton.ts` | **stage 順序表**(plan.md §4.2)。12 個の**フェーズ**の列。**この配列を変えるとゲームが変わる** |
+| `domain/stage-skeleton.ts` | **stage 順序表**(plan.md §4.2 + ネットワーク 2 フェーズ)。14 個の**フェーズ**の列。**この配列を変えるとゲームが変わる** |
 
 他の 4 ファイル(`composition.ts` / `session.ts` / `qa-api.ts` / `modding.ts`)は、
 plan.md §3.15 が compose に割り当てた残りの責務である。

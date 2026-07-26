@@ -23,6 +23,8 @@ describe('public API surface', () => {
         'SIMULATION_PHASES',
         'SIMULATION_STAGES',
         'STAGE_PHASE_INPUT',
+        'STAGE_PHASE_NETWORK_INBOUND',
+        'STAGE_PHASE_NETWORK_OUTBOUND',
         'STAGE_PHASE_SIM_PHYSICS',
         'STAGE_PHASE_SIM_INTERACTIONS',
         'STAGE_PHASE_SIM_ENTITIES',
@@ -35,6 +37,8 @@ describe('public API surface', () => {
         'STAGE_PHASE_POST_FX',
         'STAGE_PHASE_HUD_SYNC',
         'STAGE_INPUT',
+        'STAGE_NETWORK_INBOUND',
+        'STAGE_NETWORK_OUTBOUND',
         'STAGE_SIM_PHYSICS',
         'STAGE_SIM_INTERACTIONS',
         'STAGE_SIM_ENTITIES',
@@ -130,12 +134,19 @@ describe('the prime directive, as a surface check', () => {
     Effect.sync(() => {
       expect(STANDARD_STAGE_SKELETON.map((phase) => phase.name)).toStrictEqual([
         'input',
+        // EXTENSION. plan.md §4.2's backbone has no networking phase; these two
+        // were added when mx-multiplayer registered `multiplayer:inbound` and
+        // `multiplayer:outbound` and both resolved after the HUD. The argument
+        // is at `domain/stage-skeleton.ts`; this list is where a reviewer sees
+        // that the table is no longer a straight transcription of §4.2.
+        'network:inbound',
         'simulation:physics',
         'simulation:interactions',
         'simulation:entities',
         'simulation:fluids',
         'simulation:redstone',
         'simulation:time-weather',
+        'network:outbound', // EXTENSION
         'camera-mirror',
         'chunk-sync',
         'render',
@@ -164,12 +175,22 @@ describe('the prime directive, as a surface check', () => {
         STANDARD_STAGE_SKELETON.map((phase) => [phase.name, [...phase.members]] as const),
       ).toStrictEqual([
         ['input', ['input']],
+        // The network phases claim a stage NAME, not the `multiplayer:`
+        // namespace. That is not a stylistic choice: a namespace member would
+        // claim both of mx-multiplayer's stages for one position, and
+        // `test/e2e/roster-frame-order.test.ts` measures that there is no
+        // position such a phase could take — before physics it is a CYCLE
+        // against `multiplayer:outbound`'s declared edge, after it `inbound`
+        // runs a frame late. Turning either of these into `['multiplayer:']`
+        // breaks that test, which is the point of pinning membership here.
+        ['network:inbound', ['inbound']],
         ['simulation:physics', ['physics']],
         ['simulation:interactions', ['interactions']],
         ['simulation:entities', ['entities']],
         ['simulation:fluids', ['fluids']],
         ['simulation:redstone', ['redstone', 'redstone:']],
         ['simulation:time-weather', ['time-weather', 'weather']],
+        ['network:outbound', ['outbound']],
         ['camera-mirror', ['camera-mirror']],
         ['chunk-sync', ['chunk-sync', 'mesh-sync']],
         ['render', ['render', 'draw']],
@@ -193,7 +214,7 @@ describe('the prime directive, as a surface check', () => {
     Effect.sync(() => {
       const registeredToday = ROSTER_STAGE_IDS
 
-      expect(registeredToday).toHaveLength(13)
+      expect(registeredToday).toHaveLength(16)
 
       for (const stageId of registeredToday) {
         expect(

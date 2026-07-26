@@ -19,7 +19,7 @@ plan.md §3.15:
 | 責務 | 実装 |
 | --- | --- |
 | **stage 全順序の解決**(唯一の所有者、§2.3-3) | `domain/stage-order.ts` |
-| **stage 順序表**(§4.2。12 個の**フェーズ**の列) | `domain/stage-skeleton.ts` |
+| **stage 順序表**(§4.2 + ネットワーク 2 フェーズ。14 個の**フェーズ**の列) | `domain/stage-skeleton.ts` |
 | **Layer マージ** | `domain/composition.ts` |
 | セッションライフサイクル(タイトル ⇄ ゲーム) | `domain/session.ts` |
 | QA / デバッグ API | `domain/qa-api.ts` |
@@ -142,16 +142,20 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
 - セッションは `InGame` から `Title` へ直行できない。ティアダウンは通過必須の状態
 - QA コマンドは所有モジュールが名前空間ごと提供し、compose はマージするだけ
 - mod は一級のモジュール。stage 名前空間だけが制約
-- **ロスターの実 id 13 本が plan.md §4.2 のフレームに合成される**ことは検証済み
+- **ロスターの実 id 16 本(6 リポジトリ)が §4.2 のフレームに合成される**ことは検証済み
   (`test/e2e/`、[docs/testing.md](./docs/testing.md) §3.4)
 
 ロスターについて**測って分かったこと**([docs/design-notes.md](./docs/design-notes.md) DN-14 / DN-15):
 
-- リポジトリ境界をまたぐ `after` エッジは全ロスターで **4 本しか無く、その 4 本とも
-  `sim:physics` を名指ししていて、`sim:physics` を登録しているリポジトリは 1 つも無い**。
-  つまり今日、あるリポジトリを別のリポジトリより先に走らせているのは順序表だけである
-- 骨格の 12 フェーズに **`multiplayer:` を拾うものが無い**。
-  mx-multiplayer が最初の stage を登録した日、それは HUD の後ろで走る
+- リポジトリ境界をまたぐ `after` エッジは全ロスターで **5 本しか無く、5 本とも `sim:physics`
+  を名指ししている**。かつてはその `sim:physics` を誰も登録しておらず 4 本とも宙に浮いていた。
+  mc-sim が登録して**全部繋がり、しかしフレームは 1 本も動かなかった** — 骨格が既に同じ順序を
+  与えていたからで、その一致は宙に浮いている間は**確かめようが無かった**(DN-14)
+- 骨格の 12 フェーズに **`multiplayer:` を拾うものが無かった**。mx-multiplayer が
+  `multiplayer:inbound` / `multiplayer:outbound` を登録した日、予測どおり **index 14, 15 =
+  HUD の後ろ**で走った。対処として骨格に `network:inbound` / `network:outbound` を追加した。
+  これは **plan.md §4.2 の拡張であって転記ではない** — §4.2 はネットワークに触れていない
+  ([docs/architecture.md](./docs/architecture.md) §4.5、DN-15)
 
 確定していない:
 
@@ -162,9 +166,9 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
   フレーム側は済んでいる — 半分ずつの区別は [docs/testing.md](./docs/testing.md) §3.4
 - **ブラウザエントリポイント**
 - `ModuleLayer` の精密な型(現在 `Layer<any, any, any>`)
-- **`sim:physics` を誰が登録するのか**。4 リポジトリが `after` で名指しし、mc-sim には
-  `stages/` が無い([docs/design-notes.md](./docs/design-notes.md) DN-14)
-- **ネットワーク同期のフェーズを骨格のどこに置くか**(同 DN-15)
+- **mc-sim の `GameModule` を誰がホストに渡すのか**。mc-sim は `sim:physics` を登録したが、
+  mc-compose は mc-sim を import できない(rule 3)。stage を登録することと import 可能で
+  あることは別の性質である([docs/design-notes.md](./docs/design-notes.md) DN-14)
 - ビルド / publish。`package.json` の `exports` は TypeScript ソースを直接指している
 - カバレッジ閾値(99% ゲートは完成条件到達時に有効化)
 

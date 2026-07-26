@@ -13,7 +13,7 @@
 <!-- ------------------------------------------------------------------------- -->
 
 format: 1
-exported declarations: 84
+exported declarations: 88
 supporting declarations: 7
 
 ## Exported
@@ -222,6 +222,18 @@ const STAGE_HUD_SYNC: StageId;
 const STAGE_INPUT: StageId;
 ```
 
+### STAGE_NETWORK_INBOUND  `const`
+
+```ts
+const STAGE_NETWORK_INBOUND: StageId;
+```
+
+### STAGE_NETWORK_OUTBOUND  `const`
+
+```ts
+const STAGE_NETWORK_OUTBOUND: StageId;
+```
+
 ### STAGE_PHASE_CAMERA_MIRROR  `const`
 
 ```ts
@@ -244,6 +256,18 @@ const STAGE_PHASE_HUD_SYNC: StagePhase;
 
 ```ts
 const STAGE_PHASE_INPUT: StagePhase;
+```
+
+### STAGE_PHASE_NETWORK_INBOUND  `const`
+
+```ts
+const STAGE_PHASE_NETWORK_INBOUND: StagePhase;
+```
+
+### STAGE_PHASE_NETWORK_OUTBOUND  `const`
+
+```ts
+const STAGE_PHASE_NETWORK_OUTBOUND: StagePhase;
 ```
 
 ### STAGE_PHASE_POST_FX  `const`

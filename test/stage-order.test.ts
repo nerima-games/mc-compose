@@ -554,9 +554,16 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
     Effect.sync(() => {
       expect(order(realBuild, STANDARD_STAGE_SKELETON)).toStrictEqual([
         'render:input',
-        // `simulation:physics` is EMPTY: mc-sim registers no stage. The phase
-        // closes over rather than breaking the chain, which is why the rest of
-        // the frame is still §4.2.
+        // The two network phases the skeleton adds to §4.2's backbone. With no
+        // `after` edges at all, they are placed by the table alone — which is
+        // the whole reason they had to be added to it: `multiplayer:inbound`
+        // cannot declare "before sim:physics" from mx-multiplayer, because
+        // `StageRegistration` has `after` and no `before`.
+        'multiplayer:inbound',
+        // No longer empty: mc-sim registers `sim:physics`. This line used to be
+        // a comment explaining that the phase closed over rather than breaking
+        // the chain.
+        'sim:physics',
         'gameplay:interactions',
         'gameplay:entities',
         'gameplay:fluids',
@@ -566,6 +573,7 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
         'redstone:effects',
         'redstone:power',
         'gameplay:time-weather',
+        'multiplayer:outbound',
         'render:camera-mirror',
         'render:chunk-sync',
         'render:draw',
