@@ -8,20 +8,22 @@ plan.md §3.15 は移植元をこう書いている:
 
 > `src/main.ts` + `packages/app` の配線(918 LOC相当)+ QA API(~1.4k)+ `e2e/`
 
-**この見積りは 2 箇所で実測と食い違う。**
+**この見積りは 3 箇所で実測と突き合わせる必要がある。うち食い違うのは 1 箇所だけである。**
 
-| plan.md | 実測(2026-07-26) | 差 |
+| plan.md | 実測(2026-07-26) | 判定 |
 | --- | --- | --- |
-| `packages/app` の配線「918 LOC相当」 | `packages/app/application/` = **20,737 LOC**(本体のみ) | 22 倍 |
-| QA API「~1.4k」 | `qa-api*.ts` + `qa-spatial.ts` = **2,648 LOC**(16 ファイル、テスト込み) | 1.9 倍 |
-| E2E「64本」(§8) | **70 本**(23 スペックファイル、2,875 LOC) | +6 |
+| `packages/app` の配線「918 LOC相当」 | `main/layers/` = **918 LOC**(66 ファイル) / `packages/app/application/` 全体 = **20,737 LOC**(本体のみ) | **スコープ次第**。下記 §0.1 |
+| QA API「~1.4k」 | 本体のみ **1,395 LOC**(14 ファイル) / テスト込み **2,648 LOC**(16 ファイル) | **ほぼ正しい**。下記 §0.2 |
+| E2E「64本」(§8) | **70 本**(23 スペックファイル、2,875 LOC) | 食い違う(+6) |
 
 測定コマンド:
 
 ```console
-$ cd /Users/take/ghq/github.com/takeokunn/ts-minecraft
+$ cd <reference-impl>          # takeokunn/ts-minecraft の checkout
 $ find packages/app/application -name '*.ts' -not -name '*.test.ts' | xargs wc -l | tail -1
  20737 total
+$ find packages/app/application/main/layers -name '*.ts' -not -name '*.test.ts' | xargs wc -l | tail -1
+   918 total
 $ find packages/app/application/main \( -name 'qa-api*.ts' -o -name 'qa-spatial*.ts' \) | xargs wc -l | tail -1
   2708 total          # ここから qa-spatial.test.ts(60)を引いて 2,648
 $ find e2e -name '*.e2e.ts' | wc -l
@@ -30,9 +32,41 @@ $ grep -rhcE "(^|[^.a-zA-Z])test\(" e2e --include='*.e2e.ts' | paste -sd+ | bc
 70
 ```
 
+### 0.1 「918 LOC相当」— plan.md は狭義には正しく、移植計画としては誤り
+
+918 は**再現できる実測値**である。`packages/app/application/main/layers/`(66 ファイル)が
+ちょうど 918 LOC で、これは Layer 合成そのもの —— 文字どおりの「配線」—— である。
+mc-playground-kit の
+[porting.md](https://github.com/nerima-games/mc-playground-kit/blob/main/docs/porting.md) §1 が
+`layers/` を「移植しないもの」として挙げるときに使っているのがこの数字であり、
+そちらは「plan.md の 918 はこの実測値と一致する」と書いている。**その指摘は正しい。**
+
+一方 20,737 は `packages/app/application/` 全体(`frame/` 11,082 + `main/` 7,948 +
+`multiplayer/` 900 + `mods/` 123 + 直下ファイル、いずれも本体のみ)である。
+plan.md §3.15 は「`packages/app` の配線(918 LOC相当)」を **mc-compose の移植元の規模**として
+提示しているので、**移植量の見積りとして読むと 22 倍の過小評価になる。**
+
+したがって両方が正しい:
+
+| 読み方 | 918 | 20,737 |
+| --- | --- | --- |
+| 「Layer 合成コードは何行か」 | **正解** | 過大 |
+| 「`packages/app` から出ていく総量は何行か」 | **22 倍の過小評価** | 正解 |
+
 **918 LOC と 20,737 LOC の差が、このリポジトリの計画そのものである。**
-「配線」と呼べる部分は確かに 1,000 LOC 未満だったかもしれない。
-残りの 20,000 LOC が、配線の場所に堆積したルールである。
+「配線」と呼べる部分は確かに 918 LOC だった。
+残りの約 19,800 LOC が、配線の場所に堆積したルールである。
+mc-compose が引き取るのはそのうちのごく一部で、残りは各体験モジュールへ散る(§1)。
+
+### 0.2 QA API「~1.4k」は実質的に正しかった
+
+`qa-api*.ts` + `qa-spatial.ts` は**本体だけなら 1,395 LOC**(14 ファイル。内訳は
+[design-notes.md](./design-notes.md) DN-6)であり、plan.md の「~1.4k」と
+5 行しか違わない。2,648 はテスト(`*.test.ts` 2 ファイル)を含めた数字で、
+本文書の他の LOC(すべて本体のみ)とは計数条件が違う。
+**「1.9 倍の過小評価」という以前の判定はこの計数条件の混同によるもので、撤回する。**
+テスト込みの規模を知りたいときのために 2,648 は残すが、plan.md の見積りの正誤は
+1,395 と比較して判断すること。
 
 ## 1. 移植元の実測(`packages/app/application/`、本体のみ)
 
