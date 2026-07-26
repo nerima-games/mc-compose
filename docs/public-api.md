@@ -389,4 +389,38 @@ mod 専用フックも優先度も pre/post パスも無い。
 | ブラウザエントリポイント | 縦切りスパイク後 |
 | **E2E スイート** | 合成できる中身ができてから。[testing.md](./testing.md) |
 | `ModuleLayer` の精密な型 | 縦切りスパイクで実サービス集合が出てから |
-| API ロックファイル | plan.md §9「未決」— ツール選定待ち |
+
+**API ロックファイルはこの表から外れた。** plan.md §9 の未決事項
+「API ロックファイルのツール選定（api-extractor 相当の Effect-TS 互換手段）」は決着し、
+実装されている。
+
+| 項目 | 内容 |
+| --- | --- |
+| 生成物 | リポジトリ直下の `api-lock.md`（公開宣言 84 件 + 参照されている非 export 宣言 7 件。コミット対象） |
+| 生成器 | `scripts/api-lock.ts`（16 リポジトリに byte-identical で vendor。`scripts/check-dependency-whitelist.ts` と同じ方式で、編集してよいのは `REPOSITORY_POLICY` だけ） |
+| 検査 | `pnpm api:check` — `api-lock.md` が実際の公開 API と食い違えば非ゼロ終了 |
+| 更新 | `pnpm api:update` |
+| 配線 | `pnpm verify` の `check:deps` と `test` の間、および CI の `API lock` ステップ |
+| 追加依存 | **なし**（`typescript` は既に devDependency） |
+
+理由と実測の正本は mc-kernel の `docs/versioning.md` §7。
+`@microsoft/api-extractor` は「`Context.Tag` のサービスクラスが写らない」ことを決め手に却下されている。
+16 リポジトリの全サービスがその形で宣言されており、合成する側の本リポジトリは
+その Tag 識別子文字列が正しいことに全面的に依存している。
+
+**mc-compose 固有で効くのは §6 の modding 契約である。** `api-lock.md` には
+
+```ts
+const MODDING_API_VERSION = 1;
+```
+
+がリテラルとして記録されている。`GameModule` / `ModManifest` の形も同様に写る。
+サードパーティが書いた mod を黙って壊す変更 —— `GameModule` にフィールドを足す、
+`ModManifest.apiVersion` の意味を変える —— は、レビューの前に diff として目に見える。
+`composeGame` / `resolveStageOrder` のシグネチャも同じ扱いである。
+
+**写らないものは正直に書く。** `STAGE_INPUT` などの stage id 定数は `StageId` としか写らず、
+**文字列そのものはロックに出ない**。§2 の stage 順序表（`SIMULATION_STAGES` などの並び）も
+`ReadonlyArray<StageId>` としか写らない。順序は本リポジトリの中核であり、
+守るのは引き続き `domain/stage-skeleton.ts` に対するテストである。
+**ロックは形を、テストは順序と挙動を見る。**

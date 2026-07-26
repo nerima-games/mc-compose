@@ -56,7 +56,9 @@ mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multipla
 1. **4 つの体験モジュールと mc-render を実際に合成し、動くゲームが起動する**
 2. **E2E が最終ゲートとして動いている**([testing.md](./testing.md) §3)。
    参照実装の 70 本のうち、モジュール間相互作用を検証するものが移植済み
-3. **API ロック 4 週間無変更**(plan.md §6 Step 3)
+3. **API ロック 4 週間無変更**(plan.md §6 Step 3)。
+   ロックファイルは実装済みで、計測の起点は `api-lock.md` が最後に変わったコミットである
+   ([public-api.md](./public-api.md) §7)
 4. **本体 LOC が 2,000 を超えていない**([porting.md](./porting.md) §2)。
    超えていたら、超えた分がどのモジュールに属するかを先に決める
 5. **ビルド / publish パイプラインが存在する**(§7)
