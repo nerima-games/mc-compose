@@ -55,7 +55,7 @@ plan.md §8 リスク表:
 | セッションライフサイクル(タイトル ⇄ ゲーム) | `domain/session.ts` | §3.15 |
 | QA / デバッグ API | `domain/qa-api.ts` | §3.15, §7 |
 | Modding 入口 | `domain/modding.ts` | §3.15, §7 |
-| **E2E**(最終ゲート) | **未実装**([testing.md](./testing.md)) | §3.15, §8 |
+| **E2E**(最終ゲート) | `test/e2e/`。**フレーム側のみ**([testing.md](./testing.md) §3.4) | §3.15, §8 |
 
 ### 1.1 stage 全順序の唯一の所有者(plan.md §2.3-3)
 

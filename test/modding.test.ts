@@ -20,7 +20,12 @@ import {
   type ModManifest,
 } from '../domain/modding'
 import { StageId } from '../domain/stage-order'
-import { STAGE_INPUT, STAGE_RENDER, STAGE_SIM_PHYSICS } from '../domain/stage-skeleton'
+import {
+  STAGE_INPUT,
+  STAGE_RENDER,
+  STAGE_SIM_PHYSICS,
+  STANDARD_STAGE_SKELETON,
+} from '../domain/stage-skeleton'
 
 const modModule = (frameStages: ReadonlyArray<StageRegistration>): GameModule => ({
   name: 'a mod',
@@ -147,6 +152,30 @@ describe('reserved stage namespaces', () => {
         failure(acceptMod(manifest('sneaky', [stage(StageId('simulation:invented'))])))?._tag,
       ).toBe('ReservedStageNamespace')
       expect(RESERVED_STAGE_PREFIXES).toContain('simulation:')
+    }),
+  )
+
+  /**
+   * REGRESSION: `RESERVED_STAGE_PREFIXES` is written out by hand and
+   * `STANDARD_STAGE_SKELETON` is written out by hand, and NOTHING connected
+   * them. Adding a thirteenth phase — a `multiplayer` slot is the one the
+   * roster is currently missing (docs/design-notes.md DN-15) — would leave its
+   * canonical id unreserved, and a mod registering that bare name would BE the
+   * phase in any build whose owning module is absent. That is the failure the
+   * test above describes for `simulation:physics`, reintroduced through the
+   * table rather than through the reserve list.
+   *
+   * Two tables that must agree and cannot see each other is precisely what this
+   * repository is for, so the agreement is asserted rather than remembered.
+   */
+  it.effect('reserves the canonical id of every phase in the standard skeleton', () =>
+    Effect.sync(() => {
+      const unreserved = STANDARD_STAGE_SKELETON.map((phase) => phase.name).filter(
+        (name) =>
+          failure(acceptMod(manifest('sneaky', [stage(StageId(name))])))?._tag !==
+          'ReservedStageNamespace',
+      )
+      expect(unreserved).toStrictEqual([])
     }),
   )
 

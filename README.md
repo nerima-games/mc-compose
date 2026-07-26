@@ -63,7 +63,8 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 | [docs/public-api.md](./docs/public-api.md) | 公開 API と契約 |
 | [docs/design-notes.md](./docs/design-notes.md) | 参照実装の実測知見(回帰テスト名付き)。**必読** |
 | [docs/porting.md](./docs/porting.md) | 移植計画。LOC は実測値 |
-| [docs/testing.md](./docs/testing.md) | テスト戦略。E2E が何を検証し、何を検証しないか |
+| [docs/testing.md](./docs/testing.md) | テスト戦略。E2E が**今日どちらの半分を検証していて、どちらをしていないか** |
+| [docs/e2e-triage.md](./docs/e2e-triage.md) | **参照実装 E2E 70 本の 1 本ずつの判定。** compose に 25 本 / 降ろす 43 本 / 消える 2 本 |
 | [docs/versioning.md](./docs/versioning.md) | 0.x → 1.0.0、GitHub Packages、modding API バージョン |
 
 ## 依存ルール(16 リポジトリ共通)
@@ -118,7 +119,9 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
 | `pnpm test` | vitest(`@effect/vitest` の `it.effect` が主 API) |
 | `pnpm test:watch` | vitest watch |
 | `pnpm test:coverage` | カバレッジ計測(閾値は未設定) |
+| `pnpm e2e` | E2E だけを走らせる(`vitest run test/e2e`)。純粋なので `pnpm test` も `pnpm verify` も既に拾っている |
 | `pnpm check:deps` | 依存ホワイトリスト + 循環検査 + `Date.now()` 禁止の検査 |
+| `pnpm check:roster` | `test/e2e/roster.ts` の転記が兄弟リポジトリの実ソースと一致するかを照合。**`verify` に入っていない** — 兄弟のチェックアウトが要り、CI には無いため([docs/testing.md](./docs/testing.md) §3.5) |
 | `pnpm api:check` | `api-lock.md` が実際の公開 API と食い違えば非ゼロ終了（[`docs/public-api.md`](./docs/public-api.md) §7） |
 | `pnpm api:update` | `api-lock.md` を書き直す。公開面を変える PR は結果を同じ PR に含める |
 | `pnpm verify` | `typecheck && lint && check:deps && api:check && test`。CI と同じ内容 |
@@ -139,17 +142,29 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
 - セッションは `InGame` から `Title` へ直行できない。ティアダウンは通過必須の状態
 - QA コマンドは所有モジュールが名前空間ごと提供し、compose はマージするだけ
 - mod は一級のモジュール。stage 名前空間だけが制約
+- **ロスターの実 id 13 本が plan.md §4.2 のフレームに合成される**ことは検証済み
+  (`test/e2e/`、[docs/testing.md](./docs/testing.md) §3.4)
+
+ロスターについて**測って分かったこと**([docs/design-notes.md](./docs/design-notes.md) DN-14 / DN-15):
+
+- リポジトリ境界をまたぐ `after` エッジは全ロスターで **4 本しか無く、その 4 本とも
+  `sim:physics` を名指ししていて、`sim:physics` を登録しているリポジトリは 1 つも無い**。
+  つまり今日、あるリポジトリを別のリポジトリより先に走らせているのは順序表だけである
+- 骨格の 12 フェーズに **`multiplayer:` を拾うものが無い**。
+  mx-multiplayer が最初の stage を登録した日、それは HUD の後ろで走る
 
 確定していない:
 
 - **4 つの体験モジュールの実合成**(全モジュール未公開)
 - **mc-kernel の契約型への切り替え**。現在 `StageId` / `DeltaTimeSecs` / `GameModule` /
   `StageRegistration` / `WorldId` はローカル宣言のミラーである
-- **E2E スイート**。合成できる中身がまだ無い
+- **E2E の振る舞い側**(「採掘 → インベントリ」)。合成できる中身がまだ無い。
+  フレーム側は済んでいる — 半分ずつの区別は [docs/testing.md](./docs/testing.md) §3.4
 - **ブラウザエントリポイント**
 - `ModuleLayer` の精密な型(現在 `Layer<any, any, any>`)
-- **mc-render がどこから実行時に到達するか** — 宣言されたグラフの穴。
-  [docs/architecture.md](./docs/architecture.md) §5
+- **`sim:physics` を誰が登録するのか**。4 リポジトリが `after` で名指しし、mc-sim には
+  `stages/` が無い([docs/design-notes.md](./docs/design-notes.md) DN-14)
+- **ネットワーク同期のフェーズを骨格のどこに置くか**(同 DN-15)
 - ビルド / publish。`package.json` の `exports` は TypeScript ソースを直接指している
 - カバレッジ閾値(99% ゲートは完成条件到達時に有効化)
 

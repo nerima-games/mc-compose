@@ -341,7 +341,10 @@ mod 専用フックも優先度も pre/post パスも無い。
 
 ## DN-8: E2E は最終ゲートであり、それ以外の何かにしない
 
-**回帰テスト名**: 未実装(E2E 自体がまだ無い。[testing.md](./testing.md) 参照)
+**回帰テスト名**: `produces exactly the §4.2 order from the ids the roster really registers` ほか
+**実装**: `test/e2e/roster-frame-order.test.ts`(**フレーム側のみ**実装済み。
+振る舞い側は publish 待ちで、その理由は [testing.md](./testing.md) §3.4。
+70 本 1 本ずつの判定は [e2e-triage.md](./e2e-triage.md))
 
 **根拠**: 参照実装の E2E は `e2e/` にある。plan.md は「64 本」と書いているが、実測は異なる。
 
@@ -487,6 +490,74 @@ DN-3 は「ダングリングエッジは拒否せず**報告する**」と書�
 
 ---
 
+## DN-14: ロスターのリポジトリ間 `after` エッジは、**4 本とも宙に浮いている**
+
+**回帰テスト名**: `leaves the skeleton as the ONLY thing ordering one repository against another` /
+`drops exactly four edges, all of them naming sim:physics` /
+`stays consistent with §4.2 once mc-sim registers sim:physics`
+**実装**: `test/e2e/roster-frame-order.test.ts`(実装済み)
+
+**実測**(2026-07-27、`test/e2e/roster.ts` の転記と `pnpm check:roster` による照合):
+
+ロスター全体で登録されている stage は **13 本**、宣言されている `after` エッジは **12 本**。
+そのうち 8 本は**同一リポジトリ内**(自分の 2 本を並べているだけ)であり、
+リポジトリ境界をまたぐのは **4 本だけ**である:
+
+| 宣言している stage | `after` | 宣言箇所 |
+| --- | --- | --- |
+| `gameplay:interactions` | `sim:physics` | `mx-gameplay/stages/stage-ids.ts:71` |
+| `redstone:power` | `sim:physics` | `mx-redstone/stages/stage-ids.ts:57` |
+| `ui:hud-sync` | `sim:physics` | `mx-ui/stages/stage-ids.ts:49` |
+| `render:camera-mirror` | `sim:physics` | `mc-render/stages/stage-ids.ts:124` |
+
+**そして `sim:physics` を登録しているリポジトリは 1 つも無い。**
+mc-sim には `stages/` ディレクトリが存在せず、`docs/responsibility.md:50` は
+「mc-sim は `after` 制約を宣言するだけ」としか書いていない。
+
+**何が問題か**: 単体では問題ではない。ダングリングエッジは合法であり(DN-3)、
+落として報告するのが正しい。**問題は本数である。**
+**リポジトリ間の順序制約は 4 本しか存在せず、その 4 本が全部落ちている。**
+つまり今日のビルドでは、**あるリポジトリを別のリポジトリより先に走らせているものは
+`STANDARD_STAGE_SKELETON` しか無い。** 順序表が load-bearing なのではなく、
+**load-bearing のすべて**である。
+
+これは 1 リポジトリからは絶対に見えない。mx-gameplay は
+「`sim:physics` の後に走らせてくれ」と正しく宣言しており、それが無視されていることを
+知る方法が無い。mc-sim は自分が何を求められているかを知らない。
+**合成層だけがこの数を数えられる。** plan.md §3.15 が E2E を最終ゲートと呼ぶ理由の実例である。
+
+**本実装での対処**: 強制しない、報告する — DN-3 / DN-13 のとおり。
+`ComposedGame.warnings` は今日 4 行を返し、そのすべてが stage 名と `sim:physics` を名指しする。
+加えて `stays consistent with §4.2 once mc-sim registers sim:physics` が
+**mc-sim が `sim:physics` を登録した日にフレームが動かないこと**を先に固定している。
+今日フレームが正しいのは偶然ではなく、宣言されたエッジ 4 本が骨格と同じ向きだからである
+— そしてもし向きが違っていたら、それは今日**見えない**。
+
+## DN-15: 骨格に `multiplayer:` を拾うフェーズが無い
+
+**回帰テスト名**: `would schedule a multiplayer stage after the HUD, and says so`
+**実装**: `test/e2e/roster-frame-order.test.ts`(実装済み)
+
+**実測**: plan.md §4.2 の骨格は 12 フェーズあり、そのどれも `multiplayer:` 名前空間も
+`sync` のような名前も `members` に持たない。mx-multiplayer の stage 登録は
+未実装である(`mx-multiplayer/docs/responsibility.md:17`)ため、今日は表面化しない。
+
+**何が問題か**: mx-multiplayer が最初の 1 本 — たとえば `multiplayer:sync` — を登録した瞬間、
+それはどのフェーズにも一致せず、`priorityOf` が `MAX_SAFE_INTEGER` を返し、
+**HUD の後ろ、フレームの最後尾で走る**。リモートピアの状態が毎フレーム 1 フレーム遅れて
+適用されるという症状になり、これは「バグ」ではなく「ラグ」に見えるので誰も報告しない。
+
+報告はされる(`unmatchedPhase` と `warnings`。DN-13)。それがリゾルバの正しい振る舞いである。
+**足りないのは報告ではなく、報告の読み手である。**
+
+**本実装での対処**: 今日この挙動をテストで固定した。
+mx-multiplayer が stage を登録するとき、compose 側の作業は
+「`STANDARD_STAGE_SKELETON` にネットワーク同期のフェーズをどこに置くか」であり、
+それは順序表の編集 — このリポジトリが所有する変更 — である。
+**プルリクエストに書かれた理由が要る種類の編集**([stage-skeleton.ts](../domain/stage-skeleton.ts) 参照)。
+
+---
+
 ## 未検証・要調査
 
 | 項目 | 状態 |
@@ -496,4 +567,9 @@ DN-3 は「ダングリングエッジは拒否せず**報告する**」と書�
 | stage の障害処理(`Effect.catchAllCause` を誰が張るか) | 未決。plan.md §3.8 は sim に対して defect のログ出力を求めている |
 | 自動保存の `Schedule.spaced`(plan.md §3.8) | mc-sim 側。compose は stage 順序だけ |
 | フレーム予算 / adaptive quality | 参照実装は `frame-adaptive-quality.ts` を持つ。**compose には置かない** |
+| **`sim:physics` を誰が登録するのか** | **未決。DN-14。** 4 リポジトリが `after` で名指ししており、mc-sim には `stages/` が無い |
+| **`InventoryService` のインスタンスを誰が構築するのか** | **未決。[e2e-triage.md](./e2e-triage.md) §4.3。** mx-gameplay が書き mx-ui が読むので 1 インスタンスでなければならないが、mx-gameplay は登録時に acquire する必要があり(`RRegister`)、それを discharge するホストは mc-compose で、**mc-compose は mc-sim を import できない**(rule 3)。mc-render の `InputService` が成立するのは、それが mc-render 自身の `ROut` にありホワイトリストに入っているからで、この論法は mc-sim には効かない |
+| **`BlockId`(数値)から `ItemId`(文字列)への解決を誰が持つか** | **未決。[e2e-triage.md](./e2e-triage.md) §4.2。** mc-kernel は `BlockId` と `BlockType` と `resolveDropItem` を持つが、`ItemId` / `ItemType` を 1 つも定義していない。mc-sim の `ItemId = string` は自ら PROVISIONAL と書いている |
+| **ネットワーク同期のフェーズ位置** | **未決。DN-15。** 骨格に置き場が無い |
+| E2E の (b) 側(振る舞いの相互作用) | publish 待ち。[testing.md](./testing.md) §3.4 |
 | E2E ハーネス(Playwright、SwiftShader、ポインタロック不可) | plan.md §3.10 の知見を流用。未着手 |

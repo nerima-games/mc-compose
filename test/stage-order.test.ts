@@ -28,6 +28,10 @@ import {
   STAGE_SIM_TIME_WEATHER,
   STANDARD_STAGE_SKELETON,
 } from '../domain/stage-skeleton'
+// The roster, transcribed from the siblings' source and kept honest by
+// `pnpm check:roster`. Imported rather than restated: the hand-written copy
+// this file used to carry named six stages nobody registers.
+import { ROSTER, ROSTER_STAGE_IDS } from './e2e/roster'
 
 const id = (value: string): StageId => StageId(value)
 
@@ -518,44 +522,41 @@ describe('the standard skeleton (plan.md §4.2)', () => {
 
 describe('the skeleton constrains a REAL build, not just its own canonical ids', () => {
   /**
-   * The stage ids the roster actually registers today, read out of the
-   * modules' `stages/stage-ids.ts`:
+   * THE REAL BUILD — every stage id in `test/e2e/roster.ts`, which
+   * `pnpm check:roster` verifies line by line against the siblings' source.
    *
-   *   mx-gameplay  gameplay:{interactions,entities,fluids,time-weather}
-   *   mx-redstone  redstone:{power,effects}
-   *   mx-ui        ui:{hud-sync,overlay-sync}
-   *   mx-*         after: sim:physics
+   * REGRESSION, and an unusually instructive one. This array used to be written
+   * out by hand, under a comment claiming it was "the stage ids the roster
+   * actually registers today", as:
    *
-   * plus the ids mc-sim and mc-render will register for the phases they own.
-   * NOT ONE of them is a member of the old flat skeleton, which is why that
-   * skeleton contributed nothing.
+   *     input, sim:physics, gameplay:*, redstone:*,
+   *     camera-mirror, chunk-sync, render, post-fx, ui:*
+   *
+   * SIX OF THOSE FOURTEEN ARE REGISTERED BY NOBODY. mc-render registers
+   * `render:input`, `render:camera-mirror`, `render:chunk-sync`, `render:draw`
+   * and `render:post-fx` — all five carrying its repository prefix, for the
+   * reasons its `stages/stage-ids.ts` sets out — and mc-sim registers nothing at
+   * all, so `sim:physics` does not exist either.
+   *
+   * Every assertion in this block passed anyway, because the invented ids land
+   * in the same phases as the real ones. That is the failure mode worth
+   * remembering: a test can assert exactly the right property about a world
+   * that is not the one being shipped, and stay green forever. The manifest and
+   * `pnpm check:roster` exist so it cannot happen again.
+   *
+   * The constraints are dropped on purpose: with NO `after` edges at all, the
+   * skeleton is the only thing that can order these stages. Under the old flat
+   * list it ordered nothing and the result was the alphabet.
    */
-  const realBuild: ReadonlyArray<StageConstraint> = [
-    stage('input'),
-    stage('sim:physics'),
-    stage('gameplay:interactions'),
-    stage('gameplay:entities'),
-    stage('gameplay:fluids'),
-    stage('redstone:power'),
-    stage('redstone:effects'),
-    stage('gameplay:time-weather'),
-    stage('camera-mirror'),
-    stage('chunk-sync'),
-    stage('render'),
-    stage('post-fx'),
-    stage('ui:hud-sync'),
-    stage('ui:overlay-sync'),
-  ]
+  const realBuild: ReadonlyArray<StageConstraint> = ROSTER_STAGE_IDS.map((value) => stage(value))
 
-  // REGRESSION, and the whole point of the rewrite. Every constraint above is
-  // absent on purpose: with NO `after` edges at all, the skeleton is the only
-  // thing that can order these stages. Under the old flat list it ordered
-  // nothing and the result was the alphabet.
   it.effect('produces the §4.2 frame from registrations that declare no ordering at all', () =>
     Effect.sync(() => {
       expect(order(realBuild, STANDARD_STAGE_SKELETON)).toStrictEqual([
-        'input',
-        'sim:physics',
+        'render:input',
+        // `simulation:physics` is EMPTY: mc-sim registers no stage. The phase
+        // closes over rather than breaking the chain, which is why the rest of
+        // the frame is still §4.2.
         'gameplay:interactions',
         'gameplay:entities',
         'gameplay:fluids',
@@ -565,10 +566,10 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
         'redstone:effects',
         'redstone:power',
         'gameplay:time-weather',
-        'camera-mirror',
-        'chunk-sync',
-        'render',
-        'post-fx',
+        'render:camera-mirror',
+        'render:chunk-sync',
+        'render:draw',
+        'render:post-fx',
         'ui:hud-sync',
         'ui:overlay-sync',
       ])
@@ -589,15 +590,15 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
       expect(withoutSkeleton).toStrictEqual(realBuild.map((entry) => entry.id).sort())
       expect(withoutSkeleton).not.toStrictEqual(withSkeleton)
 
-      // Concretely, under the alphabet: the world would react to input before
-      // reading it ("g" < "i"), the frame would be drawn before anything moved
-      // ("r" < "s"), and the camera would be mirrored before the entities it is
-      // meant to be looking at had run ("c" < "g"). Each of those is reversed
-      // by the skeleton.
+      // Concretely, under the alphabet: the world reacts to input before the
+      // input stage has read it ("g" < "r"), the frame is drawn before this
+      // frame's input exists ("render:d" < "render:i"), and redstone runs after
+      // time/weather, reversing §4.2's simulation block ("g" < "r"). Each of
+      // those is reversed by the skeleton.
       const brokenPairs: ReadonlyArray<readonly [string, string]> = [
-        ['gameplay:interactions', 'input'],
-        ['render', 'sim:physics'],
-        ['camera-mirror', 'gameplay:entities'],
+        ['gameplay:interactions', 'render:input'],
+        ['render:draw', 'render:input'],
+        ['gameplay:time-weather', 'redstone:power'],
       ]
 
       for (const [earlier, later] of brokenPairs) {
@@ -633,26 +634,14 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
 
   it.effect('honours the modules’ own after-edges inside a phase, without needing to know them', () =>
     Effect.sync(() => {
-      // The real registrations, edges included: mx-redstone declares
-      // `effects after power`, mx-ui declares `overlay-sync after hud-sync`,
-      // and each experience module declares `after sim:physics`.
+      // The real registrations, edges included, straight out of the manifest:
+      // mx-redstone declares `effects after power`, mx-ui declares
+      // `overlay-sync after hud-sync`, and four repositories declare
+      // `after sim:physics` — which dangles, because mc-sim registers nothing.
       const resolved = order(
-        [
-          stage('input'),
-          stage('sim:physics'),
-          stage('gameplay:interactions', 'sim:physics'),
-          stage('gameplay:entities', 'gameplay:interactions'),
-          stage('gameplay:fluids', 'gameplay:entities'),
-          stage('gameplay:time-weather', 'gameplay:fluids'),
-          stage('redstone:power', 'sim:physics'),
-          stage('redstone:effects', 'redstone:power'),
-          stage('camera-mirror'),
-          stage('chunk-sync'),
-          stage('render'),
-          stage('post-fx'),
-          stage('ui:hud-sync', 'sim:physics'),
-          stage('ui:overlay-sync', 'ui:hud-sync'),
-        ],
+        ROSTER.flatMap((module) =>
+          module.stages.map((registration) => stage(registration.id, ...registration.after)),
+        ),
         STANDARD_STAGE_SKELETON,
       )
 
@@ -665,7 +654,7 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
         positionIn(resolved, 'ui:overlay-sync'),
       )
       // ...and the phases still hold everything else in place.
-      expect(resolved[0]).toBe('input')
+      expect(resolved[0]).toBe('render:input')
       expect(resolved[resolved.length - 1]).toBe('ui:overlay-sync')
     }),
   )

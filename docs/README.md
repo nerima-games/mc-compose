@@ -29,7 +29,8 @@ E2E でしか検証できなくなった。**それが本計画全体の出発�
 | [public-api.md](./public-api.md) | 公開 API 一覧と、それぞれの契約 | mod 作者・実装者 |
 | [design-notes.md](./design-notes.md) | 参照実装の実測知見。各項目が「名前付き回帰テスト」として書かれている | 実装者。**実装前に必読** |
 | [porting.md](./porting.md) | 移植計画。**LOC は実測値**(plan.md の見積りは 22 倍ずれている) | 実装者 |
-| [testing.md](./testing.md) | テスト戦略。E2E が何を検証し、何を検証しないか | 実装者・レビュアー |
+| [testing.md](./testing.md) | テスト戦略。E2E が**今日どちらの半分を検証していて、どちらをしていないか**(§3.4) | 実装者・レビュアー |
+| [e2e-triage.md](./e2e-triage.md) | **参照実装 E2E 70 本を 1 本ずつ判定したもの。** compose に残る 25 本 / 降ろす 43 本 / 消える 2 本。「採掘 → インベントリ」が今日繋がらない理由を 3 つに分けて記録している(§4) | 実装者。E2E に着手するとき |
 | [versioning.md](./versioning.md) | 0.x → 1.0.0、GitHub Packages、modding API バージョン | リリース担当 |
 
 ## 2. 読む順番
@@ -69,7 +70,11 @@ plan.md §3.15 が compose に割り当てた残りの責務である。
 
 - 4 つの体験モジュールの実合成(全モジュール未公開)
 - mc-kernel の契約型への切り替え(現在はローカル宣言のミラー)
-- **E2E スイート**(合成できる中身がまだ無い)
+- **E2E の振る舞い側**(「採掘 → インベントリ」)。フレーム側は `test/e2e/` に実装済みで、
+  半分ずつの区別は [testing.md](./testing.md) §3.4、繋がらない理由は
+  [e2e-triage.md](./e2e-triage.md) §4
 - ブラウザエントリポイント
 - `ModuleLayer` の精密な型(現在 `Layer<any, any, any>`)
-- **mc-render がどこから実行時に到達するか**([architecture.md](./architecture.md) §5)
+- **`sim:physics` を誰が登録するのか**([design-notes.md](./design-notes.md) DN-14)
+- **ネットワーク同期のフェーズを骨格のどこに置くか**(同 DN-15)
+- **`InventoryService` のインスタンスを誰が構築するのか**([e2e-triage.md](./e2e-triage.md) §4.3)

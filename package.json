@@ -49,7 +49,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "e2e": "vitest run test/e2e",
     "check:deps": "tsx scripts/check-dependency-whitelist.ts",
+    "check:roster": "tsx scripts/check-roster-manifest.ts",
     "api:check": "tsx scripts/api-lock.ts",
     "api:update": "tsx scripts/api-lock.ts --write",
     "verify": "pnpm typecheck && pnpm lint && pnpm check:deps && pnpm api:check && pnpm test"

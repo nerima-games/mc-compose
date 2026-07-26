@@ -3,6 +3,7 @@ import { Effect } from 'effect'
 import * as compose from '../index'
 import { resolveStageOrder } from '../domain/stage-order'
 import { STANDARD_STAGE_SKELETON } from '../domain/stage-skeleton'
+import { ROSTER_STAGE_IDS } from './e2e/roster'
 
 describe('public API surface', () => {
   it.effect('re-exports every value a consumer is expected to import', () =>
@@ -181,24 +182,18 @@ describe('the prime directive, as a surface check', () => {
   // REGRESSION: every stage id the roster registers today must land in a phase.
   // One that does not is scheduled after everything the skeleton knows, which
   // is how `ui:hud-sync` used to end up ordered by the alphabet.
+  //
+  // REGRESSION, second layer: this list used to be written out here by hand and
+  // contained `input`, `sim:physics`, `camera-mirror`, `chunk-sync`, `render`
+  // and `post-fx` — six ids NOBODY REGISTERS. mc-render registers `render:input`
+  // and friends; mc-sim registers nothing. The test passed because the invented
+  // ids happen to land in the same phases as the real ones. It now reads the
+  // manifest that `pnpm check:roster` verifies against the siblings' source.
   it.effect('claims every stage id the roster actually registers', () =>
     Effect.sync(() => {
-      const registeredToday = [
-        'input',
-        'sim:physics',
-        'gameplay:interactions',
-        'gameplay:entities',
-        'gameplay:fluids',
-        'gameplay:time-weather',
-        'redstone:power',
-        'redstone:effects',
-        'camera-mirror',
-        'chunk-sync',
-        'render',
-        'post-fx',
-        'ui:hud-sync',
-        'ui:overlay-sync',
-      ]
+      const registeredToday = ROSTER_STAGE_IDS
+
+      expect(registeredToday).toHaveLength(13)
 
       for (const stageId of registeredToday) {
         expect(
