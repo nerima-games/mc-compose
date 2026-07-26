@@ -18,9 +18,18 @@ type StageOrderError =
   | { _tag: 'DuplicateStage'; id: StageId }
   | { _tag: 'StageCycle'; cycle: ReadonlyArray<StageId> }   // 経路。先頭が末尾に再出現
 
+type StagePhase = {
+  readonly name: string                      // フェーズ名。同時にそのフェーズの正規 StageId
+  readonly members: ReadonlyArray<string>    // どの stage id がこのフェーズに属するか
+}
+
+const stagePhase: (name: string, ...members: ReadonlyArray<string>) => StagePhase
+const phaseAdmits: (phase: StagePhase, id: StageId) => boolean
+const phaseOf: (skeleton: ReadonlyArray<StagePhase>, id: StageId) => StagePhase | undefined
+
 const resolveStageOrder: (
   constraints: ReadonlyArray<StageConstraint>,
-  options?: { readonly skeleton?: ReadonlyArray<StageId> },
+  options?: { readonly skeleton?: ReadonlyArray<StagePhase> },
 ) => Either<StageOrderPlan, StageOrderError>
 
 const describeStageOrderError: (error: StageOrderError) => string
@@ -30,7 +39,7 @@ const describeStageOrderError: (error: StageOrderError) => string
 
 | 保証 | 内容 |
 | --- | --- |
-| **決定性** | 同じ入力からは常に同じ順序。tie-break は skeleton 上の位置 → id 辞書順の**全順序** |
+| **決定性** | 同じ入力からは常に同じ順序。tie-break は skeleton 上の**フェーズ位置** → id 辞書順の**全順序** |
 | **登録順非依存** | モジュールを並べた順序が結果に影響しない |
 | **循環は経路つき** | `StageCycle.cycle` は実際の経路。先頭ノードが末尾に再出現する |
 | **循環の最小報告** | 循環の後ろで配置できなかっただけの stage は報告に含めない |
@@ -38,19 +47,75 @@ const describeStageOrderError: (error: StageOrderError) => string
 | **自己エッジは無視** | 「自分の後に走る」は無意味であって循環ではない |
 | **重複 id は致命** | どちらが走るかが恣意的になるため |
 
+### `skeleton` は stage id の列ではなく **フェーズ**の列である
+
+`skeleton` は `ReadonlyArray<StagePhase>` を取る。フェーズは**フレーム内の位置**と
+**そこに入る仕事の種類**を名指すもので、stage id は自分の**名前部分**でそこへの所属を宣言する。
+
+| `members` の要素 | 何と一致するか | 例 |
+| --- | --- | --- |
+| `:` で終わる | id の**名前空間**全体 | `redstone:` は `redstone:power` と `redstone:effects` |
+| それ以外 | id の**名前**部分(最後の `:` より後ろ) | `physics` は `sim:physics` とも裸の `physics` とも一致 |
+
+複数のフェーズに一致する id は**最も早いフェーズ**に属する(列が権威)。
+したがって `render:input` は render ではなく input である。
+
+**モジュール側は何も得ない。** 名前空間は「誰が所有するか」を、名前は「どんな仕事か」を言うだけで、
+絶対位置を名乗る手段はどこにも増えていない — plan.md §2.3-3 はそのまま保たれる。
+`interactions` がどこで走るかを決めるのは、今も mc-compose だけである。
+
 ### `skeleton` オプションの 2 つの役割
 
-1. **暗黙の順序エッジ。** 実際に登録された skeleton stage を skeleton 順に並べ、隣接ペアにエッジを張る。
-   **登録されていない stage は鎖を閉じる** — 流体モジュール抜きのビルドでも
-   entities は redstone の前に走る
-2. **第一の tie-break。** 順序関係を持たない 2 つの stage は、辞書順ではなく skeleton の言うところに落ちる
+1. **暗黙の順序エッジ。** 実際に stage が登録された**フェーズ**を skeleton 順に並べ、
+   隣接するフェーズの全ペアにエッジを張る。
+   **stage が 1 つも入らなかったフェーズは鎖を閉じる** — 流体モジュール抜きのビルドでも
+   entities は redstone の前に走る。
+   **同じフェーズに落ちた 2 つの stage の間にはエッジを張らない** —
+   `redstone:power` と `redstone:effects` の順序は mx-redstone 自身の `after` が決める。
+   compose はフェーズを並べ、モジュールはフェーズ内で自分を並べる
+2. **第一の tie-break。** 順序関係を持たない 2 つの stage は、辞書順ではなくフェーズの位置に落ちる。
+   どのフェーズにも属さない stage(mod の stage など)は、属する stage すべての**後ろ**に回る
+
+#### なぜフェーズでなければならなかったか(回帰)
+
+skeleton は以前 `simulation:physics` / `hud-sync` のような**具体的な id の平坦なリスト**であり、
+登録との照合は文字列の完全一致だった。**それらの id を登録するモジュールは 1 つも無い。**
+plan.md §4.1 の規約が `<owning-repo-suffix>:<stage>` である以上、モジュールが登録するのは
+`sim:physics` / `gameplay:interactions` / `redstone:power` / `ui:hud-sync` である。
+結果として照合は常に空振りし、暗黙エッジは 1 本も張られず、`priorityOf` は全 stage に
+`MAX_SAFE_INTEGER` を返し、**tie-break は純粋な辞書順に退化していた**。
+plan.md §4.2 の骨格は装飾であり、実ビルドでは `camera-mirror` が `gameplay:entities` より先に走る
+(`c` が `g` より前だから)。
+
+固定しているテストは `test/public-api.test.ts` の
+`pins how each phase claims a stage, which is what makes the table load-bearing` と
+`claims every stage id the roster actually registers`。
+前者は `members` を、後者は「今日ロスターが実際に登録する 14 個の id が全部どこかのフェーズに落ちる」ことを見る。
 
 ## 2. stage 順序表(`domain/stage-skeleton.ts`)
 
 ```typescript
-const STANDARD_STAGE_SKELETON: ReadonlyArray<StageId>
-const SIMULATION_STAGES: ReadonlyArray<StageId>
+const STANDARD_STAGE_SKELETON: ReadonlyArray<StagePhase>
+const SIMULATION_PHASES: ReadonlyArray<StagePhase>
+const SIMULATION_STAGES: ReadonlyArray<StageId>     // 各シミュレーションフェーズの正規 id
 
+// フェーズ本体。`name` と、そこに所属を宣言できる `members`。
+const STAGE_PHASE_INPUT            // 'input'                    <- ['input']
+const STAGE_PHASE_SIM_PHYSICS      // 'simulation:physics'       <- ['physics']
+const STAGE_PHASE_SIM_INTERACTIONS // 'simulation:interactions'  <- ['interactions']
+const STAGE_PHASE_SIM_ENTITIES     // 'simulation:entities'      <- ['entities']
+const STAGE_PHASE_SIM_FLUIDS       // 'simulation:fluids'        <- ['fluids']
+const STAGE_PHASE_SIM_REDSTONE     // 'simulation:redstone'      <- ['redstone', 'redstone:']
+const STAGE_PHASE_SIM_TIME_WEATHER // 'simulation:time-weather'  <- ['time-weather', 'weather']
+const STAGE_PHASE_CAMERA_MIRROR    // 'camera-mirror'            <- ['camera-mirror']
+const STAGE_PHASE_CHUNK_SYNC       // 'chunk-sync'               <- ['chunk-sync', 'mesh-sync']
+const STAGE_PHASE_RENDER           // 'render'                   <- ['render', 'draw']
+const STAGE_PHASE_POST_FX          // 'post-fx'                  <- ['post-fx']
+const STAGE_PHASE_HUD_SYNC         // 'hud-sync'                 <- ['hud-sync', 'ui:']
+
+// 各フェーズの正規 StageId(= `phase.name`)。フェーズ丸ごとを所有するモジュールが
+// そのまま登録できる名前であり、`domain/modding.ts` が mod に対して予約する名前でもある。
+// フェーズから導出しているので、表と id が食い違うことはない。
 const STAGE_INPUT              // 'input'
 const STAGE_SIM_PHYSICS        // 'simulation:physics'
 const STAGE_SIM_INTERACTIONS   // 'simulation:interactions'
@@ -77,10 +142,30 @@ input
   -> hud-sync
 ```
 
+ロスターが今日登録している id が、どのフェーズに落ちるか:
+
+| フェーズ | 実際に落ちる id | 所有者 |
+| --- | --- | --- |
+| `input` | `input` | mc-render |
+| `simulation:physics` | `sim:physics` | mc-sim |
+| `simulation:interactions` | `gameplay:interactions` | mx-gameplay |
+| `simulation:entities` | `gameplay:entities` | mx-gameplay |
+| `simulation:fluids` | `gameplay:fluids` | mx-gameplay |
+| `simulation:redstone` | `redstone:power`、`redstone:effects` | mx-redstone |
+| `simulation:time-weather` | `gameplay:time-weather` | mx-gameplay |
+| `camera-mirror` | `camera-mirror` | mc-render(正は mc-sim) |
+| `chunk-sync` | `chunk-sync` | mc-worldgen / mc-render |
+| `render` | `render` | mc-render |
+| `post-fx` | `post-fx` | mc-render |
+| `hud-sync` | `ui:hud-sync`、`ui:overlay-sync` | mx-ui |
+
 **この配列を変えるとゲームが変わる。**
 このリポジトリへの差分の中で、PR に理由の記述が要ると想定されている唯一のものである。
 `test/public-api.test.ts` の
-`pins the standard stage skeleton (plan.md §4.2) so a reorder is always deliberate` が値を固定している。
+`pins the standard stage skeleton (plan.md §4.2) so a reorder is always deliberate` が並びを、
+`pins how each phase claims a stage, which is what makes the table load-bearing` が
+各フェーズの `members` を固定している。**後者も同じだけ重要である** — `members` を落とせば、
+並びを保ったまま表が再び効かなくなる。
 
 各エッジの根拠は `domain/stage-skeleton.ts` の各定数の doc コメントにある。
 

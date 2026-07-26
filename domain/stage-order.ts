@@ -96,29 +96,105 @@ export type StageOrderPlan = {
   readonly dangling: ReadonlyArray<DanglingEdge>
 }
 
+/**
+ * One PHASE of the frame: a position in the skeleton, plus how a stage id says
+ * it belongs there.
+ *
+ * ---------------------------------------------------------------------------
+ * Why membership and not a list of ids
+ * ---------------------------------------------------------------------------
+ *
+ * The skeleton used to be a flat `ReadonlyArray<StageId>` of concrete ids —
+ * `simulation:physics`, `simulation:interactions`, `hud-sync`, … — matched
+ * against the registrations by string equality. No module registers those ids.
+ * They register `sim:physics`, `gameplay:interactions`, `redstone:power`,
+ * `ui:hud-sync`, because plan.md §4.1's convention is
+ * `<owning-repo-suffix>:<stage>` and a module names its OWN stages. So the
+ * filter below matched nothing, `priorityOf` returned MAX_SAFE_INTEGER for
+ * every stage, no implicit edge was ever added, and plan.md §4.2's backbone
+ * decayed into a lexicographic sort of whatever happened to be registered.
+ *
+ * A phase fixes that without giving any module a say in the total order. The
+ * NAMESPACE half of an id says who owns the stage; the NAME half says what kind
+ * of work it is, and that is what a phase claims. `gameplay:interactions` and a
+ * hypothetical `sim:interactions` are both interactions; mc-compose decides
+ * where interactions run, and neither module can express an opinion about it.
+ * §2.3-3 is preserved exactly: modules declare `after`, compose declares this.
+ */
+export type StagePhase = {
+  /**
+   * The phase's name, which doubles as its canonical `StageId` — what a module
+   * with no repository prefix would register, and what the mod loader reserves.
+   */
+  readonly name: string
+  /**
+   * How a stage id declares membership. An entry ending in `:` matches a whole
+   * NAMESPACE (`redstone:` matches `redstone:power`); any other entry matches
+   * the stage NAME, the part after the last `:` (`physics` matches both
+   * `sim:physics` and a bare `physics`).
+   *
+   * A stage that matches several phases belongs to the EARLIEST — the sequence
+   * is the authority, so `render:input` is input rather than render.
+   */
+  readonly members: ReadonlyArray<string>
+}
+
+/** Build a phase. `members` defaults to the phase's own name. */
+export const stagePhase = (name: string, ...members: ReadonlyArray<string>): StagePhase => ({
+  name,
+  members: members.length === 0 ? [name] : members,
+})
+
+/** The namespace half of an id, WITH its colon. `gameplay:fluids` -> `gameplay:`. */
+const namespaceOf = (id: string): string => {
+  const at = id.indexOf(':')
+  return at === -1 ? '' : id.slice(0, at + 1)
+}
+
+/** The name half of an id: everything after the LAST colon. `mod:x:tick` -> `tick`. */
+const stageNameOf = (id: string): string => {
+  const at = id.lastIndexOf(':')
+  return at === -1 ? id : id.slice(at + 1)
+}
+
+/** Does this phase claim this stage? See `StagePhase.members`. */
+export const phaseAdmits = (phase: StagePhase, id: StageId): boolean =>
+  phase.members.some((member) =>
+    member.endsWith(':') ? namespaceOf(id) === member : stageNameOf(id) === member,
+  )
+
+/**
+ * Which phase a stage belongs to, or `undefined` if the skeleton has never
+ * heard of it — which is legal, and is how a mod's stage stays schedulable.
+ */
+export const phaseOf = (
+  skeleton: ReadonlyArray<StagePhase>,
+  id: StageId,
+): StagePhase | undefined => skeleton.find((phase) => phaseAdmits(phase, id))
+
 export type ResolveOptions = {
   /**
    * The standard stage skeleton (plan.md §4.2), owned by this repository.
    *
    * It does two things:
    *
-   * - Contributes implicit ordering edges between the skeleton stages that are
-   *   actually registered, IN SKELETON ORDER, closing over any that are absent.
+   * - Contributes implicit ordering edges between the phases that actually have
+   *   a registered stage, IN SKELETON ORDER, closing over any that are empty.
    *   A build with no fluids still runs entities before redstone.
    * - Provides the primary tie-break, so that two stages with no ordering
    *   relation land where the skeleton says rather than alphabetically.
    */
-  readonly skeleton?: ReadonlyArray<StageId>
+  readonly skeleton?: ReadonlyArray<StagePhase>
 }
 
-/** Lower sorts first. Non-skeleton stages sort after every skeleton stage. */
-const priorityOf = (skeleton: ReadonlyArray<StageId>, id: StageId): number => {
-  const index = skeleton.indexOf(id)
+/** Lower sorts first. Stages in no phase sort after every stage that is in one. */
+const priorityOf = (skeleton: ReadonlyArray<StagePhase>, id: StageId): number => {
+  const index = skeleton.findIndex((phase) => phaseAdmits(phase, id))
   return index === -1 ? Number.MAX_SAFE_INTEGER : index
 }
 
 /**
- * The deterministic tie-break, in full: skeleton position, then id.
+ * The deterministic tie-break, in full: phase position, then id.
  *
  * It is TOTAL — two distinct stages can never compare equal, because ids are
  * unique by the time this runs. That totality is what makes the output
@@ -126,7 +202,7 @@ const priorityOf = (skeleton: ReadonlyArray<StageId>, id: StageId): number => {
  * `Array.prototype.sort`'s stability and of insertion order.
  */
 const compareStages =
-  (skeleton: ReadonlyArray<StageId>) =>
+  (skeleton: ReadonlyArray<StagePhase>) =>
   (left: StageId, right: StageId): number => {
     const byPriority = priorityOf(skeleton, left) - priorityOf(skeleton, right)
     return byPriority === 0 ? (left < right ? -1 : left > right ? 1 : 0) : byPriority
@@ -253,14 +329,38 @@ export const resolveStageOrder = (
   }
 
   // --- 3. Implicit skeleton chain ------------------------------------------
-  // Only over skeleton stages that are actually registered, so an absent stage
-  // closes the gap rather than breaking the chain.
-  const presentSkeleton = skeleton.filter((id) => registered.has(id))
-  for (let index = 1; index < presentSkeleton.length; index += 1) {
-    const before = presentSkeleton[index - 1]
-    const after = presentSkeleton[index]
-    if (before !== undefined && after !== undefined) {
-      addEdge(before, after)
+  // Every stage of one phase runs before every stage of the next NON-EMPTY
+  // phase, so an unpopulated phase closes the gap rather than breaking the
+  // chain: a build with no fluids still runs entities before redstone.
+  //
+  // Note what this does NOT do: order two stages that landed in the SAME phase.
+  // Both mx-redstone stages are `simulation:redstone`, and which of them runs
+  // first is settled by mx-redstone's own `after` edge, because it is the only
+  // repository that knows. Compose orders phases; modules order themselves
+  // within one (plan.md §2.3-3).
+  const byPhase = new Map<number, Array<StageId>>()
+  for (const id of registered) {
+    const index = skeleton.findIndex((phase) => phaseAdmits(phase, id))
+    if (index === -1) {
+      continue
+    }
+    const bucket = byPhase.get(index)
+    if (bucket === undefined) {
+      byPhase.set(index, [id])
+    } else {
+      bucket.push(id)
+    }
+  }
+
+  const populated = [...byPhase.keys()]
+    .sort((left, right) => left - right)
+    .map((index) => byPhase.get(index) ?? [])
+
+  for (let index = 1; index < populated.length; index += 1) {
+    for (const before of populated[index - 1] ?? []) {
+      for (const after of populated[index] ?? []) {
+        addEdge(before, after)
+      }
     }
   }
 

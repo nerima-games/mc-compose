@@ -34,6 +34,7 @@ import {
   type StageId,
   type StageOrderError,
   type StageOrderPlan,
+  type StagePhase,
 } from './stage-order'
 import { STANDARD_STAGE_SKELETON } from './stage-skeleton'
 
@@ -106,8 +107,12 @@ export type ComposedGame = {
 }
 
 export type ComposeOptions = {
-  /** Defaults to `STANDARD_STAGE_SKELETON`. Overridable so tests can be small. */
-  readonly skeleton?: ReadonlyArray<StageId>
+  /**
+   * The frame's phases. Defaults to `STANDARD_STAGE_SKELETON`; overridable so
+   * tests can be small. See `domain/stage-order.ts` on why a phase rather than
+   * a concrete stage id.
+   */
+  readonly skeleton?: ReadonlyArray<StagePhase>
 }
 
 /**

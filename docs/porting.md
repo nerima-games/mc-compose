@@ -37,12 +37,15 @@ $ grep -rhcE "(^|[^.a-zA-Z])test\(" e2e --include='*.e2e.ts' | paste -sd+ | bc
 918 は**再現できる実測値**である。`packages/app/application/main/layers/`(66 ファイル)が
 ちょうど 918 LOC で、これは Layer 合成そのもの —— 文字どおりの「配線」—— である。
 mc-playground-kit の
-[porting.md](https://github.com/nerima-games/mc-playground-kit/blob/main/docs/porting.md) §1 が
+[porting.md](https://github.com/nerima-games/mc-playground-kit/blob/main/docs/porting.md) §1 / §1.1 が
 `layers/` を「移植しないもの」として挙げるときに使っているのがこの数字であり、
 そちらは「plan.md の 918 はこの実測値と一致する」と書いている。**その指摘は正しい。**
+（同 §1.1 に、この 2 つの判定が矛盾しない理由を本節と同じ表で置いてある。
+どちらか一方だけを読んで「plan.md は正しい / 誤り」と結論しないこと。）
 
-一方 20,737 は `packages/app/application/` 全体(`frame/` 11,082 + `main/` 7,948 +
-`multiplayer/` 900 + `mods/` 123 + 直下ファイル、いずれも本体のみ)である。
+一方 20,737 は `packages/app/application/` 全体である。内訳は
+`frame/` 11,082 + `main/` 7,948 + `multiplayer/` 900 + `mods/` 123 + 直下ファイル 684 = **20,737**
+(いずれも本体のみ。§1 に直下 684 の内訳がある)。
 plan.md §3.15 は「`packages/app` の配線(918 LOC相当)」を **mc-compose の移植元の規模**として
 提示しているので、**移植量の見積りとして読むと 22 倍の過小評価になる。**
 
@@ -70,16 +73,32 @@ mc-compose が引き取るのはそのうちのごく一部で、残りは各体
 
 ## 1. 移植元の実測(`packages/app/application/`、本体のみ)
 
+直下の 5 行（`frame/` / `main/` / `multiplayer/` / `mods/` / 直下ファイル）が
+`packages/app/application/` を**過不足なく分割する**。合計は 20,737 に一致する。
+インデントされた行はその内訳であり、合計には二重に足さないこと。
+
 | ディレクトリ | LOC | 行き先 |
 | --- | ---: | --- |
-| **合計** | **20,737** | |
 | `frame/` | 11,082 | **分割**(下記) |
 | └ `frame/stages/` | 9,030 | 大半が体験モジュールへ |
 | &nbsp;&nbsp;&nbsp;└ `stages/interaction-*.ts`(40 ファイル) | 3,317 | **mx-gameplay**(plan.md §3.11) |
 | `main/` | 7,948 | **分割**(下記) |
 | └ `qa-api*.ts` + `qa-spatial.ts`(16 ファイル、テスト込み) | 2,648 | **mc-compose**(名前空間マージのみ)+ 各モジュール |
 | `multiplayer/` | 900 | **mx-multiplayer** + **mx-ui** |
-| `mods/mod-api.ts` | 123 | **mc-compose**(`domain/modding.ts`) |
+| `mods/`(= `mod-api.ts` 1 ファイル) | 123 | **mc-compose**(`domain/modding.ts`) |
+| `application/` 直下のファイル(6 ファイル) | 684 | **分割**(下記) |
+| **合計** | **20,737** | 11,082 + 7,948 + 900 + 123 + 684 |
+
+直下 684 LOC の内訳(`find packages/app/application -maxdepth 1 -name '*.ts' -not -name '*.test.ts'`):
+
+| ファイル | LOC | 行き先 |
+| --- | ---: | --- |
+| `frame-handler.ts` | 306 | **mc-compose**(`runFrame` の呼び出し側。条件分岐は落とす) |
+| `debug-feature-flags.config.ts` | 192 | **mc-compose**(QA/デバッグ入口、plan.md §3.15) |
+| `frame-handler.config.ts` | 76 | **mc-compose** |
+| `debug-feature-flags.ts` | 65 | **mc-compose** |
+| `main.config.ts` | 32 | **mc-compose** |
+| `debug-feature-flags.types.ts` | 13 | **mc-compose** |
 
 加えて `src/main.ts` = **201 LOC**(エントリポイント)、
 `packages/app/test/` = **1,095 LOC**。
@@ -149,6 +168,26 @@ E2E に残すべきは「モジュール間の相互作用でしか壊れない�
 
 この数字が守れているかは、レビューのたびに `wc -l domain/*.ts` で確認できる。
 **本体が 2,000 LOC を超えたら、それは黄信号である。**
+
+### 実測(2026-07-26、コメント込みの生の `wc -l`)
+
+| ファイル | LOC |
+| --- | ---: |
+| `domain/stage-order.ts` | 417 |
+| `domain/stage-skeleton.ts` | 231 |
+| `domain/composition.ts` | 190 |
+| `domain/session.ts` | 174 |
+| `domain/modding.ts` | 168 |
+| `domain/qa-api.ts` | 160 |
+| `index.ts` | 42 |
+| **合計** | **1,382** |
+
+上の見込みは実装コードの見込みであり、この実測はコメントを含む生の行数である。
+順序解決 + 順序表の 648 行のうち過半は「なぜこの順序なのか」「なぜフェーズなのか」の
+散文であり、それはこのリポジトリで**残すべき**種類の行数である
+(順序表の各エッジが 1 フレーム内の因果についての主張であり、
+「参照実装がそうだったから」は理由にならないため)。
+黄信号の閾値 2,000 に対しては十分に内側にいる。
 
 ## 3. 移植順序
 

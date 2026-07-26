@@ -9,7 +9,7 @@ import {
   type GameModule,
   type StageRegistration,
 } from '../domain/composition'
-import { StageId, type StageOrderError } from '../domain/stage-order'
+import { StageId, type StageOrderError, type StagePhase } from '../domain/stage-order'
 import { STAGE_HUD_SYNC, STAGE_INPUT, STAGE_RENDER, STANDARD_STAGE_SKELETON } from '../domain/stage-skeleton'
 
 const id = (value: string): StageId => StageId(value)
@@ -33,7 +33,7 @@ const moduleOf = (name: string, frameStages: ReadonlyArray<StageRegistration>): 
 
 const composed = (
   modules: ReadonlyArray<GameModule>,
-  skeleton: ReadonlyArray<StageId> = [],
+  skeleton: ReadonlyArray<StagePhase> = [],
 ): ComposedGame => Either.getOrThrow(composeGame(modules, { skeleton }))
 
 const failure = (
@@ -172,7 +172,7 @@ describe('composeGame', () => {
       )
 
       expect([...game.plan.order]).toStrictEqual([STAGE_INPUT, STAGE_RENDER, STAGE_HUD_SYNC])
-      expect(STANDARD_STAGE_SKELETON).toContain(STAGE_INPUT)
+      expect(STANDARD_STAGE_SKELETON.map((phase) => phase.name)).toContain(STAGE_INPUT)
     }),
   )
 })

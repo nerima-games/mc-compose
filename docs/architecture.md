@@ -143,6 +143,35 @@ kit のミニ世界ではなく本物の合成済みゲームを対象とする�
 **このリポジトリの中心。** [responsibility.md](./responsibility.md) §1.1 と
 [public-api.md](./public-api.md) §1 を参照。
 
+順序表(`STANDARD_STAGE_SKELETON`)は **12 個のフェーズの列**である。
+stage id のリストではない。フェーズは「フレーム内の位置」と「そこに入る仕事の種類」を名指し、
+stage id は自分の**名前部分**(最後の `:` より後ろ)でそこへの所属を宣言する
+(`members` の要素が `:` で終わるときだけ、名前空間まるごとが一致する)。
+
+```
+フェーズ                     ← 所属を宣言する id の例
+input                        ← input
+simulation:physics           ← sim:physics
+simulation:interactions      ← gameplay:interactions
+simulation:entities          ← gameplay:entities
+simulation:fluids            ← gameplay:fluids
+simulation:redstone          ← redstone:power, redstone:effects   （名前空間一致）
+simulation:time-weather      ← gameplay:time-weather
+camera-mirror                ← camera-mirror
+chunk-sync                   ← chunk-sync
+render                       ← render
+post-fx                      ← post-fx
+hud-sync                     ← ui:hud-sync, ui:overlay-sync       （名前空間一致）
+```
+
+**この形が §2.3-3 の実装そのものである。** 名前空間は「誰が所有するか」しか言わず、
+名前は「どんな仕事か」しか言わない。モジュールが絶対位置を名乗る手段は増えていない。
+compose がフェーズを並べ、モジュールは自分の `after` で**フェーズ内の**自分の位置だけを言う。
+
+以前この表は具体的な stage id の平坦なリストで、**誰もその id を登録していなかった**ため
+1 本もエッジを出しておらず、フレームは辞書順に退化していた。
+経緯と回帰テストは [design-notes.md](./design-notes.md) DN-4.1。
+
 ### 4.4 依存ホワイトリストは CI で強制(plan.md §2.3-5)
 
 `pnpm check:deps` は違反があれば必ず非ゼロ終了する。

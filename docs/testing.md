@@ -10,12 +10,12 @@ plan.md §3.15 検証:
 
 | レイヤ | 検証手段 | 現状 |
 | --- | --- | --- |
-| stage 全順序の解決 | 決定性・循環検出・dangling・skeleton 連鎖 | `test/stage-order.test.ts`(29 tests) |
+| stage 全順序の解決 | 決定性・循環検出・dangling・フェーズ所属・skeleton 連鎖 | `test/stage-order.test.ts`(38 tests) |
 | Layer 合成 + フレーム実行 | 解決順が**実際に実行を駆動する**こと | `test/composition.test.ts`(15 tests) |
 | セッションライフサイクル | 状態機械。**2 周目**が最重要 | `test/session.test.ts`(15 tests) |
 | QA API | 名前空間マージ・衝突拒否・インストール | `test/qa-api.test.ts`(15 tests) |
 | Modding 入口 | 名前空間予約・一級モジュール性 | `test/modding.test.ts`(15 tests) |
-| 公開 API + 規範 | バレルのピン留め + ゲームルール名の検査 | `test/public-api.test.ts`(5 tests) |
+| 公開 API + 規範 | バレルのピン留め + ゲームルール名の検査 + **フェーズ所属のピン留め** | `test/public-api.test.ts`(7 tests) |
 | 依存境界 | ホワイトリスト・推移閉包・`Date.now()` 禁止 | `test/check-dependency-whitelist.test.ts`(44 tests) |
 | **モジュール間相互作用** | **E2E** | **未実装**。§3 |
 
@@ -95,7 +95,9 @@ it.effect('has no edge from InGame straight to Title', ...)
 | `rejects reaching past the experience modules to mc-sim, and names the path` | prime directive の機械化された半分 |
 | `cannot reach mc-render or mc-meshing at all` | グラフの穴をピン留め([architecture.md](./architecture.md) §5) |
 | `exports nothing that sounds like a game rule, an entity or a world` | 弱いが、追加のその場所に規範を置く |
-| `pins the standard stage skeleton (plan.md §4.2)` | 順序表の変更を必ず明示的な編集にする |
+| `pins the standard stage skeleton (plan.md §4.2)` | 順序表の**並び**の変更を必ず明示的な編集にする |
+| `pins how each phase claims a stage, which is what makes the table load-bearing` | 順序表の**所属規則**を落とすと、並びを保ったまま表が効かなくなる([design-notes.md](./design-notes.md) DN-4.1) |
+| `claims every stage id the roster actually registers` | 表がロスターの実 id を取りこぼしていないこと。取りこぼした stage は辞書順に流れる |
 | `passes the delta through untouched` | 物理定数が合成層に来ない |
 | `records no edge between any two experience modules` | plan.md §2.3-1 |
 | `never names mc-playground-kit as a runtime edge` | plan.md §2.3-2 |

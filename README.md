@@ -19,7 +19,7 @@ plan.md §3.15:
 | 責務 | 実装 |
 | --- | --- |
 | **stage 全順序の解決**(唯一の所有者、§2.3-3) | `domain/stage-order.ts` |
-| **stage 順序表**(§4.2) | `domain/stage-skeleton.ts` |
+| **stage 順序表**(§4.2。12 個の**フェーズ**の列) | `domain/stage-skeleton.ts` |
 | **Layer マージ** | `domain/composition.ts` |
 | セッションライフサイクル(タイトル ⇄ ゲーム) | `domain/session.ts` |
 | QA / デバッグ API | `domain/qa-api.ts` |
@@ -92,21 +92,22 @@ Clock Port の実装アダプタ自身だけは実クロックを読む必要が
 ### セットアップ
 
 ```console
-$ direnv allow          # devenv 経由で nodejs_22 + pnpm が入る
+$ direnv allow          # flake.nix の devShell で nodejs_22 + corepack が入る
 $ pnpm install
 ```
 
-devenv を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)を用意する。
+Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)を用意する。
 
-> **注意**: `devenv.lock` はコミットされていない。生成には `devenv` の実行が必要なため、
-> 初回に devenv を動かした人がコミットすること。
+> **注意**: ツールチェーンは `devenv.nix` から `flake.nix` + `flake.lock` に移行済みである。
+> `flake.lock` はコミットされているので、`nix develop`（`.envrc` は `use flake`）は
+> 誰の手元でも同じ nixpkgs に解決される。`devenv.nix` / `devenv.lock` はもう存在しない。
 
 ### コマンド
 
 | コマンド | 内容 |
 | --- | --- |
 | `pnpm typecheck` | `tsconfig.build.json` と `tsconfig.test.json` の両方を型検査 |
-| `pnpm lint` | oxlint(このリポジトリ唯一の lint / format 設定) |
+| `pnpm lint` | oxlint(このリポジトリ唯一の lint / format 設定)。**`--deny-warnings` 付きで走る**ため、`warn` のルールもビルドを落とす（`oxlint.json` は 5 カテゴリすべてと個別 67 ルールが `warn`、`error` は 4 つだけ。このフラグが無かった頃は実質その 4 つしかゲートになっていなかった） |
 | `pnpm lint:fix` | oxlint の自動修正 |
 | `pnpm test` | vitest(`@effect/vitest` の `it.effect` が主 API) |
 | `pnpm test:watch` | vitest watch |
@@ -121,7 +122,10 @@ devenv を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推�
 確定している **仕組み**:
 
 - stage 全順序は compose だけが解決する。決定論、循環は経路つきで報告、dangling は非致命
-- skeleton の暗黙エッジは登録済み stage の間だけに張り、欠けた stage は鎖を閉じる
+- 順序表は**フェーズの列**であり、stage id は名前部分(または名前空間)で所属を宣言する。
+  モジュールは絶対位置を名乗れないまま、表が実際にエッジを出す
+- skeleton の暗黙エッジは stage が入ったフェーズの間だけに張り、空のフェーズは鎖を閉じる。
+  同じフェーズ内の順序はそのモジュール自身の `after` が決める
 - Layer は `merge` であって `provide` ではない(モジュールは対等)
 - `runFrame` は delta をクランプせず、try/catch も計測も条件分岐も持たない
 - セッションは `InGame` から `Title` へ直行できない。ティアダウンは通過必須の状態

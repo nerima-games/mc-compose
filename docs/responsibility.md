@@ -29,7 +29,12 @@ plan.md §8 リスク表:
 | └ `application/main/` | 7,948 |
 | &nbsp;&nbsp;&nbsp;└ `qa-api*.ts` + `qa-spatial.ts`(テスト込み 16 ファイル) | **2,648** |
 | └ `application/multiplayer/` | 900 |
-| └ `application/mods/mod-api.ts` | 123 |
+| └ `application/mods/`(= `mod-api.ts`) | 123 |
+| └ `application/` 直下のファイル(6 ファイル。`frame-handler*` / `debug-feature-flags*` / `main.config.ts`) | 684 |
+
+第 1 階層の 5 項目 11,082 + 7,948 + 900 + 123 + 684 が **20,737 に一致する**（過不足なし）。
+インデントされた行はその内訳なので、合計に二重に足さないこと。
+直下 684 の内訳は [porting.md](./porting.md) §1。
 
 `interaction-*.ts` の 40 ファイル 3,317 LOC は、plan.md §3.11 が **mx-gameplay** に割り当てている内容である。
 つまり参照実装では**採掘・設置・アイテム使用のルールが合成層にいた**。
@@ -45,7 +50,7 @@ plan.md §8 リスク表:
 | 責務 | 実装 | plan.md |
 | --- | --- | --- |
 | **stage 全順序の解決** | `domain/stage-order.ts` | §2.3-3 |
-| **stage 順序表(骨格)** | `domain/stage-skeleton.ts` | §4.2 |
+| **stage 順序表(骨格 = フェーズ列)** | `domain/stage-skeleton.ts` | §4.2 |
 | **Layer マージ** | `domain/composition.ts` | §3.15 |
 | セッションライフサイクル(タイトル ⇄ ゲーム) | `domain/session.ts` | §3.15 |
 | QA / デバッグ API | `domain/qa-api.ts` | §3.15, §7 |
@@ -72,6 +77,43 @@ plan.md §8 リスク表:
 3. **dangling edge はエラーにしない。** 「input があるなら input の後に走らせて」を
    input リポジトリへの依存なしに書けることが `after` の存在意義である(mc-kernel `domain/frame.ts`)。
    落としたうえで**報告する**
+
+### 1.1.1 骨格は**フェーズの列**であって、id のリストではない
+
+`domain/stage-skeleton.ts` の `STANDARD_STAGE_SKELETON` は `ReadonlyArray<StagePhase>` である。
+1 つの `StagePhase` は「フレーム内の位置」と「そこに入る仕事の種類」を名指し、
+stage id は自分の**名前部分**(最後の `:` より後ろ)でそこへの所属を宣言する。
+`members` の要素が `:` で終わる場合だけは、名前空間まるごとが一致する
+(`redstone:` が `redstone:power` と `redstone:effects` を拾う)。
+
+**これは §2.3-3 の緩和ではない。** 名前空間は「誰が所有するか」しか言わず、
+名前は「どんな仕事か」しか言わない。どちらも**絶対位置**ではないので、
+`interactions` がフレームのどこで走るかを言えるのは今も compose だけである。
+compose はフェーズを並べ、モジュールは**フェーズ内で**自分を並べる
+(`redstone:effects` が `redstone:power` の後、というのは mx-redstone にしか言えない)。
+
+#### なぜこれが「表を持つ」の実体なのか
+
+以前の骨格は `simulation:physics` / `simulation:interactions` / `hud-sync` といった
+**具体的な id の平坦なリスト**で、登録との照合は文字列の完全一致だった。
+**そのどれ 1 つとして、登録するモジュールは存在しない** — 規約が
+`<owning-repo-suffix>:<stage>` である以上、実際に登録されるのは
+`sim:physics` / `gameplay:interactions` / `ui:hud-sync` である。
+
+したがって:
+
+- 照合が空振りするので、**暗黙エッジは 1 本も張られなかった**
+- `priorityOf` が全 stage に `MAX_SAFE_INTEGER` を返すので、**tie-break は辞書順に退化した**
+- 結果として、実ビルドのフレームは `camera-mirror` → `gameplay:entities` の順になる。
+  `c` が `g` より前だからである
+
+**「表を所有している」と書いてあるのに、その表が 1 本もエッジを出していなかった。**
+順序表を持つことがこのリポジトリの存在理由である以上、これは飾りではなく欠陥だった。
+フェーズはその修正であり、`members` を落とすことは並びを崩すのと同じだけ重い変更である。
+
+回帰テスト: `test/public-api.test.ts` の
+`pins how each phase claims a stage, which is what makes the table load-bearing`、
+`claims every stage id the roster actually registers`。
 
 ### 1.2 Layer マージ
 

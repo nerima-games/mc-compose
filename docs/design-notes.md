@@ -4,7 +4,7 @@
 再発させてはならない事象を抽出したもの。
 
 **各項目は「名前付き回帰テスト」として書いてある。**
-参照実装のパスは `/Users/take/ghq/github.com/takeokunn/ts-minecraft` 起点。
+参照実装のパスは `<reference-impl>` 起点。
 行番号・LOC は実測(2026-07-26)。
 
 ---
@@ -31,11 +31,16 @@ $ find packages/app/application/frame/stages -name 'interaction-*.ts' -not -name
 | 対象 | 実測 LOC |
 | --- | ---: |
 | `packages/app/application/` | **20,737** |
-| └ `frame/`(11,082)/ `frame/stages/` | 9,030 |
-| &nbsp;&nbsp;&nbsp;└ `stages/interaction-*.ts`(40 ファイル) | 3,317 |
+| └ `frame/` | 11,082 |
+| &nbsp;&nbsp;&nbsp;└ `frame/stages/` | 9,030 |
+| &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└ `stages/interaction-*.ts`(40 ファイル) | 3,317 |
 | └ `main/` | 7,948 |
 | └ `multiplayer/` | 900 |
-| └ `mods/mod-api.ts` | 123 |
+| └ `mods/`(= `mod-api.ts`) | 123 |
+| └ `application/` 直下のファイル(6 ファイル) | 684 |
+
+第 1 階層の 5 項目 11,082 + 7,948 + 900 + 123 + 684 が **20,737 に一致する**（過不足なし）。
+直下 684 の内訳は [porting.md](./porting.md) §1。
 
 `interaction-*.ts` の 40 ファイル 3,317 LOC は、plan.md §3.11 が **mx-gameplay** に割り当てている内容
 (採掘・設置・アイテム使用のルール)である。
@@ -76,10 +81,12 @@ plan.md §1 の出発点そのものである:
 リプレイ可能であることを前提にしたシミュレーション(plan.md §5.1-3「クロック注入による決定論」)にとって、
 これは最悪の失敗様式である。
 
-**本実装での対処**: tie-break を**全順序**にする — skeleton 上の位置、次に id の辞書順。
+**本実装での対処**: tie-break を**全順序**にする — skeleton 上の**フェーズ位置**、次に id の辞書順。
 2 つの異なる stage が「等しい」と比較されることは(id が一意なので)決してない。
 その全域性が再現性を保証する。部分順序の比較子だと、
 結果が `Array.prototype.sort` の安定性と挿入順序に左右される。
+
+なお、この tie-break が**実際に効いている**ことは自明ではなかった。DN-4.1 を参照。
 
 ---
 
@@ -131,18 +138,73 @@ stage は単にどこか別の場所で走るだけで、誰も気づかない�
 
 ---
 
-## DN-4: skeleton の暗黙エッジは「登録済みの stage の間」だけに張る
+## DN-4: skeleton の暗黙エッジは「stage が入ったフェーズの間」だけに張る
 
-**回帰テスト名**: `closes the chain over a skeleton stage that no loaded module registered`
+**回帰テスト名**:
+- `closes the chain over a skeleton stage that no loaded module registered`
+- `closes over a phase no loaded module populates`
+
 **実装**: `test/stage-order.test.ts`(実装済み)
 
 **何が問題か**: skeleton の連鎖を「表の全要素」から作ると、
-存在しない stage のところで鎖が切れる。
+stage が 1 つも入らなかったところで鎖が切れる。
 流体モジュールを積まないビルドでは `entities` と `redstone` の間のエッジが消え、
 **辞書順の tie-break にフォールバックしてフレーム順序が黙って変わる**。
 
-**本実装での対処**: 実際に登録された skeleton stage のみを skeleton 順に並べ、
-隣接ペアにエッジを張る。欠けた stage は鎖を**閉じる**。
+**本実装での対処**: 実際に stage が登録された**フェーズ**だけを skeleton 順に並べ、
+隣接するフェーズの全ペアにエッジを張る。空のフェーズは鎖を**閉じる**。
+
+**同じフェーズの中には 1 本もエッジを張らない。** `redstone:power` と `redstone:effects` は
+どちらも `simulation:redstone` に属するが、どちらが先かは mx-redstone にしか言えない
+(自分の `after` で宣言する)。compose はフェーズを並べ、モジュールはフェーズ内で自分を並べる。
+`honours the modules’ own after-edges inside a phase, without needing to know them` がこれを固定している。
+
+---
+
+## DN-4.1: 骨格が**フェーズ**でなければ、1 本もエッジを出していなかった
+
+**回帰テスト名**:
+- `pins how each phase claims a stage, which is what makes the table load-bearing`(`test/public-api.test.ts`)
+- `claims every stage id the roster actually registers`(同上)
+- `differs from the lexicographic fallback, which is what the old skeleton degraded to`
+- `produces the §4.2 frame from registrations that declare no ordering at all`
+- `places redstone between fluids and time/weather, which no module is allowed to declare`
+
+**実装**: `test/stage-order.test.ts` / `test/public-api.test.ts`(実装済み)
+
+**何が問題だったか**: `STANDARD_STAGE_SKELETON` は当初、
+`simulation:physics` / `simulation:interactions` / `hud-sync` といった
+**具体的な stage id の平坦なリスト**で、登録との照合は文字列の完全一致だった。
+
+**そのどれ 1 つとして、登録するモジュールは存在しない。**
+plan.md §4.1 の id 規約は `<owning-repo-suffix>:<stage>` であり、
+モジュールは自分の stage を自分で名付ける — 実際に登録されるのは
+`sim:physics` / `gameplay:interactions` / `redstone:power` / `ui:hud-sync` である。
+
+したがって照合は常に空振りし、
+
+- **暗黙エッジ(DN-4)は 1 本も張られず**、
+- `priorityOf` は全 stage に `MAX_SAFE_INTEGER` を返し、
+- **tie-break(DN-1)は純粋な辞書順に退化していた**。
+
+plan.md §4.2 の骨格は装飾だった。実ビルドのフレームは
+`camera-mirror` → `gameplay:entities` の順に走る。`c` が `g` より前だからである。
+
+**発見しにくい種類の欠陥である。** `test/stage-order.test.ts` は skeleton の**正規 id を直接登録して**
+検証していたので、当然すべて緑だった。表は自分自身に対しては正しく効いていた
+— ただ、誰も表の言葉で登録していなかった。
+
+**本実装での対処**: 骨格を `ReadonlyArray<StagePhase>` にする。
+1 つのフェーズは `{ name, members }` で、id は**名前部分**(最後の `:` より後ろ)で所属を宣言する。
+`members` の要素が `:` で終わるときだけ、名前空間まるごとが一致する。
+
+**§2.3-3 は緩んでいない。** 名前空間は所有者を、名前は仕事の種類を言うだけで、
+どちらも絶対位置ではない。`interactions` がフレームのどこで走るかを決めるのは今も compose だけである。
+
+テストも直した。`the skeleton constrains a REAL build, not just its own canonical ids` の
+describe は、**ロスターが実際に登録する id だけ**を使って §4.2 のフレームが出ることを検証する。
+`differs from the lexicographic fallback` は、その結果が辞書順の答えと**違う**ことを見ている
+— 同じだったら、このテストは何も検証していないことになる。
 
 ---
 
@@ -197,7 +259,10 @@ stage は単にどこか別の場所で走るだけで、誰も気づかない�
 Reflect.set(window, '__TS_MINECRAFT_QA__', makeQaApi(deps, stagedResourceBlocksRef, stagedZombiePositionRef))
 ```
 
-その規模は plan.md §3.15 の見積り「~1.4k」より**大きい**。実測:
+**plan.md §3.15 の見積り「~1.4k」は実質的に正しい。**（以前ここに「見積りより大きい」と
+書いていたのは、計数条件を混同した誤りである。[porting.md](./porting.md) §0.2 と同じ訂正。）
+
+実測:
 
 ```console
 $ find packages/app/application/main \( -name 'qa-api*.ts' -o -name 'qa-spatial*.ts' \) | xargs wc -l | tail -1
@@ -206,8 +271,15 @@ $ wc -l packages/app/application/main/qa-spatial.test.ts
   60
 ```
 
-`qa-api*.ts`(全 15 ファイル、テスト込み)+ `qa-spatial.ts`(83)= **2,648 LOC**。
-16 ファイル(本体 14 + テスト 2)。本体だけなら 1,395 LOC。
+| 計数条件 | ファイル数 | LOC | plan.md「~1.4k」との差 |
+| --- | ---: | ---: | --- |
+| **本体のみ**（本書の他の LOC と同条件） | 14 | **1,395** | **5 行**。ほぼ一致 |
+| テスト込み | 16 | 2,648 | 1.9 倍 |
+
+`qa-api*.ts`(全 15 ファイル、テスト込み)+ `qa-spatial.ts`(83)= 2,648 LOC。
+本書の LOC はすべて `.test.ts` を除いた本体のみで数えているので、
+plan.md の見積りの正誤は **1,395 と比べて判断すること**。
+2,648 はテスト込みの規模を知りたいときのために残してある。
 
 内訳(本体): qa-api-visual 181 / qa-api-debug-state 179 / qa-api 172 /
 qa-api-rendering 145 / qa-api-inventory 127 / qa-api-world 121 / qa-api-perf 105 /
@@ -255,9 +327,15 @@ qa-api-village 49 / qa-api-env 33 / qa-api-settings 19。
 mod 専用フックも優先度も pre/post パスも無い。
 
 **唯一の制約が stage 名前空間**である。mod の stage は `mod:<modId>:<stage>` でなければならない。
-これが無いと mod は `simulation:physics` を登録でき、
+これが無いと mod は各フェーズの正規 id(`simulation:physics` など)を登録でき、
 実在する physics と衝突する(`DuplicateStage` で捕まる)か、
-あるいは — physics 抜きのビルドが出荷された瞬間 — **黙って physics stage そのものになる**。
+あるいは — physics 抜きのビルドが出荷された瞬間 — **黙って physics フェーズそのものになる**。
+
+なお `mod:<modId>:<stage>` は**名前部分でフェーズに参加できる**。
+`mod:extra-ores:physics` は physics フェーズに落ち、`mod:mine:tick` はどのフェーズにも属さず
+(それも正当で)、フェーズを持つ全 stage の後ろに決定論的に並ぶ。
+`gives a stage in no phase no phase, which is legal and keeps it schedulable` と
+`gives a module stage outside the skeleton a deterministic position` が両方を固定している。
 
 ---
 
@@ -331,9 +409,9 @@ E2E の本数が増え続けるなら、それは compose にロジックが溜�
 > (「camera.position を読むな matrixWorld を使え」という慢性 gotcha の根源)。
 > 新実装は sim が姿勢を所有し、THREE カメラはミラー
 
-**本実装での対処**: `camera-mirror` を skeleton 上の**独立した stage** として置く。
+**本実装での対処**: `camera-mirror` を skeleton 上の**独立したフェーズ**として置く。
 コピーの方向が、名前が付いていて、順序が決まっていて、1 フレームに 1 回だけ起きる出来事になる。
-`simulation:*` の後、`chunk-sync` と `render` の前。
+6 つの `simulation:*` フェーズの後、`chunk-sync` と `render` の前。
 
 ---
 

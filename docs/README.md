@@ -2,6 +2,14 @@
 
 `@nerima-games/mc-compose` の実装情報はここに集約する。
 
+## 表記
+
+| 表記 | 意味 |
+| --- | --- |
+| `<reference-impl>` | **参照実装のチェックアウトのルート**。凍結された `takeokunn/ts-minecraft` の作業コピーを指す。本ドキュメント群では `<reference-impl>/packages/…` の形か、単に `packages/…`（同じくルート相対）で引用する。手元のどこに clone してあっても読み替えられるようにするためのプレースホルダである |
+| plan.md | リポジトリ構成仕様書（16 リポジトリ、確定済み）。**非公開**であり、公開読者は開けない。だから本ドキュメント群は「plan.md を読まなくても追える」ことを要件にしている —— plan.md の主張を引くときは必ず原文を引用し、参照実装での裏づけを file:line で添える |
+| `nerima-games/<repo>` | 同 org の兄弟リポジトリ。リンクは GitHub の URL で張る |
+
 ## 0. 最初に読むこと
 
 > **このリポジトリに追加してよいコードは、Layer 合成と stage 順序表だけである。**
@@ -37,7 +45,7 @@ E2E でしか検証できなくなった。**それが本計画全体の出発�
 | ファイル | 役割 |
 | --- | --- |
 | `domain/stage-order.ts` | **stage 全順序の解決器。** 決定論・循環検出・dangling 報告 |
-| `domain/stage-skeleton.ts` | **stage 順序表**(plan.md §4.2)。**この配列を変えるとゲームが変わる** |
+| `domain/stage-skeleton.ts` | **stage 順序表**(plan.md §4.2)。12 個の**フェーズ**の列。**この配列を変えるとゲームが変わる** |
 
 他の 4 ファイル(`composition.ts` / `session.ts` / `qa-api.ts` / `modding.ts`)は、
 plan.md §3.15 が compose に割り当てた残りの責務である。
@@ -49,7 +57,8 @@ plan.md §3.15 が compose に割り当てた残りの責務である。
 **確定している**(仕組みとして):
 
 - stage 全順序は compose だけが解決する。決定論、循環は経路つきで報告、dangling は非致命
-- skeleton の暗黙エッジは登録済み stage の間だけに張り、欠けた stage は鎖を閉じる
+- 順序表は**フェーズの列**。stage id は名前部分(または名前空間)で所属を宣言し、絶対位置は名乗れない
+- skeleton の暗黙エッジは stage が入ったフェーズの間だけに張り、空のフェーズは鎖を閉じる
 - Layer は `merge` であって `provide` ではない(モジュールは対等)
 - `runFrame` は delta をクランプせず、try/catch も計測も条件分岐も持たない
 - セッションは `InGame` から `Title` へ直行できない。ティアダウンは通過必須の状態

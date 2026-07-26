@@ -12,9 +12,25 @@ describe('public API surface', () => {
         'StageId',
         'resolveStageOrder',
         'describeStageOrderError',
+        'stagePhase',
+        'phaseOf',
+        'phaseAdmits',
         // the stage order table
         'STANDARD_STAGE_SKELETON',
+        'SIMULATION_PHASES',
         'SIMULATION_STAGES',
+        'STAGE_PHASE_INPUT',
+        'STAGE_PHASE_SIM_PHYSICS',
+        'STAGE_PHASE_SIM_INTERACTIONS',
+        'STAGE_PHASE_SIM_ENTITIES',
+        'STAGE_PHASE_SIM_FLUIDS',
+        'STAGE_PHASE_SIM_REDSTONE',
+        'STAGE_PHASE_SIM_TIME_WEATHER',
+        'STAGE_PHASE_CAMERA_MIRROR',
+        'STAGE_PHASE_CHUNK_SYNC',
+        'STAGE_PHASE_RENDER',
+        'STAGE_PHASE_POST_FX',
+        'STAGE_PHASE_HUD_SYNC',
         'STAGE_INPUT',
         'STAGE_SIM_PHYSICS',
         'STAGE_SIM_INTERACTIONS',
@@ -103,7 +119,7 @@ describe('the prime directive, as a surface check', () => {
   // says so.
   it.effect('pins the standard stage skeleton (plan.md §4.2) so a reorder is always deliberate', () =>
     Effect.sync(() => {
-      expect([...STANDARD_STAGE_SKELETON]).toStrictEqual([
+      expect(STANDARD_STAGE_SKELETON.map((phase) => phase.name)).toStrictEqual([
         'input',
         'simulation:physics',
         'simulation:interactions',
@@ -120,9 +136,68 @@ describe('the prime directive, as a surface check', () => {
     }),
   )
 
-  it.effect('declares every skeleton stage exactly once', () =>
+  it.effect('declares every skeleton phase exactly once', () =>
     Effect.sync(() => {
-      expect(new Set(STANDARD_STAGE_SKELETON).size).toBe(STANDARD_STAGE_SKELETON.length)
+      const names = STANDARD_STAGE_SKELETON.map((phase) => phase.name)
+      expect(new Set(names).size).toBe(STANDARD_STAGE_SKELETON.length)
+    }),
+  )
+
+  // REGRESSION: the skeleton's names alone are not what makes it work. It used
+  // to be a flat list of exactly these strings, matched against registrations
+  // by equality, and no module registers any of them — so it contributed no
+  // ordering edge and the frame degraded to a lexicographic sort. Pinning the
+  // MEMBERSHIP alongside the names means dropping a member is as visible as
+  // reordering the table.
+  it.effect('pins how each phase claims a stage, which is what makes the table load-bearing', () =>
+    Effect.sync(() => {
+      expect(
+        STANDARD_STAGE_SKELETON.map((phase) => [phase.name, [...phase.members]] as const),
+      ).toStrictEqual([
+        ['input', ['input']],
+        ['simulation:physics', ['physics']],
+        ['simulation:interactions', ['interactions']],
+        ['simulation:entities', ['entities']],
+        ['simulation:fluids', ['fluids']],
+        ['simulation:redstone', ['redstone', 'redstone:']],
+        ['simulation:time-weather', ['time-weather', 'weather']],
+        ['camera-mirror', ['camera-mirror']],
+        ['chunk-sync', ['chunk-sync', 'mesh-sync']],
+        ['render', ['render', 'draw']],
+        ['post-fx', ['post-fx']],
+        ['hud-sync', ['hud-sync', 'ui:']],
+      ])
+    }),
+  )
+
+  // REGRESSION: every stage id the roster registers today must land in a phase.
+  // One that does not is scheduled after everything the skeleton knows, which
+  // is how `ui:hud-sync` used to end up ordered by the alphabet.
+  it.effect('claims every stage id the roster actually registers', () =>
+    Effect.sync(() => {
+      const registeredToday = [
+        'input',
+        'sim:physics',
+        'gameplay:interactions',
+        'gameplay:entities',
+        'gameplay:fluids',
+        'gameplay:time-weather',
+        'redstone:power',
+        'redstone:effects',
+        'camera-mirror',
+        'chunk-sync',
+        'render',
+        'post-fx',
+        'ui:hud-sync',
+        'ui:overlay-sync',
+      ]
+
+      for (const stageId of registeredToday) {
+        expect(
+          compose.phaseOf(STANDARD_STAGE_SKELETON, compose.StageId(stageId))?.name,
+          `${stageId} belongs to no phase`,
+        ).toBeDefined()
+      }
     }),
   )
 })

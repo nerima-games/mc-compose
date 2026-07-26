@@ -2,11 +2,14 @@ import { describe, expect, it } from '@effect/vitest'
 import { Effect, Either, Option } from 'effect'
 import {
   describeStageOrderError,
+  phaseOf,
   resolveStageOrder,
   StageId,
+  stagePhase,
   type StageConstraint,
   type StageOrderError,
   type StageOrderPlan,
+  type StagePhase,
 } from '../domain/stage-order'
 import {
   SIMULATION_STAGES,
@@ -14,6 +17,7 @@ import {
   STAGE_CHUNK_SYNC,
   STAGE_HUD_SYNC,
   STAGE_INPUT,
+  STAGE_PHASE_SIM_FLUIDS,
   STAGE_POST_FX,
   STAGE_RENDER,
   STAGE_SIM_ENTITIES,
@@ -26,17 +30,26 @@ import {
 
 const id = (value: string): StageId => StageId(value)
 
+/** A skeleton of one-name phases, which is the old flat-list behaviour exactly. */
+const phases = (...names: ReadonlyArray<string>): ReadonlyArray<StagePhase> =>
+  names.map((name) => stagePhase(name))
+
+/** The canonical stage id of every phase in the standard skeleton, in order. */
+const skeletonStageIds: ReadonlyArray<StageId> = STANDARD_STAGE_SKELETON.map((phase) =>
+  id(phase.name),
+)
+
 const stage = (name: string, ...after: ReadonlyArray<string>): StageConstraint =>
   after.length === 0 ? { id: id(name) } : { id: id(name), after: after.map(id) }
 
 const plan = (
   constraints: ReadonlyArray<StageConstraint>,
-  skeleton?: ReadonlyArray<StageId>,
+  skeleton?: ReadonlyArray<StagePhase>,
 ): StageOrderPlan => Either.getOrThrow(resolveStageOrder(constraints, skeleton ? { skeleton } : {}))
 
 const order = (
   constraints: ReadonlyArray<StageConstraint>,
-  skeleton?: ReadonlyArray<StageId>,
+  skeleton?: ReadonlyArray<StagePhase>,
 ): ReadonlyArray<string> => [...plan(constraints, skeleton).order]
 
 const failure = (
@@ -132,15 +145,67 @@ describe('determinism', () => {
 
   it.effect('lets the skeleton override the lexicographic tie-break', () =>
     Effect.sync(() => {
-      const skeleton = [id('zulu'), id('alpha')]
+      const skeleton = phases('zulu', 'alpha')
       expect(order([stage('alpha'), stage('zulu')], skeleton)).toStrictEqual(['zulu', 'alpha'])
     }),
   )
 
   it.effect('sorts stages the skeleton does not know after every stage it does', () =>
     Effect.sync(() => {
-      const skeleton = [id('zulu')]
+      const skeleton = phases('zulu')
       expect(order([stage('alpha'), stage('zulu')], skeleton)).toStrictEqual(['zulu', 'alpha'])
+    }),
+  )
+})
+
+describe('phase membership', () => {
+  // REGRESSION, and the reason the skeleton is a phase list at all. It used to
+  // be a flat list of concrete ids matched by string equality, and NOTHING
+  // registers those ids: modules register `sim:physics`, `gameplay:fluids`,
+  // `redstone:power`, `ui:hud-sync` under plan.md §4.1's
+  // `<owning-repo-suffix>:<stage>` convention. So the skeleton matched nothing,
+  // contributed no edge, and plan.md §4.2's backbone was decoration.
+  it.effect('claims a stage by its NAME half, whatever repository prefix owns it', () =>
+    Effect.sync(() => {
+      const skeleton = phases('physics', 'fluids')
+      expect(phaseOf(skeleton, id('sim:physics'))?.name).toBe('physics')
+      expect(phaseOf(skeleton, id('gameplay:fluids'))?.name).toBe('fluids')
+      // A bare id is its own name, so a module owning a whole phase may simply
+      // register the phase name.
+      expect(phaseOf(skeleton, id('physics'))?.name).toBe('physics')
+      // ...and the deepest colon wins, so a mod's namespaced id is read the
+      // same way.
+      expect(phaseOf(skeleton, id('mod:extra-ores:physics'))?.name).toBe('physics')
+    }),
+  )
+
+  it.effect('claims a whole NAMESPACE when the member ends in a colon', () =>
+    Effect.sync(() => {
+      const skeleton = [stagePhase('simulation:redstone', 'redstone', 'redstone:')]
+      expect(phaseOf(skeleton, id('redstone:power'))?.name).toBe('simulation:redstone')
+      expect(phaseOf(skeleton, id('redstone:effects'))?.name).toBe('simulation:redstone')
+      // A namespace member matches the namespace, not a stage merely named for it.
+      expect(phaseOf(skeleton, id('mod:mine:redstone'))?.name).toBe('simulation:redstone')
+      expect(phaseOf(skeleton, id('redstoneish:power'))).toBeUndefined()
+    }),
+  )
+
+  it.effect('gives a stage in no phase no phase, which is legal and keeps it schedulable', () =>
+    Effect.sync(() => {
+      expect(phaseOf(phases('physics'), id('mod:extra-ores:tick'))).toBeUndefined()
+      expect(order([stage('mod:extra-ores:tick')], phases('physics'))).toStrictEqual([
+        'mod:extra-ores:tick',
+      ])
+    }),
+  )
+
+  // The sequence is the authority: mc-render's input stage is input, even
+  // though `render:` would also read as rendering.
+  it.effect('resolves a stage matching two phases to the EARLIER one', () =>
+    Effect.sync(() => {
+      const skeleton = [stagePhase('input', 'input'), stagePhase('render', 'render', 'render:')]
+      expect(phaseOf(skeleton, id('render:input'))?.name).toBe('input')
+      expect(phaseOf(skeleton, id('render:draw'))?.name).toBe('render')
     }),
   )
 })
@@ -199,7 +264,7 @@ describe('cycle detection', () => {
   // them. Catching it is exactly why the resolver, not the modules, owns order.
   it.effect('detects a cycle created by a module fighting the skeleton chain', () =>
     Effect.sync(() => {
-      const skeleton = [id('early'), id('late')]
+      const skeleton = phases('early', 'late')
       // `early` declares it runs after `late`, but the skeleton says the
       // opposite. Neither declaration is wrong in isolation.
       const error = failure(resolveStageOrder([stage('early', 'late'), stage('late')], { skeleton }))
@@ -273,11 +338,11 @@ describe('dangling after-edges', () => {
 })
 
 describe('the standard skeleton (plan.md §4.2)', () => {
-  const everyStage = STANDARD_STAGE_SKELETON.map((skeletonId) => ({ id: skeletonId }))
+  const everyStage = skeletonStageIds.map((skeletonId) => ({ id: skeletonId }))
 
   it.effect('resolves a full build to exactly the skeleton order', () =>
     Effect.sync(() => {
-      expect(order(everyStage, STANDARD_STAGE_SKELETON)).toStrictEqual([...STANDARD_STAGE_SKELETON])
+      expect(order(everyStage, STANDARD_STAGE_SKELETON)).toStrictEqual([...skeletonStageIds])
     }),
   )
 
@@ -311,9 +376,9 @@ describe('the standard skeleton (plan.md §4.2)', () => {
   // fall back to the lexicographic tie-break — silently reordering the frame.
   it.effect('closes the chain over a skeleton stage that no loaded module registered', () =>
     Effect.sync(() => {
-      const withoutFluids = STANDARD_STAGE_SKELETON.filter(
-        (value) => value !== STAGE_SIM_FLUIDS,
-      ).map((value) => ({ id: value }))
+      const withoutFluids = skeletonStageIds
+        .filter((value) => value !== STAGE_SIM_FLUIDS)
+        .map((value) => ({ id: value }))
 
       const resolved = order(withoutFluids, STANDARD_STAGE_SKELETON)
 
@@ -361,6 +426,175 @@ describe('the standard skeleton (plan.md §4.2)', () => {
       )
 
       expect(resolved).toStrictEqual([STAGE_INPUT, 'mod:extra-ores:tick', STAGE_RENDER])
+    }),
+  )
+})
+
+describe('the skeleton constrains a REAL build, not just its own canonical ids', () => {
+  /**
+   * The stage ids the roster actually registers today, read out of the
+   * modules' `stages/stage-ids.ts`:
+   *
+   *   mx-gameplay  gameplay:{interactions,entities,fluids,time-weather}
+   *   mx-redstone  redstone:{power,effects}
+   *   mx-ui        ui:{hud-sync,overlay-sync}
+   *   mx-*         after: sim:physics
+   *
+   * plus the ids mc-sim and mc-render will register for the phases they own.
+   * NOT ONE of them is a member of the old flat skeleton, which is why that
+   * skeleton contributed nothing.
+   */
+  const realBuild: ReadonlyArray<StageConstraint> = [
+    stage('input'),
+    stage('sim:physics'),
+    stage('gameplay:interactions'),
+    stage('gameplay:entities'),
+    stage('gameplay:fluids'),
+    stage('redstone:power'),
+    stage('redstone:effects'),
+    stage('gameplay:time-weather'),
+    stage('camera-mirror'),
+    stage('chunk-sync'),
+    stage('render'),
+    stage('post-fx'),
+    stage('ui:hud-sync'),
+    stage('ui:overlay-sync'),
+  ]
+
+  // REGRESSION, and the whole point of the rewrite. Every constraint above is
+  // absent on purpose: with NO `after` edges at all, the skeleton is the only
+  // thing that can order these stages. Under the old flat list it ordered
+  // nothing and the result was the alphabet.
+  it.effect('produces the §4.2 frame from registrations that declare no ordering at all', () =>
+    Effect.sync(() => {
+      expect(order(realBuild, STANDARD_STAGE_SKELETON)).toStrictEqual([
+        'input',
+        'sim:physics',
+        'gameplay:interactions',
+        'gameplay:entities',
+        'gameplay:fluids',
+        // Two stages in one phase: mc-compose places the PHASE, and their
+        // relative order falls to the tie-break unless mx-redstone declares one
+        // (it does — see the next test).
+        'redstone:effects',
+        'redstone:power',
+        'gameplay:time-weather',
+        'camera-mirror',
+        'chunk-sync',
+        'render',
+        'post-fx',
+        'ui:hud-sync',
+        'ui:overlay-sync',
+      ])
+    }),
+  )
+
+  // REGRESSION: the previous assertion would also pass a skeleton that did
+  // nothing, if the alphabet happened to agree. It does not, and spelling out
+  // the difference is what proves the skeleton is load-bearing rather than
+  // decorative.
+  it.effect('differs from the lexicographic fallback, which is what the old skeleton degraded to', () =>
+    Effect.sync(() => {
+      const withSkeleton = order(realBuild, STANDARD_STAGE_SKELETON)
+      const withoutSkeleton = order(realBuild)
+
+      // What a skeleton that matches nothing produces: `priorityOf` answers
+      // MAX_SAFE_INTEGER for every id and the tie-break is the alphabet alone.
+      expect(withoutSkeleton).toStrictEqual(realBuild.map((entry) => entry.id).sort())
+      expect(withoutSkeleton).not.toStrictEqual(withSkeleton)
+
+      // Concretely, under the alphabet: the world would react to input before
+      // reading it ("g" < "i"), the frame would be drawn before anything moved
+      // ("r" < "s"), and the camera would be mirrored before the entities it is
+      // meant to be looking at had run ("c" < "g"). Each of those is reversed
+      // by the skeleton.
+      const brokenPairs: ReadonlyArray<readonly [string, string]> = [
+        ['gameplay:interactions', 'input'],
+        ['render', 'sim:physics'],
+        ['camera-mirror', 'gameplay:entities'],
+      ]
+
+      for (const [earlier, later] of brokenPairs) {
+        expect(positionIn(withoutSkeleton, earlier), `${earlier} vs ${later}`).toBeLessThan(
+          positionIn(withoutSkeleton, later),
+        )
+        expect(positionIn(withSkeleton, later), `${later} vs ${earlier}`).toBeLessThan(
+          positionIn(withSkeleton, earlier),
+        )
+      }
+    }),
+  )
+
+  // plan.md §4.2 puts redstone BETWEEN gameplay's fluids and its time/weather
+  // stage — and no module declares that, deliberately: mx-redstone's
+  // `stages/stage-ids.ts` records that an `after` edge on `gameplay:fluids`
+  // would couple redstone's frame position to another experience module
+  // (§2.3-1). It is exactly the kind of claim only mc-compose may make, and
+  // exactly what the old skeleton failed to make.
+  it.effect('places redstone between fluids and time/weather, which no module is allowed to declare', () =>
+    Effect.sync(() => {
+      const resolved = order(realBuild, STANDARD_STAGE_SKELETON)
+
+      expect(positionIn(resolved, 'gameplay:fluids')).toBeLessThan(
+        positionIn(resolved, 'redstone:power'),
+      )
+      expect(positionIn(resolved, 'redstone:effects')).toBeLessThan(
+        positionIn(resolved, 'gameplay:time-weather'),
+      )
+      expect(phaseOf(STANDARD_STAGE_SKELETON, id('gameplay:fluids'))).toBe(STAGE_PHASE_SIM_FLUIDS)
+    }),
+  )
+
+  it.effect('honours the modules’ own after-edges inside a phase, without needing to know them', () =>
+    Effect.sync(() => {
+      // The real registrations, edges included: mx-redstone declares
+      // `effects after power`, mx-ui declares `overlay-sync after hud-sync`,
+      // and each experience module declares `after sim:physics`.
+      const resolved = order(
+        [
+          stage('input'),
+          stage('sim:physics'),
+          stage('gameplay:interactions', 'sim:physics'),
+          stage('gameplay:entities', 'gameplay:interactions'),
+          stage('gameplay:fluids', 'gameplay:entities'),
+          stage('gameplay:time-weather', 'gameplay:fluids'),
+          stage('redstone:power', 'sim:physics'),
+          stage('redstone:effects', 'redstone:power'),
+          stage('camera-mirror'),
+          stage('chunk-sync'),
+          stage('render'),
+          stage('post-fx'),
+          stage('ui:hud-sync', 'sim:physics'),
+          stage('ui:overlay-sync', 'ui:hud-sync'),
+        ],
+        STANDARD_STAGE_SKELETON,
+      )
+
+      // Now the declared edge decides inside the redstone phase, where the
+      // alphabet decided before.
+      expect(positionIn(resolved, 'redstone:power')).toBeLessThan(
+        positionIn(resolved, 'redstone:effects'),
+      )
+      expect(positionIn(resolved, 'ui:hud-sync')).toBeLessThan(
+        positionIn(resolved, 'ui:overlay-sync'),
+      )
+      // ...and the phases still hold everything else in place.
+      expect(resolved[0]).toBe('input')
+      expect(resolved[resolved.length - 1]).toBe('ui:overlay-sync')
+    }),
+  )
+
+  // A build with no redstone module still runs entities before time/weather:
+  // the empty phase closes rather than breaking the chain.
+  it.effect('closes over a phase no loaded module populates', () =>
+    Effect.sync(() => {
+      const noRedstone = realBuild.filter((entry) => !entry.id.startsWith('redstone:'))
+      const resolved = order(noRedstone, STANDARD_STAGE_SKELETON)
+
+      expect(resolved).not.toContain('redstone:power')
+      expect(positionIn(resolved, 'gameplay:fluids')).toBeLessThan(
+        positionIn(resolved, 'gameplay:time-weather'),
+      )
     }),
   )
 })

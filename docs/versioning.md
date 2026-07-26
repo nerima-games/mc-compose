@@ -45,7 +45,7 @@ mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multipla
 | --- | --- |
 | 公開 API | **破壊的変更を予告なく入れてよい。** 0.x とはそういう意味である |
 | バージョン | 変更のたびに patch/minor を上げるが、semver の保証はしない |
-| **`STANDARD_STAGE_SKELETON`** | **変更には PR に理由の記述が要る。** 0.x でもこれは守る |
+| **`STANDARD_STAGE_SKELETON`** | **変更には PR に理由の記述が要る。** 0.x でもこれは守る。フェーズの**並び**だけでなく、各フェーズの `members`(どの stage id がそこに落ちるか)も同じ扱いである — `members` を落とすと並びを保ったまま表が効かなくなる([design-notes.md](./design-notes.md) DN-4.1) |
 | `MODDING_API_VERSION` | 1 のまま。mod の互換性保証は**開始していない** |
 | ドキュメント | `docs/` は実装と同時に更新する。ここも 0.x でも守る |
 
