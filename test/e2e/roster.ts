@@ -130,25 +130,25 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // Dangling. `sim:physics` is registered by nobody — see
         // `ROSTER_REGISTERS_NOTHING` below.
         after: ['sim:physics'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:164',
+        declaredAt: 'mx-gameplay/stages/registration.ts:251',
         idAt: 'mx-gameplay/stages/stage-ids.ts:41',
       },
       {
         id: 'gameplay:entities',
         after: ['gameplay:interactions'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:223',
+        declaredAt: 'mx-gameplay/stages/registration.ts:310',
         idAt: 'mx-gameplay/stages/stage-ids.ts:43',
       },
       {
         id: 'gameplay:fluids',
         after: ['gameplay:entities'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:277',
+        declaredAt: 'mx-gameplay/stages/registration.ts:431',
         idAt: 'mx-gameplay/stages/stage-ids.ts:45',
       },
       {
         id: 'gameplay:time-weather',
         after: ['gameplay:fluids'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:292',
+        declaredAt: 'mx-gameplay/stages/registration.ts:446',
         idAt: 'mx-gameplay/stages/stage-ids.ts:47',
       },
     ],
@@ -196,31 +196,31 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // that lands in the frame is mc-compose's to decide — its skeleton
         // claims the NAME half of this id (`input`) for the first phase."
         after: [],
-        declaredAt: 'mc-render/stages/registration.ts:227',
+        declaredAt: 'mc-render/stages/registration.ts:232',
         idAt: 'mc-render/stages/stage-ids.ts:85',
       },
       {
         id: 'render:camera-mirror',
         after: ['sim:physics'],
-        declaredAt: 'mc-render/stages/registration.ts:279',
+        declaredAt: 'mc-render/stages/registration.ts:291',
         idAt: 'mc-render/stages/stage-ids.ts:92',
       },
       {
         id: 'render:chunk-sync',
         after: ['render:camera-mirror'],
-        declaredAt: 'mc-render/stages/registration.ts:304',
+        declaredAt: 'mc-render/stages/registration.ts:316',
         idAt: 'mc-render/stages/stage-ids.ts:94',
       },
       {
         id: 'render:draw',
         after: ['render:chunk-sync'],
-        declaredAt: 'mc-render/stages/registration.ts:332',
+        declaredAt: 'mc-render/stages/registration.ts:344',
         idAt: 'mc-render/stages/stage-ids.ts:96',
       },
       {
         id: 'render:post-fx',
         after: ['render:draw'],
-        declaredAt: 'mc-render/stages/registration.ts:344',
+        declaredAt: 'mc-render/stages/registration.ts:356',
         idAt: 'mc-render/stages/stage-ids.ts:105',
       },
     ],
