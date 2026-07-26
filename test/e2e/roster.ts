@@ -142,13 +142,13 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
       {
         id: 'gameplay:fluids',
         after: ['gameplay:entities'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:259',
+        declaredAt: 'mx-gameplay/stages/registration.ts:277',
         idAt: 'mx-gameplay/stages/stage-ids.ts:45',
       },
       {
         id: 'gameplay:time-weather',
         after: ['gameplay:fluids'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:274',
+        declaredAt: 'mx-gameplay/stages/registration.ts:292',
         idAt: 'mx-gameplay/stages/stage-ids.ts:47',
       },
     ],
