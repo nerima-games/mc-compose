@@ -20,9 +20,9 @@ mc-kernel の 1 行変更が 15 リポジトリの bump 連鎖を引き起こす
 それを構造的に避けるため、開発中は `@nerima-games/mc-dev-meta` が
 15 リポジトリを 1 つの pnpm workspace に束ね、`workspace:*` で解決する。
 
-## 3. `dependencies` に 4 つの体験モジュールが無い理由
+## 3. `dependencies` に依存先が 1 つも無い理由
 
-mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multiplayer である。
+mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multiplayer / mc-render である。
 にもかかわらず `package.json` には `effect` しか無い。
 
 理由は **ボトムアップの publish-then-pin** である:
@@ -36,7 +36,7 @@ mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multipla
 少なくとも 1 回は publish されるまで、ここに書ける `dependencies` は存在しない。
 
 **ポリシー側(`scripts/check-dependency-whitelist.ts` の `REPOSITORY_POLICY`)には
-4 つの体験モジュールが既に宣言してある**ので、契約は最初から機械可読な形で存在する。
+5 つとも既に宣言してある**ので、契約は最初から機械可読な形で存在する。
 `package.json` があとから追いつく。
 
 ## 4. 0.x の間の約束
@@ -53,7 +53,7 @@ mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multipla
 
 以下がすべて満たされたとき 1.0.0 にする。
 
-1. **4 つの体験モジュールを実際に合成し、動くゲームが起動する**
+1. **4 つの体験モジュールと mc-render を実際に合成し、動くゲームが起動する**
 2. **E2E が最終ゲートとして動いている**([testing.md](./testing.md) §3)。
    参照実装の 70 本のうち、モジュール間相互作用を検証するものが移植済み
 3. **API ロック 4 週間無変更**(plan.md §6 Step 3)

@@ -146,17 +146,17 @@ input
 
 | フェーズ | 実際に落ちる id | 所有者 |
 | --- | --- | --- |
-| `input` | `input` | mc-render |
+| `input` | `render:input` | mc-render |
 | `simulation:physics` | `sim:physics` | mc-sim |
 | `simulation:interactions` | `gameplay:interactions` | mx-gameplay |
 | `simulation:entities` | `gameplay:entities` | mx-gameplay |
 | `simulation:fluids` | `gameplay:fluids` | mx-gameplay |
 | `simulation:redstone` | `redstone:power`、`redstone:effects` | mx-redstone |
 | `simulation:time-weather` | `gameplay:time-weather` | mx-gameplay |
-| `camera-mirror` | `camera-mirror` | mc-render(正は mc-sim) |
-| `chunk-sync` | `chunk-sync` | mc-worldgen / mc-render |
-| `render` | `render` | mc-render |
-| `post-fx` | `post-fx` | mc-render |
+| `camera-mirror` | `render:camera-mirror` | mc-render(正は mc-sim) |
+| `chunk-sync` | `render:chunk-sync` | mc-render |
+| `render` | `render:draw` | mc-render |
+| `post-fx` | `render:post-fx` | mc-render |
 | `hud-sync` | `ui:hud-sync`、`ui:overlay-sync` | mx-ui |
 
 **この配列を変えるとゲームが変わる。**
@@ -172,32 +172,93 @@ input
 ## 3. Layer 合成(`domain/composition.ts`)
 
 ```typescript
-type DeltaTimeSecs = number
+type DeltaTimeSecs = number & Brand<'DeltaTimeSecs'>   // kernel のブランドそのもの
+type FrameServices = ClockPort                          // kernel の確定した答え
 type StageRegistration = {
   readonly id: StageId
   readonly after?: ReadonlyArray<StageId>
-  readonly run: (dt: DeltaTimeSecs) => Effect<void>
+  readonly run: (dt: DeltaTimeSecs) => Effect<void, never, FrameServices>
 }
-type ModuleLayer = Layer<any, any, any>
+type ModuleLayer = Layer<any, any, never>               // RIn だけは never に締めてある
 const EMPTY_MODULE_LAYER: ModuleLayer
 
 type GameModule = {
   readonly name: string          // 診断用。分岐に使わない
   readonly layers: ModuleLayer
-  readonly frameStages: ReadonlyArray<StageRegistration>
+  readonly frameStages: ReadonlyArray<StageRegistration>   // 登録**済み**
 }
 
 type ComposedGame = {
   readonly plan: StageOrderPlan
   readonly layer: ModuleLayer
-  readonly runFrame: (dt: DeltaTimeSecs) => Effect<void>
+  readonly runFrame: (dt: DeltaTimeSecs) => Effect<void, never, FrameServices>
+  readonly runFrameWith: (services: Layer<FrameServices>) => (dt: DeltaTimeSecs) => Effect<void>
   readonly moduleNames: ReadonlyArray<string>
+  readonly warnings: ReadonlyArray<string>
 }
 
 const composeGame: (modules, options?) => Either<ComposedGame, StageOrderError>
 const mergeModuleLayers: (modules) => ModuleLayer
 const collectStages: (modules) => ReadonlyArray<StageRegistration>
+const registerModule: <RRegister>(module) => Effect<GameModule, never, RRegister>
 ```
+
+### `run` が R チャネルを運ぶ（旧: `Effect<void>`）
+
+**以前は R チャネルを落としていた。** 要求は勝手に消えないので、kernel の
+`Effect<void, never, ClockPort>` はその型に**代入できない**。にもかかわらず `composeGame` が
+コンパイルできていたのは、`mx-gameplay` / `mx-redstone` / `mx-ui` の 3 つがそれぞれのミラーで
+`FrameServices = never` と宣言していたからにすぎない。3 つとも kernel 公開時にそのファイルを削除すると
+明言しており、その瞬間にこのリポジトリはコンパイルしなくなるはずだった。
+
+`test/composition.test.ts` の
+`accepts a stage written against kernel's contract, ClockPort and all` が
+kernel の契約どおりに書かれた stage を直接組み立てて固定している。
+
+### `runFrame` は運び、`runFrameWith` が discharge する
+
+`Layer<FrameServices>` は `Layer<ClockPort, never, never>` であり、この経路に `any` は 1 つも無い。
+だから `Effect.provide` は要求を**消去するのではなく除去**する。
+`ClockPort` を discharge するのは合成層の仕事そのものである — 時計を読む stage と、
+それを実装するプラットフォームアダプタの両方が見える唯一のリポジトリだからである。
+
+### `DeltaTimeSecs` はブランド付きになった
+
+以前は素の `number` だった。**ロスター全体で `StageRegistration.run` を実際に呼ぶ唯一の場所が
+ここである**以上、素の `number` は「全モジュールの全 stage が誰も検証していない値を渡される」を意味する。
+kernel の refine（有限かつ非負）をそのまま持ってきてある。
+plan.md §3.4 のクランプ `min(max(0.001, raw), 0.05)` は**ブランドの一部ではなく**、
+このリポジトリも適用しない（[design-notes.md](./design-notes.md) DN-9）。
+
+### `warnings` — リゾルバが飲み込んでいたもの
+
+`StageOrderPlan.dangling` にはロスター中どこにも**消費者が無かった**。
+リゾルバは忠実に計算し、誰も見ていなかった。誰も読まないフィールドは報告ではないので、
+「ダングリングエッジは拒否せず報告する」は実際には成り立っていなかった。
+
+同じ問題がもう 1 つあり、そちらは計算すらされていなかった。名前がどの phase にも一致しない stage は
+`priorityOf` が `MAX_SAFE_INTEGER` を返し、**黙ってフレーム末尾に落ちる**。
+これは合法（mod の stage が予定表に乗る仕組みそのもの）であり、同時に `render:daw` と見分けがつかない。
+
+**何も強制せず、両方を報告する。** `StageOrderPlan` が `dangling` と `unmatchedPhase` を運び、
+`describeStagePlanWarnings` が両方を行に落とし、`ComposedGame.warnings` がそれをホストに見せる。
+言うことが無ければ空配列なので、ホストは長さを見ずに常に印字してよい。
+
+### `registerModule` — kernel の `GameModule` との橋
+
+kernel の `GameModule.frameStages` は配列ではなく
+`Effect<ReadonlyArray<StageRegistration>, never, RRegister>` である
+（モジュールが stage を**組み立てる**ためにサービスを取得できる瞬間がそこにしか無いため。
+mc-kernel `docs/freeze-checklist.md` (b)）。
+
+その Effect は起動時に 1 回だけ走り、`composeGame` はその後に走る。
+だからこのリポジトリが合成する型は kernel のそれの `frameStages` を評価済みにしたものである。
+境界をそこに置いてあるのは `composeGame` を純粋な `Either` のまま保つためで、
+全順序の解決は id とエッジに対する計算であり、他人のコンストラクタの都合で
+ファイバを借りて算術をするのは筋が悪い。
+
+`registerModule` は 3 行のアダプタで、`RRegister` が現れる唯一の場所である。
+そこで消去していないのは意図的で、discharge するのはホストであり、ホストはその型を持っているからである。
 
 ### `composeGame` がやることは 3 つだけ
 
@@ -217,9 +278,33 @@ delta はクランプせずそのまま渡す
 ### `EMPTY_MODULE_LAYER` が必要な理由
 
 `Layer` は `in ROut`(反変)で宣言されているため、`Layer<never, ...>` は
-`Layer<any, ...>` に代入できない(`any` が `never` に代入できる必要がある)。
+`Layer<any, ...>` に代入できない(`any` が `never` に代入できる必要があり、
+`never` は `any` が代入できない唯一の型である)。
 実モジュールの Layer はすべて問題なく代入できる。空 Layer だけが例外であり、
 この定数がその例外の封じ込め場所である。
+
+### `ModuleLayer` の `RIn` は `never` に締めた。`ROut` は締められていない
+
+以前は `Layer<any, any, any>` だった。`RIn` が `any` だと `Effect.provide(game.layer)` は
+要求を **discharge するのではなく消去する** — どのモジュールも提供していないサービスを要求する
+Effect が型検査を通り、実行時に `Service not found` で落ちる。
+`tsc` はこれを `exactOptionalPropertyTypes` 経由で偶発的にしか捕まえない。
+
+`Layer` の `RIn` は共変(`out RIn`)なので、`Layer<X, E, R>` が `Layer<any, any, never>` に
+代入できるのは `R` が `never` のときだけである。つまり**モジュールは自己完結して届かなければならない**。
+これは新しい規則ではない。モジュールは対等であり(`Layer.merge`、`Layer.provide` ではない)、
+他モジュールのサービスを構築に要求するモジュールは plan.md §2.3-1 が禁じる依存エッジそのものである。
+プラットフォームハンドルを要求するモジュールは、`composeGame` に渡す**前に**それを受け取る
+——ホスト側にはまだそれを満たす型がある。
+
+**残る不健全さを明記しておく**: `ROut` は依然として `any` である。`composeGame` は
+サービス型の異なるモジュールの異種配列を取るので、その和を正確に書くには可変長タプル型が要る。
+したがって `Effect.provide(game.layer)` は「要求されたサービスをどれかのモジュールが提供しているか」を
+検査できない。**ただしこの穴はフレームの経路には無い** — `runFrame` は `FrameServices` を自分の型に
+書いており、`runFrameWith` は正確に型付けされた Layer に対して discharge する。
+`test/composition.test.ts` の
+`KNOWN LIMIT: ROut stays erased, so a missing service still fails at runtime, not at tsc`
+が、これを驚きではなく既知の穴として固定している。
 
 ## 4. セッションライフサイクル(`domain/session.ts`)
 

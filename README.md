@@ -30,8 +30,14 @@ plan.md §3.15:
 
 ## 依存
 
-直接依存は 4 つの体験モジュールだけ:
-mx-gameplay / mx-redstone / mx-ui / mx-multiplayer(加えて mc-kernel はどこからでも import 可)。
+直接依存は 4 つの体験モジュール + mc-render:
+mx-gameplay / mx-redstone / mx-ui / mx-multiplayer / mc-render
+(加えて mc-kernel はどこからでも import 可)。
+
+mc-render は縦切りスパイクが足した唯一の tier 2 エッジである。それ以前は
+**ロスターの誰も mc-render を実行時依存に宣言しておらず**、結果として出荷ビルドには
+入力 stage が 1 つも存在しなかった(唯一の入力 stage が開発時専用の mc-playground-kit にあった)。
+経緯は [docs/architecture.md](./docs/architecture.md) §5。
 
 **推移的には全リポジトリに到達する。だからこそ推移閉包の禁止がここで最も重要になる。**
 `pnpm install` すると `node_modules` には mc-sim も mc-worldgen も物理的に置かれるが、

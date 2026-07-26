@@ -68,6 +68,7 @@ graph BT
   compose --> redstone
   compose --> ui
   compose --> multiplayer
+  compose --> render
 
   style compose fill:#7f1d1d,color:#ffffff
   style devmeta stroke-dasharray: 5 5
@@ -80,8 +81,12 @@ graph BT
 
 ## 3. このリポジトリの位置
 
-mc-compose の直接依存は **4 つの体験モジュールだけ** である:
-mx-gameplay / mx-redstone / mx-ui / mx-multiplayer。
+mc-compose の直接依存は **4 つの体験モジュール + mc-render** である:
+mx-gameplay / mx-redstone / mx-ui / mx-multiplayer / mc-render。
+
+mc-render のエッジは縦切りスパイクが足した唯一の tier 2 エッジで、根拠は §5 にある。
+「他モジュールの stage を登録するのは配線であってルールではない」が理由であり、
+その論法は mc-sim や mc-worldgen — 状態を持つもの — には一般化しない。
 
 **推移的には全リポジトリに到達する。だからこそ「推移閉包の禁止」がここで最も重要になる。**
 
@@ -178,30 +183,61 @@ compose がフェーズを並べ、モジュールは自分の `after` で**フ�
 参照実装の `check-package-dag.ts` は警告を出して常に 0 で終了していた
 — 落ちないゲートはドキュメントであってゲートではない。
 
-## 5. 未解決: mc-render はどこから実行時に到達するのか
+## 5. 解決済み: mc-render は mc-compose から到達する
 
-**宣言されたグラフには穴がある。** ロスターの中で `mc-render` を実行時依存として
-宣言しているリポジトリは **1 つも無い**:
+**かつてここには「宣言されたグラフには穴がある」と書いてあった。** ロスターの中で `mc-render` を
+実行時依存として宣言しているリポジトリが 1 つも無く、結果として **mc-render は mc-compose から
+推移的にすら到達できなかった**。`mc-render` を import しようとすると `transitive-import` ですらなく
+`not-whitelisted` になる、という状態である。
 
-- `mc-playground-kit -> mc-render` は存在するが、kit は **devDependency 専用**であり
-  実行時エッジを作らない
-- mx-ui は `mc-sim` と `mc-audio` にしか依存しない(DOM だけで起動するため)
-- mc-compose の直接依存は 4 つの mx-* だけ
-
-結果として、**mc-render は mc-compose から推移的にすら到達できない**。
-`mc-render` を import しようとすると `transitive-import` ですらなく
-`not-whitelisted` になる。`mc-meshing`(mc-render の背後)も同様である。
-
-これは plan.md §2.1 のグラフをそのまま符号化した結果であり、本リポジトリの実装ミスではない。
-**そして、このリポジトリが勝手に import を足して解決してよい問題でもない。**
-
-考えられる解決は 3 つあり、いずれもグラフの変更(= plan.md の更新)を伴う:
+考えられる解決は 3 つ挙げてあり、「決定は plan.md §2.1 の所有者が行う」として保留していた:
 
 1. `mx-ui -> mc-render` を足す(HUD がレンダラのキャンバスに乗る、という理解)
 2. `mc-compose -> mc-render` を足す(compose が描画 stage を配線する、という理解)
 3. 描画 stage を提供する新しい体験モジュールを置く
 
-**決定は plan.md §2.1 の所有者が行う。** それまでこの穴は
-`test/check-dependency-whitelist.test.ts` の
-`cannot reach mc-render or mc-meshing at all — no runtime edge in the roster leads there`
-としてピン留めしてあり、グラフが変われば必ずこのテストが落ちる。
+**縦切りスパイクが 2 を選んだ。**
+
+### 5-1. なぜ 3 ではなく 2 なのか
+
+描画 stage の完全な import 集合は `mc-kernel` + `mc-sim`(読み取りのみ) + `mc-render` + `mc-meshing` で、
+これは**既に mc-render の行そのもの**である。3 を選ぶと、同じ行を持つノードを新設し、
+さらに `新モジュール -> mc-render` のエッジを足し、plan.md §2.1 にノードを 1 つ増やすことになる。
+
+そして描画 stage には**ゲームルールが 1 つも無い**。体験モジュール(plan.md §2.2)が所有するのは
+VERB であり、これらを抱えたモジュールは VERB を 1 つも所有しない。名前だけの体験モジュールになる。
+
+### 5-2. 決め手は設計の対称性ではなく、実在する欠陥だった
+
+`InputService.endFrame`(`mc-render/application/input-service.ts`)はフレーム毎にちょうど 1 回
+呼ばれなければならない。**フレーム毎にちょうど 1 回起きるものは、定義上 stage である。**
+
+ところがロスター全体で登録されていた入力 stage は `mc-playground-kit` の `input:sample` **だけ**であり、
+kit は開発時専用で `dependencies` に置くことを rule 6 が禁じている。
+つまり**出荷ビルドには入力 stage が存在しなかった**。`justPressed` が永久にクリアされず、
+インベントリキーを 1 回押すと押しっぱなしのフレーム全部で再発火する。
+
+これは plan.md §2.3-2(「ランタイム入力は mc-render に置く。kit は開発時専用だから」)が
+防ぐために書かれた失敗そのもので、サービスの置き場所ではなく **stage の欠落**として再発していた。
+
+対応は `mc-render/stages/` である。詳細は mc-render `stages/stage-ids.ts` を参照。
+
+### 5-3. なぜこれが prime directive を弱めないのか
+
+**他モジュールの stage を登録するのは配線であって、ルールではない。**
+compose は mc-render の `GameModule` を受け取り、その Layer を merge し、その `StageRegistration` を
+リゾルバに渡す。mx-gameplay に対してやっている 3 つとまったく同じで、
+どのモジュールが何を描くかについては何も知らない。
+
+そして rule 3(推移閉包の禁止)は効き続ける。このエッジが許可するのは `mc-render` **だけ**であり、
+その背後は許可しない。`mc-meshing` と `mc-sim` は推移的に到達可能になるので、
+`not-whitelisted` ではなく `transitive-import` 違反になる — **メッセージが変わるだけで、
+ハードエラーであることは変わらない**。
+
+`test/check-dependency-whitelist.test.ts` の 2 本がこれを固定している:
+
+- `reaches mc-render, because compose registers the renderer's stages`
+- `still cannot reach mc-meshing, now as a closure violation rather than a flat one`
+
+旧テスト `cannot reach mc-render or mc-meshing at all` は**削除ではなく反転**した。
+片側(mc-meshing に到達できない)は今も守るべき性質だからである。

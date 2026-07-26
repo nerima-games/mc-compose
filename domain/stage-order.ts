@@ -94,6 +94,24 @@ export type StageOrderPlan = {
   readonly order: ReadonlyArray<StageId>
   /** Edges that named an absent stage and were therefore dropped. */
   readonly dangling: ReadonlyArray<DanglingEdge>
+  /**
+   * Stages whose id matched no phase of the skeleton.
+   *
+   * `priorityOf` answers `MAX_SAFE_INTEGER` for such a stage, so it sorts after
+   * every stage the skeleton does recognise and it contributes no implicit
+   * edge — it simply falls to the end of the frame. That is LEGAL and is how a
+   * mod's stage stays schedulable (`domain/modding.ts`), but it is also exactly
+   * what a mistyped `render:daw` looks like, and the two are indistinguishable
+   * from the symptom.
+   *
+   * So: enforce nothing, report it. Sorted, so the field is a value a host can
+   * compare between builds.
+   *
+   * Empty when `resolveStageOrder` was given no skeleton at all — with no phase
+   * table there is nothing for a stage to fail to match, and reporting every
+   * stage would make the field noise in exactly the tests that pass `[]`.
+   */
+  readonly unmatchedPhase: ReadonlyArray<StageId>
 }
 
 /**
@@ -399,8 +417,43 @@ export const resolveStageOrder = (
     return Either.left({ _tag: 'StageCycle', cycle: findCycle(stuck, frozenEdges) })
   }
 
-  return Either.right({ order, dangling })
+  // --- 6. What the resolver would otherwise have swallowed ------------------
+  // Neither of these is an error. Both are reported, because both are
+  // indistinguishable from a typo at the point where they bite: an `after` that
+  // named nothing simply does not order anything, and a stage in no phase
+  // simply runs last. See `StageOrderPlan.unmatchedPhase`.
+  const unmatchedPhase =
+    skeleton.length === 0
+      ? []
+      : [...registered].filter((id) => phaseOf(skeleton, id) === undefined).sort()
+
+  return Either.right({ order, dangling, unmatchedPhase })
 }
+
+/**
+ * Everything a host should print about a resolved plan, as lines.
+ *
+ * Exported because `StageOrderPlan.dangling` previously had NO consumer
+ * anywhere in the roster: the resolver computed it faithfully and nothing ever
+ * looked. A field nobody reads is not a report, and the whole justification for
+ * not rejecting a dangling edge is that it gets surfaced instead.
+ *
+ * Empty when there is nothing to say, so a host can print it unconditionally
+ * without a length check.
+ */
+export const describeStagePlanWarnings = (plan: StageOrderPlan): ReadonlyArray<string> => [
+  ...plan.dangling.map(
+    (edge) =>
+      `stage "${edge.stage}" declares after: ["${edge.missing}"], which no module registered in this build. ` +
+      'The edge was dropped, not rejected — that is how a module says "after input, if there is input". ' +
+      'If it was meant to order against a stage that IS in this build, it is a typo.',
+  ),
+  ...plan.unmatchedPhase.map(
+    (id) =>
+      `stage "${id}" matches no phase of the frame skeleton, so it runs after every stage that does. ` +
+      'That is legal — a mod stage is expected to look like this — but a mistyped core stage id looks identical.',
+  ),
+]
 
 /** Human-readable rendering of a resolution failure, for logs and test output. */
 export const describeStageOrderError = (error: StageOrderError): string => {

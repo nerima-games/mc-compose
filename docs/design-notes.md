@@ -415,12 +415,84 @@ E2E の本数が増え続けるなら、それは compose にロジックが溜�
 
 ---
 
+## DN-11: stage の R チャネルを落とすと、契約どおりの stage が 1 つも走らせられない
+
+**回帰テスト名**: `accepts a stage written against kernel's contract, ClockPort and all`
+**実装**: `test/composition.test.ts`(実装済み)
+
+`domain/composition.ts` の `StageRegistration.run` は `Effect<void>` を返していた。
+**R チャネルを落としていた。** 要求は勝手に消えないので、kernel の
+`Effect<void, never, ClockPort>` はその型に代入できない。
+
+にもかかわらず `composeGame` がコンパイルできていたのは、`mx-gameplay` / `mx-redstone` / `mx-ui` が
+それぞれのミラーで `FrameServices = never` と宣言していたからにすぎない。
+3 つとも kernel 公開時にそのファイルを削除すると明言している。**その瞬間に落ちる時限爆弾だった。**
+
+**本実装での対処**: `run` は `Effect<void, never, FrameServices>` を返す。
+`FrameServices` は `domain/kernel-vocabulary.ts` で `ClockPort` として宣言してある —
+mx-* が `never` に留めているのに対しこのリポジトリが Tag を再掲するのは、
+**compose は stage の著者ではなく提供者**であり、名前を書けないものは discharge できないからである。
+Tag は文字列キーで解決されるので、`'@nerima-games/mc-kernel/ClockPort'` から作ったミラーは
+実行時に kernel のサービスそのものである。`test/kernel-mirror.test.ts` が形を固定している。
+
+discharge は `ComposedGame.runFrameWith(services: Layer<FrameServices>)` である。
+この経路に `any` は 1 つも無いので、`Effect.provide` は要求を**消去ではなく除去**する。
+
+---
+
+## DN-12: `ModuleLayer` の `RIn` を締める。`ROut` は締められない
+
+**回帰テスト名**: `rejects a module whose Layer still needs a service, at compile time` /
+`KNOWN LIMIT: ROut stays erased, so a missing service still fails at runtime, not at tsc`
+**実装**: `test/composition.test.ts`(実装済み)
+
+`ModuleLayer = Layer<any, any, any>` だと `Effect.provide(game.layer)` は要求を
+**discharge するのではなく消去する**。どのモジュールも提供していないサービスを要求する Effect が
+型検査を通り、実行時に `Service not found` で落ちる。
+`tsc` はこれを `exactOptionalPropertyTypes` 経由で偶発的にしか捕まえない。
+
+**本実装での対処**: `Layer<any, any, never>`。`Layer` の `RIn` は共変(`out RIn`)なので、
+これは「モジュールは自己完結して届かなければならない」を型で言うことになる。
+新しい規則ではない — モジュールは対等であり(`Layer.merge`、`Layer.provide` ではない)、
+他モジュールのサービスを構築に要求するモジュールは plan.md §2.3-1 が禁じるエッジそのものである。
+
+**`ROut` は締められない。** 異種配列の提供サービス和を正確に書くには可変長タプル型が要る。
+したがって `game.layer` 経由の `Effect.provide` は「そのサービスを誰かが提供しているか」を
+検査できない。**ただしこの穴はフレームの経路には無い**(DN-11)。既知の穴として上の 2 本目が固定している。
+
+---
+
+## DN-13: 誰も読まないフィールドは報告ではない
+
+**回帰テスト名**: `surfaces a dropped after edge on the composed game` /
+`surfaces a stage the skeleton does not recognise, without rejecting it`
+**実装**: `test/composition.test.ts`、`test/stage-order.test.ts`(実装済み)
+
+DN-3 は「ダングリングエッジは拒否せず**報告する**」と書いている。
+ところが `StageOrderPlan.dangling` には**ロスター中どこにも消費者が無かった**。
+リゾルバは忠実に計算し、誰も見ていなかった。それでは DN-3 の後半が成り立っていない。
+
+同じ問題がもう 1 つあり、そちらは計算すらされていなかった。名前がどの phase にも一致しない stage は
+`priorityOf` が `MAX_SAFE_INTEGER` を返し、暗黙エッジも張られず、**黙ってフレーム末尾に落ちる**
+(`domain/stage-order.ts`)。これは合法であり(mod の stage が予定表に乗る仕組みそのもの)、
+同時に `render:daw` と見分けがつかない。
+
+**本実装での対処**: 何も強制せず、両方を報告する。
+`StageOrderPlan` が `dangling` と `unmatchedPhase` を運び、`describeStagePlanWarnings` が
+両方を行に落とし、`ComposedGame.warnings` がホストに見せる。
+言うことが無ければ空配列なので、ホストは長さを見ずに常に印字してよい。
+
+強制しない理由は DN-3 と同じである。ダングリングエッジは
+「input があるなら input の後」を表明する正規の手段であり、拒否するとその語法が消える。
+
+---
+
 ## 未検証・要調査
 
 | 項目 | 状態 |
 | --- | --- |
-| `FrameServices` の実体 | mc-kernel 側でプレースホルダ。縦切りスパイクで決める |
-| `ModuleLayer` の型消去(`Layer<any,any,any>`) | 可変長タプル型で精密化できるが、実サービス集合が出るまで保留 |
+| `FrameServices` の実体 | **確定**。`ClockPort` のみ(mc-kernel `docs/freeze-checklist.md` (b))。DN-11 |
+| `ModuleLayer` の `ROut` 消去(`Layer<any,any,never>` の第 1 引数) | 可変長タプル型で精密化できる。`RIn` は締めた。DN-12 |
 | stage の障害処理(`Effect.catchAllCause` を誰が張るか) | 未決。plan.md §3.8 は sim に対して defect のログ出力を求めている |
 | 自動保存の `Schedule.spaced`(plan.md §3.8) | mc-sim 側。compose は stage 順序だけ |
 | フレーム予算 / adaptive quality | 参照実装は `frame-adaptive-quality.ts` を持つ。**compose には置かない** |

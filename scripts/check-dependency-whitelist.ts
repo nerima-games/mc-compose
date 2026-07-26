@@ -98,11 +98,11 @@ import { fileURLToPath } from 'node:url'
  * transitively — which is precisely why rule 3 (NO TRANSITIVE CLOSURE) matters
  * most here.
  *
- * compose may import ONLY the four experience modules (mx-gameplay,
- * mx-redstone, mx-ui, mx-multiplayer) plus mc-kernel. It may NOT import mc-sim,
- * mc-worldgen, mc-render, mc-physics, mc-save, mc-audio, mc-noise or
- * mc-meshing, even though it depends on all of them transitively and even
- * though `pnpm install` will physically place them in node_modules.
+ * compose may import the four experience modules (mx-gameplay, mx-redstone,
+ * mx-ui, mx-multiplayer), plus mc-render, plus mc-kernel. It may NOT import
+ * mc-sim, mc-worldgen, mc-physics, mc-save, mc-audio, mc-noise or mc-meshing,
+ * even though it depends on all of them transitively and even though
+ * `pnpm install` will physically place them in node_modules.
  *
  * This is the mechanical half of the repository's prime directive. The
  * reference implementation accumulated 20,737 production LOC in
@@ -111,7 +111,27 @@ import { fileURLToPath } from 'node:url'
  * directly is a rule that belongs in an experience module. The gate makes
  * "reach past mx-* and write it here" fail the build instead of failing review.
  *
- * NOTE: none of the four are declared in package.json yet. Nothing in the
+ * ---------------------------------------------------------------------------
+ * WHY mc-render IS ON THAT LIST (and why it does not weaken the directive)
+ * ---------------------------------------------------------------------------
+ *
+ * docs/architecture.md §5 recorded a hole in plan.md §2.1's graph: NOTHING in
+ * the roster declared a runtime dependency on mc-render, so the renderer could
+ * not be reached from a running game at all. Three resolutions were listed;
+ * the vertical-slice spike settled on option 2, `mc-compose -> mc-render`.
+ *
+ * The reason it is safe is that REGISTERING ANOTHER MODULE'S STAGES IS WIRING,
+ * NOT A RULE. compose takes mc-render's `GameModule`, merges its Layer and
+ * hands its `StageRegistration`s to the resolver — the same three things it
+ * does with mx-gameplay's, with no knowledge of what any of them draw.
+ *
+ * And rule 3 still bites where it matters: the edge licenses `mc-render` and
+ * NOTHING BEHIND IT. `mc-meshing` and `mc-sim` become transitively reachable
+ * and therefore `transitive-import` violations rather than `not-whitelisted`
+ * ones — a different message, the same hard failure. `test/check-dependency-
+ * whitelist.test.ts` pins exactly that: mc-render reachable, mc-meshing not.
+ *
+ * NOTE: none of the five are declared in package.json yet. Nothing in the
  * 16-repo roster has been published (bottom-up publish-then-pin, plan.md §6
  * Step 3), so this skeleton declares only `effect`.
  * ---------------------------------------------------------------------------
@@ -181,6 +201,14 @@ export const REPOSITORY_POLICY = {
         '@nerima-games/mx-redstone',
         '@nerima-games/mx-ui',
         '@nerima-games/mx-multiplayer',
+        // Added by the vertical-slice spike. mc-render registers the frame's
+        // input, camera-mirror, chunk-sync, draw and post-fx stages, and NOTHING
+        // in the roster previously declared a runtime edge to it — so the
+        // shipped build had no input stage at all (plan.md §2.3-2). Registering
+        // another module's stages is wiring, not a rule; rule 3 still blocks
+        // compose from reaching mc-meshing or mc-sim behind it.
+        // See mc-compose/docs/architecture.md §5.
+        '@nerima-games/mc-render',
       ]),
     ],
 

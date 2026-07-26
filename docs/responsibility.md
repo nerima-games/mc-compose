@@ -166,14 +166,21 @@ try/catch も、stage 単位の時間計測も、条件付きスキップも、�
 
 ### 3.1 依存ホワイトリスト(最重要)
 
-mc-compose が import してよいのは **4 つの体験モジュール + mc-kernel だけ**である。
+mc-compose が import してよいのは **4 つの体験モジュール + mc-render + mc-kernel だけ**である。
 
 ```
 mc-compose -> mx-gameplay / mx-redstone / mx-ui / mx-multiplayer   ... OK
+mc-compose -> mc-render                                            ... OK（stage 配線。architecture.md §5）
 mc-compose -> mc-sim                                               ... transitive-import 違反
 mc-compose -> mc-worldgen / mc-physics / mc-save / mc-audio / mc-noise ... 同上
-mc-compose -> mc-render / mc-meshing                               ... not-whitelisted 違反
+mc-compose -> mc-meshing                                           ... 同上（mc-render の背後）
 ```
+
+**mc-render のエッジは規範を弱めない。** それが許可するのは mc-render **だけ**であり、
+背後の mc-meshing と mc-sim は推移的に到達可能になるぶん `transitive-import` 違反になる。
+メッセージが変わるだけで、ハードエラーであることは変わらない。
+そして compose がやるのは「mc-render の `GameModule` を受け取り、Layer を merge し、
+`StageRegistration` をリゾルバに渡す」の 3 つで、mx-gameplay に対してやっているのとまったく同じである。
 
 `pnpm install` すると `node_modules` にはこれら全部が物理的に置かれる。
 **それでも import は禁止**であり、`pnpm check:deps` が非ゼロ終了する。

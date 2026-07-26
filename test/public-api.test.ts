@@ -15,6 +15,8 @@ describe('public API surface', () => {
         'stagePhase',
         'phaseOf',
         'phaseAdmits',
+        // what the resolver would otherwise have swallowed
+        'describeStagePlanWarnings',
         // the stage order table
         'STANDARD_STAGE_SKELETON',
         'SIMULATION_PHASES',
@@ -48,6 +50,12 @@ describe('public API surface', () => {
         'mergeModuleLayers',
         'EMPTY_MODULE_LAYER',
         'collectStages',
+        // the bridge from kernel's `GameModule` (whose `frameStages` is an
+        // Effect) to the post-registration module this repository composes
+        'registerModule',
+        // kernel's branded delta, re-exported so a host can construct one
+        // without reaching into `domain/kernel-vocabulary.ts`
+        'DeltaTimeSecs',
         // session lifecycle
         'WorldId',
         'initialSessionState',

@@ -2,6 +2,7 @@ import { describe, expect, it } from '@effect/vitest'
 import { Effect, Either, Option } from 'effect'
 import {
   describeStageOrderError,
+  describeStagePlanWarnings,
   phaseOf,
   resolveStageOrder,
   StageId,
@@ -333,6 +334,91 @@ describe('dangling after-edges', () => {
   it.effect('reports nothing when every edge resolves', () =>
     Effect.sync(() => {
       expect([...plan([stage('a'), stage('b', 'a')]).dangling]).toStrictEqual([])
+    }),
+  )
+})
+
+describe('stages the skeleton does not recognise', () => {
+  // REGRESSION: `priorityOf` answers MAX_SAFE_INTEGER for a stage in no phase,
+  // so it sorts after everything the skeleton knows and contributes no implicit
+  // edge — it silently falls to the end of the frame. That is LEGAL (it is how
+  // a mod's stage stays schedulable) and it is also indistinguishable from a
+  // typo. `dangling` had the same problem and was at least computed; this was
+  // not computed at all.
+  it.effect('reports a stage whose name half matches no phase, without rejecting it', () =>
+    Effect.sync(() => {
+      const skeleton = phases('input', 'render')
+      const resolved = plan([stage('render:daw'), stage('render:draw'), stage('input')], skeleton)
+
+      // `render:draw` matches nothing here either — this skeleton's `render`
+      // phase claims the NAME `render`, not `draw`. Both are reported; neither
+      // is rejected.
+      expect([...resolved.unmatchedPhase]).toStrictEqual(['render:daw', 'render:draw'])
+      expect(resolved.order).toContain('render:daw')
+    }),
+  )
+
+  it.effect('reports nothing when every registered stage lands in a phase', () =>
+    Effect.sync(() => {
+      const everyStage = skeletonStageIds.map((skeletonId) => ({ id: skeletonId }))
+      expect([...plan(everyStage, STANDARD_STAGE_SKELETON).unmatchedPhase]).toStrictEqual([])
+    }),
+  )
+
+  // A definition, not an oversight: with no phase table there is nothing for a
+  // stage to fail to match, and reporting every stage would make the field
+  // noise in exactly the tests that pass no skeleton.
+  it.effect('reports nothing at all when no skeleton was supplied', () =>
+    Effect.sync(() => {
+      expect([...plan([stage('anything'), stage('else')]).unmatchedPhase]).toStrictEqual([])
+    }),
+  )
+
+  it.effect('sorts the report, so it is comparable between builds', () =>
+    Effect.sync(() => {
+      const resolved = plan([stage('zeta'), stage('alpha'), stage('mid')], phases('nothing-matches'))
+      expect([...resolved.unmatchedPhase]).toStrictEqual(['alpha', 'mid', 'zeta'])
+    }),
+  )
+})
+
+describe('describeStagePlanWarnings', () => {
+  // REGRESSION — the reason this function exists. `StageOrderPlan.dangling` had
+  // NO consumer anywhere in the roster: the resolver computed it faithfully and
+  // nothing ever looked, which makes "we report rather than reject" false in
+  // practice.
+  it.effect('renders a dropped edge with the idiom that makes it legal', () =>
+    Effect.sync(() => {
+      const lines = describeStagePlanWarnings(plan([stage('mine', 'not-loaded')]))
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toContain('mine')
+      expect(lines[0]).toContain('not-loaded')
+      expect(lines[0]).toContain('after input, if there is input')
+    }),
+  )
+
+  it.effect('renders an unrecognised stage and says why it is not an error', () =>
+    Effect.sync(() => {
+      const lines = describeStagePlanWarnings(plan([stage('render:daw')], phases('render')))
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toContain('render:daw')
+      expect(lines[0]).toContain('matches no phase')
+    }),
+  )
+
+  it.effect('is empty when there is nothing to say, so a host can print it unconditionally', () =>
+    Effect.sync(() => {
+      const everyStage = skeletonStageIds.map((skeletonId) => ({ id: skeletonId }))
+      expect(describeStagePlanWarnings(plan(everyStage, STANDARD_STAGE_SKELETON))).toStrictEqual([])
+    }),
+  )
+
+  it.effect('renders both kinds together', () =>
+    Effect.sync(() => {
+      const lines = describeStagePlanWarnings(
+        plan([stage('render:daw', 'never-registered')], phases('render')),
+      )
+      expect(lines).toHaveLength(2)
     }),
   )
 })

@@ -25,15 +25,33 @@ const graph = (entries: ReadonlyArray<readonly [string, ReadonlyArray<string>]>)
   new Map(entries.map(([node, targets]) => [node, new Set(targets)]))
 
 describe('mc-compose dependency policy', () => {
-  it.effect('depends on exactly the four experience modules — and on no foundation directly', () =>
+  it.effect('depends on the four experience modules plus mc-render — and on no other foundation', () =>
     Effect.sync(() => {
       expect(REPOSITORY_POLICY.thisPackage).toBe('@nerima-games/mc-compose')
       expect([...allowedDirectDependencies()].sort()).toStrictEqual([
+        // The one tier-2 edge, added by the vertical-slice spike: mc-render
+        // registers the frame's input / camera-mirror / chunk-sync / draw /
+        // post-fx stages and nothing else in the roster could reach it.
+        // See docs/architecture.md §5.
+        '@nerima-games/mc-render',
         '@nerima-games/mx-gameplay',
         '@nerima-games/mx-multiplayer',
         '@nerima-games/mx-redstone',
         '@nerima-games/mx-ui',
       ])
+    }),
+  )
+
+  // REGRESSION: the mc-render edge must stay the ONLY tier-2 edge. It is the
+  // one exception the spike endorsed, and the argument for it — "registering
+  // another module's stages is wiring, not a rule" — does not generalise to
+  // mc-sim, mc-worldgen or anything else with state in it.
+  it.effect('adds mc-render and nothing else below tier 3', () =>
+    Effect.sync(() => {
+      const belowTierThree = [...allowedDirectDependencies()].filter(
+        (name) => !name.startsWith('@nerima-games/mx-'),
+      )
+      expect(belowTierThree).toStrictEqual(['@nerima-games/mc-render'])
     }),
   )
 
@@ -166,21 +184,39 @@ describe('the prime directive, mechanically enforced', () => {
     }),
   )
 
-  // OBSERVATION about the declared graph, pinned so it cannot change silently:
-  // NOTHING in the roster declares a runtime dependency on mc-render. Its only
-  // dependant is mc-playground-kit, which is devDependency-only and therefore
-  // contributes no runtime edge. mc-render (and mc-meshing behind it) is
-  // consequently not even TRANSITIVELY reachable from mc-compose — importing it
-  // is a flat whitelist violation, not a closure violation.
+  // INVERTED, deliberately, and the inversion is the point.
   //
-  // See docs/architecture.md §5: how the renderer reaches a running game is an
-  // open question in plan.md §2.1's graph, not something this repository may
-  // resolve by adding an import.
-  it.effect('cannot reach mc-render or mc-meshing at all — no runtime edge in the roster leads there', () =>
+  // This test used to read `cannot reach mc-render or mc-meshing at all — no
+  // runtime edge in the roster leads there`, and it was RIGHT about the graph
+  // as declared: mc-render's only dependant was mc-playground-kit, which is
+  // devDependency-only and contributes no runtime edge. docs/architecture.md §5
+  // called that a hole in plan.md §2.1 and listed three ways to close it,
+  // explicitly refusing to pick one unilaterally.
+  //
+  // The vertical-slice spike picked option 2, and the consequence was concrete
+  // rather than architectural: `InputService.endFrame` must be called exactly
+  // once per frame, that is a stage by definition, and the only registered
+  // input stage in the whole roster lived in mc-playground-kit — which is
+  // dev-only, so the SHIPPED build had no input stage at all. That is precisely
+  // the failure plan.md §2.3-2 exists to prevent.
+  //
+  // The test is inverted rather than deleted because both halves still matter:
+  // mc-render is now reachable, and mc-meshing must still not be.
+  it.effect('reaches mc-render, because compose registers the renderer’s stages', () =>
     Effect.sync(() => {
-      for (const unreachable of ['@nerima-games/mc-render', '@nerima-games/mc-meshing']) {
-        expect(classifyImport(from(unreachable), declaredEverything)?.rule).toBe('not-whitelisted')
-      }
+      expect(classifyImport(from('@nerima-games/mc-render'), declaredEverything)).toBeUndefined()
+    }),
+  )
+
+  // REGRESSION: the edge licenses mc-render and NOTHING BEHIND IT. Rule 3 (no
+  // transitive closure) is what keeps "compose may wire the renderer" from
+  // becoming "compose may reach the mesher". The message changes from
+  // `not-whitelisted` to `transitive-import` — the failure does not.
+  it.effect('still cannot reach mc-meshing, now as a closure violation rather than a flat one', () =>
+    Effect.sync(() => {
+      const violation = classifyImport(from('@nerima-games/mc-meshing'), declaredEverything)
+      expect(violation?.rule).toBe('transitive-import')
+      expect(violation?.message).toContain('@nerima-games/mc-render')
     }),
   )
 

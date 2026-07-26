@@ -1,6 +1,13 @@
 import { describe, expect, it } from '@effect/vitest'
 import { Effect, Either, Option, Ref } from 'effect'
-import { composeGame, EMPTY_MODULE_LAYER, type GameModule, type StageRegistration } from '../domain/composition'
+import {
+  composeGame,
+  DeltaTimeSecs,
+  EMPTY_MODULE_LAYER,
+  type GameModule,
+  type StageRegistration,
+} from '../domain/composition'
+import { EpochMillis, FixedClockLayer, MonotonicTimeSecs } from '../domain/kernel-vocabulary'
 import {
   acceptMod,
   acceptMods,
@@ -181,7 +188,12 @@ describe('a mod is not a second-class module', () => {
         ]),
       )
 
-      yield* game.runFrame(0.016)
+      yield* game.runFrameWith(
+        FixedClockLayer({
+          monotonicSecs: MonotonicTimeSecs(0),
+          wallClockEpochMillis: EpochMillis(0),
+        }),
+      )(DeltaTimeSecs(0.016))
       expect(yield* Ref.get(log)).toStrictEqual(['input', 'render', 'mod'])
     }),
   )
