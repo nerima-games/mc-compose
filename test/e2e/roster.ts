@@ -166,7 +166,7 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         id: 'redstone:effects',
         after: ['redstone:power'],
         declaredAt: 'mx-redstone/stages/registration.ts:155',
-        idAt: 'mx-redstone/stages/stage-ids.ts:44',
+        idAt: 'mx-redstone/stages/stage-ids.ts:49',
       },
     ],
   },
