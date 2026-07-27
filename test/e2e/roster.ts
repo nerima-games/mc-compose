@@ -196,31 +196,31 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // that lands in the frame is mc-compose's to decide — its skeleton
         // claims the NAME half of this id (`input`) for the first phase."
         after: [],
-        declaredAt: 'mc-render/stages/registration.ts:232',
+        declaredAt: 'mc-render/stages/registration.ts:243',
         idAt: 'mc-render/stages/stage-ids.ts:85',
       },
       {
         id: 'render:camera-mirror',
         after: ['sim:physics'],
-        declaredAt: 'mc-render/stages/registration.ts:291',
+        declaredAt: 'mc-render/stages/registration.ts:302',
         idAt: 'mc-render/stages/stage-ids.ts:92',
       },
       {
         id: 'render:chunk-sync',
         after: ['render:camera-mirror'],
-        declaredAt: 'mc-render/stages/registration.ts:316',
+        declaredAt: 'mc-render/stages/registration.ts:327',
         idAt: 'mc-render/stages/stage-ids.ts:94',
       },
       {
         id: 'render:draw',
         after: ['render:chunk-sync'],
-        declaredAt: 'mc-render/stages/registration.ts:344',
+        declaredAt: 'mc-render/stages/registration.ts:355',
         idAt: 'mc-render/stages/stage-ids.ts:96',
       },
       {
         id: 'render:post-fx',
         after: ['render:draw'],
-        declaredAt: 'mc-render/stages/registration.ts:356',
+        declaredAt: 'mc-render/stages/registration.ts:385',
         idAt: 'mc-render/stages/stage-ids.ts:105',
       },
     ],
