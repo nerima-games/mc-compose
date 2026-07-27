@@ -130,25 +130,25 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // Dangling. `sim:physics` is registered by nobody — see
         // `ROSTER_REGISTERS_NOTHING` below.
         after: ['sim:physics'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:562',
+        declaredAt: 'mx-gameplay/stages/registration.ts:723',
         idAt: 'mx-gameplay/stages/stage-ids.ts:41',
       },
       {
         id: 'gameplay:entities',
         after: ['gameplay:interactions'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:793',
+        declaredAt: 'mx-gameplay/stages/registration.ts:1149',
         idAt: 'mx-gameplay/stages/stage-ids.ts:43',
       },
       {
         id: 'gameplay:fluids',
         after: ['gameplay:entities'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:993',
+        declaredAt: 'mx-gameplay/stages/registration.ts:1349',
         idAt: 'mx-gameplay/stages/stage-ids.ts:45',
       },
       {
         id: 'gameplay:time-weather',
         after: ['gameplay:fluids'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:1008',
+        declaredAt: 'mx-gameplay/stages/registration.ts:1364',
         idAt: 'mx-gameplay/stages/stage-ids.ts:47',
       },
     ],
