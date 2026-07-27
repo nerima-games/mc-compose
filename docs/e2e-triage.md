@@ -103,12 +103,20 @@ mx-ui の 20 本は 3 ファイル 28 テストになった(`test/accessibility-
 | --- | ---: | --- |
 | **その画面が mx-ui にまだ無い** | 7 | main menu 5(#2 と `main-menu.e2e.ts` の 5 本のうち DEMOTE 分)、loading screen 1、crosshair 1 |
 | **設定画面が無いのは判断であって欠落ではない** | 4 | `settings-overlay.e2e.ts` の slider / persist 系。`mx-ui/test/screen-views.test.ts` 冒頭が理由を述べている |
-| **降ろし先が違う、または主張が構造的に真** | 8 | touch controls 2(入力面なので mc-render)、#19、crosshair の重複 1、`usable at ${width}px` 2(レイアウト+`role="button"` の矛盾)、`#settings-apply` 1(§3.6 の判断どおり削除)、`Escape key opens` 1(既存テストが持っている) |
+| **降ろし先が違う、または主張が構造的に真** | 8 | touch controls 2(**mc-render に訂正確定**。語彙に `addEventListener` があるのは mc-render のみ)、#19、crosshair の重複 1、`usable at ${width}px` 2(レイアウト+`role="button"` の矛盾)、`#settings-apply` 1(§3.6 の判断どおり削除)、`Escape key opens` 1(既存テストが持っている) |
 
 **この表の 2 行目と 3 行目が、部分的な移植より完全な triage のほうが価値があるという
 §0 の主張の実例である。** 19 本のうち 12 本は「mx-ui が書き忘れた」ではなく、
 **mx-ui が別の答えを出した**か、**降ろし先の判定が誤っていた**かである。
-とくに touch controls 2 本は、mx-ui に降ろしたことが誤りだった可能性が高い(§3.5 の欄を見よ)。
+touch controls 2 本は **mc-render への訂正が確定した**(§3.5)。決め手は推測ではなく計測で、
+mc-render の `application/dom-surface.ts:172` は `addEventListener` を持ち、mx-ui の同名ファイルは
+**意図的に持たない**(DN-UI-4)。**その動詞が語彙にあるか**は「入力面か表示面か」より検証可能である。
+
+逆に **crosshair は mx-ui のままで正しかった**。「照準はカメラ中心だから mc-render 寄り」という
+推測は、参照実装が 2 度否定している: ファイルは `packages/presentation/hud/crosshair` にあり、
+`index.html:124` は `body.hud-hidden #crosshair` を `#health-display` や `#hunger-display` と
+**同一の規則**で隠す。HUD を隠すことが crosshair を隠すことだと書いた人間がいる、ということである。
+**もっともらしい直感を 1 つ採用し 1 つ棄却した。差はどちらも「実装を読んだか」だけである。**
 
 そして **39 本のうち 1 本が、移植した瞬間に赤くなった** — `HUD remains usable at ${width}px` の
 名前付けの半分である。詳細は §3.6 の `hud.e2e.ts` の欄。
@@ -211,7 +219,7 @@ mx-multiplayer → mc-sim → mx-gameplay / mx-ui をまたぐので、定義上
 | 31 | `new-world-regression: terrain generation, night readability, and mob movement are observable` | NEEDS-BROWSER | **mc-compose**。219 LOC で 3 主張。同じく割る。`gameplay:time-weather` → 描画の経路を含む |
 | 32 | `progression-loop: supports gather → craft → build → fight through the runtime loop` | NEEDS-BROWSER | **mc-compose。plan.md §3.15 の「採掘 → インベントリ反映」そのもの。** mx-gameplay(破壊)→ mc-sim(`InventoryService`)→ mx-ui(ホットバー)。**この 1 本が §3.15 の主張の (b) 側の代表である**([testing.md](./testing.md) §3.4)。§4 参照 |
 | 33 | `user-flow: same-route playthrough stays interactive and performant` | NEEDS-BROWSER | **mc-compose**。#28 と重複気味。統合を検討 |
-| 34-36 | `mobile-touch-controls`: `controls fit the safe viewport…` / `inventory and pause are operable without a keyboard` / `look gesture rotates the camera and releases cleanly` | DEMOTE ×2 + NEEDS-PUBLISH ×1 | 34・35 は **mx-ui**(1 画面のレイアウトと操作)。36 は **mc-compose**(タッチ → 入力 → カメラ。#20 と同じ経路のタッチ版)<br>**34・35 とも未移植(2026-07-27)。降ろし先の判定が誤りだった可能性がある。** mx-ui は `[data-touch-control]` を 1 つも作らない。作れない理由が構造的で、`application/dom-surface.ts` の冒頭に書いてある: タップは `addEventListener` であり、その動詞は語彙に無く、無いことが Escape の単一ハンドラを守っている(DN-UI-4)。**タッチコントロールは入力面であって表示面なので mc-render 側である。** 34 の残り半分(48px の当たり判定とセーフエリア)はレイアウトなので、どちらにせよブラウザが要る |
+| 34-36 | `mobile-touch-controls`: `controls fit the safe viewport…` / `inventory and pause are operable without a keyboard` / `look gesture rotates the camera and releases cleanly` | DEMOTE ×2 + NEEDS-PUBLISH ×1 | 34・35 は **mx-ui**(1 画面のレイアウトと操作)。36 は **mc-compose**(タッチ → 入力 → カメラ。#20 と同じ経路のタッチ版)<br>**34・35 とも未移植(2026-07-27)。降ろし先の判定が誤りだった可能性がある。** mx-ui は `[data-touch-control]` を 1 つも作らない。作れない理由が構造的で、`application/dom-surface.ts` の冒頭に書いてある: タップは `addEventListener` であり、その動詞は語彙に無く、無いことが Escape の単一ハンドラを守っている(DN-UI-4)。**降ろし先を mc-render に訂正する(2026-07-27。推測ではなく計測による)。** 決め手は 2 つの `dom-surface.ts` の差である: mc-render の `application/dom-surface.ts:172` は `addEventListener` を**持つ**が、mx-ui の同名ファイルは**意図的に持たない**(DN-UI-4)。つまりタッチは mx-ui では構造的に書けず mc-render では書ける —— 「入力面だから」という言い方より、**語彙にその動詞があるか**のほうが検証可能な基準である。34 の残り半分(48px の当たり判定とセーフエリア)はレイアウトなので、どちらにせよブラウザが要る |
 
 ### 3.6 `e2e/ui/` — 6 ファイル / 33 本 / 748 LOC
 
