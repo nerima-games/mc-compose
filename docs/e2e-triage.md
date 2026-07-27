@@ -81,28 +81,41 @@ DEMOTE 43 本の降ろし先: **mx-ui 39 本 / mc-render 2 本 / mc-save 2 本**
 | 降ろし先 | triage が割り当てた本数 | 再判定後に所有 | 移植済み | 未移植 |
 | --- | ---: | ---: | ---: | ---: |
 | mx-ui | 39 | **37** | **29** | 8 |
-| mc-render | 2 | **4** | 2 | 2 |
+| mc-render | 2 | **4** | **3** | **1** |
 | mc-save | 2 | 2 | **2** | **0** |
-| **合計** | **43** | **43** | **33** | **10** |
+| **合計** | **43** | **43** | **34** | **9** |
 
 「再判定後に所有」の列は `d43cf46` が確定させた **touch controls 2 本の mc-render への訂正**
 だけを反映している(§3.5 #34-35)。**crosshair 2 本は mx-ui のままで、そして書かれた** —
 同じ commit が `index.html:124` を根拠に棄却したとおりである。
-**訂正した touch controls 2 本はまだ書かれていないので mc-render の未移植に立っている** —
-降ろし先を直すことは移植ではない。
+**そして訂正した 2 本のうち #35 は書かれた(2026-07-27、第 3 波)。**
+残る #34 は移植ではなくブラウザ待ちに変わった — 下の段落で分割する。
 
 mx-ui の未移植 8 本の内訳: 設定画面 3 / #19 1 / `usable at ${width}px` 2 /
 `#settings-apply` 1 / `Escape key opens` 1。
-mc-render の 2 本は touch controls。mc-save は #9 が移植されたので **0** である。
-**8 + 2 + 0 = 10。**
+mc-render の 1 本は #34。mc-save は #9 が移植されたので **0** である。
+**8 + 1 + 0 = 9。**
 **mx-ui の 8 本はどれも「まだ書いていない」ではない** — 判断か、構造的に真か、
 ブラウザが要るかである。「その画面が mx-ui に無い」という理由は**ゼロになった。**
 
-**mc-render の 2 本だけは「まだ書いていない」である。** 降ろし先を直した根拠が
-そのまま「書ける」の意味だからで、`addEventListener` が語彙にあるのは mc-render のほうである。
-34 の半分(48px の当たり判定とセーフエリア)はレイアウトなのでブラウザが要るが、
-35「キーボード無しで操作できる」は**タップがキーと同じ intent に束ねられているか**であり、
-それは mc-render の入力バインディングの問いなので headless で問える。
+**そして今回、「まだ書いていない」は全体でゼロになった。** 直前の追記が
+「mc-render の 2 本だけは『まだ書いていない』である」と書いた 2 本が、その 2 本だったからである。
+**#35 は `mc-render/test/touch-controls.test.ts` の 23 テストになった**(mc-render の suite は
+373 → 396)。主張は「タップがキーと同じ intent に束ねられているか」であり、
+それは入力バインディングの問いなので headless で問えた —— 予告どおりである。
+
+**#34 は半分だけ書かれ、残り半分は今後もここでは書けない。** 分割は次のとおりで、
+**この行が「未移植」に立ち続ける理由は今日から「まだ書いていない」ではなく「ブラウザが要る」である**
+(mx-ui の 8 本と同じ分類に移った):
+
+- **書けた半分** — 宣言されたコントロールが**死んでいない**こと。48px で、セーフエリアの内側で、
+  そして**何にも束ねられていない**ボタンはあり得る。プレイヤーは押せて、へこんで、ゲームは反応しない。
+  レイアウトの失敗より**悪い**ほうの失敗であり、これは束縛表への問いなのでブラウザは要らない
+  (`unboundTouchActions`)。
+- **書けない半分** — 48px の当たり判定とセーフエリアそのもの。mc-render は `lib.DOM` を出荷せず、
+  `application/dom-surface.ts` は**意図的に幾何を 1 つも持たない**。Node の
+  `getBoundingClientRect` は 0 を返すので、そこで `48` を主張するテストは**fake が正しく書けているか**を
+  主張することになる。**測っていないものを測ったことにはしない。**
 
 > この段落は一度「8 + 2 + 1 = 11」のまま取り残された。**同じことを述べる場所が
 > 3 つある**(§2.1 の表・この内訳・各行)ため、1 つ動かすと 2 つが古くなる。
@@ -161,6 +174,12 @@ mx-ui の suite は 226 → 283。**新規 57 本すべてについて、狙っ�
 > **以下の表は初回追記の原文である(数字の誤りは上の欄外で訂正済み)。**
 > 第 2 波の後、**1 行目は 8 → 0 になり、この理由の分類そのものが消えた。**
 > 2 行目・3 行目は動いていない — そちらは判断と構造であって、書き忘れではないからである。
+>
+> **第 3 波(2026-07-27)で 3 行目が 8 → 7 になった。** touch controls 2 本のうち
+> **#35 が書かれ、#34 はレイアウト側だけが残った**ので、3 行目の内訳から
+> 「touch controls 2」が「**#34 のレイアウト側 1**」に縮んでいる。
+> **降ろし先の訂正はここでは動いていない** — 3 行目はもともと「降ろし先が違う、
+> または主張が構造的に真」であり、#34 が残る理由は今日から**ブラウザが要る**だからである。
 
 | 理由 | 本数 | 内訳 |
 | --- | ---: | --- |
@@ -370,7 +389,36 @@ mx-multiplayer → mc-sim → mx-gameplay / mx-ui をまたぐので、定義上
 | 31 | `new-world-regression: terrain generation, night readability, and mob movement are observable` | NEEDS-BROWSER | **mc-compose**。219 LOC で 3 主張。同じく割る。`gameplay:time-weather` → 描画の経路を含む |
 | 32 | `progression-loop: supports gather → craft → build → fight through the runtime loop` | NEEDS-BROWSER | **mc-compose。plan.md §3.15 の「採掘 → インベントリ反映」そのもの。** mx-gameplay(破壊)→ mc-sim(`InventoryService`)→ mx-ui(ホットバー)。**この 1 本が §3.15 の主張の (b) 側の代表である**([testing.md](./testing.md) §3.4)。§4 参照 |
 | 33 | `user-flow: same-route playthrough stays interactive and performant` | NEEDS-BROWSER | **mc-compose**。#28 と重複気味。統合を検討 |
-| 34-36 | `mobile-touch-controls`: `controls fit the safe viewport…` / `inventory and pause are operable without a keyboard` / `look gesture rotates the camera and releases cleanly` | DEMOTE ×2 + NEEDS-PUBLISH ×1 | 34・35 は **mx-ui**(1 画面のレイアウトと操作)。36 は **mc-compose**(タッチ → 入力 → カメラ。#20 と同じ経路のタッチ版)<br>**34・35 とも未移植(2026-07-27)。降ろし先の判定が誤りだった可能性がある。** mx-ui は `[data-touch-control]` を 1 つも作らない。作れない理由が構造的で、`application/dom-surface.ts` の冒頭に書いてある: タップは `addEventListener` であり、その動詞は語彙に無く、無いことが Escape の単一ハンドラを守っている(DN-UI-4)。**降ろし先を mc-render に訂正する(2026-07-27。推測ではなく計測による)。** 決め手は 2 つの `dom-surface.ts` の差である: mc-render の `application/dom-surface.ts:172` は `addEventListener` を**持つ**が、mx-ui の同名ファイルは**意図的に持たない**(DN-UI-4)。つまりタッチは mx-ui では構造的に書けず mc-render では書ける —— 「入力面だから」という言い方より、**語彙にその動詞があるか**のほうが検証可能な基準である。34 の残り半分(48px の当たり判定とセーフエリア)はレイアウトなので、どちらにせよブラウザが要る |
+| 34-36 | `mobile-touch-controls`: `controls fit the safe viewport…` / `inventory and pause are operable without a keyboard` / `look gesture rotates the camera and releases cleanly` | DEMOTE ×2 + NEEDS-PUBLISH ×1 | 34・35 は **mx-ui**(1 画面のレイアウトと操作)。36 は **mc-compose**(タッチ → 入力 → カメラ。#20 と同じ経路のタッチ版)<br>**34・35 とも未移植(2026-07-27)。降ろし先の判定が誤りだった可能性がある。** mx-ui は `[data-touch-control]` を 1 つも作らない。作れない理由が構造的で、`application/dom-surface.ts` の冒頭に書いてある: タップは `addEventListener` であり、その動詞は語彙に無く、無いことが Escape の単一ハンドラを守っている(DN-UI-4)。**降ろし先を mc-render に訂正する(2026-07-27。推測ではなく計測による)。** 決め手は 2 つの `dom-surface.ts` の差である: mc-render の `application/dom-surface.ts:172` は `addEventListener` を**持つ**が、mx-ui の同名ファイルは**意図的に持たない**(DN-UI-4)。つまりタッチは mx-ui では構造的に書けず mc-render では書ける —— 「入力面だから」という言い方より、**語彙にその動詞があるか**のほうが検証可能な基準である。34 の残り半分(48px の当たり判定とセーフエリア)はレイアウトなので、どちらにせよブラウザが要る<br>**35 は移植済み(2026-07-27、第 3 波)** → `mc-render/test/touch-controls.test.ts`。**34 は入力側の半分だけ移植し、レイアウト側の半分は未移植のまま残した**(同ファイル。理由は §2.1)。**タッチは既存の語彙に合流させた。並行の語彙は作っていない** — オンスクリーンのコントロールは `InputAction` を担い、タップは `codeForTouchAction` で**その時点の束縛**へ解決される。だから `Bindings` は形を変えていない(1 アクション 1 コード、`remap` の衝突検査も 1 つの値空間のまま)。**`openInventory` を `KeyE` から `KeyI` に付け替えると、オンスクリーンのボタンも一緒に動く** —— これが 35 の主張の一番鋭い形である。**pause は Escape を 2 人目の所有者にせずに解いた**: タッチの pause は `ESCAPE_KEY_CODE` **そのもの**を出し、読むのは `ESCAPE_OWNER` が名指す唯一のフレームハンドラのままである(所有は「誰が押すか」ではなく「誰が処理するか」)。**DOM surface は 1 メンバーも増えていない** — コントロールは座標ではなく `event.target` の**同一性**で解決するので、`TouchList` も `clientX` も要らず、`test/fixtures/dom-surface.ts` の代入可能性証明は再議論不要だった。**タップはポインタロック取得経路に到達しない**(DN-16 §5(b) は閉じたまま。詳細は §3.5 の直後) |
+
+#### 3.5.1 タッチを足すときに閉じたままにしなければならなかったもの(2026-07-27)
+
+**#36 の所有は動いていない。** 「ドラッグでカメラが回り、きれいに離れる」は
+NEEDS-PUBLISH のまま **mc-compose** のものである — それは**カメラに届くか**の主張であり、
+mc-render はカメラの権威になることを禁じられている(ポーズは mc-sim が所有し、
+逆向きは依存の循環になる)。**移したのは算術だけである。**
+`touchLookStep` は mc-render の `domain/input-bindings.ts` にあり、
+`notchesForWheelDelta` と同じ規則で置かれている(アダプタに置いた方針は
+`environment: 'node'` が触れない)。罠は 2 つあり、どちらも #36 の文言そのものである:
+`MouseEvent.movementX` は**すでに差分**だが `Touch` が返すのは**絶対座標**なので、
+そのままカメラに渡すと**指の画面位置の分だけ視点が回る**。そして離したときに anchor を
+忘れないと、**次のドラッグの最初の 1 フレームで前のドラッグの終点との差だけ視点が飛ぶ**
+—— DN-09 が別のデバイスで再発した形である。
+
+**そして、2 つ目の入力ソースを足すことは DN-16 §5(b) を開け直す絶好の機会だった。**
+あの実害(HUD をクリックするとポインタロックを取ってしまう)は、
+`landing !== 'ui'` という**開いた**判定ではなく
+`landing === 'lock-target'` という**閉じた** 3 値で閉じられている。**その選択が、
+タッチを安全に足せた理由そのものだった:**
+
+- タッチの押下は `withCodeDown` を通り `withButtonDown` を通らないので、
+  `uiClickLandings` に**エントリを作らない**。フレームはそこしか読まないので、
+  タップは取得経路に**到達し得ない**。`attack` のコントロール(既定で `MouseLeft` に解決される)でも同じである。
+- ブラウザがタップから合成する互換 `mousedown` は残るが、その `target` は**コントロールの要素**なので
+  `resolveClickLanding` は `ui` か `elsewhere` を返し、`acquiresPointerLock` は `lock-target` を要求する。
+- **開いた判定のままだったら、こうはならなかった。** ホストが宣言し忘れたコントロールは
+  「UI ではない」と読まれ、**タップのたびにポインタを奪っていた**。
+  閉じた判定の最悪ケースは「マウスルックが起動しない」で、それは 1 回目で目に見える。
 
 ### 3.6 `e2e/ui/` — 6 ファイル / 33 本 / 748 LOC
 
