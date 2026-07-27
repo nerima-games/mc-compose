@@ -176,13 +176,13 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
       {
         id: 'ui:hud-sync',
         after: ['sim:physics'],
-        declaredAt: 'mx-ui/stages/registration.ts:91',
+        declaredAt: 'mx-ui/stages/registration.ts:103',
         idAt: 'mx-ui/stages/stage-ids.ts:36',
       },
       {
         id: 'ui:overlay-sync',
         after: ['ui:hud-sync'],
-        declaredAt: 'mx-ui/stages/registration.ts:104',
+        declaredAt: 'mx-ui/stages/registration.ts:116',
         idAt: 'mx-ui/stages/stage-ids.ts:38',
       },
     ],
