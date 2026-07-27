@@ -66,10 +66,11 @@
     </style>
   </head>
   <body data-mc-compose-boot="starting">
-    <!-- NOT a drawing surface. mc-render creates no WebGL context (see
-         apps/web/main.ts), so this canvas exists only as the pointer-lock
-         target and the element a click can land on. Giving it a context here
-         would make docs/e2e-triage.md #1 pass without mc-render drawing. -->
+    <!-- THE drawing surface. mc-render's `makeWorldRenderer` creates the WebGL2
+         context on it (see apps/web/main.ts); this file still never calls
+         getContext, because a context created here would make
+         docs/e2e-triage.md #1 pass without mc-render drawing anything. It is
+         also the pointer-lock target and the element a click can land on. -->
     <canvas id="game-canvas"></canvas>
     <div id="hud-root"></div>
     <div id="fps-counter">FPS: <span id="fps-value">0</span></div>

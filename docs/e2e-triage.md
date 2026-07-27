@@ -264,7 +264,7 @@ mc-render の `application/dom-surface.ts:172` は `addEventListener` を持ち�
 
 | # | test() | 判定 | 行き先・必要なもの |
 | --- | --- | --- | --- |
-| 1 | `WebGL2 canvas is present and active` | NEEDS-BROWSER | **mc-compose**。ブラウザエントリポイント + mc-render<br>**未達(2026-07-28)。エントリポイントは出来たが、この 1 本だけは前提の後半が満たされていない。** `e2e/smoke.e2e.ts` に `test.fixme` として名前付きで置いてある。理由は計測である: **mc-render は何も描かない** — `stages/registration.ts` の `render:draw` は `Ref.update(state.framesDrawn, (drawn) => drawn + 1)` であり、`package.json` に `three` は無く、リポジトリ全体に `getContext` が 1 つも無い。THREE.js の面は FIRST CUT のコメントであって実装ではない。**エントリポイント側で `canvas.getContext('webgl2')` を 1 行書けばこのテストは緑になる。それをしていないことがこの行の中身である** — それは mc-render について何も主張せず、かつ mc-compose が描画することは `domain/composition.ts` が防いでいる違反そのものだからである |
+| 1 | `WebGL2 canvas is present and active` | NEEDS-BROWSER | **mc-compose**。ブラウザエントリポイント + mc-render<br>**移植済み(2026-07-28)** → `e2e/smoke.e2e.ts`。**`fixme` を外した。** この行は長らく「mc-render は何も描かない」という計測だった —— `render:draw` が `Ref.update(state.framesDrawn, (drawn) => drawn + 1)` で、`package.json` に `three` が無く、リポジトリ全体に `getContext` が 1 つも無かった。**mc-render 側が塞がった**: `application/three-surface.ts`(構造的な THREE の面) + `application/world-renderer.ts`。WebGL2 コンテキストを作るのは `new WebGLRenderer({ canvas })` であり、それは mc-render の中にある。`apps/web/main.ts` が渡すのは `three` 名前空間と canvas だけで、**`getContext` は今も 1 つも書いていない** —— ライブラリを渡すのは配線、何を描くか決めるのはルールだからである。<br>**参照実装のアサーションは無価値だったので捨てた。これは実測である。** `canvas.getContext('webgl2') !== null` は**描画器が 1 つも無くても緑になる** —— `getContext` はアクセサではなく**コンストラクタ**で、コンテキストの無い canvas に対しては作って返すからである。つまりこのアサーションは**テスト自身が満たしている**。描画器を入れる前の `apps/web/main.ts` に対して実際に走らせて確認した(緑になった)。この行が `fixme` だった理由は正しかったが、**書かれていた本体のまま外していたら、mc-render が 1 行も動かないまま緑になっていた**。<br>そこで、**テストが自分では満たせない 2 つ**に主張を移した: (1) `getContext('2d')` が **null** —— canvas は 1 つのコンテキストしか持てず、既にあるものと非互換な型の要求は null になる。この呼び出しはテストが canvas に触る前に行うので、null は「先に誰かが取った」を意味し、その誰かは mc-render である。素の canvas なら 2d が返って落ちる。(2) `canvas.width === canvas.clientWidth` —— width 属性の無い canvas は CSS サイズと無関係に 300x150 であり、`index.html` は属性を与えていない。両者が一致するのは mc-render の中の `renderer.setSize(clientWidth, clientHeight, false)` が呼ばれたときだけである(1280 であって 300 ではない)。`isContextLost() === false` と非 null は**後書き**として残してある。<br>ミューテーション確認済み: ホストから描画器の生成を外すと (1) で赤くなる。<br>**画面はスカイブルー 1 色である。** ジオメトリは 1 つも届かない —— mc-worldgen も mc-meshing も `vite.config.ts` が解決できる 3 兄弟に入っていないため(§4.3 と同じ壁)。このテストが言うのは「コンテキストがある」であって「絵がある」ではない。**ピクセルを問う行は、ワールドが届くようになった時点で別に足すこと** |
 | 2 | `main menu renders on boot` | DEMOTE | **mx-ui**。1 画面の DOM<br>**移植済み(2026-07-27、第 2 波)** → `mx-ui/test/main-menu.test.ts`「mounts into the host and opens on its root card」。参照実装の主張は「初期化の後に `#mm-new-world` が見える」だが、本実装ではそれより強い: 親は**引数**である(`docs/public-api.md` §4-1)ので、メニューが**渡された親に**生えることと、2 インスタンスが 1 要素も共有しないことを問える<br>*(初回追記時は未移植。理由は「`application/` にあるのは hud / inventory / caption / save-indicator の 4 画面で、メニューはそのどれでもない」だった。)* |
 | 3 | `no fatal startup errors before game session` | NEEDS-BROWSER | **mc-compose**。全 Layer が起動時に落ちないこと = 合成の主張<br>**移植済み(2026-07-28)** → `e2e/smoke.e2e.ts`。**3 モジュールぶんの Layer 合成・登録 Effect・`composeGame` の解決を、実ブラウザで通した。** `composeGame` が Left を返す失敗は**何も throw しない**ので、コンソールだけでなく `#boot-status` が空であることも問う |
 | 4 | `game loop starts and FPS counter becomes non-zero` | NEEDS-BROWSER | **mc-compose**。フレームが回る = `runFrameWith` が実際に駆動している<br>**移植済み(2026-07-28)** → `e2e/smoke.e2e.ts`。参照実装より強い: 「非ゼロ」は**一度動いて死んだループでも永久に満たす**ので、`data-frames` が**増え続ける**ことを問う。ミューテーション(rAF の再スケジュールを外す)で赤くなることを確認済み |
@@ -274,11 +274,14 @@ mc-render の `application/dom-surface.ts:172` は `addEventListener` を持ち�
 
 compose に 4 本、mx-ui に 3 本。
 
-> **4 本のうち 3 本が動いた(2026-07-28)。** #3・#4・#7 が緑、#1 だけが `fixme` である。
+> **4 本とも動いた(2026-07-28)。** #1・#3・#4・#7 が緑で、`fixme` は 0 本になった。
 > **判定は 1 つも変えていない** — 4 本とも NEEDS-BROWSER のままで、実際にブラウザが要った。
-> 動くようになった理由は publish ではなく、**エントリポイントが書かれたから**である。
+> 動くようになった理由は publish ではなく、**エントリポイントが書かれたから**(#3・#4・#7)と
+> **mc-render が描くようになったから**(#1)である。
 > §5 の段階表がこれを「mc-render + mc-sim publish + ブラウザエントリポイント」の行に
 > まとめて置いていたが、**その 3 つの前提は独立だった**。詳細は §5.1。
+> #1 はその独立性のいちばん強い実例で、**publish を 1 つも待たずに**解けた ——
+> 要ったのは mc-render に実装が入ることだけだった。
 
 ### 3.2 `e2e/contracts/` — 1 本 / 68 LOC
 
@@ -799,12 +802,15 @@ compose にロジックが溜まっている兆候」の予防そのものであ
 上の段階表は「今 = **0**」の次に「mc-render + mc-sim publish + ブラウザエントリポイント = 11 本」を
 置いている。**この行の 3 つの前提は独立だった。** ブラウザエントリポイントは publish を待たずに
 書けたので、11 本のうち**ブラウザと合成だけで足りる 3 本**(#3・#4・#7)が先に解けた。
+**#1 も publish を待たなかった**: 要ったのは mc-render に描画器が入ることだけで、
+それも publish とは無関係に起きた。**「publish が要る」と書かれていた 4 本のうち 4 本が、
+publish 前に解けたことになる。**
 
 | | 本数 |
 | --- | ---: |
 | compose に残る合計 | **25** |
-| うち緑(2026-07-28) | **3**(#3・#4・#7) |
-| うち `fixme` で名前付き | **1**(#1。描画器が無い) |
+| うち緑(2026-07-28) | **4**(#1・#3・#4・#7) |
+| うち `fixme` で名前付き | **0** |
 | 未着手 | **21** |
 
 **判定語も降ろし先も 1 つも変えていない。** 変わったのは §5 の「前提」欄の読み方だけで、

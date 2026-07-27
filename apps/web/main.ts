@@ -54,22 +54,43 @@
  * — a green lamp with nothing behind it.
  *
  * ---------------------------------------------------------------------------
- * There is no renderer, and the page says so
+ * THERE IS A RENDERER NOW, AND THIS FILE STILL DOES NOT DRAW
  * ---------------------------------------------------------------------------
  *
- * mc-render draws nothing yet. `render:draw` is
- * `Ref.update(state.framesDrawn, (drawn) => drawn + 1)` and the repository has
- * no `three` dependency and no `getContext` call anywhere — its THREE.js
- * surface is a documented FIRST CUT seam, not code. So this page creates NO
- * WebGL context, and `docs/e2e-triage.md` #1 (`WebGL2 canvas is present and
- * active`) stays unmet. The canvas below exists because the pointer-lock target
- * and the click-landing vocabulary are real and need an element; it is
- * deliberately never given a drawing context, because a `getContext('webgl2')`
- * placed here to make a test green would be this repository drawing, and it
- * would make #1 pass while asserting nothing about mc-render.
+ * This paragraph used to say "mc-render draws nothing yet", and
+ * `docs/e2e-triage.md` #1 (`WebGL2 canvas is present and active`) was `fixme`
+ * because of it. mc-render now has `application/world-renderer.ts`, and the
+ * WebGL2 context on `#game-canvas` is created BY IT — `new WebGLRenderer({
+ * canvas })`, inside mc-render, from mc-render's own transcribed parameters.
+ *
+ * What this file adds is item (1) of the five above and nothing else: `three`
+ * is a PLATFORM LIBRARY, supplied here exactly as `window`, `document` and the
+ * canvas already are. mc-render describes the seven constructors it needs as
+ * structural types in `application/three-surface.ts` and imports `three`
+ * nowhere; the host is the only place that can hold the real namespace, because
+ * the host is the only place that knows it is in a browser.
+ *
+ * The line that would have been the violation is still not written. There is no
+ * `canvas.getContext(...)` here, no scene, no geometry and no draw call — this
+ * file cannot draw a triangle, and `domain/composition.ts` is why. Passing a
+ * library to a module that decides what to do with it is wiring; deciding what
+ * to draw is a rule, and rules belong to modules.
+ *
+ * WHAT IS ON THE SCREEN, precisely: the sky colour mc-render clears to
+ * (`SKY_CLEAR_COLOR`, transcribed from the reference's `SKY_COLOR_DAY`), and
+ * nothing else. No chunk geometry reaches the renderer because no world reaches
+ * this page — `mc-worldgen` and `mc-meshing` are not among the three siblings
+ * `vite.config.ts` can resolve, and for the reason stated under "WHY THREE
+ * MODULES AND NOT SIX" they cannot be: registering `gameplayModule` needs a
+ * `ChunkStore` and the only implementations in the organisation are test
+ * doubles. So #1 passes for the reason it names — a WebGL2 context exists and
+ * is active — and the picture is a blue field. That is the honest state and it
+ * is worth having: it is the difference between "no context" and "no content",
+ * and until now those two were indistinguishable from this page.
  */
+import * as THREE from 'three'
 import { Effect, Either, Exit, Layer, Scope } from 'effect'
-import { browserInputLayer, renderModule } from '@nerima-games/mc-render'
+import { browserInputLayer, makeWorldRenderer, renderModule } from '@nerima-games/mc-render'
 import {
   createCrosshairView,
   createHudView,
@@ -117,6 +138,23 @@ const requireElement = (id: string): HTMLElement => {
 }
 
 /**
+ * The same, narrowed to a canvas.
+ *
+ * `instanceof` and not a cast. `makeWorldRenderer` is generic in the canvas
+ * type — mc-render cannot name `HTMLCanvasElement` — so THIS call site is where
+ * the real type is supplied and where a `<div id="game-canvas">` would
+ * otherwise sail through into `new WebGLRenderer` and fail somewhere inside
+ * three with a message about a null context.
+ */
+const requireCanvas = (id: string): HTMLCanvasElement => {
+  const element = requireElement(id)
+  if (!(element instanceof HTMLCanvasElement)) {
+    throw new Error(`#${id} is a ${element.tagName}, not a <canvas>`)
+  }
+  return element
+}
+
+/**
  * Report a boot failure where BOTH a human and Playwright can see it.
  *
  * `data-mc-compose-boot` is the machine-readable half. docs/e2e-triage.md #3
@@ -133,7 +171,7 @@ const failBoot = (reason: string, detail?: unknown): void => {
 }
 
 const boot = async (): Promise<void> => {
-  const canvas = requireElement('game-canvas')
+  const canvas = requireCanvas('game-canvas')
   const hudParent = requireElement('hud-root')
   const fpsValue = requireElement('fps-value')
   const stageList = requireElement('stage-order')
@@ -165,11 +203,49 @@ const boot = async (): Promise<void> => {
   // 2. Registration
   // -------------------------------------------------------------------------
 
+  // The renderer. mc-render builds it; this file supplies only the two things
+  // it cannot reach — the `three` namespace and the element to draw on.
+  //
+  // `clientWidth`/`clientHeight` and not `width`/`height`: the canvas has the
+  // host's CSS 100vw/100vh rule on it and no width attribute, so the attribute
+  // pair is three's default 300x150 and the layout pair is the viewport. That
+  // distinction is also why mc-render passes `updateStyle: false` to `setSize`
+  // — see `application/world-renderer.ts`.
+  //
+  // THE THREE TYPE ARGUMENTS ARE NOT OPTIONAL, and mc-render's
+  // `application/three-surface.ts` records why at length: `typeof
+  // THREE.BufferGeometry` is itself generic and defaults to
+  // `BufferGeometry<NormalOrGLBufferAttributes>`, while `typeof THREE.Mesh`
+  // wants the narrower `BufferGeometry<NormalBufferAttributes>` — so inference
+  // draws incompatible conclusions from the same namespace and fails four
+  // levels down, naming `GLBufferAttribute`. mc-render cannot pin either from
+  // its side without naming a `three` type, which is the one thing that seam
+  // exists not to do. The host has `three` in scope and pins them here.
+  const worldRenderer = await Effect.runPromise(
+    makeWorldRenderer<HTMLCanvasElement, THREE.BufferGeometry, THREE.MeshBasicMaterial>(
+      THREE,
+      canvas,
+      { width: canvas.clientWidth, height: canvas.clientHeight },
+    ),
+  )
+
+  // The canvas is the host's element and its SIZE is the host's business, so
+  // the resize listener is here rather than in mc-render — mc-render ships no
+  // `lib.DOM` and could not add one. It tells the renderer; the renderer
+  // decides what that means for the projection.
+  window.addEventListener('resize', () => {
+    Effect.runSync(worldRenderer.resize(canvas.clientWidth, canvas.clientHeight))
+  })
+
   // `renderModule()` is called for its `frameStages` only; its `layers` field
   // is replaced by the browser adapter. The module's own header sanctions
   // exactly this: "Pass it where `InputServiceLayer()` would go — `renderModule`'s
   // `layers` is the same tag."
-  const render = renderModule()
+  //
+  // The third argument is the `DrawPort` that `render:draw` calls. Its default
+  // is `NO_DRAW_TARGET`, which is what every Node consumer gets and what this
+  // page got until the renderer existed.
+  const render = renderModule(undefined, undefined, worldRenderer)
 
   const registeredRender = await Effect.runPromise(
     Effect.provide(

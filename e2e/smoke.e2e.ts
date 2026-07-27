@@ -71,27 +71,90 @@ test.describe('smoke — the composed frame in a real browser', () => {
   /**
    * #1 `WebGL2 canvas is present and active`.
    *
-   * NOT WRITTEN, and this is the measurement rather than an omission. mc-render
-   * draws nothing: `stages/registration.ts`'s `render:draw` is
-   * `Ref.update(state.framesDrawn, (drawn) => drawn + 1)`, the repository has no
-   * `three` dependency in its package.json, and it contains no `getContext` call
-   * anywhere. Its THREE.js surface is a documented FIRST CUT seam.
+   * UNBLOCKED. It was `fixme` because mc-render drew nothing — `render:draw`
+   * was `Ref.update(state.framesDrawn, (drawn) => drawn + 1)` and the
+   * repository had no `three` dependency and no `getContext` call anywhere. It
+   * now has `application/world-renderer.ts`, whose `makeWorldRenderer` runs
+   * `new WebGLRenderer({ canvas })`, and `apps/web/main.ts` hands it the
+   * element and the `three` namespace.
    *
-   * The entry point could satisfy this test in one line — `canvas.getContext(
-   * 'webgl2')` — and that line is the reason this is `fixme` instead. It would
-   * make the test green while asserting nothing whatsoever about mc-render, and
-   * mc-compose drawing anything is the prime-directive violation
-   * `domain/composition.ts` exists to prevent.
+   * ---------------------------------------------------------------------------
+   * THE OBVIOUS ASSERTION IS WORTHLESS, AND THIS WAS MEASURED
+   * ---------------------------------------------------------------------------
    *
-   * UNBLOCKED BY: a real renderer in mc-render's `render:draw`.
+   * The `fixme` body this replaces was:
+   *
+   *   canvas instanceof HTMLCanvasElement && canvas.getContext('webgl2') !== null
+   *
+   * IT PASSES WITH NO RENDERER AT ALL. `getContext` is a CONSTRUCTOR, not an
+   * accessor: called on a canvas that has none, it creates one and returns it.
+   * So the assertion is satisfied by the test itself, on any `<canvas>` in any
+   * page. This was confirmed by running it against the previous
+   * `apps/web/main.ts` — the one with no renderer — where it went green.
+   *
+   * That is docs/testing.md §3.4's "偽物のモジュールを4つ作って合成すれば、検証
+   * されるのは偽物である" in its purest form: the test was verifying itself. The
+   * row was `fixme` for a true reason, and had it ever been un-`fixme`d as
+   * written it would have gone green without mc-render moving.
+   *
+   * So the claim is carried by two assertions that a test CANNOT satisfy for
+   * itself, and the naive one is kept only as a postscript:
+   *
+   *   1. `getContext('2d')` RETURNS NULL. A canvas holds one context, and a
+   *      request for an incompatible type on a canvas that already has one is
+   *      specified to return null. Null therefore means SOMEBODY ELSE GOT HERE
+   *      FIRST — and this is asked before anything in this file has touched the
+   *      canvas, so that somebody is mc-render. On a bare canvas it returns a
+   *      `CanvasRenderingContext2D` and this test fails.
+   *   2. `canvas.width` EQUALS ITS LAYOUT WIDTH. A canvas with no width
+   *      attribute is 300x150 regardless of its CSS size, and `index.html`
+   *      gives it none — only `renderer.setSize(clientWidth, clientHeight,
+   *      false)` inside mc-render makes the two agree. 1280, not 300.
+   *
+   * ---------------------------------------------------------------------------
+   * What this still does NOT assert
+   * ---------------------------------------------------------------------------
+   *
+   * That anything is VISIBLE. The page is a flat sky colour: no chunk geometry
+   * reaches it, because `mc-worldgen` and `mc-meshing` are not among the three
+   * siblings `vite.config.ts` can resolve, for the reason §4.3 of the triage
+   * gives. This says the frame loop has somewhere to draw TO; #4 says the loop
+   * runs. A pixel assertion belongs here when a world reaches this page.
    */
-  test.fixme('#1 WebGL2 canvas is present and active', async ({ page }) => {
+  test('#1 WebGL2 canvas is present and active', async ({ page }) => {
     await page.goto('/')
-    const hasContext = await page.evaluate(() => {
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+    const probe = await page.evaluate(() => {
       const canvas = document.getElementById('game-canvas')
-      return canvas instanceof HTMLCanvasElement && canvas.getContext('webgl2') !== null
+      if (!(canvas instanceof HTMLCanvasElement)) {
+        return undefined
+      }
+      // FIRST, before this file has touched the canvas: null here means a
+      // context of an incompatible type already exists, i.e. mc-render's.
+      const twoDimensional = canvas.getContext('2d')
+      const gl = canvas.getContext('webgl2')
+      return {
+        somebodyElseHoldsAContext: twoDimensional === null,
+        bufferWidth: canvas.width,
+        bufferHeight: canvas.height,
+        layoutWidth: canvas.clientWidth,
+        layoutHeight: canvas.clientHeight,
+        hasWebgl2: gl !== null,
+        lost: gl === null || gl.isContextLost(),
+      }
     })
-    expect(hasContext).toBe(true)
+
+    expect(probe).toBeDefined()
+    // The two that a test cannot satisfy for itself.
+    expect(probe?.somebodyElseHoldsAContext).toBe(true)
+    expect(probe?.bufferWidth).toBe(probe?.layoutWidth)
+    expect(probe?.bufferHeight).toBe(probe?.layoutHeight)
+    expect(probe?.layoutWidth).toBeGreaterThan(0)
+    // The naive pair, kept because they are what the row is named after — but
+    // they are a postscript to the two above, not the claim.
+    expect(probe?.hasWebgl2).toBe(true)
+    expect(probe?.lost).toBe(false)
   })
 
   /**
