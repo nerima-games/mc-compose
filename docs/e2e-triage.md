@@ -82,8 +82,8 @@ DEMOTE 43 本の降ろし先: **mx-ui 39 本 / mc-render 2 本 / mc-save 2 本**
 | --- | ---: | ---: | ---: | ---: |
 | mx-ui | 39 | **37** | **29** | 8 |
 | mc-render | 2 | **4** | 2 | 2 |
-| mc-save | 2 | 2 | 1 | 1 |
-| **合計** | **43** | **43** | **32** | **11** |
+| mc-save | 2 | 2 | **2** | **0** |
+| **合計** | **43** | **43** | **33** | **10** |
 
 「再判定後に所有」の列は `d43cf46` が確定させた **touch controls 2 本の mc-render への訂正**
 だけを反映している(§3.5 #34-35)。**crosshair 2 本は mx-ui のままで、そして書かれた** —
@@ -204,7 +204,7 @@ compose に 4 本、mx-ui に 3 本。
 
 | # | test() | 判定 | 行き先・必要なもの |
 | --- | --- | --- | --- |
-| 9 | `'minecraft-worlds' IndexedDB is created after game starts` | DEMOTE | **mc-save**。DB が作られるのはストレージ層の話<br>**未移植(2026-07-27)。** mc-save には IndexedDB アダプタがまだ無く、`StoragePort` の実装は `makeInMemoryStorage` と `failingStorageLayer` の 2 つだけなので、DB 名も object store も問う先が無い。加えて `indexedDB.databases()` / `IDBDatabase.objectStoreNames` が問う「`chunks` と `metadata` という store がある」は、mc-save が意図的に捨てた参照実装のスキーマそのものである(`domain/storage-port.ts` 冒頭)。**IndexedDB アダプタを書く者のアダプタテストとして残す。** 理由の全文は `mc-save/test/binary-roundtrip.test.ts` 末尾 |
+| 9 | `'minecraft-worlds' IndexedDB is created after game starts` | DEMOTE | **mc-save**。DB が作られるのはストレージ層の話<br>**移植済み(2026-07-27)** → `mc-save/test/indexeddb-storage.test.ts`。**この行が予告したとおりの形になった。** かつてここには「アダプタが無いので問う先が無い」と書いてあり、さらに「`chunks` と `metadata` という store がある」という主張は mc-save が意図的に捨てた参照実装のスキーマなので**移植してはならない**とも書いてあった。アダプタが書かれた今、前者は消え、後者は生きている: :84 が「渡された名前の DB を作り、他は作らない」を、:107 が「**参照実装の chunks/metadata ではなく自分の store 構成**を作る」を主張する。**参照実装のスキーマを主張し返さないことが、この移植の中身である。** |
 | 10 | `world data persists across page reload (within same context)` | NEEDS-BROWSER | **mc-compose**。リロードはセッション境界をまたぐ |
 | 11 | `save & quit to title loads the same world with restored player position` | NEEDS-BROWSER | **mc-compose**。**このディレクトリで最も価値が高い 1 本**。`Title ⇄ InGame` の往復と mc-sim / mc-save / mc-worldgen の状態一致を同時に主張する。plan.md §3.8 の「2 周目デッドロック」に直接当たる |
 
