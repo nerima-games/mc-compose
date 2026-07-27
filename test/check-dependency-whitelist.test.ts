@@ -13,6 +13,7 @@ import {
   findCycles,
   findTransitivePath,
   isToolingOrTestPath,
+  isUnpublishedPath,
   maskSource,
   parseImports,
   REPOSITORY_POLICY,
@@ -358,6 +359,123 @@ describe('classifyImport', () => {
     Effect.sync(() => {
       const violation = classifyImport(site('@nerima-games/mc-playground-kit', true), NOTHING_DECLARED)
       expect(violation?.rule).toBe('undeclared-dependency')
+    }),
+  )
+})
+
+/**
+ * The browser entry point's exemption (`REPOSITORY_POLICY.devServerResolved`).
+ *
+ * REGRESSION — this is a HOLE IN A GATE, and a hole nobody tests is a hole that
+ * grows. The gate's own norm is docs/testing.md's:「テストされていない腐り検出器は、
+ * それが守るはずだった腐ったマニフェストと同じ価値しか無い」。
+ *
+ * The exemption exists because rule 5 (DECLARED == IMPORTED) had no satisfiable
+ * answer under `apps/`: the organisation forbids declaring an unpublished
+ * sibling (mc-dev-meta/scripts/check-repoint.ts — every repository also builds
+ * standalone, where `workspace:*` does not resolve). See docs/testing.md §3.5.1.
+ *
+ * What these pin is the SHAPE of the hole: one rule, one root, no extra reach.
+ */
+describe('the unpublished-root exemption', () => {
+  const inApps = (importedPackage: string) => ({
+    importedPackage,
+    filePath: 'apps/web/main.ts',
+    line: 3,
+    isToolingOrTest: true,
+  })
+
+  const inDomain = (importedPackage: string) => ({
+    importedPackage,
+    filePath: 'domain/example.ts',
+    line: 3,
+    isToolingOrTest: false,
+  })
+
+  it.effect('recognises apps/ as unpublished, and every other scanned root as published', () =>
+    Effect.sync(() => {
+      expect(isUnpublishedPath('apps/web/main.ts')).toBe(true)
+      // The rest of SCAN_ROOTS. `index.ts` and `domain/` are in package.json
+      // `files`; `scripts/` and `test/` are not shipped but are also not
+      // resolved by a dev server, so they keep the ordinary requirement.
+      expect(isUnpublishedPath('index.ts')).toBe(false)
+      expect(isUnpublishedPath('domain/composition.ts')).toBe(false)
+      expect(isUnpublishedPath('scripts/api-lock.ts')).toBe(false)
+      expect(isUnpublishedPath('test/composition.test.ts')).toBe(false)
+      // Not a prefix match on the bare word: a `apps-legacy/` directory must
+      // not inherit the exemption.
+      expect(isUnpublishedPath('apps-legacy/main.ts')).toBe(false)
+    }),
+  )
+
+  it.effect('waives the package.json declaration for the modules the dev server aliases', () =>
+    Effect.sync(() => {
+      for (const resolved of REPOSITORY_POLICY.devServerResolved) {
+        expect(classifyImport(inApps(resolved), NOTHING_DECLARED)).toBeUndefined()
+      }
+    }),
+  )
+
+  // REGRESSION — THE reason the exemption is written after the whitelist checks
+  // rather than before them. `apps/` is the composition layer's own front door;
+  // if it could reach mc-sim, every rule mc-compose exists to enforce
+  // (domain/composition.ts's prime directive) would be reachable from a file
+  // nobody thinks of as shipped source.
+  it.effect('still refuses to let apps/ reach past the modules it may compose', () =>
+    Effect.sync(() => {
+      expect(classifyImport(inApps('@nerima-games/mc-sim'), NOTHING_DECLARED)?.rule).toBe(
+        'transitive-import',
+      )
+      expect(classifyImport(inApps('@nerima-games/mc-meshing'), NOTHING_DECLARED)?.rule).toBe(
+        'transitive-import',
+      )
+      expect(classifyImport(inApps('@nerima-games/mc-does-not-exist'), NOTHING_DECLARED)?.rule).toBe(
+        'unknown-package',
+      )
+    }),
+  )
+
+  // REGRESSION: a whitelisted module that is NOT in `devServerResolved` gets no
+  // exemption. The set is the dev server's alias table; a module absent from it
+  // would not resolve in the browser either, so a gate that passed it would be
+  // reporting on a build that cannot run.
+  it.effect('does not waive the declaration for a whitelisted module the dev server does not alias', () =>
+    Effect.sync(() => {
+      expect(REPOSITORY_POLICY.devServerResolved.has('@nerima-games/mx-gameplay')).toBe(false)
+      expect(classifyImport(inApps('@nerima-games/mx-gameplay'), NOTHING_DECLARED)?.rule).toBe(
+        'undeclared-dependency',
+      )
+    }),
+  )
+
+  // REGRESSION: the exemption is scoped to the ROOT, not to the package. The
+  // shipped `domain/` importing mc-render must still declare it — that import
+  // really would be missing from an install.
+  it.effect('does not waive the declaration outside an unpublished root', () =>
+    Effect.sync(() => {
+      expect(classifyImport(inDomain('@nerima-games/mc-render'), NOTHING_DECLARED)?.rule).toBe(
+        'undeclared-dependency',
+      )
+    }),
+  )
+
+  // REGRESSION: rule 6 outranks the exemption. mc-playground-kit in a runtime
+  // entry point would ship a game whose input handling comes from the developer
+  // harness — i.e. a released build with no input handling at all.
+  it.effect('does not let the exemption admit the dev-only package', () =>
+    Effect.sync(() => {
+      expect(REPOSITORY_POLICY.devServerResolved.has('@nerima-games/mc-playground-kit')).toBe(false)
+    }),
+  )
+
+  // REGRESSION: every exempted package must also be a legal direct dependency.
+  // The set may waive a declaration; it must never grant reach.
+  it.effect('exempts only packages that are already whitelisted direct dependencies', () =>
+    Effect.sync(() => {
+      const allowed = allowedDirectDependencies()
+      for (const resolved of REPOSITORY_POLICY.devServerResolved) {
+        expect(allowed.has(resolved)).toBe(true)
+      }
     }),
   )
 })

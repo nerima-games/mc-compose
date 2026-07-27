@@ -30,6 +30,13 @@ coverage/
 test-results/
 vitest.workspace.*
 
+# Playwright (pnpm e2e:browser). `test-results/` above already covers the
+# reporter output; these are the trace/screenshot and browser-download dirs.
+playwright-report/
+blob-report/
+.playwright-mcp/
+.vite/
+
 # Environment files
 .env
 .env.local

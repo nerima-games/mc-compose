@@ -72,31 +72,57 @@ DEMOTE 43 本の降ろし先: **mx-ui 39 本 / mc-render 2 本 / mc-save 2 本**
 **compose に残るのは 25 本(36%)。** plan.md §3.15 が言う「E2E は最終ゲート」の
 最終ゲートは、70 本ではなくこの 25 本である。
 
-### 2.1 移植の進捗(2026-07-27 追記。上の判定は 1 つも変えていない)
+### 2.1 移植の進捗(2026-07-28 追記。上の判定は 1 つも変えていない)
 
-**この節は 3 度目の追記を受けている。** 下の表が最新で、過去の数字は欄外に残してある。
+**この節は 4 度目の追記を受けている。** 下の表が最新で、過去の数字は欄外に残してある。
 **動いたのは移植の進捗だけである。§2 の集計(43 / 25 / 2)も §3 の判定語も、
 `d43cf46` が確定させた降ろし先の訂正も、1 つも変えていない。**
 
 | 降ろし先 | triage が割り当てた本数 | 再判定後に所有 | 移植済み | 未移植 |
 | --- | ---: | ---: | ---: | ---: |
-| mx-ui | 39 | **37** | **29** | 8 |
+| mx-ui | 39 | **37** | **31** | **6** |
 | mc-render | 2 | **4** | **3** | **1** |
 | mc-save | 2 | 2 | **2** | **0** |
-| **合計** | **43** | **43** | **34** | **9** |
+| **合計** | **43** | **43** | **36** | **7** |
 
 「再判定後に所有」の列は `d43cf46` が確定させた **touch controls 2 本の mc-render への訂正**
 だけを反映している(§3.5 #34-35)。**crosshair 2 本は mx-ui のままで、そして書かれた** —
 同じ commit が `index.html:124` を根拠に棄却したとおりである。
 **そして訂正した 2 本のうち #35 は書かれた(2026-07-27、第 3 波)。**
-残る #34 は移植ではなくブラウザ待ちに変わった — 下の段落で分割する。
+残る #34 は移植ではなくブラウザ待ちに変わり、**第 4 波でその「ブラウザ待ち」が誤診だと分かった** —
+下の段落で分割する。
 
-mx-ui の未移植 8 本の内訳: 設定画面 3 / #19 1 / `usable at ${width}px` 2 /
+mx-ui の未移植 6 本の内訳: 設定画面 3 / #19 1 /
 `#settings-apply` 1 / `Escape key opens` 1。
 mc-render の 1 本は #34。mc-save は #9 が移植されたので **0** である。
-**8 + 1 + 0 = 9。**
-**mx-ui の 8 本はどれも「まだ書いていない」ではない** — 判断か、構造的に真か、
-ブラウザが要るかである。「その画面が mx-ui に無い」という理由は**ゼロになった。**
+**6 + 1 + 0 = 7。**
+**mx-ui の 6 本はどれも「まだ書いていない」ではない** — 判断か、構造的に真かである。
+「その画面が mx-ui に無い」という理由は**ゼロのままで**、
+**「ブラウザが要る」という理由も第 4 波でゼロになった。**
+
+**第 4 波(2026-07-28): `usable at ${width}px` 2 本が移植され、mx-ui の「ブラウザ待ち」が消えた。**
+mx-ui に Playwright ゲートが立った(`mx-ui/test-browser/`、17 本。
+`mx-ui/docs/testing.md` §8)。移植されたのは
+`hud.e2e.ts` の `HUD remains usable at ${width}px` のレイアウト側と
+`inventory-overlay.e2e.ts` の `usable at ${width}px` の前半で、どちらも
+320x568 と 390x844 の両方で問うている。**`role="button"` の後半は今も移植していない** —
+§3.6 が述べたとおり、それは移植の失敗ではなく 2 つのアーキテクチャが違う答えを出した点である。
+
+**そしてこの 2 本は移植した瞬間に赤くなった。** `HUD remains usable` が
+**2 度目**に mx-ui から NO を引き出したことになる(1 度目はアクセシブル名で、§3.6 の欄外にある)。
+出てきた欠陥は 2 件で、**どちらも偽 document には原理的に見えないもの**である:
+
+- **ホットバーのスロットに寸法が無かった** — 390px 幅で `43.3 x 4`。スロットの span は
+  mc-sim がアイテムを供給するまで空なので、4px は全部ボーダーだった。
+  これが `weight` distinguisher とフォーカスリング(`inset: 0` のオーバーレイが `386 x 0`)を
+  同時に潰していた。
+- **ホットバーが 1 列に並んでいなかった** — 9 スロットが全幅バーの縦積み(254px)。
+  `mx-ui/application/inventory-view.ts` は**同じ 9 スロットをインベントリ画面では横に並べていた**。
+  1 リポジトリに 2 つの答えがあり、見分けられるのはブラウザだけだった。
+
+**「レイアウトはブラウザが要る」は正しかった。しかしそれは、誰もブラウザを立てていなかった
+というだけのことだった。** この文書が 2 度書いた「ブラウザが要る」は
+**不可能の宣言として読まれるべきではなかった** — 立てたら 2 件出てきた。
 
 **そして今回、「まだ書いていない」は全体でゼロになった。** 直前の追記が
 「mc-render の 2 本だけは『まだ書いていない』である」と書いた 2 本が、その 2 本だったからである。
@@ -104,22 +130,49 @@ mc-render の 1 本は #34。mc-save は #9 が移植されたので **0** で�
 373 → 396)。主張は「タップがキーと同じ intent に束ねられているか」であり、
 それは入力バインディングの問いなので headless で問えた —— 予告どおりである。
 
-**#34 は半分だけ書かれ、残り半分は今後もここでは書けない。** 分割は次のとおりで、
-**この行が「未移植」に立ち続ける理由は今日から「まだ書いていない」ではなく「ブラウザが要る」である**
-(mx-ui の 8 本と同じ分類に移った):
+**#34 は半分だけ書かれ、残り半分はここでは書けない。** 分割は次のとおりで、
+**この行が「未移植」に立ち続ける理由は第 4 波で「ブラウザが要る」から
+「誰も要素を作っていない」に変わった**:
 
 - **書けた半分** — 宣言されたコントロールが**死んでいない**こと。48px で、セーフエリアの内側で、
   そして**何にも束ねられていない**ボタンはあり得る。プレイヤーは押せて、へこんで、ゲームは反応しない。
   レイアウトの失敗より**悪い**ほうの失敗であり、これは束縛表への問いなのでブラウザは要らない
   (`unboundTouchActions`)。
-- **書けない半分** — 48px の当たり判定とセーフエリアそのもの。mc-render は `lib.DOM` を出荷せず、
-  `application/dom-surface.ts` は**意図的に幾何を 1 つも持たない**。Node の
-  `getBoundingClientRect` は 0 を返すので、そこで `48` を主張するテストは**fake が正しく書けているか**を
-  主張することになる。**測っていないものを測ったことにはしない。**
+- **書けない半分** — 48px の当たり判定とセーフエリアそのもの。当初の理由は
+  「mc-render は `lib.DOM` を出荷せず、`application/dom-surface.ts` は**意図的に幾何を 1 つも持たない**。
+  Node の `getBoundingClientRect` は 0 を返すので、そこで `48` を主張するテストは
+  **fake が正しく書けているか**を主張することになる」だった。
+  **測っていないものを測ったことにはしない**は今も正しい。**しかし理由は当たっていなかった。**
+
+> **2026-07-28、第 4 波。ブラウザは立った。それでも #34 のレイアウト側は閉じられない。
+> 理由が変わったので書き換える。**
+>
+> mx-ui に実ブラウザのゲートが立ち(`mx-ui/test-browser/`)、
+> 320x568 と 390x844 で当たり判定もセーフエリアも実測できるようになった。
+> **それでも `[data-touch-control]` は 1 つも測れない。誰も作っていないからである:**
+>
+> - **mx-ui は要素を作るが、タッチコントロールを持たない。** これは当初からそうで、
+>   この文書の判定は正しい —— `[data-touch-control]` は mx-ui の語彙の外である。
+> - **mc-render はタップを所有し、`event.target` の同一性でコントロールを解決する。
+>   だが `application/dom-surface.ts` に `createElement` も `style` も無い。**
+>   コントロールを**束ねる**ことはできて、**作る**ことはできない。
+>
+> つまり #34 が測る要素は**ホストのもの**であり、ホストは mc-compose のブラウザ
+> エントリポイントである。**この行が待っているのは道具ではなく所有者である**、
+> というほうが、ブロックされている理由として鋭い。
+>
+> **降ろし先そのものは動かしていない。** `d43cf46` が `addEventListener` の有無という
+> 検証可能な基準で mc-render に確定させた判断は、#35(束縛)については今も正しく、
+> #35 は現に書かれている。#34 のレイアウト側だけが別の所有者を必要とする —
+> **その再判定は compose 側の判断なので、ここでは証拠を置くに留める。**
 
 > この段落は一度「8 + 2 + 1 = 11」のまま取り残された。**同じことを述べる場所が
 > 3 つある**(§2.1 の表・この内訳・各行)ため、1 つ動かすと 2 つが古くなる。
 > 数字が各行から導出されない限りこれは続く。
+>
+> **第 4 波では 3 つとも同じ commit で動かしている**(表: 29→31 / 8→6、
+> この内訳: `usable at ${width}px` 2 を削除、各行: §3.6 の `hud.e2e.ts` と
+> `inventory-overlay.e2e.ts` の欄)。予告どおり、動かすときは 3 つ一緒である。
 
 > **初回追記(mx-ui 20 / mc-render 2 / mc-save 1 = 23 移植済み、20 未移植)。**
 > この表は一度「mc-render 0 本移植済み」と書かれて commit 直前に直った。同じ文書の
@@ -185,7 +238,7 @@ mx-ui の suite は 226 → 283。**新規 57 本すべてについて、狙っ�
 | --- | ---: | --- |
 | **その画面が mx-ui にまだ無い** | 7 | main menu 5(#2 と `main-menu.e2e.ts` の 5 本のうち DEMOTE 分)、loading screen 1、crosshair 1 |
 | **設定画面が無いのは判断であって欠落ではない** | 4 | `settings-overlay.e2e.ts` の slider / persist 系。`mx-ui/test/screen-views.test.ts` 冒頭が理由を述べている |
-| **降ろし先が違う、または主張が構造的に真** | 8 | touch controls 2(**mc-render に訂正確定**。語彙に `addEventListener` があるのは mc-render のみ)、#19、crosshair の重複 1、`usable at ${width}px` 2(レイアウト+`role="button"` の矛盾)、`#settings-apply` 1(§3.6 の判断どおり削除)、`Escape key opens` 1(既存テストが持っている) |
+| **降ろし先が違う、または主張が構造的に真** | 8 → **5**(第 4 波) | touch controls 2(**mc-render に訂正確定**。語彙に `addEventListener` があるのは mc-render のみ)、#19、crosshair の重複 1、~~`usable at ${width}px` 2(レイアウト+`role="button"` の矛盾)~~ **→ レイアウト側は第 4 波で移植済み。`role="button"` の矛盾は今も移植しない**、`#settings-apply` 1(§3.6 の判断どおり削除)、`Escape key opens` 1(既存テストが持っている) |
 
 **この表の 2 行目と 3 行目が、部分的な移植より完全な triage のほうが価値があるという
 §0 の主張の実例である。** 19 本のうち 12 本は「mx-ui が書き忘れた」ではなく、
@@ -211,15 +264,21 @@ mc-render の `application/dom-surface.ts:172` は `addEventListener` を持ち�
 
 | # | test() | 判定 | 行き先・必要なもの |
 | --- | --- | --- | --- |
-| 1 | `WebGL2 canvas is present and active` | NEEDS-BROWSER | **mc-compose**。ブラウザエントリポイント + mc-render |
+| 1 | `WebGL2 canvas is present and active` | NEEDS-BROWSER | **mc-compose**。ブラウザエントリポイント + mc-render<br>**未達(2026-07-28)。エントリポイントは出来たが、この 1 本だけは前提の後半が満たされていない。** `e2e/smoke.e2e.ts` に `test.fixme` として名前付きで置いてある。理由は計測である: **mc-render は何も描かない** — `stages/registration.ts` の `render:draw` は `Ref.update(state.framesDrawn, (drawn) => drawn + 1)` であり、`package.json` に `three` は無く、リポジトリ全体に `getContext` が 1 つも無い。THREE.js の面は FIRST CUT のコメントであって実装ではない。**エントリポイント側で `canvas.getContext('webgl2')` を 1 行書けばこのテストは緑になる。それをしていないことがこの行の中身である** — それは mc-render について何も主張せず、かつ mc-compose が描画することは `domain/composition.ts` が防いでいる違反そのものだからである |
 | 2 | `main menu renders on boot` | DEMOTE | **mx-ui**。1 画面の DOM<br>**移植済み(2026-07-27、第 2 波)** → `mx-ui/test/main-menu.test.ts`「mounts into the host and opens on its root card」。参照実装の主張は「初期化の後に `#mm-new-world` が見える」だが、本実装ではそれより強い: 親は**引数**である(`docs/public-api.md` §4-1)ので、メニューが**渡された親に**生えることと、2 インスタンスが 1 要素も共有しないことを問える<br>*(初回追記時は未移植。理由は「`application/` にあるのは hud / inventory / caption / save-indicator の 4 画面で、メニューはそのどれでもない」だった。)* |
-| 3 | `no fatal startup errors before game session` | NEEDS-BROWSER | **mc-compose**。全 Layer が起動時に落ちないこと = 合成の主張 |
-| 4 | `game loop starts and FPS counter becomes non-zero` | NEEDS-BROWSER | **mc-compose**。フレームが回る = `runFrameWith` が実際に駆動している |
+| 3 | `no fatal startup errors before game session` | NEEDS-BROWSER | **mc-compose**。全 Layer が起動時に落ちないこと = 合成の主張<br>**移植済み(2026-07-28)** → `e2e/smoke.e2e.ts`。**3 モジュールぶんの Layer 合成・登録 Effect・`composeGame` の解決を、実ブラウザで通した。** `composeGame` が Left を返す失敗は**何も throw しない**ので、コンソールだけでなく `#boot-status` が空であることも問う |
+| 4 | `game loop starts and FPS counter becomes non-zero` | NEEDS-BROWSER | **mc-compose**。フレームが回る = `runFrameWith` が実際に駆動している<br>**移植済み(2026-07-28)** → `e2e/smoke.e2e.ts`。参照実装より強い: 「非ゼロ」は**一度動いて死んだループでも永久に満たす**ので、`data-frames` が**増え続ける**ことを問う。ミューテーション(rAF の再スケジュールを外す)で赤くなることを確認済み |
 | 5 | `dynamic DOM elements are injected after game initialization` | DEMOTE | **mx-ui**<br>**移植済み(2026-07-27)** → `mx-ui/test/screen-mount.test.ts`。「JS が注入する」より強い主張になった: 親は**引数**であって探索先ではない(`docs/public-api.md` §4-1)ので、4 画面すべてが渡された親に mount することと、2 インスタンスが 1 要素も共有しないことを問える |
 | 6 | `settings and inventory overlays are hidden at startup` | DEMOTE | **mx-ui**。`ui:overlay-sync` の初期状態<br>**移植済み(2026-07-27)** → `mx-ui/test/modal-flows.test.ts`。`emptyModalStack` にどちらも載っておらず、`gameplayInputSuppressed` も `pointerLockReleased` も false であること |
-| 7 | `no fatal startup errors during session` | NEEDS-BROWSER | **mc-compose**。セッション全体 |
+| 7 | `no fatal startup errors during session` | NEEDS-BROWSER | **mc-compose**。セッション全体<br>**移植済み(2026-07-28)** → `e2e/smoke.e2e.ts`。#3 との差は**時間**である: #3 は組み上がらない Layer を、#7 は 400 フレーム目で defect する stage を捕まえる。`apps/web/main.ts` は defect でループを止めて `data-mc-compose-boot="failed"` を書くので、**毎秒 60 回自分の初出を埋めていく**という参照実装の失敗の形にならない |
 
 compose に 4 本、mx-ui に 3 本。
+
+> **4 本のうち 3 本が動いた(2026-07-28)。** #3・#4・#7 が緑、#1 だけが `fixme` である。
+> **判定は 1 つも変えていない** — 4 本とも NEEDS-BROWSER のままで、実際にブラウザが要った。
+> 動くようになった理由は publish ではなく、**エントリポイントが書かれたから**である。
+> §5 の段階表がこれを「mc-render + mc-sim publish + ブラウザエントリポイント」の行に
+> まとめて置いていたが、**その 3 つの前提は独立だった**。詳細は §5.1。
 
 ### 3.2 `e2e/contracts/` — 1 本 / 68 LOC
 
@@ -389,7 +448,7 @@ mx-multiplayer → mc-sim → mx-gameplay / mx-ui をまたぐので、定義上
 | 31 | `new-world-regression: terrain generation, night readability, and mob movement are observable` | NEEDS-BROWSER | **mc-compose**。219 LOC で 3 主張。同じく割る。`gameplay:time-weather` → 描画の経路を含む |
 | 32 | `progression-loop: supports gather → craft → build → fight through the runtime loop` | NEEDS-BROWSER | **mc-compose。plan.md §3.15 の「採掘 → インベントリ反映」そのもの。** mx-gameplay(破壊)→ mc-sim(`InventoryService`)→ mx-ui(ホットバー)。**この 1 本が §3.15 の主張の (b) 側の代表である**([testing.md](./testing.md) §3.4)。§4 参照 |
 | 33 | `user-flow: same-route playthrough stays interactive and performant` | NEEDS-BROWSER | **mc-compose**。#28 と重複気味。統合を検討 |
-| 34-36 | `mobile-touch-controls`: `controls fit the safe viewport…` / `inventory and pause are operable without a keyboard` / `look gesture rotates the camera and releases cleanly` | DEMOTE ×2 + NEEDS-PUBLISH ×1 | 34・35 は **mx-ui**(1 画面のレイアウトと操作)。36 は **mc-compose**(タッチ → 入力 → カメラ。#20 と同じ経路のタッチ版)<br>**34・35 とも未移植(2026-07-27)。降ろし先の判定が誤りだった可能性がある。** mx-ui は `[data-touch-control]` を 1 つも作らない。作れない理由が構造的で、`application/dom-surface.ts` の冒頭に書いてある: タップは `addEventListener` であり、その動詞は語彙に無く、無いことが Escape の単一ハンドラを守っている(DN-UI-4)。**降ろし先を mc-render に訂正する(2026-07-27。推測ではなく計測による)。** 決め手は 2 つの `dom-surface.ts` の差である: mc-render の `application/dom-surface.ts:172` は `addEventListener` を**持つ**が、mx-ui の同名ファイルは**意図的に持たない**(DN-UI-4)。つまりタッチは mx-ui では構造的に書けず mc-render では書ける —— 「入力面だから」という言い方より、**語彙にその動詞があるか**のほうが検証可能な基準である。34 の残り半分(48px の当たり判定とセーフエリア)はレイアウトなので、どちらにせよブラウザが要る<br>**35 は移植済み(2026-07-27、第 3 波)** → `mc-render/test/touch-controls.test.ts`。**34 は入力側の半分だけ移植し、レイアウト側の半分は未移植のまま残した**(同ファイル。理由は §2.1)。**タッチは既存の語彙に合流させた。並行の語彙は作っていない** — オンスクリーンのコントロールは `InputAction` を担い、タップは `codeForTouchAction` で**その時点の束縛**へ解決される。だから `Bindings` は形を変えていない(1 アクション 1 コード、`remap` の衝突検査も 1 つの値空間のまま)。**`openInventory` を `KeyE` から `KeyI` に付け替えると、オンスクリーンのボタンも一緒に動く** —— これが 35 の主張の一番鋭い形である。**pause は Escape を 2 人目の所有者にせずに解いた**: タッチの pause は `ESCAPE_KEY_CODE` **そのもの**を出し、読むのは `ESCAPE_OWNER` が名指す唯一のフレームハンドラのままである(所有は「誰が押すか」ではなく「誰が処理するか」)。**DOM surface は 1 メンバーも増えていない** — コントロールは座標ではなく `event.target` の**同一性**で解決するので、`TouchList` も `clientX` も要らず、`test/fixtures/dom-surface.ts` の代入可能性証明は再議論不要だった。**タップはポインタロック取得経路に到達しない**(DN-16 §5(b) は閉じたまま。詳細は §3.5 の直後) |
+| 34-36 | `mobile-touch-controls`: `controls fit the safe viewport…` / `inventory and pause are operable without a keyboard` / `look gesture rotates the camera and releases cleanly` | DEMOTE ×2 + NEEDS-PUBLISH ×1 | 34・35 は **mx-ui**(1 画面のレイアウトと操作)。36 は **mc-compose**(タッチ → 入力 → カメラ。#20 と同じ経路のタッチ版)<br>**34・35 とも未移植(2026-07-27)。降ろし先の判定が誤りだった可能性がある。** mx-ui は `[data-touch-control]` を 1 つも作らない。作れない理由が構造的で、`application/dom-surface.ts` の冒頭に書いてある: タップは `addEventListener` であり、その動詞は語彙に無く、無いことが Escape の単一ハンドラを守っている(DN-UI-4)。**降ろし先を mc-render に訂正する(2026-07-27。推測ではなく計測による)。** 決め手は 2 つの `dom-surface.ts` の差である: mc-render の `application/dom-surface.ts:172` は `addEventListener` を**持つ**が、mx-ui の同名ファイルは**意図的に持たない**(DN-UI-4)。つまりタッチは mx-ui では構造的に書けず mc-render では書ける —— 「入力面だから」という言い方より、**語彙にその動詞があるか**のほうが検証可能な基準である。34 の残り半分(48px の当たり判定とセーフエリア)はレイアウトなので、どちらにせよブラウザが要る<br>**34 のレイアウト側は第 4 波(2026-07-28)でも未移植で、理由が「ブラウザが要る」から「誰も要素を作っていない」に変わった。** mx-ui に実ブラウザのゲートが立ち当たり判定は実測できるようになったが、`[data-touch-control]` を作る repository が存在しない —— mx-ui は要素を作るがタッチコントロールを持たず、mc-render はタップを束ねるが `dom-surface.ts` に `createElement` も `style` も無い。**測る要素はホスト(mc-compose のブラウザエントリポイント)のものである。** 詳細は §2.1<br>**35 は移植済み(2026-07-27、第 3 波)** → `mc-render/test/touch-controls.test.ts`。**34 は入力側の半分だけ移植し、レイアウト側の半分は未移植のまま残した**(同ファイル。理由は §2.1)。**タッチは既存の語彙に合流させた。並行の語彙は作っていない** — オンスクリーンのコントロールは `InputAction` を担い、タップは `codeForTouchAction` で**その時点の束縛**へ解決される。だから `Bindings` は形を変えていない(1 アクション 1 コード、`remap` の衝突検査も 1 つの値空間のまま)。**`openInventory` を `KeyE` から `KeyI` に付け替えると、オンスクリーンのボタンも一緒に動く** —— これが 35 の主張の一番鋭い形である。**pause は Escape を 2 人目の所有者にせずに解いた**: タッチの pause は `ESCAPE_KEY_CODE` **そのもの**を出し、読むのは `ESCAPE_OWNER` が名指す唯一のフレームハンドラのままである(所有は「誰が押すか」ではなく「誰が処理するか」)。**DOM surface は 1 メンバーも増えていない** — コントロールは座標ではなく `event.target` の**同一性**で解決するので、`TouchList` も `clientX` も要らず、`test/fixtures/dom-surface.ts` の代入可能性証明は再議論不要だった。**タップはポインタロック取得経路に到達しない**(DN-16 §5(b) は閉じたまま。詳細は §3.5 の直後) |
 
 #### 3.5.1 タッチを足すときに閉じたままにしなければならなかったもの(2026-07-27)
 
@@ -478,6 +537,24 @@ mc-render はカメラの権威になることを禁じられている(ポーズ
 > `application/icon-element.ts` に `ICON_ROW_LABEL` を足し、行に `role="group"` と
 > `aria-label` を付けた。**これがこの移植で唯一の実装コード変更である。**
 > レイアウト側(320px で収まるか、crosshair が中央か)は移植していない — ブラウザが要る。
+>
+> **そのレイアウト側が第 4 波(2026-07-28)で移植された** →
+> `mx-ui/test-browser/geometry.spec.ts`。320x568 と 390x844 の両方で、収まることと
+> 照準が中央に留まることを実測する。**そして、また赤くなった** ——
+> **この 1 本が mx-ui から NO を引き出したのは 2 度目である。**
+> 出てきたのは 2 件で、どちらも偽 document には原理的に見えないものだった:
+> スロットに寸法が無く(`43.3 x 4`、フォーカスリングは `386 x 0`)、
+> ホットバーが 1 列に並んでいなかった(全幅バーの縦積み 254px)。
+> **`mx-ui/application/inventory-view.ts` は同じ 9 スロットを横に並べていた** ——
+> 1 リポジトリに 2 つの答えがあり、見分けられるのはブラウザだけだった。
+> 実装コード変更は 2 か所(`SLOT_TARGET_MIN_SIZE` と HUD のホットバーのグリッド)。
+> 詳細は `mx-ui/docs/testing.md` §8。
+>
+> **48px ではなく 24px にした理由も記録に値する。** 48 は #34 の
+> `[data-touch-control]` の数字(Android のボタン指針)で、**ホットバーには算術的に不可能**である
+> —— 9 スロット × 48px = 432px、この文書が名指す最も狭い viewport は 320px。
+> 満たせない床は消される床である。24 は WCAG 2.2 §2.5.8(Target Size, Minimum)の数字で、
+> **選んだのではなく引用した**ものであり、320px に 9 つ並べても収まる(35.6 x 24)。
 
 `inventory-overlay.e2e.ts`(6 / DEMOTE 6):
 `hidden at startup` / `E key opens` / `contains slot elements when open` /
@@ -490,14 +567,22 @@ mc-render はカメラの権威になることを禁じられている(ポーズ
 > どの画面を見ているのか判別できなかったからである。移植版は 1 押下で 1 画面、
 > かつポーズメニューが**下に開かないこと**まで問う。
 >
-> **`usable at ${width}px` は未移植。** 前半(要素が viewport に収まる)はレイアウトでブラウザが要る。
-> **後半は矛盾するので移植してはならない**: 参照実装は最初のスロットに
+> **`usable at ${width}px` は前半が第 4 波(2026-07-28)で移植された** →
+> `mx-ui/test-browser/geometry.spec.ts`。要素が viewport に収まることは、
+> **セーフエリアの矩形に収まること**という一段強い形で問うている
+> (#34 の「セーフエリアの内側で」がタッチコントロール以外にも一般化する唯一の部分である)。
+> **後半は矛盾するので移植してはならない。第 4 波でも移植していない**: 参照実装は最初のスロットに
 > `role="button"` と `aria-label=/Inventory slot/` があり focus できることを主張しているが、
 > mx-ui は**意図的にそうしていない** — `application/slot-element.ts`
 > 「A slot has no activation, no `role="button"` and no click」。押せることは
 > キーかポインタのイベントを要り、その動詞は `dom-surface.ts` に無い。
 > **押せない control に `role="button"` を付けるのは、届くのに使えない control を作ることである。**
 > これは移植の失敗ではなく、2 つのアーキテクチャが違う答えを出した点であり、記録に値する。
+>
+> **第 4 波でスロットに最小寸法が入ったが、この判断は動いていない。**
+> `SLOT_TARGET_MIN_SIZE` が与えるのは**届く大きさ**であって**押せること**ではない。
+> `role="button"` も activation も付いていない —— 押すにはキーかポインタのイベントが要り、
+> その動詞は今も `dom-surface.ts` に無い。**大きくしたことを「ボタンにした」と読まないこと。**
 
 `loading-screen.e2e.ts`(1 / DEMOTE 1):
 `keeps loading visible for a minimum duration before gameplay starts`。
@@ -708,6 +793,53 @@ DEMOTE 43 本は publish を待たない。**mx-ui へ 39 本、mc-render へ 2 
 いずれもブラウザ抜きで、はるかに速く書ける。
 それが [testing.md](./testing.md) §3.2 の言う「E2E の本数が増え続けるなら
 compose にロジックが溜まっている兆候」の予防そのものである。
+
+### 5.1 実測(2026-07-28)。**publish は 1 つも起きていないのに、3 本動いた**
+
+上の段階表は「今 = **0**」の次に「mc-render + mc-sim publish + ブラウザエントリポイント = 11 本」を
+置いている。**この行の 3 つの前提は独立だった。** ブラウザエントリポイントは publish を待たずに
+書けたので、11 本のうち**ブラウザと合成だけで足りる 3 本**(#3・#4・#7)が先に解けた。
+
+| | 本数 |
+| --- | ---: |
+| compose に残る合計 | **25** |
+| うち緑(2026-07-28) | **3**(#3・#4・#7) |
+| うち `fixme` で名前付き | **1**(#1。描画器が無い) |
+| 未着手 | **21** |
+
+**判定語も降ろし先も 1 つも変えていない。** 変わったのは §5 の「前提」欄の読み方だけで、
+それも「publish が要る」が誤りだったのではなく、**11 本が 1 行にまとまっていたために
+publish を待たなくてよい 3 本が見えなかった**ということである。
+
+**残り 21 本が待っているものは publish だけではない。** 内訳:
+
+- **#1** — mc-render の描画器。publish ではなく**実装**を待っている(§3.1 の行)。
+- **#20 / #18 / #25-28 / #30-33** — mc-sim。ただし止めているのは publish ではなく
+  **§4.3 の未決事項のほう**である。下の段落を見よ。
+- **#10 / #11** — mc-save。 **#12-14** — mx-multiplayer のトランスポート。 **#70** — ビルド/publish。
+
+> **エントリポイントを書いて分かったこと: §4.3 の壁は、ホスト側から見ると 1 段手前にある。**
+> §4.3 は「`InventoryService` のインスタンスを誰が構築するか」を未決事項として立てた。
+> ホストを実際に書くと、それより先に**構築する手段そのものが無い**ことが分かる:
+> `gameplayModule` は `GameModule<never, never, never, ChunkStore | EntityManager |
+> InventoryService>` であり、`multiplayerModule` は `TransportPort` を要る。
+> **この 4 つの実装は、組織全体で `mx-gameplay/test/support/*-double.ts` にしか無い** —
+> テストダブルであり、どのパッケージの公開 API にも載っていない(`exports` は `"." : "./index.ts"`)。
+> **したがって mx-gameplay と mx-multiplayer は今日ホストから合成できない。**
+> ホストが自前の `ChunkStore` を書けば合成はできるが、それは**合成層に世界の記憶域を書く**ことであり、
+> `domain/composition.ts` が存在する理由そのものである。§3.4 が言う
+> 「偽物のモジュールを 4 つ作って合成すれば、検証されるのは偽物である」の、最も具体的な形がここにある。
+> **`apps/web/main.ts` が 6 ではなく 3 モジュールを合成しているのは、この計測の結果である。**
+
+> **合成できるモジュールが減ると、フレームの順序表も弱くなる。** これは予想していなかった副作用で、
+> 実行して初めて見えた。`render:camera-mirror`・`ui:hud-sync`・`redstone:power` は 3 本とも
+> `after: ['sim:physics']` を宣言しているが、**mc-sim が合成に居ないのでこのエッジは 3 本とも落ちる**
+> (`composeGame` の `warnings` が 3 件ともブラウザのコンソールに出る。落とすのは仕様であり、
+> `domain/stage-order.ts` のとおり dangling `after` は**合法**である)。
+> 結果として `redstone:power` が `render:camera-mirror` **より前**に来ており、
+> mc-sim が居る本物のフレームではそうならない。**`e2e/smoke.e2e.ts` の #3b が
+> 9 本の id を順序ごと pin してあるのは、この順序が「今の構成の順序」であって
+> 「§4.2 のフレーム」ではないことを、次に読む者が取り違えないためである。**
 
 **39 対 25 という比が、この triage の 2 番目の結論である。**
 参照実装の E2E の 6 割は mx-ui のものであり、E2E であった理由は

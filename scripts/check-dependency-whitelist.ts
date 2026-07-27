@@ -221,6 +221,64 @@ export const REPOSITORY_POLICY = {
   aliases: new Map<string, string>([
     // ['@nerima-games/mc-old-name', '@nerima-games/mc-new-name'],
   ]),
+
+  /**
+   * `devServerResolved`
+   *   Org packages that an UNPUBLISHED-ROOT file (see `UNPUBLISHED_ROOTS`
+   *   below) may import without appearing in package.json.
+   *
+   *   Empty in fifteen of the sixteen repositories, and a copy of this script
+   *   that has no browser entry point should leave it empty.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THIS EXISTS — a gap the template had, not a licence somebody wanted
+   * ---------------------------------------------------------------------------
+   *
+   * `SCAN_ROOTS` has always listed `apps`, anticipating the browser entry point
+   * plan.md §3.15 requires. When that entry point was finally written, rule 5
+   * (DECLARED == IMPORTED) fired on all three modules it composes — and the
+   * organisation FORBIDS satisfying it. `mc-dev-meta/scripts/check-repoint.ts`
+   * states the constraint in its own header: each of the sixteen repositories
+   * also builds standalone in its own CI, where a `workspace:*` specifier does
+   * not resolve, so "no downstream package.json on disk may ever gain a sibling
+   * before it is published". Declaring `@nerima-games/mc-render` here would
+   * break `pnpm install` in mc-compose's own CI.
+   *
+   * So rule 5 as written had no satisfiable answer for `apps/`. The two ways out
+   * were to declare (breaking install) or to move the entry point somewhere this
+   * script does not scan (which would also have taken the CLOCK BAN off it —
+   * strictly worse, since the frame loop is exactly where a stray
+   * `performance.now()` would go).
+   *
+   * ---------------------------------------------------------------------------
+   * What is preserved, so that this is a narrowing and not a hole
+   * ---------------------------------------------------------------------------
+   *
+   * This exempts ONE rule (the package.json declaration) for ONE root (`apps/`),
+   * and it does not weaken the rest:
+   *
+   *   - Rule 3 (NO TRANSITIVE CLOSURE) still applies in full and is checked
+   *     BEFORE this. `apps/web/main.ts` importing `@nerima-games/mc-sim` still
+   *     fails as `transitive-import`, which is the half of the gate that carries
+   *     the prime directive.
+   *   - Rule 6 (mc-playground-kit is dev-only) is unaffected.
+   *   - Rule 7 (NO RAW CLOCK READS) is unaffected, and keeping `apps/` scanned
+   *     is the main reason not to solve this by relocation.
+   *   - A package listed here that is NOT a whitelisted direct dependency is
+   *     still rejected — this set cannot grant reach, only waive a declaration
+   *     that cannot legally be made.
+   *
+   * DELETE AN ENTRY THE DAY ITS PACKAGE IS PUBLISHED, and declare it properly:
+   * from then on the declaration is both possible and meaningful. `apps/` also
+   * stops being unpublished-only if it is ever added to package.json `files`,
+   * which is what `UNPUBLISHED_ROOTS` guards against.
+   */
+  devServerResolved: new Set<string>([
+    // Resolved by `vite.config.ts`'s alias table, from a sibling checkout.
+    '@nerima-games/mc-render',
+    '@nerima-games/mx-ui',
+    '@nerima-games/mx-redstone',
+  ]),
 } as const
 
 // ---------------------------------------------------------------------------
@@ -259,6 +317,23 @@ export const BANNED_TIME_SOURCES: ReadonlyArray<{ readonly pattern: RegExp; read
 
 /** Directories and files scanned for imports and banned time sources. */
 export const SCAN_ROOTS: ReadonlyArray<string> = ['apps', 'index.ts', 'domain', 'scripts', 'test']
+
+/**
+ * Scanned roots that are NOT part of any published tarball.
+ *
+ * The test is package.json `files`, which lists `index.ts` and `domain` and
+ * does not list `apps`. Nothing under an unpublished root is ever installed by
+ * anybody, so "the install would be missing this dependency" — the entire point
+ * of rule 5 — cannot happen there. See `REPOSITORY_POLICY.devServerResolved`
+ * for the rest of the argument and for what is deliberately still enforced.
+ *
+ * Kept as a prefix list rather than derived from `files` so that this script
+ * keeps working with no dependencies and no package.json parse ordering.
+ */
+export const UNPUBLISHED_ROOTS: ReadonlyArray<string> = ['apps/']
+
+export const isUnpublishedPath = (relativePath: string): boolean =>
+  UNPUBLISHED_ROOTS.some((root) => relativePath.startsWith(root))
 
 const SKIPPED_DIRECTORIES: ReadonlySet<string> = new Set([
   'node_modules',
@@ -769,6 +844,13 @@ export const classifyImport = (site: ImportSite, declared: DeclaredDependencies)
         `imports ${imported}, which is not a direct dependency of ${thisPackage}. ` +
         `Allowed: ${describeAllowed()}.`,
     }
+  }
+
+  // Placed AFTER the whitelist / transitive / unknown checks above, on purpose:
+  // this waives the declaration and nothing else, so an unpublished root still
+  // cannot reach past the modules it is allowed to compose.
+  if (isUnpublishedPath(site.filePath) && REPOSITORY_POLICY.devServerResolved.has(imported)) {
+    return undefined
   }
 
   const declaredAnywhere = declared.dependencies.has(imported) || declared.devDependencies.has(imported)

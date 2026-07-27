@@ -131,6 +131,8 @@ mc-render が登録するのは `render:input` / `render:camera-mirror` / `rende
 | --- | --- | --- |
 | `pnpm e2e`(= `vitest run test/e2e`) | マニフェストが §4.2 のフレームに合成されるか | **入る**。`effect` と自分の `domain/` しか要らない純粋なテストで、`pnpm test` のグロブが既に拾う |
 | `pnpm check:roster` | マニフェストが兄弟リポジトリの**実ソース**と一致するか(id・`after`・`file:line` の 26 箇所すべて) | **入らない**。兄弟リポジトリのチェックアウトが要る |
+| `pnpm e2e:browser`(= `playwright test`) | **合成済みのゲームが実ブラウザで起動し、フレームが回るか**([e2e-triage.md](./e2e-triage.md) §3.1) | **入らない**。Chromium と dev サーバと**兄弟リポジトリのチェックアウト**が要る |
+| `pnpm typecheck:app` | `apps/` と `e2e/` が型として通るか(`tsconfig.app.json`) | **入らない**。同上 — 兄弟の `index.ts` を `paths` で解決する |
 
 `pnpm check:roster` を `verify` に入れない理由は 1 つで、
 **mc-compose の CI は mc-compose しか clone しない**からである。
@@ -153,6 +155,56 @@ CI で走れないゲートを CI が走らせるゲートに入れると、`pnp
 ゲート自身が動くことは `test/check-roster-manifest.test.ts` がインメモリの
 ファイルシステムで検証しており、これは CI で走る。
 **テストされていない腐り検出器は、それが守るはずだった腐ったマニフェストと同じ価値しか無い。**
+
+`pnpm e2e:browser` と `pnpm typecheck:app` が `verify` の外にあるのは
+**`check:roster` と同じ 1 つの理由**である。`check:mirrors` / `check:repoint` が
+mc-dev-meta で置いた先例もこれと同じ形で、そちらは
+`mc-dev-meta/scripts/check-repoint.ts` のヘッダが理由を書いている。
+
+### 3.5.1 publish されていない兄弟をどう解決したか、そして何を諦めたか
+
+ブラウザエントリポイント(`apps/web/main.ts` + `index.html` + `vite.config.ts`)は
+**本物の mc-render / mx-ui / mx-redstone を import する。** 偽物を 3 つ作って合成すれば
+検証されるのは偽物である(§3.4)。だが 1 つも publish されていないので、
+`node_modules` に `@nerima-games/*` は無い。
+
+**解決した方法**: `vite.config.ts` の `resolve.alias` が**ディスク上のチェックアウト**を指す。
+探索順は `check:roster` と同一 — `MC_ROSTER_ROOT` → `..` → `../mc-dev-meta/repos` — で、
+**選んだルートを必ず印字する**。理由も同じである(上の欄外: 2 つのチェックアウトはずれる)。
+ただし 1 点だけ厳しくしてある: **全モジュールが揃っているルートを 1 つ選ぶ**。
+モジュールごとに探すと、**別々のリビジョンの寄せ集めでゲームが組み上がる**からである。
+
+**やらなかった方法**: `package.json` に `@nerima-games/*` を足すこと。
+`mc-dev-meta/scripts/check-repoint.ts` のヘッダが組織全体の制約を述べている —
+16 リポジトリはそれぞれ**単独の CI でもビルドされ**、そこでは `workspace:*` は解決しない。
+だから「publish 前の兄弟が downstream の `package.json` に載ってはならない」。
+載せれば mc-compose 自身の CI の `pnpm install` が壊れる。**dev サーバが兄弟の
+チェックアウトを要ることより、install が壊れることのほうが厳密に悪い。**
+
+**その選択の代償が 1 つあり、ゲートを 1 箇所直した。** `check:deps` の規則 5
+(DECLARED == IMPORTED)は、宣言することが禁じられている import に対して
+**満たしようがない**。`SCAN_ROOTS` は最初から `apps` を挙げていた(=エントリポイントを
+予期していた)のに、規則 5 はその場合と突き合わされたことが無かった。
+そこで `REPOSITORY_POLICY.devServerResolved` を足し、
+**`apps/` からの import に限り、宣言の要求だけを免除する**ようにした。免除していないもの:
+
+- 規則 3(推移的 import 禁止)は**先に**評価される。`apps/` から `mc-sim` を import すれば
+  今でも `transitive-import` で落ちる — prime directive を担っているのはこちら側である。
+- 規則 7(生の時計読み禁止)はそのまま効く。**これがエントリポイントを
+  スキャン外へ移動させて解決しなかった一番の理由である** — フレームループは
+  `performance.now()` が紛れ込む場所そのものだからである。
+- 免除は宣言だけで、**到達範囲は 1 mm も広がっていない**。
+
+3 つともミューテーションで確認してある(mc-sim を import する / フレームループで
+`performance.now()` を読む / ホワイトリスト外の mc-audio を import する — 3 つとも赤)。
+
+> **`scripts/check-dependency-whitelist.ts` は「フェンスから下は 16 リポジトリで
+> byte-for-byte」という規約を持つ。** 今回の変更はフェンスより下に 1 条件だけ入る。
+> ただし**その規約は既に守られていない**: 実測(2026-07-28)で mc-compose / mc-render /
+> mx-ui / mx-gameplay / mc-kernel / mc-sim の 6 つは `SCAN_ROOTS` 以降が
+> **6 通りとも異なるハッシュ**で、行数も 977〜1030 と割れている。
+> **データ(どのパッケージを免除するか)はフェンスの中の `REPOSITORY_POLICY` に置いた**ので、
+> 他リポジトリがこの条件を取り込んでも、集合が空である限り挙動は変わらない。
 
 ### 3.6 移植の内訳
 
