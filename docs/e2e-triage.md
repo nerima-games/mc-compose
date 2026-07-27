@@ -77,8 +77,20 @@ DEMOTE 43 本の降ろし先: **mx-ui 39 本 / mc-render 2 本 / mc-save 2 本**
 | 降ろし先 | triage が割り当てた本数 | 移植済み | 未移植 |
 | --- | ---: | ---: | ---: |
 | mx-ui | 39 | **20** | 19 |
-| mc-render | 2 | 0 | 2 |
-| mc-save | 2 | 1 | 1 |
+| mc-render | 2 | **2** | 0 |
+| mc-save | 2 | **1** | 1 |
+| **合計** | **43** | **23** | **20** |
+
+> この表は一度「mc-render 0 本移植済み」と書かれて commit 直前に直った。同じ文書の
+> #23・#24 の欄は同じ日付で「移植済み → `mc-render/test/movement-keys.test.ts`」と書いており、
+> そのファイルは 10 本 green で存在していた。**同じことを述べる手書きの表が 2 つあれば、
+> いつか食い違う** — この組織が `SCAN_ROOTS` / 出荷ソース述語 / `package.json` `files` で
+> 3 度やった失敗と同じ形である。表の数字が本文の欄から導出されていない限り、
+> この行はまた壊れる。
+
+mc-render の 2 本は `test/movement-keys.test.ts` の 10 テストになった。参照実装の主張は
+`does not crash` であり、それは**何も主張していない**に等しい(§0 の「主張を運ぶ」の反例)。
+移植したのは「そのキーがどの意図に束ねられているか」であって、**落ちないこと**ではない。
 
 mx-ui の 20 本は 3 ファイル 28 テストになった(`test/accessibility-gate.test.ts`、
 `test/modal-flows.test.ts`、`test/screen-mount.test.ts`)。本数が増えているのは
