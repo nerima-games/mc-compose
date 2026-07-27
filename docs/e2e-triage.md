@@ -74,19 +74,46 @@ DEMOTE 43 本の降ろし先: **mx-ui 39 本 / mc-render 2 本 / mc-save 2 本**
 
 ### 2.1 移植の進捗(2026-07-27 追記。上の判定は 1 つも変えていない)
 
-| 降ろし先 | triage が割り当てた本数 | 移植済み | 未移植 |
-| --- | ---: | ---: | ---: |
-| mx-ui | 39 | **20** | 19 |
-| mc-render | 2 | **2** | 0 |
-| mc-save | 2 | **1** | 1 |
-| **合計** | **43** | **23** | **20** |
+**この節は 3 度目の追記を受けている。** 下の表が最新で、過去の数字は欄外に残してある。
+**動いたのは移植の進捗だけである。§2 の集計(43 / 25 / 2)も §3 の判定語も、
+`d43cf46` が確定させた降ろし先の訂正も、1 つも変えていない。**
 
+| 降ろし先 | triage が割り当てた本数 | 再判定後に所有 | 移植済み | 未移植 |
+| --- | ---: | ---: | ---: | ---: |
+| mx-ui | 39 | **37** | **29** | 8 |
+| mc-render | 2 | **4** | 2 | 2 |
+| mc-save | 2 | 2 | 1 | 1 |
+| **合計** | **43** | **43** | **32** | **11** |
+
+「再判定後に所有」の列は `d43cf46` が確定させた **touch controls 2 本の mc-render への訂正**
+だけを反映している(§3.5 #34-35)。**crosshair 2 本は mx-ui のままで、そして書かれた** —
+同じ commit が `index.html:124` を根拠に棄却したとおりである。
+**訂正した touch controls 2 本はまだ書かれていないので mc-render の未移植に立っている** —
+降ろし先を直すことは移植ではない。
+
+mx-ui の未移植 8 本の内訳: 設定画面 3 / #19 1 / `usable at ${width}px` 2 /
+`#settings-apply` 1 / `Escape key opens` 1。
+mc-render の 2 本は touch controls、mc-save の 1 本は #9 である。**8 + 2 + 1 = 11。**
+**残っている 8 本はどれも「まだ書いていない」ではない** — 判断か、構造的に真か、
+ブラウザが要るかである。「その画面が mx-ui に無い」という理由は**ゼロになった。**
+
+> **初回追記(mx-ui 20 / mc-render 2 / mc-save 1 = 23 移植済み、20 未移植)。**
 > この表は一度「mc-render 0 本移植済み」と書かれて commit 直前に直った。同じ文書の
 > #23・#24 の欄は同じ日付で「移植済み → `mc-render/test/movement-keys.test.ts`」と書いており、
 > そのファイルは 10 本 green で存在していた。**同じことを述べる手書きの表が 2 つあれば、
 > いつか食い違う** — この組織が `SCAN_ROOTS` / 出荷ソース述語 / `package.json` `files` で
 > 3 度やった失敗と同じ形である。表の数字が本文の欄から導出されていない限り、
 > この行はまた壊れる。
+>
+> **予告どおり壊れていた。今回それを踏んだ。** 初回追記の「未移植 19 本」の内訳表(下に原文のまま
+> 残してある)は 1 行目を **7**(main menu 5 / loading 1 / crosshair 1)、2 行目を **4** と書いている。
+> だが 1 行目の括弧は「#2 と `main-menu.e2e.ts` の DEMOTE 分」であり、それは 1 + 5 = **6** で、
+> loading と crosshair を足すと **8** になる。一方 2 行目が名指しする
+> `settings-overlay.e2e.ts` の slider / persist 系は §3.6 の内訳で数えて **3** 本しかない。
+> **1 行目が 1 少なく 2 行目が 1 多かったので、合計 19 だけが合っていた。**
+> 正しい分割は 8 / 3 / 8 である。**合計も降ろし先も判定も誤っていない。誤っていたのは
+> 内訳表の 2 つの数字だけで、そしてそれは「main menu を 5 本と読むか 6 本と読むか」を
+> 次に移植する者に 1 度だけ迷わせるのにちょうど足りた。**
 
 mc-render の 2 本は `test/movement-keys.test.ts` の 10 テストになった。参照実装の主張は
 `does not crash` であり、それは**何も主張していない**に等しい(§0 の「主張を運ぶ」の反例)。
@@ -97,7 +124,32 @@ mx-ui の 20 本は 3 ファイル 28 テストになった(`test/accessibility-
 `hotbar slot 1..9` を 9 本に開いたためで、逆に accessibility の 7 本は 1 本のスイープに畳まれている。
 **28 本すべてについて、狙った実装コードを壊して赤くなることを確認してある。**
 
+**さらに 9 本(2026-07-27、第 2 波)。「その画面が mx-ui にまだ無い」で止まっていた 8 本が
+ぜんぶ解けた。** メインメニュー 6 本(#2 と `main-menu.e2e.ts` の DEMOTE 5 本)、
+ローディング画面 1 本、crosshair 2 本(#15 と `hud.e2e.ts` の重複)が
+3 ファイル 54 テストになった(`mx-ui/test/main-menu.test.ts`、
+`mx-ui/test/loading-screen.test.ts`、`mx-ui/test/crosshair.test.ts`)。
+`accessibility-gate.test.ts` のスイープは 4 画面から **7 画面**になり 9 → 12 テスト。
+mx-ui の suite は 226 → 283。**新規 57 本すべてについて、狙った実装コードを壊して
+赤くなることを確認してある(69 変異、うち 68 が 1 本以上を殺し、全て revert 済み)。**
+残る 1 変異は `setMotion` の早期 return を外すもので、`project()` が完全に差分化されている
+以上**観測不能な等価変異**である。テストの穴ではないので、そう記録して残した。
+
+画面は 3 つとも `domain/` の導出 + `application/` の射影という既存の形で書かれている
+(`domain/main-menu.ts` / `application/main-menu-view.ts`、
+`domain/loading-screen.ts` / `application/loading-view.ts`、
+`domain/crosshair.ts` / `application/crosshair-view.ts`)。
+**3 つともリスナを 1 つも持たず、タイマーも 1 つも持たない。** メニューの「クリック」は `test/modal-flows.test.ts` の
+「E キー」と同じ扱いで、mx-ui が持つのは**押した後にメニューがどこにいるか**だけである
+(DN-UI-4)。設定画面がここに無い理由は依然として `mx-ui/test/screen-views.test.ts` 冒頭にあり、
+**それはメニューには当てはまらない**: rebind はキーストロークそのものが全部だが、
+クリックを取り除いたメニューには**遷移という値**が残る。
+
 **未移植 19 本の理由は 3 種類しかなく、どれも「まだ書いていない」ではない。**
+
+> **以下の表は初回追記の原文である(数字の誤りは上の欄外で訂正済み)。**
+> 第 2 波の後、**1 行目は 8 → 0 になり、この理由の分類そのものが消えた。**
+> 2 行目・3 行目は動いていない — そちらは判断と構造であって、書き忘れではないからである。
 
 | 理由 | 本数 | 内訳 |
 | --- | ---: | --- |
@@ -130,7 +182,7 @@ mc-render の `application/dom-surface.ts:172` は `addEventListener` を持ち�
 | # | test() | 判定 | 行き先・必要なもの |
 | --- | --- | --- | --- |
 | 1 | `WebGL2 canvas is present and active` | NEEDS-BROWSER | **mc-compose**。ブラウザエントリポイント + mc-render |
-| 2 | `main menu renders on boot` | DEMOTE | **mx-ui**。1 画面の DOM<br>**未移植(2026-07-27)。** mx-ui にメインメニューのレンダラが無い。`application/` にあるのは hud / inventory / caption / save-indicator の 4 画面で、メニューはそのどれでもない。`#mm-new-world` に当たる要素が無いので、問いが立たない |
+| 2 | `main menu renders on boot` | DEMOTE | **mx-ui**。1 画面の DOM<br>**移植済み(2026-07-27、第 2 波)** → `mx-ui/test/main-menu.test.ts`「mounts into the host and opens on its root card」。参照実装の主張は「初期化の後に `#mm-new-world` が見える」だが、本実装ではそれより強い: 親は**引数**である(`docs/public-api.md` §4-1)ので、メニューが**渡された親に**生えることと、2 インスタンスが 1 要素も共有しないことを問える<br>*(初回追記時は未移植。理由は「`application/` にあるのは hud / inventory / caption / save-indicator の 4 画面で、メニューはそのどれでもない」だった。)* |
 | 3 | `no fatal startup errors before game session` | NEEDS-BROWSER | **mc-compose**。全 Layer が起動時に落ちないこと = 合成の主張 |
 | 4 | `game loop starts and FPS counter becomes non-zero` | NEEDS-BROWSER | **mc-compose**。フレームが回る = `runFrameWith` が実際に駆動している |
 | 5 | `dynamic DOM elements are injected after game initialization` | DEMOTE | **mx-ui**<br>**移植済み(2026-07-27)** → `mx-ui/test/screen-mount.test.ts`。「JS が注入する」より強い主張になった: 親は**引数**であって探索先ではない(`docs/public-api.md` §4-1)ので、4 画面すべてが渡された親に mount することと、2 インスタンスが 1 要素も共有しないことを問える |
@@ -180,11 +232,99 @@ mx-multiplayer → mc-sim → mx-gameplay / mx-ui をまたぐので、定義上
 
 | # | test() | 判定 | 行き先・必要なもの |
 | --- | --- | --- | --- |
-| 15 | `crosshair is visible after game loads` | DEMOTE | **mx-ui**。HUD の DOM。#26 と重複<br>**未移植(2026-07-27)。** mx-ui は crosshair を描いていない(`application/` 全体に 1 度も現れない)。画面中央の照準はカメラの中心であって HUD の投影ではないので、**mc-render の持ち物である可能性が高い**。降ろし先の再判定が要る |
+| 15 | `crosshair is visible after game loads` | DEMOTE | **mx-ui**。HUD の DOM。#26 と重複<br>**移植済み(2026-07-27、第 2 波)** → `mx-ui/test/crosshair.test.ts`。降ろし先は `d43cf46` のとおり mx-ui。**保留していた「パレットの保証にこのマークを収める節が無い」は解けた** — 節を足すのではなく、**照準が自分用の scrim を連れて歩く**ことで既存の G1 の中に入った。新トークンは 1 つも足していない。詳細は下の欄外 |
 | 16 | `left click on canvas does not crash game` | **OBSOLETE** | 「クラッシュしない」は主張ではない。`gameplay:interactions` は `Effect<void, never, _>` で、エラーチャネルが `never` である。破壊の結果を主張するテスト(#31)に置き換わる |
 | 17 | `right click on canvas does not crash game` | **OBSOLETE** | 同上 |
 | 18 | `repeated left and right clicks do not accumulate errors` | NEEDS-PUBLISH | **mc-compose**。入力エッジが毎フレーム 1 回だけクリアされること。`render:input` が存在する理由そのもの(mc-render `stages/stage-ids.ts` 冒頭)。**mc-render + mc-sim** |
 | 19 | `game remains in play mode after click (overlays stay closed)` | DEMOTE | **mx-ui**。モーダルスタックの状態機械<br>**未移植(2026-07-27)。主張が構造的に真になったので、書けば必ず緑になるテストにしかならない。** mx-ui でモーダルを開ける動詞は `openScreen` だけで、`render` は `ModalStack` を引数にも戻り値にも持たない。「クリックしても開かない」は型で閉じている。HUD 側の対応する主張(死んでも画面を開かない)は `test/hud-view.test.ts`「marks death as state rather than acting on it」が既に持っている |
+
+> **crosshair の移植(2026-07-27、第 2 波)。降ろし先は 2 度確かめて mx-ui、
+> そして「保証の形」の問題は節を足さずに解けた。**
+>
+> `d43cf46` の判断は正しい。`index.html:124` が `#crosshair` を `#survival-hud` や
+> `#sound-captions` と同じ `body.hud-hidden` の規則で隠している以上、参照実装の書き手は
+> これを HUD だと思っていた。**そして `#sound-captions` も `#autosave-status` も
+> 現に mx-ui のものである。**
+>
+> 実装を最後まで読むと、別のものが出てくる。
+> `packages/presentation/hud/crosshair.ts:19-20` は照準に
+> `mix-blend-mode: difference` と `drop-shadow` を掛けており、`crosshair.test.ts:296`
+> 「should protect crosshair contrast against bright and dark backgrounds」が
+> **その 2 つを名指しで assert している**。つまり参照実装は crosshair のコントラスト方針を
+> 明示的に持っていて、**それは色ではない**。線自体は `background-color: white` だが、
+> 画面に出る色は `255 - 背後のピクセル` である。
+>
+> 固定色を選ばなかったのは正しい。**任意のワールドピクセルの上で読める固定色は無い。**
+> ただし `difference` は**レンジの真ん中で壊れる**。合成結果は `|背後 − 元|` なので、
+> 白い線を中間グレーの上に置くと、ほぼ同じグレーが返ってくる:
+>
+> | ワールドピクセル | 線 対 背後 | ハロー 対 背後 |
+> | ---: | ---: | ---: |
+> | 96 | 2.38:1 | 1.00:1 |
+> | 128 | **1.01:1** | **1.00:1** |
+> | 160 | 2.44:1 | 1.00:1 |
+>
+> `filter` は blend より先に走るので、**安全網であるはずの黒いハローも差分を取られて
+> 背後そのものに戻る**。線とハローが同時に消える。石も水も、夕暮れのたいていのものも
+> このバンドにいる。**参照実装のテストは方針が「書かれている」ことを assert しており、
+> 効くことは assert していない** — そしてタイトルが名指しする bright と dark は、
+> ちょうどそれが安全な 2 点である。`domain/save-status.ts` の自動保存ペアに続いて、
+> このパレットの算術が参照実装に見つけた **2 件目の欠陥**である。
+>
+> **解いた方法は、パレットに節を足すことではなかった。**
+> mx-ui の `domain/palette.ts` は、シーンの上に直接描かれたものを保証の外に置いたうえで、
+> その理由も書いている: 「That is why `SCRIM` is a token and not a decoration: it is the
+> mechanism by which the claim above is made honourable, and **content that leaves it
+> leaves the guarantee with it**」。**ならば離れさせなければよい。**
+> 照準の線は `INK`、その 1px の縁は `SCRIM` — つまり**照準が自分用の scrim を連れて歩く**。
+> 参照実装の `drop-shadow(0 0 2px rgba(0,0,0,.9))` は既にそれであって、
+> `rgba(0,0,0,.9)` は `SCRIM` と 3 チャンネルしか違わない。**壊しているのは上に載せた
+> blend mode のほうで、それがハローを取り上げてしまう。**
+>
+> 結果として **新トークンは 0 個**である。床は `surveyPalette()` が既に測っている
+> `worstCaseContrastOnScrim(INK)` = **13.34:1**(アイコンの床は 3:1)であり、
+> 既存のテストが既に pin している数字がそのまま照準の床になる。
+> `CROSSHAIR` トークンを足す道も検討したが、それは新しいコントラスト測定と、
+> `SLOT_SELECTED`(白 対 白、距離 0)との全ペア衝突と、その言い訳の免除エントリを
+> 3 つセットで連れてくる。**保証を広げずに済むなら広げない。**
+>
+> **スイープの空振りは実在した。** `mx-ui/test/accessibility-gate.test.ts` の画面別監査は
+> `color` しか読んでいなかったので、テキストを持たない crosshair は
+> **1 色も見られないまま緑**になる。ミューテーションで確認してある: 線の色をベタの
+> `#f0f0f0` に変えても、監査は気づかなかった。**監査を `background-color` まで広げた。**
+> 判定はプロパティ名の一覧ではなくパレット自身の区別で書ける — **未ガードのトークンは面**
+> (`SCRIM` / `SURFACE` / `METER_TRACK` / `SLOT_FILL`。測っていないのは、他が
+> それに対して測られる側だからである)なので背景に使ってよい。**ガード済みのトークンはマーク**
+> なので、どこに塗られていても自分の床を超えていなければならない。トークンでない値は
+> どちらでも失格である。**既存 5 画面はいずれも緑のままで、以前は見えなかった
+> 「背景に生リテラル」が新たに捕まるようになった。**
+
+> **ヒットマーカーはタイマーを持たずに移植できた(第 2 波)。**
+> 参照実装は `crosshair.ts:141` で `setTimeout(resetPulse, 120)` を使う — レンダラの中の
+> 壁時計であり、plan.md §4.3 がリポジトリ全体で禁じているものである。要らなかった:
+> パルスは「ある時刻からの継続時間」であって、それは `domain/save-status.ts` と
+> `domain/loading-screen.ts` が既に持っている形である。フレームが `lastHitAtSecs` を置き、
+> `crosshairViewModel` が `nowSecs` を引数で取る(DN-UI-10)。
+> **参照実装が手で管理している `pulseTimeoutRef` — `hide` でも `toggle` でも再パルスでも
+> 消して回るあれ — は、消すものが無いので丸ごと消えた。**
+>
+> **表示条件も新しいフラグにはならなかった。** 参照実装は `visibleRef` を持つが、
+> 「照準はポインタロックを要る」ので `domain/modal-stack.ts` の `pointerLockReleased` が
+> 既に答えである。おかげで参照実装には言えない主張が立つ: **まだ誰も書いていない画面**
+> (`achievements`、`statistics`)を開いても照準は下がる。呼び出し箇所の一覧では覆えない。
+>
+> **そして 1 つ、reduced-motion で情報を落とさないようにした。** 参照実装のパルスは
+> 1.45 倍のスケールで、それは装飾アニメーションなので `domain/accessibility.ts` の規定では
+> reduced-motion で抑止される — **抑止するとその人はヒットのフィードバックを完全に失う。**
+> ローディングバーの凍結と同じ形の間違いである。だから mx-ui では**ヒットは常に線が太くなり**
+> (`weight` はパレットが宣言済みの `Distinguisher` である)、スケールはモーションが
+> 許されているときの上乗せにした。**誰も信号を失わず、一部の人はアニメーションも得る。**
+>
+> **持ってこなかったもの**: `DomOperationsService`。参照実装の crosshair ファイルは
+> trading / settings-overlay / inventory-renderer が import する汎用 DOM ファサードも
+> 輸出しており、それは同居しているだけの別の仕事である。
+> **中央に来ているかの検証も持ってこない** — それはレイアウトでブラウザが要る
+> (`hud.e2e.ts:61-62`)。compose に残る。
 
 > #16 / #17 が OBSOLETE なのは「弱い」からではなく、**新アーキテクチャで主張が消える**からである。
 > 参照実装ではルールが合成層にあり、クリックが何を壊すかを合成層でしか確かめられなかったので、
@@ -230,10 +370,10 @@ mx-multiplayer → mc-sim → mx-gameplay / mx-ui をまたぐので、定義上
 | ファイル | 本数 | 判定 | 備考 |
 | --- | ---: | --- | --- |
 | `accessibility.e2e.ts` | 7 | **DEMOTE(7 本すべて)→ mx-ui** | 6 画面 + パラメタライズ 1。名前付けとコントラスト比は 1 画面で閉じる。**ただし 7 本のうち 6 本が同一のヘルパーを画面違いで呼ぶだけなので、mx-ui では 1 本のパラメタライズドテストになる**<br>**移植済み(2026-07-27)** → `mx-ui/test/accessibility-gate.test.ts`。**予想どおり 1 本のスイープになった** |
-| `hud.e2e.ts` | 3 | DEMOTE ×2 → mx-ui / NEEDS-BROWSER ×1 → mc-compose | `#crosshair is visible`(#15 と重複)と `HUD remains usable at ${width}px` は mx-ui。`#fps-value updates with numeric content` は **フレームが実際に回っていること**の主張なので compose<br>**crosshair は未移植(#15 と同じ理由)。`HUD remains usable` は部分移植(2026-07-27)** → `mx-ui/test/accessibility-gate.test.ts`。**この 1 本が 39 本のうち唯一「mx-ui が NO と答えた」ものである** — 下の欄外を見よ |
+| `hud.e2e.ts` | 3 | DEMOTE ×2 → mx-ui / NEEDS-BROWSER ×1 → mc-compose | `#crosshair is visible`(#15 と重複)と `HUD remains usable at ${width}px` は mx-ui。`#fps-value updates with numeric content` は **フレームが実際に回っていること**の主張なので compose<br>**crosshair は移植済み(2026-07-27、第 2 波。#15 と同じファイル)。`HUD remains usable` は部分移植(2026-07-27)** → `mx-ui/test/accessibility-gate.test.ts`。**この 1 本が 39 本のうち唯一「mx-ui が NO と答えた」ものである** — 下の欄外を見よ |
 | `inventory-overlay.e2e.ts` | 6 | **DEMOTE(6 本すべて)→ mx-ui** | 開閉・スロット要素・レスポンシブ・E/Escape。**すべて `ui:overlay-sync` のモーダル状態機械で、世界が要らない**<br>**4 本移植済み(2026-07-27)** → `mx-ui/test/modal-flows.test.ts` と `test/screen-mount.test.ts`。残り 2 本は下の内訳を見よ。**E キーそのものは移植していない** — `application/dom-surface.ts` に `addEventListener` が無く、キーは mc-render の持ち物である |
-| `loading-screen.e2e.ts` | 1 | DEMOTE → mx-ui | 最低表示時間はローディング画面の内部規約<br>**未移植(2026-07-27)。** mx-ui はローディング画面を持たない。最も近い「最低表示時間」の概念は `domain/save-status.ts` の `SAVED_VISIBLE_SECS` で、それは既に `test/save-indicator.test.ts` が持っている。**ローディング画面が書かれたときに、その画面のテストとして立つ** |
-| `main-menu.e2e.ts` | 7 | DEMOTE ×5 → mx-ui / NEEDS-BROWSER ×2 → mc-compose | `New World confirm starts game session` と `Options opens settings before starting a world and returns to main menu` は **`Title → InGame` 遷移**を含むのでセッションライフサイクル = compose。残り 5 本はメニューの DOM<br>**5 本とも未移植(2026-07-27)。** #2 と同じ理由 — mx-ui にメインメニューが無い。**降ろし先の判定は正しく、まだ書かれていないだけである**(plan.md §3.13 はメニューを mx-ui に置いている) |
+| `loading-screen.e2e.ts` | 1 | DEMOTE → mx-ui | 最低表示時間はローディング画面の内部規約<br>**移植済み(2026-07-27、第 2 波)** → `mx-ui/test/loading-screen.test.ts`。初回追記が「ローディング画面が書かれたときに、その画面のテストとして立つ」と予告したとおりに立った。予告どおり `domain/loading-screen.ts` は `domain/save-status.ts` と同じ形(時刻は引数、DN-UI-10)で、**参照実装が 90 秒のタイムアウトとストップウォッチで、しかも本来の 2,500 ms を CI ジッタのため 1,800 ms に緩めて問うていた 1 本が、境界の両側を厳密に問う算術になった** |
+| `main-menu.e2e.ts` | 7 | DEMOTE ×5 → mx-ui / NEEDS-BROWSER ×2 → mc-compose | `New World confirm starts game session` と `Options opens settings before starting a world and returns to main menu` は **`Title → InGame` 遷移**を含むのでセッションライフサイクル = compose。残り 5 本はメニューの DOM<br>**5 本とも移植済み(2026-07-27、第 2 波)** → `mx-ui/test/main-menu.test.ts`。初回追記の「降ろし先の判定は正しく、まだ書かれていないだけである」(plan.md §3.13 はメニューを mx-ui に置いている)がそのまま解消した。**5 本ともクリックを駆動していたが、移植したのはクリックの後にメニューがどこにいるかである** — 下の欄外を見よ |
 | `settings-overlay.e2e.ts` | 9 | DEMOTE ×8 → mx-ui / NEEDS-BROWSER ×1 → mc-compose | `persisted render distance is reflected in slider after page reload` だけがリロードをまたぐ。`render distance change persists immediately` と `quality selection persists immediately without Apply` は mx-ui + mc-render の設定適用で、**mx-ui に降ろしたうえで mc-render 側に対応するテストを置く**のが正しい割り方<br>**3 本移植済み(2026-07-27)** → `mx-ui/test/modal-flows.test.ts`。**設定画面そのものは mx-ui に無く、それは意図的である** — `mx-ui/test/screen-views.test.ts` の冒頭が理由を述べている(rebind は `KeyboardEvent.code` を要り、それはリスナを要り、リスナは語彙に無い)。移植できたのは**スタックの遷移**の側だけである |
 
 #### 33 本の内訳(算数を検算できるように全部書く)
@@ -260,6 +400,15 @@ mx-multiplayer → mc-sim → mx-gameplay / mx-ui をまたぐので、定義上
 `#crosshair is visible after game loads`(DEMOTE)/
 `#fps-value updates with numeric content`(**NEEDS-BROWSER → compose**)/
 `HUD remains usable at ${viewport.width}px`(DEMOTE)。
+
+> **`#crosshair is visible` は #15 と同じ 1 ファイルに移植した(2026-07-27、第 2 波)** →
+> `mx-ui/test/crosshair.test.ts`。重複を 2 本のテストに開くことはしていない —
+> 2 つのファイルが同じ主張を別の言葉で書いていたことこそが、
+> `docs/e2e-triage.md` がこれを「#15 と重複」と記録した理由だからである。
+> **移植版は元より強い**: 参照実装が問えたのは「attached であること」だけで、
+> それはあの実装で `show()` が `document.body` に append し `hide()` が remove するからである。
+> mx-ui には `removeChild` が無いので可視性は `hidden` 属性であり、
+> **面白いほうの問い(いつ描かれないか)**が初めて問える。
 
 > **`HUD remains usable` を移植したら赤になった(2026-07-27)。39 本のうち唯一である。**
 > 参照実装はこの 1 本の中で `getByLabel('Health')` / `getByLabel('Hunger')` を使って
@@ -294,6 +443,28 @@ mx-multiplayer → mc-sim → mx-gameplay / mx-ui をまたぐので、定義上
 `loading-screen.e2e.ts`(1 / DEMOTE 1):
 `keeps loading visible for a minimum duration before gameplay starts`。
 
+> **移植の中身(2026-07-27、第 2 波)。** 参照実装のこの 1 本は、ページを起動し、
+> メインメニューを最大 60 秒待ち、New World をクリックし、オーバーレイを最大 30 秒待ち、
+> 1 秒眠ってから「2,500 ms のうち 1,800 ms は出ていた」と主張する。**緩めた 700 ms は
+> ジッタのための保険であって、主張の一部ではない。** 本実装では
+> `LOADING_MINIMUM_VISIBLE_SECS` は引数で来る時刻に対する算術なので(DN-UI-10)、
+> **床のちょうど手前とちょうど上の両方**をマイクロ秒で問える。
+>
+> **床が「まだ働いている」と別物であることが、移植して初めて言えるようになった。**
+> 参照実装にとってはどちらも `toBeVisible()` である。`loadingScreenView` は
+> `{ kind: 'preparing', held: true }` を返し、`held` は DOM の
+> `data-loading-held` にも出る — **ワールドは出来ていて、床だけが画面を支えている**状態である。
+>
+> **そして 1 つ、参照実装側の欠陥が出た。** `loading-screen.ts:67` は不定(indeterminate)の
+> プログレスバーを描き、情報を運ばないので `aria-hidden` にしている。ところが `:123` の
+> reduced-motion 分岐はアニメーションを外したうえで**バーを `left:29%;width:42%` に置き去りにする**。
+> OS にアニメーションを切ってくれと頼んだプレイヤーにとって、揺れていたはずのものは
+> **3 分の 1 ほど進んだ確定的な進捗に見える静止バー**になり、二度と動かない —
+> つまり遅いロードがハングしたロードに見える。`domain/accessibility.ts` は
+> reduced-motion を「せっかちな人のためではなく、乗り物酔いする人のため」と書いている。
+> **凍った不定バーはそのどちらにも応えず、最も無視しにくい層に向かって数字を捏造する。**
+> だから mx-ui のローディング画面はバーを描かない。**言葉だけである。**
+
 `main-menu.e2e.ts`(7):
 `shows title, play buttons, and Options`(DEMOTE)/
 `Options opens settings before starting a world and returns to main menu`(**compose**)/
@@ -302,6 +473,53 @@ mx-multiplayer → mc-sim → mx-gameplay / mx-ui をまたぐので、定義上
 `New World cancel returns to main menu root`(DEMOTE)/
 `Load World back button returns to root`(DEMOTE)/
 `no fatal startup errors on menu display`(DEMOTE)。
+
+> **移植の中身(2026-07-27、第 2 波)。DEMOTE 5 本ぜんぶと、#2。**
+>
+> **クリックは移植していない。** 5 本とも `page.click('#mm-new-world')` で駆動していたが、
+> それは `test/modal-flows.test.ts` の E キーや `test/screen-mount.test.ts` の数字キーと同じで、
+> mc-render の持ち物である(plan.md §2.3-2)。mx-ui が持つのは**押した後にメニューがどこにいるか**で、
+> それは `domain/main-menu.ts` の純関数である。
+>
+> **設定画面が無い理由がここには当てはまらない**ことを先に確かめてある。
+> `mx-ui/test/screen-views.test.ts` 冒頭の主張は「rebind はキーストロークそのものが全部なので、
+> キーを取り除くと何も残らない」であり、それは正しい。**メニューからクリックを取り除くと
+> 遷移が残る** — 現に 5 本のうち 3 本(`New World cancel`、`Load World back`、
+> `New World flow` の可視性の半分)はポインタについて何も言っておらず、
+> **どのカードが上にいるか**だけを問うている。
+>
+> 移植して強くなった点が 3 つある。
+>
+> 1. **往復が「根に戻った」ではなく「元の値に戻った」になった。** 参照実装は
+>    `#mm-new-world` が再び見えることを見ており、**2 枚目のカードを下に開いたまま**でも
+>    それは満たされる。`backToRoot(openPanel(s, ...))` が `s` と `toStrictEqual` であることは満たさない。
+> 2. **空の名前の置換が画面に出た。** `main-menu-handlers.ts:282` の
+>    `trimmed.length > 0 ? trimmed : 'New World'` は**確定ハンドラの中**にあるので、
+>    参照実装のカードは空欄を見せたまま「New World」という名前の世界を作れる。
+>    **プレイヤーに見せた文字列と作られる世界の名前が違い、テストからは見えない。**
+>    `worldNameLabel` は 1 か所しかないので、カードが見せる名前が作られる名前である。
+> 3. **`no fatal startup errors on menu display` は「落ちない」の言い換えなので捨てた。**
+>    §3.5 が #16 / #17 について既に述べたとおりである。代わりに置いたのは全状態の網羅で、
+>    **どの状態でもカードがちょうど 1 枚**であることを問う。**2 枚出ていても 0 枚でも、
+>    コンソールには何も出ない。**
+>
+> **`role="button"` は 1 つも付けていない。** §3.6 が `usable at ${width}px` の後半について
+> 出した判断(「押せない control に `role="button"` を付けるのは、届くのに使えない control を
+> 作ることである」)は、**ボタンでできているメニューにこそ効く**。
+> `accessibility-gate.test.ts` のフォーカス可能物の国勢調査に、メインメニューは
+> **0 / 0 の行として載っている** — 押せるようになった日に更新しなければならない行として。
+>
+> **Load World のセーブ一覧は「空」ではなく `unknown` である。** mc-save に訊く手段が無いので、
+> `application/inventory-view.ts` が防具立てについて出した答えをそのまま使った:
+> 空の一覧は「あなたに世界はありません」という**主張**であり、それが誤っている相手は
+> 世界がぜんぶ残っているプレイヤーである。
+>
+> **`onEsc` を持ってこなかったことも記録に値する。**
+> `main-menu-handlers.ts` の末尾はメニュー自身の Escape ハンドラで、
+> `preventDefault()` を呼んでサブ状態を根に戻す — セッション側に既に 1 つある
+> (`session-runtime-overlays.ts:151` が自分で困っていると書いている)のに、である。
+> **DN-UI-4 が禁じている 2 人目の所有者そのものである。** だから `backToRoot` は関数であって
+> リスナではなく、フレーム側の単一ハンドラが `escapePressed` と同じ資格で呼ぶ。
 
 `settings-overlay.e2e.ts`(9):
 `Escape key opens` / `second Escape key closes` / `pause -> settings -> resume returns to active gameplay state` /
