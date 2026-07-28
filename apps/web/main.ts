@@ -317,9 +317,28 @@ const boot = async (): Promise<void> => {
 
   // The gesture the browser requires: pointer lock can only be requested from a
   // user activation, so the canvas asks on click.
+  //
+  // A REFUSAL IS NOT AN ERROR. Some environments decline pointer lock outright
+  // — Playwright on SwiftShader is one, and answers `WrongDocumentError` — and
+  // a host that let that reach the console would make every automated run
+  // report a failure it cannot do anything about. The game degrades exactly as
+  // mc-render's `UNAVAILABLE_POINTER_LOCK` describes: keyboard still works,
+  // clicks stay UI clicks, and `attack` does not fire.
   canvas.addEventListener('click', () => {
-    if (document.pointerLockElement !== canvas) {
-      canvas.requestPointerLock()
+    if (document.pointerLockElement === canvas) {
+      return
+    }
+    try {
+      const requested: unknown = canvas.requestPointerLock()
+      if (requested instanceof Promise) {
+        requested.catch(() => {
+          canvas.setAttribute('data-pointer-lock', 'refused')
+        })
+      }
+    } catch {
+      // The attribute IS the record. A boolean nobody reads would be the
+      // unread-field shape this project keeps finding; a test can see this.
+      canvas.setAttribute('data-pointer-lock', 'refused')
     }
   })
 
@@ -394,42 +413,97 @@ const boot = async (): Promise<void> => {
   // becomes wrong, which is the intended way to find it.
   const terrainSource = await loadTerrainFixture()
 
+  // STREAMING, keyed to where the player is — not a one-shot load at boot.
+  //
+  // `syncWorld` takes a `DirtySource` port precisely so the thing that decides
+  // WHICH chunks should be resident can live outside mc-render. Here that is a
+  // radius around the player; when mc-worldgen publishes it becomes
+  // `ChunkStore.subscribeDirty` and this closure is deleted, not rewritten.
+  //
+  // A BOOT-TIME LOAD OF EVERYTHING WOULD HAVE PASSED EVERY TEST WRITTEN SO FAR
+  // and is the wrong shape for a world a player walks through: it bounds the
+  // world by what fits in memory at once, and it means nothing is ever
+  // released. What this exercises instead is `syncWorld`'s add AND remove.
+  // 2, not 3: the fixture is a 7x7 square and a radius of 3 covers all of it
+  // from anywhere, so nothing would ever stream. Small enough that crossing a
+  // chunk boundary genuinely changes the resident set.
+  const STREAM_RADIUS_CHUNKS = 2
+  const streamLoaded = new Set<string>()
+  let quadsByKey = new Map<string, ReadonlyArray<FixtureQuad>>()
+  let chunksStreamedIn = 0
+  let chunksDropped = 0
+
   if (terrainSource !== undefined) {
-    const loaded = new Set<string>()
-    const wanted: ReadonlyArray<ChunkRef> = terrainSource.chunks.map((chunk) => ({
-      cx: chunk.cx,
-      cz: chunk.cz,
-    }))
-    const quadsByKey = new Map<string, ReadonlyArray<FixtureQuad>>(
+    quadsByKey = new Map(
       terrainSource.chunks.map((chunk) => [chunkKeyOf(chunk), chunk.quads]),
     )
+    canvas.setAttribute('data-world-source', 'fixture')
+    console.log(
+      `[mc-compose] world: ${String(terrainSource.chunks.length)} chunks available from the ` +
+        `development fixture (seed ${String(terrainSource.seed)}); NOT a generated world`,
+    )
+  } else {
+    canvas.setAttribute('data-world-source', 'none')
+  }
 
-    const report = await Effect.runPromise(
-      syncWorld(
+  /**
+   * Which chunks should be resident around a world position.
+   *
+   * Filtered to what the fixture HAS, so the edge of the generated square is a
+   * boundary rather than a stream of misses — `syncWorld`'s mesher would answer
+   * `undefined` for each and defer it every frame forever.
+   */
+  const desiredAround = (x: number, z: number): ReadonlyArray<ChunkRef> => {
+    const cx0 = Math.floor(x / 16)
+    const cz0 = Math.floor(z / 16)
+    const wanted: Array<ChunkRef> = []
+    for (let cx = cx0 - STREAM_RADIUS_CHUNKS; cx <= cx0 + STREAM_RADIUS_CHUNKS; cx += 1) {
+      for (let cz = cz0 - STREAM_RADIUS_CHUNKS; cz <= cz0 + STREAM_RADIUS_CHUNKS; cz += 1) {
+        if (quadsByKey.has(chunkKeyOf({ cx, cz }))) {
+          wanted.push({ cx, cz })
+        }
+      }
+    }
+    return wanted
+  }
+
+  const streamAround = (x: number, z: number): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const report = yield* syncWorld(
         worldRenderer,
         {
           drain: Effect.sync(() => {
-            const changed = wanted.filter((chunk) => !loaded.has(chunkKeyOf(chunk)))
+            const wanted = desiredAround(x, z)
+            const wantedKeys = new Set(wanted.map(chunkKeyOf))
+            const changed = wanted.filter((chunk) => !streamLoaded.has(chunkKeyOf(chunk)))
+            const removed = [...streamLoaded]
+              .filter((key) => !wantedKeys.has(key))
+              .map((key) => {
+                const [cx, cz] = key.split(',')
+                return { cx: Number(cx), cz: Number(cz) }
+              })
             for (const chunk of changed) {
-              loaded.add(chunkKeyOf(chunk))
+              streamLoaded.add(chunkKeyOf(chunk))
             }
-            return { changed, removed: [] }
+            for (const chunk of removed) {
+              streamLoaded.delete(chunkKeyOf(chunk))
+            }
+            return { changed, removed }
           }),
         },
         (chunk) => Effect.sync(() => quadsByKey.get(chunkKeyOf(chunk))),
         { tile: (quad: MeshQuad) => (quad as FixtureQuad).tile },
-      ),
-    )
+      )
+      chunksStreamedIn += report.meshed
+      chunksDropped += report.removed
+      canvas.setAttribute('data-chunks-meshed', String(streamLoaded.size))
+      canvas.setAttribute('data-chunks-streamed-in', String(chunksStreamedIn))
+      canvas.setAttribute('data-chunks-dropped', String(chunksDropped))
+    })
 
-    canvas.setAttribute('data-world-source', 'fixture')
-    canvas.setAttribute('data-chunks-meshed', String(report.meshed))
-    console.log(
-      `[mc-compose] world: ${String(report.meshed)} chunks from the development ` +
-        `fixture (seed ${String(terrainSource.seed)}); NOT a generated world`,
-    )
-  } else {
-    canvas.setAttribute('data-world-source', 'none')
-    canvas.setAttribute('data-chunks-meshed', '0')
+  // The first fill, around the spawn, before the loop starts.
+  if (terrainSource !== undefined) {
+    await Effect.runPromise(streamAround(terrainSource.spawn.x, terrainSource.spawn.z))
   }
 
   // `renderModule()` is called for its `frameStages` only; its `layers` field
@@ -779,6 +853,11 @@ const boot = async (): Promise<void> => {
 
     grounded = resolved.isGrounded
     playerVelocityY = resolved.body.velocity.y
+
+    // Stream from where the player ACTUALLY ended up, not from where they
+    // asked to go: a player stopped by a wall should not load the chunks behind
+    // it.
+    Effect.runSync(streamAround(resolved.body.centre.x, resolved.body.centre.z))
     Effect.runSync(
       playerApi.moveTo({
         x: resolved.body.centre.x,

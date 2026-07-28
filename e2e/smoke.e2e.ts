@@ -467,3 +467,97 @@ test.describe('the player', () => {
  * comment, and a test that reached past the lock machine to fake the event
  * would be asserting about a build nobody runs.
  */
+
+test.describe('sustained play', () => {
+  test('#11 chunks stream in and out as the player walks', async ({ page }) => {
+    // THE DIFFERENCE BETWEEN A DEMO AND A WORLD. A boot-time load of everything
+    // passes every earlier test in this file and is the wrong shape: it bounds
+    // the world by what fits in memory at once and never releases anything.
+    // What this asserts is `syncWorld`'s ADD and its REMOVE.
+    await page.goto('/')
+    await expect
+      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
+        timeout: 15_000,
+      })
+      .toBe('true')
+
+    const residentAtSpawn = Number(
+      await page.locator('#game-canvas').getAttribute('data-chunks-meshed'),
+    )
+    expect(residentAtSpawn).toBeGreaterThan(0)
+
+    await page.locator('#game-canvas').click()
+    await page.keyboard.down('KeyW')
+    await page.waitForTimeout(3_000)
+    await page.keyboard.up('KeyW')
+
+    const streamedIn = Number(
+      await page.locator('#game-canvas').getAttribute('data-chunks-streamed-in'),
+    )
+    const dropped = Number(await page.locator('#game-canvas').getAttribute('data-chunks-dropped'))
+
+    // More than the first fill: anything counted here loaded because the player
+    // moved.
+    expect(streamedIn).toBeGreaterThan(residentAtSpawn)
+
+    // And the other half — the one that catches a renderer that only ever adds,
+    // which looks correct on screen and grows without bound.
+    expect(dropped).toBeGreaterThan(0)
+  })
+
+  test('#12 a sustained session stays healthy: frames advance, no defects, still standing', async ({
+    page,
+  }) => {
+    // Not "does it boot" but "does it keep going". A frame loop that throws on
+    // frame 200, a resolver that drifts the player into the floor, or a stream
+    // that leaks until it stalls all pass a first-frame assertion.
+    const fatal: Array<string> = []
+    page.on('console', (message) => {
+      if (message.type() === 'error') {
+        fatal.push(message.text())
+      }
+    })
+    page.on('pageerror', (error) => fatal.push(String(error)))
+
+    await page.goto('/')
+    await expect
+      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
+        timeout: 15_000,
+      })
+      .toBe('true')
+
+    const framesAtStart = Number(await page.locator('body').getAttribute('data-frames'))
+
+    // Walk, turn, walk back. Enough frames that a per-frame leak or a drift
+    // would show.
+    await page.locator('#game-canvas').click()
+    await page.keyboard.down('KeyW')
+    await page.waitForTimeout(2_000)
+    await page.keyboard.up('KeyW')
+    await page.keyboard.down('KeyD')
+    await page.waitForTimeout(1_500)
+    await page.keyboard.up('KeyD')
+    await page.keyboard.down('KeyS')
+    await page.waitForTimeout(2_000)
+    await page.keyboard.up('KeyS')
+
+    const framesAtEnd = Number(await page.locator('body').getAttribute('data-frames'))
+
+    // The loop never stopped. `boot` replaces the body attribute on a defect,
+    // so a stalled loop shows here as a count that stopped rising.
+    expect(framesAtEnd).toBeGreaterThan(framesAtStart + 100)
+    expect(await page.locator('body').getAttribute('data-mc-compose-boot')).toBe('running')
+
+    // Still standing on the world after all of it — not sunk into it, not
+    // fallen out of it.
+    expect(await page.locator('#game-canvas').getAttribute('data-player-grounded')).toBe('true')
+    const feetY = Number(
+      (await page.locator('#game-canvas').getAttribute('data-player-feet'))?.split(',')[1],
+    )
+    expect(feetY).toBeGreaterThan(0)
+
+    expect(fatal).toStrictEqual([])
+
+    await page.screenshot({ path: 'test-results/sustained.png' })
+  })
+})
