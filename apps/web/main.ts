@@ -110,9 +110,10 @@
  * `ChunkStore.subscribeDirty`, and that attribute becomes `generated`.
  */
 import * as THREE from 'three'
-import { Effect, Either, Exit, Layer, Scope } from 'effect'
+import { Context, Effect, Either, Exit, Layer, Scope } from 'effect'
 import {
   browserInputLayer,
+  InputService,
   chunkKeyOf,
   makeWorldRenderer,
   renderModule,
@@ -129,13 +130,14 @@ import {
 } from '@nerima-games/mx-ui'
 import { redstoneModule } from '@nerima-games/mx-redstone'
 import {
-  InMemoryChunkStoreLayer,
-  InMemoryEntityManagerLayer,
-  InMemoryInventoryLayer,
-  InMemoryPlayerLayer,
+  applyGravity,
   cellKey as gameplayCellKey,
   chunkKey as gameplayChunkKey,
   gameplayModule,
+  makeInMemoryWorld,
+  resolvePlayerMovement,
+  solidityFromStore,
+  PLAYER_HALF_HEIGHT,
 } from '@nerima-games/mx-gameplay'
 import {
   composeGame,
@@ -167,6 +169,22 @@ const clampDelta = (raw: number): DeltaTimeSecs =>
 /** How often the FPS readout is recomputed. Long enough to be a rate, short enough to watch. */
 const FPS_WINDOW_SECS = 0.5
 
+/**
+ * How fast the player walks, jumps and turns.
+ *
+ * THESE ARE HOST CONSTANTS AND SHOULD NOT BE. Walk speed and jump impulse are
+ * player TUNING, which mc-sim owns — `mc-render/docs/responsibility.md` puts the
+ * same class of value there for step height, and `domain/composition.ts` would
+ * rather this file held none of them. They are here because mc-sim is not
+ * composed and a player with no speed does not move at all.
+ *
+ * They are the first thing to delete when mc-sim publishes, and they are
+ * grouped and labelled so that deletion is one block rather than a search.
+ */
+const WALK_SPEED_M_PER_S = 4.3
+const JUMP_SPEED_M_PER_S = 8.4
+const LOOK_SENSITIVITY = 0.0022
+
 /** A quad as the fixture stores it: mc-meshing's `Quad`, plus its resolved tile. */
 type FixtureQuad = MeshQuad & { readonly tile: number }
 
@@ -194,6 +212,16 @@ type TerrainFixture = {
     readonly cx: number
     readonly cz: number
     readonly quads: ReadonlyArray<FixtureQuad>
+    /**
+     * Highest solid block per column, row-major over `lz * 16 + lx`.
+     *
+     * READ FROM THE CHUNK'S OWN BLOCKS by the generator, not inferred from the
+     * quads. A quad is a FACE — offset from its block by direction and spanning
+     * `width x height` after the greedy merge — so reconstructing solidity from
+     * quads is an off-by-one and a missing span at once. The first cut did
+     * exactly that and the player fell through the world to y = 0.
+     */
+    readonly heights: ReadonlyArray<number>
   }>
 }
 
@@ -483,46 +511,69 @@ const boot = async (): Promise<void> => {
   // block changes the world the player is looking at rather than a second copy
   // of it. That is the whole reason the two share a source: two worlds that
   // agree at boot and diverge on the first edit is the bug this avoids.
+  // SEEDED FROM THE HEIGHTMAP, not from the quads. See `heights` above.
+  //
+  // Only the top `SOLID_DEPTH_BLOCKS` of each column are marked solid, which is
+  // a deliberate approximation and is stated rather than hidden: a player can
+  // stand on the surface and cannot walk through it, and the interior is not
+  // reachable without first passing a surface block. Caves under the surface
+  // are NOT represented — this world has no holes to fall into, and the day the
+  // store comes from mc-worldgen it will.
+  const SOLID_DEPTH_BLOCKS = 4
   const worldBlocks = new Map<string, number>()
   const loadedChunks: Array<string> = []
   if (terrainSource !== undefined) {
     for (const chunk of terrainSource.chunks) {
       loadedChunks.push(gameplayChunkKey({ cx: chunk.cx, cz: chunk.cz }))
-      for (const quad of chunk.quads) {
-        // The quad's own cell, in world space. A quad is a FACE, so this marks
-        // the block it belongs to — enough for a store the player can mine.
-        const x = chunk.cx * 16 + quad.lx
-        const z = chunk.cz * 16 + quad.lz
-        worldBlocks.set(gameplayCellKey({ x, y: quad.y, z }), quad.blockId)
+      for (let lz = 0; lz < 16; lz += 1) {
+        for (let lx = 0; lx < 16; lx += 1) {
+          const top = chunk.heights[lz * 16 + lx] ?? -1
+          if (top < 0) {
+            continue
+          }
+          const x = chunk.cx * 16 + lx
+          const z = chunk.cz * 16 + lz
+          for (let y = top; y > top - SOLID_DEPTH_BLOCKS && y >= 0; y -= 1) {
+            worldBlocks.set(gameplayCellKey({ x, y, z }), 1)
+          }
+        }
       }
     }
   }
 
-  const gameplayServices = Layer.mergeAll(
-    InMemoryChunkStoreLayer({ blocks: worldBlocks, loaded: loadedChunks }),
-    InMemoryEntityManagerLayer(),
-    InMemoryInventoryLayer(),
-    InMemoryPlayerLayer(
-      terrainSource === undefined
-        ? undefined
+  // ONE CONSTRUCTION. `makeInMemoryWorld` hands back the Layer AND the handles,
+  // built from the same instances — see its header. Building a Layer here and
+  // constructing a second set for the loop is the `InputServiceLayer` failure
+  // mc-render records: two services, and the loop would move one player while
+  // `render:camera-mirror` mirrors the other.
+  const world = await Effect.runPromise(
+    makeInMemoryWorld({
+      world: { blocks: worldBlocks, loaded: loadedChunks },
+      ...(terrainSource === undefined
+        ? {}
         : {
-            feetPosition: {
-              x: terrainSource.spawn.x,
-              y: terrainSource.spawn.y,
-              z: terrainSource.spawn.z,
+            spawnPose: {
+              feetPosition: {
+                x: terrainSource.spawn.x,
+                y: terrainSource.spawn.y,
+                z: terrainSource.spawn.z,
+              },
+              yawRadians: terrainSource.spawn.yawRadians,
+              pitchRadians: terrainSource.spawn.pitchRadians,
             },
-            yawRadians: terrainSource.spawn.yawRadians,
-            pitchRadians: terrainSource.spawn.pitchRadians,
-          },
-    ),
+          }),
+    }),
   )
 
-  // Built ONCE, into a context the registration is provided from — the same
-  // shape `inputLayer` uses above, and for the same reason its comment gives:
-  // providing a Layer twice builds two services, and two `PlayerService`s means
-  // the stage moves one player while the renderer mirrors the other.
+  const playerApi = world.player
+  const inputApi = Context.get(inputContext, InputService)
+  const isBlockSolid = solidityFromStore(world.chunkStore)
+
+  let playerVelocityY = 0
+  let grounded = false
+
   const gameplayContext = await Effect.runPromise(
-    Effect.provideService(Layer.build(gameplayServices), Scope.Scope, scope).pipe(
+    Effect.provideService(Layer.build(world.layer), Scope.Scope, scope).pipe(
       Effect.provide(BrowserClockLayer),
     ),
   )
@@ -629,8 +680,72 @@ const boot = async (): Promise<void> => {
     const nowSecs = readNow()
     const raw = previousSecs === undefined ? FIRST_FRAME_SECS : nowSecs - previousSecs
     previousSecs = nowSecs
+    const deltaSecs = clampDelta(raw)
 
-    const outcome = Effect.runSyncExit(runFrame(clampDelta(raw)))
+    // -----------------------------------------------------------------------
+    // The player, moved and stopped by the world
+    // -----------------------------------------------------------------------
+    //
+    // WIRING, NOT A RULE. Every decision here belongs to a module and is called
+    // rather than made: `resolvePlayerMovement` and `applyGravity` are
+    // mx-gameplay's, the pose lives in its `PlayerService`, and the camera is
+    // mc-render's mirror of that pose. What this loop contributes is the order.
+    //
+    // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, and that clamp is
+    // now load-bearing twice over: it was there so a backgrounded tab does not
+    // return with a multi-second step, and it is also what keeps the resolver
+    // out of its tunnelling regime — `resolvePlayerMovement` resolves the box at
+    // the final position only, so a step large enough to jump a block sees
+    // nothing. mx-gameplay's own test states that limit.
+    const walk = Effect.runSync(inputApi.snapshot)
+    const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
+      Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
+
+    Effect.runSync(playerApi.look(-walk.pointerDelta.x * LOOK_SENSITIVITY, -walk.pointerDelta.y * LOOK_SENSITIVITY))
+    const pose = Effect.runSync(playerApi.pose)
+
+    const forward = held('moveForward') - held('moveBackward')
+    const strafe = held('moveRight') - held('moveLeft')
+    // Horizontal only, regardless of pitch: looking down and walking forward
+    // must not drive the player into the ground.
+    const sinYaw = Math.sin(pose.yawRadians)
+    const cosYaw = Math.cos(pose.yawRadians)
+
+    playerVelocityY = grounded && held('jump') > 0 ? JUMP_SPEED_M_PER_S : applyGravity(playerVelocityY, deltaSecs)
+
+    const resolved = resolvePlayerMovement(
+      {
+        centre: {
+          x: pose.feetPosition.x,
+          y: pose.feetPosition.y + PLAYER_HALF_HEIGHT,
+          z: pose.feetPosition.z,
+        },
+        velocity: {
+          x: (-sinYaw * forward + cosYaw * strafe) * WALK_SPEED_M_PER_S,
+          y: playerVelocityY,
+          z: (-cosYaw * forward - sinYaw * strafe) * WALK_SPEED_M_PER_S,
+        },
+      },
+      deltaSecs,
+      isBlockSolid,
+    )
+
+    grounded = resolved.isGrounded
+    playerVelocityY = resolved.body.velocity.y
+    Effect.runSync(
+      playerApi.moveTo({
+        x: resolved.body.centre.x,
+        y: resolved.body.centre.y - PLAYER_HALF_HEIGHT,
+        z: resolved.body.centre.z,
+      }),
+    )
+    canvas.setAttribute(
+      'data-player-feet',
+      `${resolved.body.centre.x.toFixed(2)},${(resolved.body.centre.y - PLAYER_HALF_HEIGHT).toFixed(2)},${resolved.body.centre.z.toFixed(2)}`,
+    )
+    canvas.setAttribute('data-player-grounded', String(grounded))
+
+    const outcome = Effect.runSyncExit(runFrame(deltaSecs))
 
     if (Exit.isFailure(outcome)) {
       // A stage's error channel is `never`, so reaching here means a DEFECT.

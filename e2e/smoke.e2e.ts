@@ -393,3 +393,55 @@ test.describe('the composed game has a world in it', () => {
     await page.screenshot({ path: 'test-results/composed-game.png' })
   })
 })
+
+test.describe('the player', () => {
+  test('#8 falls onto the terrain and is stopped by it', async ({ page }) => {
+    // THE ASSERTION THAT SEPARATES "a world is drawn" FROM "a world can be
+    // stood on". Before collision, a player either hung in the air or fell
+    // forever; neither is visible in a screenshot of the first frame.
+    await page.goto('/')
+    await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'fixture')
+
+    await expect
+      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
+        timeout: 15_000,
+      })
+      .toBe('true')
+
+    const feet = await page.locator('#game-canvas').getAttribute('data-player-feet')
+    const y = Number(feet?.split(',')[1])
+
+    // Standing ON the terrain, not inside it and not below the world.
+    expect(Number.isFinite(y)).toBe(true)
+    expect(y).toBeGreaterThan(0)
+  })
+
+  test('#9 holding W moves the player, and the ground still holds', async ({ page }) => {
+    await page.goto('/')
+    await expect
+      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
+        timeout: 15_000,
+      })
+      .toBe('true')
+
+    const before = await page.locator('#game-canvas').getAttribute('data-player-feet')
+
+    await page.locator('#game-canvas').click()
+    await page.keyboard.down('KeyW')
+    await page.waitForTimeout(700)
+    await page.keyboard.up('KeyW')
+
+    const after = await page.locator('#game-canvas').getAttribute('data-player-feet')
+
+    // Moved...
+    expect(after).not.toBe(before)
+
+    // ...and did not fall through the floor doing it. A resolver that only ran
+    // on the Y axis would pass the first assertion and fail this one the moment
+    // the player walked off the block they spawned on.
+    expect(await page.locator('#game-canvas').getAttribute('data-player-grounded')).toBe('true')
+
+    await page.screenshot({ path: 'test-results/playable.png' })
+    console.log(`feet before ${String(before)} -> after ${String(after)}`)
+  })
+})
