@@ -278,6 +278,13 @@ export const REPOSITORY_POLICY = {
     '@nerima-games/mc-render',
     '@nerima-games/mx-ui',
     '@nerima-games/mx-redstone',
+    // Added when mx-gameplay published complete in-memory implementations of
+    // the four services `gameplayModule` requires. It is ALREADY a declared
+    // edge above — one of the four experience modules compose may import — so
+    // this changes nothing about rule 3, only about what the dev server can
+    // resolve before publish. Contrast mc-worldgen and mc-meshing, which rule 3
+    // forbids outright and which are deliberately still absent.
+    '@nerima-games/mx-gameplay',
   ]),
 } as const
 

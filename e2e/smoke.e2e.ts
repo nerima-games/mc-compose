@@ -202,10 +202,23 @@ test.describe('smoke — the composed frame in a real browser', () => {
 
     const order = await page.locator('#stage-order').textContent()
 
+    // FOUR MODULES NOW, not three. `gameplayModule` joined when mx-gameplay
+    // shipped complete in-memory implementations of the four services it
+    // requires; its stages are placed HERE BY THE RESOLVER, from the `after`
+    // edges each one declares, not by the order this file registers them in.
+    //
+    // That is the property worth reading off this list: `gameplay:interactions`
+    // lands after `render:input` because it consumes the frame's input, and
+    // `gameplay:time-weather` after the redstone pair — neither placement is
+    // written anywhere in `apps/web/main.ts`.
     expect(order?.split(' ')).toEqual([
       'render:input',
+      'gameplay:interactions',
+      'gameplay:entities',
+      'gameplay:fluids',
       'redstone:power',
       'redstone:effects',
+      'gameplay:time-weather',
       'render:camera-mirror',
       'render:chunk-sync',
       'render:draw',

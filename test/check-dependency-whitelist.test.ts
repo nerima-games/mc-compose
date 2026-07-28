@@ -439,10 +439,19 @@ describe('the unpublished-root exemption', () => {
   // exemption. The set is the dev server's alias table; a module absent from it
   // would not resolve in the browser either, so a gate that passed it would be
   // reporting on a build that cannot run.
+  //
+  // THIS CASE USED TO NAME mx-gameplay, and the swap is worth recording: the
+  // RULE did not change, its EXAMPLE did. mx-gameplay joined the alias table
+  // when it shipped complete in-memory implementations of the four services
+  // `gameplayModule` requires, so it is now resolvable and correctly exempt.
+  // mx-multiplayer is the remaining whitelisted-but-unaliased module — it needs
+  // a `TransportPort` whose only implementation is still a test double — and it
+  // exercises the same rule. A regression test pinned to a fact that became
+  // false is a test that has to be re-read rather than one that has failed.
   it.effect('does not waive the declaration for a whitelisted module the dev server does not alias', () =>
     Effect.sync(() => {
-      expect(REPOSITORY_POLICY.devServerResolved.has('@nerima-games/mx-gameplay')).toBe(false)
-      expect(classifyImport(inApps('@nerima-games/mx-gameplay'), NOTHING_DECLARED)?.rule).toBe(
+      expect(REPOSITORY_POLICY.devServerResolved.has('@nerima-games/mx-multiplayer')).toBe(false)
+      expect(classifyImport(inApps('@nerima-games/mx-multiplayer'), NOTHING_DECLARED)?.rule).toBe(
         'undeclared-dependency',
       )
     }),

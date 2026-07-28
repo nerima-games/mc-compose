@@ -129,6 +129,15 @@ import {
 } from '@nerima-games/mx-ui'
 import { redstoneModule } from '@nerima-games/mx-redstone'
 import {
+  InMemoryChunkStoreLayer,
+  InMemoryEntityManagerLayer,
+  InMemoryInventoryLayer,
+  InMemoryPlayerLayer,
+  cellKey as gameplayCellKey,
+  chunkKey as gameplayChunkKey,
+  gameplayModule,
+} from '@nerima-games/mx-gameplay'
+import {
   composeGame,
   EMPTY_MODULE_LAYER,
   registerModule,
@@ -455,7 +464,86 @@ const boot = async (): Promise<void> => {
     }),
   )
 
-  const modules: ReadonlyArray<GameModule> = [registeredRender, registeredUi, registeredRedstone]
+  // -------------------------------------------------------------------------
+  // 2c. gameplayModule, and the four services it requires
+  // -------------------------------------------------------------------------
+  //
+  // `gameplayModule` is `GameModule<..., ChunkStore | EntityManager |
+  // InventoryService | PlayerService>`. Until mx-gameplay shipped complete
+  // in-memory implementations of all four, this file's own header recorded the
+  // wall correctly: the only implementations in the organisation were
+  // `test/support/*-double.ts`, none exported, and composing them would be
+  // 「偽物のモジュールを4つ作って合成すれば、検証されるのは偽物である」.
+  //
+  // WHAT CHANGED IS NOT THAT RULE. Those four are now real services on
+  // mx-gameplay's PUBLIC API — every member implemented, no `dieMessage`, and
+  // mc-compose is allowed to import mx-gameplay. Nothing here reaches past it.
+  //
+  // The store is seeded from the SAME fixture the renderer draws, so breaking a
+  // block changes the world the player is looking at rather than a second copy
+  // of it. That is the whole reason the two share a source: two worlds that
+  // agree at boot and diverge on the first edit is the bug this avoids.
+  const worldBlocks = new Map<string, number>()
+  const loadedChunks: Array<string> = []
+  if (terrainSource !== undefined) {
+    for (const chunk of terrainSource.chunks) {
+      loadedChunks.push(gameplayChunkKey({ cx: chunk.cx, cz: chunk.cz }))
+      for (const quad of chunk.quads) {
+        // The quad's own cell, in world space. A quad is a FACE, so this marks
+        // the block it belongs to — enough for a store the player can mine.
+        const x = chunk.cx * 16 + quad.lx
+        const z = chunk.cz * 16 + quad.lz
+        worldBlocks.set(gameplayCellKey({ x, y: quad.y, z }), quad.blockId)
+      }
+    }
+  }
+
+  const gameplayServices = Layer.mergeAll(
+    InMemoryChunkStoreLayer({ blocks: worldBlocks, loaded: loadedChunks }),
+    InMemoryEntityManagerLayer(),
+    InMemoryInventoryLayer(),
+    InMemoryPlayerLayer(
+      terrainSource === undefined
+        ? undefined
+        : {
+            feetPosition: {
+              x: terrainSource.spawn.x,
+              y: terrainSource.spawn.y,
+              z: terrainSource.spawn.z,
+            },
+            yawRadians: terrainSource.spawn.yawRadians,
+            pitchRadians: terrainSource.spawn.pitchRadians,
+          },
+    ),
+  )
+
+  // Built ONCE, into a context the registration is provided from — the same
+  // shape `inputLayer` uses above, and for the same reason its comment gives:
+  // providing a Layer twice builds two services, and two `PlayerService`s means
+  // the stage moves one player while the renderer mirrors the other.
+  const gameplayContext = await Effect.runPromise(
+    Effect.provideService(Layer.build(gameplayServices), Scope.Scope, scope).pipe(
+      Effect.provide(BrowserClockLayer),
+    ),
+  )
+
+  const registeredGameplay = await Effect.runPromise(
+    Effect.provide(
+      registerModule({
+        name: '@nerima-games/mx-gameplay',
+        layers: EMPTY_MODULE_LAYER,
+        frameStages: gameplayModule.frameStages,
+      }),
+      gameplayContext,
+    ),
+  )
+
+  const modules: ReadonlyArray<GameModule> = [
+    registeredRender,
+    registeredUi,
+    registeredRedstone,
+    registeredGameplay,
+  ]
 
   // -------------------------------------------------------------------------
   // 3. Composition
