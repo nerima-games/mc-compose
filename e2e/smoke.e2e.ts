@@ -445,3 +445,25 @@ test.describe('the player', () => {
     console.log(`feet before ${String(before)} -> after ${String(after)}`)
   })
 })
+
+/**
+ * #10 — BREAKING IS NOT TESTED HERE, AND THE REASON IS RECORDED UPSTREAM.
+ *
+ * The wiring exists: a left click is `attack`, `attack` calls
+ * `requestBlockBreak`, `gameplay:interactions` drains the inbox and writes AIR,
+ * and the collision predicate reads that same store. What cannot happen in this
+ * runner is the CLICK: mc-render's `InputService` treats a click as a game
+ * action only while the pointer is LOCKED — the closed-world predicate that
+ * stops a HUD click stealing the pointer — and plan.md §3.10 records that
+ * Playwright on SwiftShader cannot do pointer lock at all. mc-render's
+ * `apps/preview-render` exists because of the same limit.
+ *
+ * So the loop is tested one layer down, where it is reachable:
+ * `mx-gameplay/test/break-loop.test.ts` enqueues a break through the same
+ * public door this host calls, runs the real stage against the real in-memory
+ * store, and asserts the block is gone and the drop is in the inventory.
+ *
+ * A test that clicked and asserted nothing changed would be worse than this
+ * comment, and a test that reached past the lock machine to fake the event
+ * would be asserting about a build nobody runs.
+ */

@@ -133,8 +133,10 @@ import {
   applyGravity,
   cellKey as gameplayCellKey,
   chunkKey as gameplayChunkKey,
-  gameplayModule,
+  gameplayStages,
+  makeGameplayFrameState,
   makeInMemoryWorld,
+  requestBlockBreak,
   resolvePlayerMovement,
   solidityFromStore,
   PLAYER_HALF_HEIGHT,
@@ -302,9 +304,23 @@ const boot = async (): Promise<void> => {
   // it here would install the listeners and immediately take them away.
   const scope = Effect.runSync(Scope.make())
 
+  // POINTER LOCK IS THE HOST'S TO ASK FOR. mc-render's `InputService` treats a
+  // click as a GAME action only while the pointer is locked, and as a UI click
+  // otherwise — the closed-world predicate `domain/input-bindings.ts` describes,
+  // and the reason a HUD click cannot steal the pointer. Without this, `attack`
+  // never fires and no block can be broken.
   const inputLayer = browserInputLayer({
     targets: { window, document },
     canvas,
+    allowsPointerLock: () => true,
+  })
+
+  // The gesture the browser requires: pointer lock can only be requested from a
+  // user activation, so the canvas asks on click.
+  canvas.addEventListener('click', () => {
+    if (document.pointerLockElement !== canvas) {
+      canvas.requestPointerLock()
+    }
   })
 
   // Built ONCE, into a Context, and then provided as a Context rather than as a
@@ -571,22 +587,34 @@ const boot = async (): Promise<void> => {
 
   let playerVelocityY = 0
   let grounded = false
+  let breaksRequested = 0
 
-  const gameplayContext = await Effect.runPromise(
-    Effect.provideService(Layer.build(world.layer), Scope.Scope, scope).pipe(
-      Effect.provide(BrowserClockLayer),
-    ),
-  )
+  // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
+  // whole reason breaking works. `gameplayStages` takes the state as an
+  // argument — `makeGameplayStages` builds a private one — and `pendingBreaks`
+  // is an INBOX the host fills. mx-gameplay's own header says so: "Input
+  // belongs to mc-render and reaches the rules as a request to act on a
+  // position."
+  //
+  // A host that used `gameplayModule` directly would get stages that drain an
+  // inbox nobody can reach, which is the 「callable but unreachable」 state that
+  // repository has had to correct more than once.
+  const gameplayState = await Effect.runPromise(makeGameplayFrameState)
 
   const registeredGameplay = await Effect.runPromise(
-    Effect.provide(
-      registerModule({
-        name: '@nerima-games/mx-gameplay',
-        layers: EMPTY_MODULE_LAYER,
-        frameStages: gameplayModule.frameStages,
-      }),
-      gameplayContext,
-    ),
+    registerModule({
+      name: '@nerima-games/mx-gameplay',
+      layers: EMPTY_MODULE_LAYER,
+      frameStages: Effect.succeed(
+        gameplayStages(
+          gameplayState,
+          world.chunkStore,
+          world.entities as Parameters<typeof gameplayStages>[2],
+          world.inventory,
+          world.player,
+        ),
+      ),
+    }),
   )
 
   const modules: ReadonlyArray<GameModule> = [
@@ -729,6 +757,25 @@ const boot = async (): Promise<void> => {
       deltaSecs,
       isBlockSolid,
     )
+
+    // BREAKING. The cell directly beneath the player's feet — not a raycast,
+    // because picking a target along the view ray is a DDA and DDA is
+    // mc-physics', which `check:deps` forbids this repository from importing.
+    // Naming that limit is better than approximating the raycast here: a
+    // hand-rolled ray march would be a second implementation of a rule another
+    // repository owns, and it would be wrong in ways nothing here could see.
+    if (Effect.runSync(inputApi.wasActionJustTriggered('attack'))) {
+      const feetY = resolved.body.centre.y - PLAYER_HALF_HEIGHT
+      Effect.runSync(
+        requestBlockBreak(gameplayState, {
+          x: Math.floor(resolved.body.centre.x),
+          y: Math.floor(feetY) - 1,
+          z: Math.floor(resolved.body.centre.z),
+        }),
+      )
+      breaksRequested += 1
+      canvas.setAttribute('data-breaks-requested', String(breaksRequested))
+    }
 
     grounded = resolved.isGrounded
     playerVelocityY = resolved.body.velocity.y
