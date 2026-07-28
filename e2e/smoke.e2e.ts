@@ -320,3 +320,63 @@ test.describe('smoke — the composed frame in a real browser', () => {
     await expect(page.locator('[data-mx-ui="vitals"] [data-icon="shank"]')).toHaveCount(10)
   })
 })
+
+test.describe('the composed game has a world in it', () => {
+  test('#5 chunk geometry reaches the renderer, and the source is declared', async ({ page }) => {
+    // The claim #1 could not make. #1 asks whether a WebGL2 context exists;
+    // this asks whether anything is IN it. Until `setChunk` had a caller the
+    // two were indistinguishable from this page — a context on an empty scene
+    // and a context on a world both clear to sky blue.
+    await page.goto('/')
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+    const canvas = page.locator('#game-canvas')
+
+    // DECLARED, not inferred. The attribute distinguishes the development
+    // fixture from a generated world, so no screenshot of this page can be
+    // mistaken for the latter. When mc-worldgen publishes this becomes
+    // 'generated' and this assertion is the thing that has to be updated —
+    // which is the intended way to find it.
+    await expect(canvas).toHaveAttribute('data-world-source', 'fixture')
+
+    const meshed = Number(await canvas.getAttribute('data-chunks-meshed'))
+    expect(meshed).toBeGreaterThan(0)
+  })
+
+  test('#6 the composed frame draws the world, not just the sky', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'fixture')
+
+    // Sampled INSIDE the page and in the same task as a draw: the renderer runs
+    // with `preserveDrawingBuffer: false`, so a readPixels from a later task
+    // sees a cleared buffer and would report the sky no matter what was drawn.
+    const drawn = await page.evaluate(async () => {
+      const canvas = document.getElementById('game-canvas') as HTMLCanvasElement
+      const gl = canvas.getContext('webgl2')
+      if (gl === null) return -1
+      return await new Promise<number>((resolve) => {
+        requestAnimationFrame(() => {
+          const pixels = new Uint8Array(canvas.width * canvas.height * 4)
+          gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+          // 0x87ceeb, the clear colour, with a tolerance for the float->byte round.
+          let nonSky = 0
+          for (let at = 0; at < pixels.length; at += 4) {
+            const r = pixels[at] ?? 0
+            const g = pixels[at + 1] ?? 0
+            const b = pixels[at + 2] ?? 0
+            if (Math.abs(r - 135) > 2 || Math.abs(g - 206) > 2 || Math.abs(b - 235) > 2) {
+              nonSky += 1
+            }
+          }
+          resolve(nonSky)
+        })
+      })
+    })
+
+    expect(drawn).toBeGreaterThan(1_000)
+
+    // The artefact a human looks at. Not compared to a baseline: SwiftShader's
+    // rasterisation is not a real driver's, and the scalar above is the claim.
+    await page.screenshot({ path: 'test-results/composed-game.png' })
+  })
+})

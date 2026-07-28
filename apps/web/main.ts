@@ -76,21 +76,50 @@
  * library to a module that decides what to do with it is wiring; deciding what
  * to draw is a rule, and rules belong to modules.
  *
- * WHAT IS ON THE SCREEN, precisely: the sky colour mc-render clears to
- * (`SKY_CLEAR_COLOR`, transcribed from the reference's `SKY_COLOR_DAY`), and
- * nothing else. No chunk geometry reaches the renderer because no world reaches
- * this page — `mc-worldgen` and `mc-meshing` are not among the three siblings
- * `vite.config.ts` can resolve, and for the reason stated under "WHY THREE
- * MODULES AND NOT SIX" they cannot be: registering `gameplayModule` needs a
- * `ChunkStore` and the only implementations in the organisation are test
- * doubles. So #1 passes for the reason it names — a WebGL2 context exists and
- * is active — and the picture is a blue field. That is the honest state and it
- * is worth having: it is the difference between "no context" and "no content",
- * and until now those two were indistinguishable from this page.
+ * ---------------------------------------------------------------------------
+ * THERE IS A WORLD NOW. THIS PARAGRAPH USED TO SAY THE PICTURE WAS A BLUE FIELD
+ * ---------------------------------------------------------------------------
+ *
+ * It read: "No chunk geometry reaches the renderer because no world reaches
+ * this page", and it argued that mc-worldgen and mc-meshing COULD NOT be
+ * resolved here, for the reason under "WHY THREE MODULES AND NOT SIX".
+ *
+ * HALF OF THAT WAS RIGHT AND THE HALF THAT WAS WRONG IS THE INTERESTING ONE.
+ * The wall it named is real: registering `gameplayModule` needs a `ChunkStore`,
+ * an `EntityManager` and an `InventoryService`, and the only implementations
+ * are test doubles. But DRAWING TERRAIN NEVER NEEDED `gameplayModule`. It
+ * needed chunk geometry, and geometry is data.
+ *
+ * The blocker was stated as a CATEGORY ("registering a module needs services")
+ * over a set that included a case which registers nothing — the fourth time
+ * this project has recorded that shape (§0.1 of the residual-work document
+ * counts the others).
+ *
+ * WHAT IS ON THE SCREEN, precisely: nine-by-nine chunks of terrain from a
+ * DEVELOPMENT FIXTURE, over the sky colour mc-render clears to. The fixture is
+ * the output of the real `generateChunkAt` and `meshChunk`, produced
+ * out-of-tree and loaded here with `fetch` — because rule 3 forbids this
+ * repository from importing either, and `fetch` is not an import. The gate was
+ * not touched.
+ *
+ * WHAT IS STILL NOT HERE, and `data-world-source="fixture"` on the canvas says
+ * so where a screenshot cannot hide it: the world is finite, static and
+ * identical every run. Nothing streams, nothing regenerates, nothing persists,
+ * and there is no player entity or collision. When mc-worldgen publishes,
+ * mc-render takes its declared edge, `syncWorld`'s `DirtySource` becomes
+ * `ChunkStore.subscribeDirty`, and that attribute becomes `generated`.
  */
 import * as THREE from 'three'
 import { Effect, Either, Exit, Layer, Scope } from 'effect'
-import { browserInputLayer, makeWorldRenderer, renderModule } from '@nerima-games/mc-render'
+import {
+  browserInputLayer,
+  chunkKeyOf,
+  makeWorldRenderer,
+  renderModule,
+  syncWorld,
+  type ChunkRef,
+  type MeshQuad,
+} from '@nerima-games/mc-render'
 import {
   createCrosshairView,
   createHudView,
@@ -128,6 +157,57 @@ const clampDelta = (raw: number): DeltaTimeSecs =>
 
 /** How often the FPS readout is recomputed. Long enough to be a rate, short enough to watch. */
 const FPS_WINDOW_SECS = 0.5
+
+/** A quad as the fixture stores it: mc-meshing's `Quad`, plus its resolved tile. */
+type FixtureQuad = MeshQuad & { readonly tile: number }
+
+type TerrainFixture = {
+  readonly seed: number
+  readonly totalQuads: number
+  /**
+   * Where the camera starts, in world space.
+   *
+   * COMPUTED BY mc-worldgen, not chosen by looking at a screenshot: the
+   * generator script calls `surfaceHeightAt(seed, x, z)` and adds the eye
+   * height. It travels with the terrain because it is a fact ABOUT that
+   * terrain — a spawn Y that did not come from the same seed would put the
+   * camera underground, which renders as a flat sky and reads as "the world
+   * did not load".
+   */
+  readonly spawn: {
+    readonly x: number
+    readonly y: number
+    readonly z: number
+    readonly yawRadians: number
+    readonly pitchRadians: number
+  }
+  readonly chunks: ReadonlyArray<{
+    readonly cx: number
+    readonly cz: number
+    readonly quads: ReadonlyArray<FixtureQuad>
+  }>
+}
+
+/**
+ * Load the development terrain fixture, or `undefined` if it is not there.
+ *
+ * UNDEFINED RATHER THAN A THROW. The fixture is a development artefact and a
+ * build without it is a legitimate state — the page should come up with an
+ * empty world and say so on the canvas, not fail to boot. That is the same
+ * choice `NO_DRAW_TARGET` makes in mc-render: the absence is real and common,
+ * and the honest response is to report it rather than to pretend.
+ */
+const loadTerrainFixture = async (): Promise<TerrainFixture | undefined> => {
+  try {
+    const response = await fetch('/apps/web/terrain-fixture.json')
+    if (!response.ok) {
+      return undefined
+    }
+    return (await response.json()) as TerrainFixture
+  } catch {
+    return undefined
+  }
+}
 
 const requireElement = (id: string): HTMLElement => {
   const element = document.getElementById(id)
@@ -237,6 +317,68 @@ const boot = async (): Promise<void> => {
     Effect.runSync(worldRenderer.resize(canvas.clientWidth, canvas.clientHeight))
   })
 
+  // -------------------------------------------------------------------------
+  // 2a. The world — A DEVELOPMENT FIXTURE, and it says so on the canvas
+  // -------------------------------------------------------------------------
+  //
+  // Until this existed the composed page cleared to sky blue over an empty
+  // scene: `setChunk` had no caller anywhere in the organisation, and every
+  // test passed. #1 was green because a WebGL2 context existed, which is a
+  // different claim from "there is a world".
+  //
+  // WHY IT IS A FIXTURE AND NOT `generateChunkAt`. `check-dependency-whitelist.ts`
+  // rule 3 forbids this repository from importing mc-worldgen or mc-meshing —
+  // the declared graph puts that edge on mc-render, which cannot take it until
+  // they are published (plan.md §6 Step 3). The fixture is the output of the
+  // real generators, produced out-of-tree and loaded as DATA. `fetch` is not an
+  // import, and the gate was not touched.
+  //
+  // WHAT THAT COSTS, STATED RATHER THAN HIDDEN: the world is finite, static and
+  // identical every run. Nothing regenerates, nothing persists, and walking off
+  // its edge shows sky. `data-world-source="fixture"` is on the canvas so that
+  // no screenshot of this page can be mistaken for a running world — the day
+  // mc-worldgen publishes, that attribute becomes `generated` and this comment
+  // becomes wrong, which is the intended way to find it.
+  const terrainSource = await loadTerrainFixture()
+
+  if (terrainSource !== undefined) {
+    const loaded = new Set<string>()
+    const wanted: ReadonlyArray<ChunkRef> = terrainSource.chunks.map((chunk) => ({
+      cx: chunk.cx,
+      cz: chunk.cz,
+    }))
+    const quadsByKey = new Map<string, ReadonlyArray<FixtureQuad>>(
+      terrainSource.chunks.map((chunk) => [chunkKeyOf(chunk), chunk.quads]),
+    )
+
+    const report = await Effect.runPromise(
+      syncWorld(
+        worldRenderer,
+        {
+          drain: Effect.sync(() => {
+            const changed = wanted.filter((chunk) => !loaded.has(chunkKeyOf(chunk)))
+            for (const chunk of changed) {
+              loaded.add(chunkKeyOf(chunk))
+            }
+            return { changed, removed: [] }
+          }),
+        },
+        (chunk) => Effect.sync(() => quadsByKey.get(chunkKeyOf(chunk))),
+        { tile: (quad: MeshQuad) => (quad as FixtureQuad).tile },
+      ),
+    )
+
+    canvas.setAttribute('data-world-source', 'fixture')
+    canvas.setAttribute('data-chunks-meshed', String(report.meshed))
+    console.log(
+      `[mc-compose] world: ${String(report.meshed)} chunks from the development ` +
+        `fixture (seed ${String(terrainSource.seed)}); NOT a generated world`,
+    )
+  } else {
+    canvas.setAttribute('data-world-source', 'none')
+    canvas.setAttribute('data-chunks-meshed', '0')
+  }
+
   // `renderModule()` is called for its `frameStages` only; its `layers` field
   // is replaced by the browser adapter. The module's own header sanctions
   // exactly this: "Pass it where `InputServiceLayer()` would go — `renderModule`'s
@@ -245,7 +387,39 @@ const boot = async (): Promise<void> => {
   // The third argument is the `DrawPort` that `render:draw` calls. Its default
   // is `NO_DRAW_TARGET`, which is what every Node consumer gets and what this
   // page got until the renderer existed.
-  const render = renderModule(undefined, undefined, worldRenderer)
+  /**
+   * The starting pose, from the fixture.
+   *
+   * The TYPE IS DERIVED FROM THE FUNCTION rather than named, because
+   * `CameraPoseSnapshot` lives in mc-render's kernel-vocabulary MIRROR and
+   * `index.ts` deliberately keeps that out of the barrel — consumers take
+   * kernel's vocabulary from `@nerima-games/mc-kernel`, which is not published.
+   * `Parameters<typeof renderModule>[3]` follows the signature instead, so a
+   * change to it fails here rather than drifting.
+   *
+   * The cast inside is for the brands: `position` is a branded `Position` and
+   * `capturedAtSecs` a branded `MonotonicTimeSecs`. Neither has a runtime
+   * representation and the renderer reads five numbers off this.
+   *
+   * The default is `UNSET_CAMERA_POSE`, the origin — correct when there is no
+   * world, and visibly wrong when there is one, which is what its own header
+   * says it is for.
+   */
+  const initialPose =
+    terrainSource === undefined
+      ? undefined
+      : ({
+          position: {
+            x: terrainSource.spawn.x,
+            y: terrainSource.spawn.y,
+            z: terrainSource.spawn.z,
+          },
+          yawRadians: terrainSource.spawn.yawRadians,
+          pitchRadians: terrainSource.spawn.pitchRadians,
+          capturedAtSecs: 0,
+        } as unknown as NonNullable<Parameters<typeof renderModule>[3]>)
+
+  const render = renderModule(undefined, undefined, worldRenderer, initialPose)
 
   const registeredRender = await Effect.runPromise(
     Effect.provide(
