@@ -92,12 +92,16 @@ import {
   makeWorldRenderer,
   renderModule,
   syncWorld,
+  wrapHotbarSelection,
   type ChunkRef,
 } from '@nerima-games/mc-render'
 import {
   createCrosshairView,
   createHudView,
+  createInventoryView,
   hudViewModel,
+  inventoryViewModel,
+  slotSnapshotOf,
   spawnSnapshot,
   uiModule,
 } from '@nerima-games/mx-ui'
@@ -108,7 +112,9 @@ import {
   gameplayStages,
   makeGameplayFrameState,
   makeGeneratedWorld,
+  isPlaceableItem,
   requestTargetedBlockBreak,
+  requestTargetedBlockPlacement,
   resolvePlayerMovement,
   solidityFromStore,
   PLAYER_HALF_HEIGHT,
@@ -123,6 +129,7 @@ import {
 import { DeltaTimeSecs } from '../../domain/kernel-vocabulary'
 import { buildQaRegistry, describeQaApiError, installQaApi } from '../../domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
+import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -205,8 +212,10 @@ const failBoot = (reason: string, detail?: unknown): void => {
 const boot = async (): Promise<void> => {
   const canvas = requireCanvas('game-canvas')
   const hudParent = requireElement('hud-root')
+  const inventoryParent = requireElement('inventory-root')
   const fpsValue = requireElement('fps-value')
   const stageList = requireElement('stage-order')
+  let inventoryOpen = false
 
   // -------------------------------------------------------------------------
   // 1. Platform adapters
@@ -225,7 +234,7 @@ const boot = async (): Promise<void> => {
   const inputLayer = browserInputLayer({
     targets: { window, document },
     canvas,
-    allowsPointerLock: () => true,
+    allowsPointerLock: () => !inventoryOpen,
   })
 
   // The gesture the browser requires: pointer lock can only be requested from a
@@ -238,7 +247,7 @@ const boot = async (): Promise<void> => {
   // mc-render's `UNAVAILABLE_POINTER_LOCK` describes: keyboard still works,
   // clicks stay UI clicks, and `attack` does not fire.
   canvas.addEventListener('click', () => {
-    if (document.pointerLockElement === canvas) {
+    if (inventoryOpen || document.pointerLockElement === canvas) {
       return
     }
     try {
@@ -468,6 +477,7 @@ const boot = async (): Promise<void> => {
   let playerVelocityY = 0
   let grounded = false
   let breaksRequested = 0
+  let placementsRequested = 0
 
   // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
   // whole reason breaking works. `gameplayStages` takes the state as an
@@ -544,12 +554,47 @@ const boot = async (): Promise<void> => {
   // than it looks: both take (factory, parent, motion) and hand back a handle.
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduced' : 'full'
   const hud = createHudView(document, hudParent, motion)
+  const inventoryView = createInventoryView(document, inventoryParent)
   createCrosshairView(document, hudParent, motion)
 
-  // The spawn snapshot, once. `ui:hud-sync` re-projects it every frame from the
-  // module's own Ref; this first call is only so that the HUD is not blank
-  // between mount and the first frame.
-  hud.render(hudViewModel(spawnSnapshot))
+  inventoryParent.setAttribute('role', 'dialog')
+  inventoryParent.setAttribute('aria-label', 'Inventory (read only)')
+  inventoryParent.setAttribute('aria-readonly', 'true')
+  inventoryParent.setAttribute('aria-hidden', 'true')
+  inventoryParent.setAttribute('data-readonly', 'true')
+  document.body.setAttribute('data-inventory-open', 'false')
+
+  let selectedHotbarIndex = 0
+  const initialInventory = Effect.runSync(world.inventory.snapshot)
+  const renderPlayerUi = (inventory: typeof initialInventory): void => {
+    hud.render(hudViewModel({
+      ...spawnSnapshot,
+      hotbar: inventory.slots.slice(0, 9).map((slot) => slotSnapshotOf(slot, undefined)),
+      selectedHotbarIndex,
+    }))
+    inventoryView.render(inventoryViewModel({
+      inventory,
+      selectedHotbarIndex,
+      durabilityBySlot: undefined,
+      carried: undefined,
+      armour: undefined,
+      offhand: undefined,
+      crafting: undefined,
+      mergeableSlotIndices: undefined,
+    }))
+  }
+
+  const setInventoryOpen = (open: boolean): void => {
+    inventoryOpen = open
+    inventoryParent.hidden = !open
+    inventoryParent.setAttribute('aria-hidden', String(!open))
+    document.body.setAttribute('data-inventory-open', String(open))
+    if (open && document.pointerLockElement === canvas) {
+      document.exitPointerLock()
+    }
+  }
+
+  renderPlayerUi(initialInventory)
 
   // -------------------------------------------------------------------------
   // 5. QA surface
@@ -606,10 +651,25 @@ const boot = async (): Promise<void> => {
     // the final position only, so a step large enough to jump a block sees
     // nothing. mx-gameplay's own test states that limit.
     const walk = Effect.runSync(inputApi.snapshot)
-    const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
-      Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
+    if (Effect.runSync(inputApi.wasActionJustTriggered('openInventory'))) {
+      setInventoryOpen(!inventoryOpen)
+    }
 
-    Effect.runSync(playerApi.look(-walk.pointerDelta.x * LOOK_SENSITIVITY, -walk.pointerDelta.y * LOOK_SENSITIVITY))
+    if (!inventoryOpen) {
+      selectedHotbarIndex = selectedHotbarAfterInput(
+        selectedHotbarIndex,
+        walk.wheelSteps,
+        (action) => Effect.runSync(inputApi.wasActionJustTriggered(action)),
+        wrapHotbarSelection,
+      )
+    }
+
+    const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
+      !inventoryOpen && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
+
+    if (!inventoryOpen) {
+      Effect.runSync(playerApi.look(-walk.pointerDelta.x * LOOK_SENSITIVITY, -walk.pointerDelta.y * LOOK_SENSITIVITY))
+    }
     const pose = Effect.runSync(playerApi.pose)
 
     const forward = held('moveForward') - held('moveBackward')
@@ -647,12 +707,35 @@ const boot = async (): Promise<void> => {
 
     // The gameplay boundary owns both reach and DDA targeting. Compose only
     // translates the input action, preserving its dependency direction.
-    if (Effect.runSync(inputApi.wasActionJustTriggered('attack'))) {
+    if (!inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))) {
       const target = Effect.runSync(requestTargetedBlockBreak(gameplayState, world.chunkStore, playerApi))
       if (Option.isSome(target)) {
         breaksRequested += 1
         canvas.setAttribute('data-breaks-requested', String(breaksRequested))
       }
+    }
+
+    if (!inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))) {
+      const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
+      requestPlacementFromSelectedSlot(
+        inventoryBeforeUse.slots,
+        selectedHotbarIndex,
+        isPlaceableItem,
+        (heldItem) => {
+          const target = Effect.runSync(
+            requestTargetedBlockPlacement(
+              gameplayState,
+              world.chunkStore,
+              playerApi,
+              heldItem,
+            ),
+          )
+          if (Option.isSome(target)) {
+            placementsRequested += 1
+            canvas.setAttribute('data-placements-requested', String(placementsRequested))
+          }
+        },
+      )
     }
 
     grounded = resolved.isGrounded
@@ -677,6 +760,8 @@ const boot = async (): Promise<void> => {
       failBoot('a frame stage defected', outcome.cause)
       return
     }
+
+    renderPlayerUi(Effect.runSync(world.inventory.snapshot))
 
     framesTotal += 1
     framesThisWindow += 1

@@ -33,6 +33,19 @@
         z-index: 10;
       }
 
+      #inventory-root {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        z-index: 30;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+      }
+
+      #inventory-root[hidden] {
+        display: none;
+      }
+
       #fps-counter,
       #stage-order,
       #boot-status {
@@ -73,6 +86,7 @@
          also the pointer-lock target and the element a click can land on. -->
     <canvas id="game-canvas"></canvas>
     <div id="hud-root"></div>
+    <div id="inventory-root" hidden></div>
     <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
     <div id="stage-order" data-stage-count="0"></div>
     <div id="boot-status" role="status" aria-live="polite"></div>
