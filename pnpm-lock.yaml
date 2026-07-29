@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@nerima-games/mc-kernel':
-        specifier: 0.2.0
-        version: 0.2.0
       effect:
         specifier: ^3.22.0
         version: 3.22.0
@@ -279,10 +276,6 @@ packages:
     peerDependencies:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
-
-  '@nerima-games/mc-kernel@0.2.0':
-    resolution: {integrity: sha512-aNO7SZP8mfrxRo0XsDNfg2P+BSmriCvVa4rqMzQPZfbqa7orx5qfuPRdmHjxVhFRmTpvsswv/4yuy9Z1HOGrqQ==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-kernel/0.2.0/e78e32d4c2fed78a30b275ec5f2ee3e0ee16e030}
-    engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
   '@oxc-project/types@0.139.0':
     resolution: {integrity: sha512-r9gHphtCs+1M7J0pw6Sn/hh/Wpa/iQrOOkrNAlVLF/gHq+/CJmHIWKKUUhdWjcD6CIa8idarspCsASiXCXvFUw==}
@@ -1593,10 +1586,6 @@ snapshots:
       '@emnapi/runtime': 1.11.1
       '@tybys/wasm-util': 0.10.3
     optional: true
-
-  '@nerima-games/mc-kernel@0.2.0':
-    dependencies:
-      effect: 3.22.0
 
   '@oxc-project/types@0.139.0': {}
 

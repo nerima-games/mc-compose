@@ -28,7 +28,7 @@
  * decision inside its own `run`, in the repository that owns it.
  */
 import { Effect, Either, Layer } from 'effect'
-import type { DeltaTimeSecs, FrameServices } from "@nerima-games/mc-kernel"
+import type { DeltaTimeSecs, FrameServices } from './kernel-vocabulary'
 import {
   describeStagePlanWarnings,
   resolveStageOrder,
@@ -43,14 +43,14 @@ import { STANDARD_STAGE_SKELETON } from './stage-skeleton'
 /**
  * Seconds since the previous frame, BRANDED, exactly as kernel brands it.
  *
- * Re-exported from `@nerima-games/mc-kernel` rather than declared here: it
+ * Re-exported from `domain/kernel-vocabulary.ts` rather than declared here: it
  * used to be a bare `type DeltaTimeSecs = number` at the one place in the whole
  * roster that actually calls `StageRegistration.run`, which meant every stage
  * in every module was handed a value nobody had validated. See that file for
  * why the §3.4 clamp is still not part of the brand.
  */
-export { DeltaTimeSecs } from "@nerima-games/mc-kernel"
-export type { FrameServices } from "@nerima-games/mc-kernel"
+export { DeltaTimeSecs } from './kernel-vocabulary'
+export type { FrameServices } from './kernel-vocabulary'
 
 /**
  * One unit of per-frame work. Mirrors mc-kernel's `StageRegistration`.

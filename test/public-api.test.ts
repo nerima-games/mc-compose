@@ -59,7 +59,7 @@ describe('public API surface', () => {
         // Effect) to the post-registration module this repository composes
         'registerModule',
         // kernel's branded delta, re-exported so a host can construct one
-        // without reaching into `@nerima-games/mc-kernel`
+        // without reaching into `domain/kernel-vocabulary.ts`
         'DeltaTimeSecs',
         // session lifecycle
         'WorldId',

@@ -30,7 +30,7 @@ import {
   EpochMillis,
   MonotonicTimeSecs,
   type ClockService,
-} from "@nerima-games/mc-kernel"
+} from '../../domain/kernel-vocabulary'
 
 /**
  * `performance.now()` is milliseconds since the page's time origin; the Port is
