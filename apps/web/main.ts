@@ -140,6 +140,8 @@ import {
   type RedstoneComponentSnapshot,
 } from '@nerima-games/mx-redstone'
 import {
+  applyArmorToDamage,
+  armorPointsForEquipment,
   CREEPER_KIND,
   drainBlockUseResults,
   drainItemUseResults,
@@ -1314,8 +1316,10 @@ const bootGame = async (
   const applyPlayerDamage = (
     damage: Parameters<typeof world.vitals.damage>[0],
   ): void => {
+    const equipment = Effect.runSync(world.inventory.equipmentSnapshot)
+    const reducedDamage = applyArmorToDamage(damage, armorPointsForEquipment(equipment))
     const healthBefore = Effect.runSync(world.vitals.view).healthPoints
-    Effect.runSync(world.vitals.damage(damage))
+    Effect.runSync(world.vitals.damage(reducedDamage))
     if (Effect.runSync(world.vitals.view).healthPoints < healthBefore) {
       audio.play('playerHurt')
     }
@@ -1673,6 +1677,7 @@ const bootGame = async (
       inventory: {
         slots: inventory.slots.map((slot) => slot ?? null),
         durability: storage.inventoryDurability,
+        equipment: storage.equipment.slots,
       },
       entityCount: entities.length,
       renderedEntities: entityRenderProjection(),
@@ -1799,6 +1804,26 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedCraftingTableEncounter,
+        seedIronArmor: () => {
+          Effect.runSync(world.inventory.reset)
+          const equipment = [
+            ['iron_helmet', 'head'],
+            ['iron_chestplate', 'chest'],
+            ['iron_leggings', 'legs'],
+            ['iron_boots', 'feet'],
+          ] as const
+          equipment.forEach(([item]) => Effect.runSync(world.inventory.add(item, 1)))
+          equipment.forEach(([, slot], inventorySlot) => {
+            const result = Effect.runSync(world.inventory.equipFromInventory(inventorySlot, slot))
+            if (result._tag !== 'Equipped') {
+              throw new Error(`failed to equip ${slot}: ${result._tag}`)
+            }
+          })
+          inventoryInteraction.reset()
+          markSessionDirty()
+          renderPlayerUi()
+          return gameplaySnapshot()
+        },
         damage: () => {
           applyPlayerDamage({ amount: 4, cause: 'generic' })
           markSessionDirty()

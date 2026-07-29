@@ -38,6 +38,13 @@ type GameplaySnapshot = {
       readonly current: number
       readonly max: number
     } | null>
+    readonly equipment: {
+      readonly head: { readonly item: string; readonly count: number } | null
+      readonly chest: { readonly item: string; readonly count: number } | null
+      readonly legs: { readonly item: string; readonly count: number } | null
+      readonly feet: { readonly item: string; readonly count: number } | null
+      readonly offhand: { readonly item: string; readonly count: number } | null
+    }
   }
   readonly entityCount: number
   readonly entities: ReadonlyArray<EntitySnapshot>
@@ -118,6 +125,28 @@ test('shows a damage caption without requiring autoplay unlock', async ({ page }
   expect(audio.captions).toContainEqual(expect.objectContaining({
     cueId: 'playerHurt',
   }))
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('reduces player damage with equipped iron armor', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await startGameSession(page)
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  const equipped = await callQa<GameplaySnapshot>(page, 'gameplay.seedIronArmor')
+  expect(equipped.inventory.equipment).toMatchObject({
+    head: { item: 'iron_helmet', count: 1 },
+    chest: { item: 'iron_chestplate', count: 1 },
+    legs: { item: 'iron_leggings', count: 1 },
+    feet: { item: 'iron_boots', count: 1 },
+  })
+  expect(equipped.vitals.healthPoints).toBe(20)
+
+  const damaged = await callQa<GameplaySnapshot>(page, 'gameplay.damage')
+  expect(damaged.vitals.healthPoints).toBeCloseTo(18.4)
+  expect(damaged.vitals.lastDamageCause).toBeUndefined()
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })
