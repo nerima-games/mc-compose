@@ -85,6 +85,7 @@
 import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Ref, Scope } from 'effect'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
+import { makeTimeService } from '@nerima-games/mc-sim'
 import {
   chunkCoord,
   chunkSnapshotOf,
@@ -407,6 +408,10 @@ const boot = async (): Promise<void> => {
     )
     await Effect.runPromise(world.vitals.restore(loadedSession.value.state.vitals))
   }
+  const time = await Effect.runPromise(makeTimeService())
+  if (Option.isSome(loadedSession)) {
+    await Effect.runPromise(time.restore(loadedSession.value.state.time))
+  }
 
   const reportPersistenceFailure = (error: unknown): void => {
     document.body.setAttribute('data-session-persistence', 'failed')
@@ -421,6 +426,7 @@ const boot = async (): Promise<void> => {
       player: Effect.runSync(world.player.pose),
       inventory: Effect.runSync(world.inventory.snapshot),
       vitals: Effect.runSync(world.vitals.snapshot),
+      time: Effect.runSync(time.snapshot),
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -1061,13 +1067,13 @@ const boot = async (): Promise<void> => {
   }
   installQaApi(globalThis as unknown as Record<string, unknown>, registry.right)
 
-  window.setInterval(flushDirty, AUTOSAVE_INTERVAL_MS)
+  window.setInterval(requestBackgroundFlush, AUTOSAVE_INTERVAL_MS)
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') requestBackgroundFlush()
   })
   // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
-  // The debounced dirty path above is the primary durability mechanism.
-  window.addEventListener('pagehide', flushDirty)
+  // Periodic publication persists the advancing clock even without gameplay mutations.
+  window.addEventListener('pagehide', requestBackgroundFlush)
 
   // -------------------------------------------------------------------------
   // 6. The frame
@@ -1244,6 +1250,8 @@ const boot = async (): Promise<void> => {
     // asked to go: a player stopped by a wall should not load the chunks behind
     // it.
     Effect.runSync(Ref.set(gameplayState.targetPosition, resolvedFeet))
+    Effect.runSync(time.advance(deltaSecs))
+    Effect.runSync(Ref.set(gameplayState.timeOfDay, Effect.runSync(time.timeOfDay)))
     Effect.runSync(streamAround(resolvedFeet.x, resolvedFeet.z))
     canvas.setAttribute(
       'data-player-feet',

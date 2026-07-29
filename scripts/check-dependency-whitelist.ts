@@ -99,17 +99,18 @@ import { fileURLToPath } from 'node:url'
  * most here.
  *
  * compose may import the four experience modules (mx-gameplay, mx-redstone,
- * mx-ui, mx-multiplayer), plus the host-boundary packages mc-render, mc-save
- * and mc-worldgen, plus mc-kernel. It may NOT import mc-sim, mc-physics,
+ * mx-ui, mx-multiplayer), plus the host-boundary packages mc-render, mc-save,
+ * mc-sim and mc-worldgen, plus mc-kernel. It may NOT import mc-physics,
  * mc-audio, mc-noise or mc-meshing, even though it depends on all of them
  * transitively and even though `pnpm install` may place them in node_modules.
  *
  * This is the mechanical half of the repository's prime directive. The
  * reference implementation accumulated 20,737 production LOC in
  * `packages/app/application/` — roughly 13k of it game rules — because the
- * composition layer could reach anything it wanted. A rule that needs mc-sim
- * directly is a rule that belongs in an experience module. The gate makes
- * "reach past mx-* and write it here" fail the build instead of failing review.
+ * composition layer could reach anything it wanted. The mc-sim edge licenses
+ * only host-owned standalone services such as the session clock; game rules
+ * still belong in experience modules. The gate makes "reach past mx-* and
+ * write it here" fail the build instead of failing review.
  *
  * ---------------------------------------------------------------------------
  * WHY mc-render IS ON THAT LIST (and why it does not weaken the directive)
@@ -126,15 +127,16 @@ import { fileURLToPath } from 'node:url'
  * does with mx-gameplay's, with no knowledge of what any of them draw.
  *
  * And rule 3 still bites where it matters: the edge licenses `mc-render` and
- * NOTHING BEHIND IT. `mc-meshing` and `mc-sim` become transitively reachable
- * and therefore `transitive-import` violations rather than `not-whitelisted`
- * ones — a different message, the same hard failure. `test/check-dependency-
- * whitelist.test.ts` pins exactly that: mc-render reachable, mc-meshing not.
+ * NOTHING BEHIND IT. `mc-meshing` becomes transitively reachable and therefore
+ * a `transitive-import` violation rather than a `not-whitelisted` one — a
+ * different message, the same hard failure. `test/check-dependency-whitelist.test.ts`
+ * pins exactly that: mc-render reachable, mc-meshing not.
  *
- * mc-save and mc-worldgen are narrow host-boundary exceptions: compose owns
- * session persistence orchestration, while those packages continue to own the
- * save format and deterministic terrain rules. The direct edges license only
- * those public APIs; rule 3 still blocks their transitive dependencies.
+ * mc-save, mc-sim and mc-worldgen are narrow host-boundary exceptions: compose
+ * owns session persistence and clock orchestration, while those packages
+ * continue to own the save format, time state and deterministic terrain rules.
+ * The direct edges license only those public APIs; rule 3 still blocks their
+ * transitive dependencies.
  * ---------------------------------------------------------------------------
  */
 export const REPOSITORY_POLICY = {
@@ -207,13 +209,14 @@ export const REPOSITORY_POLICY = {
         // in the roster previously declared a runtime edge to it — so the
         // shipped build had no input stage at all (plan.md §2.3-2). Registering
         // another module's stages is wiring, not a rule; rule 3 still blocks
-        // compose from reaching mc-meshing or mc-sim behind it.
+        // compose from reaching mc-meshing behind it.
         // See mc-compose/docs/architecture.md §5.
         '@nerima-games/mc-render',
         // The host owns session persistence orchestration. mc-save owns the
         // storage contract and mc-worldgen owns deterministic regeneration;
         // importing those APIs here is wiring, not a game rule.
         '@nerima-games/mc-save',
+        '@nerima-games/mc-sim',
         '@nerima-games/mc-worldgen',
       ]),
     ],

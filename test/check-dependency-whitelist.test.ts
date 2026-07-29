@@ -34,12 +34,12 @@ describe('mc-compose dependency policy', () => {
     Effect.sync(() => {
       expect(REPOSITORY_POLICY.thisPackage).toBe('@nerima-games/mc-compose')
       expect([...allowedDirectDependencies()].sort()).toStrictEqual([
-        // The one tier-2 edge, added by the vertical-slice spike: mc-render
-        // registers the frame's input / camera-mirror / chunk-sync / draw /
-        // post-fx stages and nothing else in the roster could reach it.
-        // See docs/architecture.md §5.
+        // Explicit host-boundary edges cover rendering, persistence, the
+        // standalone clock, and deterministic generation without taking rules
+        // ownership.
         '@nerima-games/mc-render',
         '@nerima-games/mc-save',
+        '@nerima-games/mc-sim',
         '@nerima-games/mc-worldgen',
         '@nerima-games/mx-gameplay',
         '@nerima-games/mx-multiplayer',
@@ -49,9 +49,9 @@ describe('mc-compose dependency policy', () => {
     }),
   )
 
-  // REGRESSION: direct foundation access remains limited to renderer wiring
-  // and session persistence orchestration. It does not generalise to mc-sim or
-  // to the libraries behind these public APIs.
+  // REGRESSION: direct foundation access remains limited to narrow host-facing
+  // APIs. mc-sim contributes only the standalone clock; rules state remains
+  // experience-owned.
   it.effect('limits foundation imports to the host-boundary packages', () =>
     Effect.sync(() => {
       const belowTierThree = [...allowedDirectDependencies()].filter(
@@ -60,6 +60,7 @@ describe('mc-compose dependency policy', () => {
       expect(belowTierThree).toStrictEqual([
         '@nerima-games/mc-render',
         '@nerima-games/mc-save',
+        '@nerima-games/mc-sim',
         '@nerima-games/mc-worldgen',
       ])
     }),
@@ -167,17 +168,12 @@ describe('the prime directive, mechanically enforced', () => {
     devDependencies: new Set<string>(),
   }
 
-  // REGRESSION — THE one this repository exists for. The reference
-  // implementation accumulated 20,737 production LOC in
-  // `packages/app/application/` because its composition layer could reach any
-  // service it wanted. A rule that needs mc-sim directly is a rule that belongs
-  // in an experience module; the gate turns that from a review opinion into a
-  // build failure.
-  it.effect('rejects reaching past the experience modules to mc-sim, and names the path', () =>
+  // The host may own mc-sim's standalone clock without composing its rules
+  // engine or licensing access to libraries behind it.
+  it.effect('allows the host to own the standalone simulation clock', () =>
     Effect.sync(() => {
       const violation = classifyImport(from('@nerima-games/mc-sim'), declaredEverything)
-      expect(violation?.rule).toBe('transitive-import')
-      expect(violation?.message).toContain('@nerima-games/mc-sim')
+      expect(violation).toBeUndefined()
     }),
   )
 
@@ -429,12 +425,12 @@ describe('the unpublished-root exemption', () => {
 
   // REGRESSION — THE reason the exemption is written after the whitelist checks
   // rather than before them. `apps/` is the composition layer's own front door;
-  // if it could reach mc-sim, every rule mc-compose exists to enforce
+  // if it could reach libraries behind host APIs, every rule mc-compose exists to enforce
   // (domain/composition.ts's prime directive) would be reachable from a file
   // nobody thinks of as shipped source.
   it.effect('still refuses to let apps/ reach past the modules it may compose', () =>
     Effect.sync(() => {
-      expect(classifyImport(inApps('@nerima-games/mc-sim'), NOTHING_DECLARED)?.rule).toBe(
+      expect(classifyImport(inApps('@nerima-games/mc-physics'), NOTHING_DECLARED)?.rule).toBe(
         'transitive-import',
       )
       expect(classifyImport(inApps('@nerima-games/mc-meshing'), NOTHING_DECLARED)?.rule).toBe(
@@ -526,7 +522,7 @@ describe('checkDeclaredDependencies', () => {
   it.effect('rejects an org dependency the policy does not allow, even if the code never imports it', () =>
     Effect.sync(() => {
       const violations = checkDeclaredDependencies({
-        dependencies: new Set(['@nerima-games/mc-sim']),
+        dependencies: new Set(['@nerima-games/mc-physics']),
         devDependencies: new Set<string>(),
       })
       expect(violations).toHaveLength(1)

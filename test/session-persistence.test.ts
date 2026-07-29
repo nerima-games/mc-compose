@@ -8,6 +8,7 @@ import {
   type SaveEnvelope,
   type StorageService,
 } from '@nerima-games/mc-save'
+import { INITIAL_TIME_STATE } from '@nerima-games/mc-sim'
 import {
   CHUNK_SIZE_XZ,
   CHUNK_VOLUME,
@@ -45,6 +46,7 @@ const sessionState = (seed: number): SessionState => ({
     totalExperience: 37,
     lastDamageCause: 'fall',
   },
+  time: { ticks: 12_345, dayLengthTicks: 24_000 },
 })
 
 const chunk = (cx: number, cz: number, marker: number): Chunk => ({
@@ -147,10 +149,11 @@ describe('session persistence', () => {
 
       expect(Option.getOrThrow(loaded)).toEqual(saved)
       expect(saved.state.vitals).toEqual(sessionState(42).vitals)
+      expect(saved.state.time).toEqual(sessionState(42).time)
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 2,
+        version: 3,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -182,7 +185,32 @@ describe('session persistence', () => {
       const loaded = Option.getOrThrow(yield* loadSession('legacy-v1'))
 
       expect(loaded.state.vitals).toEqual(SPAWN_PLAYER_VITALS)
+      expect(loaded.state.time).toEqual(INITIAL_TIME_STATE)
       expect(storage.envelope(key)?.version).toBe(1)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a literal v2 session to the initial simulation time', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v2')
+    const legacyState = { ...sessionState(84) } as Record<string, unknown>
+    delete legacyState['time']
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 2,
+      payload: {
+        sessionId: 'legacy-v2',
+        revision: 'r1',
+        state: legacyState,
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v2'))
+
+      expect(loaded.state.time).toEqual(INITIAL_TIME_STATE)
+      expect(storage.envelope(key)?.version).toBe(2)
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -264,6 +292,30 @@ describe('session persistence', () => {
       const error = yield* Effect.flip(loadSession('non-finite-vitals'))
 
       expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 2 })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects persisted simulation time that violates invariants', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('invalid-time')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 3,
+      payload: {
+        sessionId: 'invalid-time',
+        revision: 'r1',
+        state: {
+          ...sessionState(42),
+          time: { ticks: Number.POSITIVE_INFINITY, dayLengthTicks: 24_000 },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession('invalid-time'))
+
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 3 })
     }).pipe(Effect.provide(storage.layer))
   })
 

@@ -12,6 +12,11 @@ import {
   type StorageError,
 } from '@nerima-games/mc-save'
 import {
+  INITIAL_TIME_STATE,
+  isValidTimeState,
+  type TimeState,
+} from '@nerima-games/mc-sim'
+import {
   CHUNK_FORMAT,
   ChunkAxis,
   chunkSnapshotOf,
@@ -178,6 +183,7 @@ export type SessionState = {
     readonly slots: ReadonlyArray<SessionInventorySlot>
   }
   readonly vitals: PlayerVitals
+  readonly time: TimeState
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -198,6 +204,15 @@ const PlayerVitalsSchema: Schema.Schema<PlayerVitals> = Schema.Struct({
   }),
 )
 
+const TimeStateSchema: Schema.Schema<TimeState> = Schema.Struct({
+  ticks: FiniteNumberSchema,
+  dayLengthTicks: FiniteNumberSchema,
+}).pipe(
+  Schema.filter(isValidTimeState, {
+    message: () => 'Time state violates simulation invariants',
+  }),
+)
+
 const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   seed: Schema.Number,
   dimension: Schema.Literal('overworld', 'nether', 'end'),
@@ -208,6 +223,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   }),
   inventory: Schema.Struct({ slots: Schema.Array(InventorySlotSchema) }),
   vitals: PlayerVitalsSchema,
+  time: TimeStateSchema,
 })
 
 export type SessionChunkManifestEntry = {
@@ -268,11 +284,30 @@ const migrateSessionV1ToV2: Migration = {
   },
 }
 
+const migrateSessionV2ToV3: Migration = {
+  from: 2,
+  describe: 'add simulation time to the session state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v2 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'time')
+        ? state
+        : { ...state, time: { ...INITIAL_TIME_STATE } },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 2,
+  version: 3,
   schema: SessionHeadSchema,
-  migrations: [migrateSessionV1ToV2],
+  migrations: [migrateSessionV1ToV2, migrateSessionV2ToV3],
 })
 
 export class SessionManifestError extends Data.TaggedError('SessionManifestError')<{
