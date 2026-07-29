@@ -36,6 +36,19 @@ type GameplaySnapshot = {
   readonly entityCount: number
   readonly entities: ReadonlyArray<EntitySnapshot>
   readonly renderedEntities: ReadonlyArray<RenderedEntitySnapshot>
+  readonly itemUse: {
+    readonly requestId: string
+    readonly heldItem: 'fire_charge' | 'flint_and_steel'
+    readonly success: boolean
+    readonly outcome: {
+      readonly _tag: 'Fire' | 'Portal'
+      readonly outcome: { readonly _tag: string }
+    }
+  } | null
+  readonly ignitionTarget: {
+    readonly reading: string
+    readonly block: number | null
+  }
 }
 
 type PageFaults = {
@@ -82,6 +95,20 @@ const inventoryCount = (current: GameplaySnapshot, item: string): number =>
     (total, slot) => total + (slot?.item === item ? slot.count : 0),
     0,
   )
+
+const grantPointerLock = async (page: Page): Promise<void> => {
+  // Headless Chromium's SwiftShader backend cannot grant pointer lock. Model
+  // the granted state, then use a real canvas click for the action itself.
+  await page.evaluate(() => {
+    const gameCanvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
+    if (gameCanvas === null) throw new Error('missing game canvas')
+    Object.defineProperty(document, 'pointerLockElement', {
+      configurable: true,
+      get: () => gameCanvas,
+    })
+    document.dispatchEvent(new Event('pointerlockchange'))
+  })
+}
 
 test('renders a lethal zombie encounter and recovers through the Respawn control', async ({
   page,
@@ -197,17 +224,7 @@ test('eats the selected potato through a right-click use action', async ({ page 
   const potatoesBefore = inventoryCount(seeded, 'potato')
   expect(potatoesBefore).toBe(2)
 
-  // Headless Chromium's SwiftShader backend cannot grant pointer lock. Model
-  // the granted state, then use a real canvas click for the use action itself.
-  await page.evaluate(() => {
-    const gameCanvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
-    if (gameCanvas === null) throw new Error('missing game canvas')
-    Object.defineProperty(document, 'pointerLockElement', {
-      configurable: true,
-      get: () => gameCanvas,
-    })
-    document.dispatchEvent(new Event('pointerlockchange'))
-  })
+  await grantPointerLock(page)
   await canvas.click({ button: 'right' })
 
   await expect.poll(async () => {
@@ -219,6 +236,103 @@ test('eats the selected potato through a right-click use action', async ({ page 
   }).toEqual({
     potatoes: potatoesBefore - 1,
     hungerPoints: seeded.vitals.hungerPoints + 1,
+  })
+
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('consumes one fire charge only after successful ignition', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await page.goto('/')
+  const canvas = page.locator('#game-canvas')
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await canvas.hover()
+  const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedFireChargeIgnition')
+  const chargesBefore = inventoryCount(seeded, 'fire_charge')
+  expect(chargesBefore).toBe(2)
+  expect(seeded.ignitionTarget.block).toBe(0)
+
+  await grantPointerLock(page)
+  await canvas.click({ button: 'right' })
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return {
+      item: current.itemUse?.heldItem,
+      success: current.itemUse?.success,
+      outcome: current.itemUse?.outcome.outcome._tag,
+      charges: inventoryCount(current, 'fire_charge'),
+      ignitionLit: current.ignitionTarget.block !== 0,
+    }
+  }).toEqual({
+    item: 'fire_charge',
+    success: true,
+    outcome: 'Lit',
+    charges: chargesBefore - 1,
+    ignitionLit: true,
+  })
+
+  await page.waitForTimeout(100)
+  expect(inventoryCount(await snapshot(page), 'fire_charge')).toBe(chargesBefore - 1)
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('does not consume a fire charge when ignition is refused', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await page.goto('/')
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedRefusedFireChargeIgnition')
+  const chargesBefore = inventoryCount(seeded, 'fire_charge')
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return {
+      item: current.itemUse?.heldItem,
+      success: current.itemUse?.success,
+      outcome: current.itemUse?.outcome.outcome._tag,
+      charges: inventoryCount(current, 'fire_charge'),
+    }
+  }).toEqual({
+    item: 'fire_charge',
+    success: false,
+    outcome: 'Occupied',
+    charges: chargesBefore,
+  })
+
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('does not consume flint and steel after successful ignition', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await page.goto('/')
+  const canvas = page.locator('#game-canvas')
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await canvas.hover()
+  const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedFlintAndSteelIgnition')
+  const toolsBefore = inventoryCount(seeded, 'flint_and_steel')
+
+  await grantPointerLock(page)
+  await canvas.click({ button: 'right' })
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return {
+      item: current.itemUse?.heldItem,
+      success: current.itemUse?.success,
+      outcome: current.itemUse?.outcome.outcome._tag,
+      tools: inventoryCount(current, 'flint_and_steel'),
+    }
+  }).toEqual({
+    item: 'flint_and_steel',
+    success: true,
+    outcome: 'Lit',
+    tools: toolsBefore,
   })
 
   expect(faults.pageErrors).toEqual([])

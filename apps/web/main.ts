@@ -122,18 +122,22 @@ import { redstoneModule } from '@nerima-games/mx-redstone'
 import {
   applyGravity,
   CREEPER_KIND,
+  drainItemUseResults,
   drainMobDrops,
   drainPlayerDamages,
   EYE_LEVEL_OFFSET,
   gameplayStages,
   makeGameplayFrameState,
   makeGeneratedWorld,
+  isIgnitionItem,
   isPlaceableItem,
   requestBowShot,
+  requestItemUse,
   requestMobSpawn,
   resolveFoodUse,
   requestTargetedBlockBreak,
   requestTargetedBlockPlacement,
+  requestTargetedItemUse,
   requestTargetedPrimaryAttack,
   resolvePlayerMovement,
   solidityFromStore,
@@ -141,6 +145,8 @@ import {
   weatherLightScale,
   PLAYER_HALF_HEIGHT,
   ZOMBIE_KIND,
+  type IgnitionItemType,
+  type ItemUseResult,
   type MobBehaviour,
   type MobDropEvent,
 } from '@nerima-games/mx-gameplay'
@@ -206,10 +212,19 @@ const DATABASE_NAME = 'nerima-games-minecraft'
 const AUTOSAVE_INTERVAL_MS = 5_000
 const SAVE_DEBOUNCE_MS = 500
 const KNOWN_TARGET_BLOCK = { x: 8, y: 63, z: 8 } as const
+const QA_IGNITION_HIT_BLOCK = { x: 8, y: 66, z: 8 } as const
+const QA_IGNITION_CELL = { x: 8, y: 66, z: 9 } as const
+const QA_IGNITION_SUPPORT_BLOCK = { x: 8, y: 65, z: 9 } as const
+const QA_IGNITION_FLOOR_BLOCK = { x: 8, y: 64, z: 10 } as const
 const QA_POSE = {
   feetPosition: { x: 8.5, y: 64.5, z: 8.5 },
   yawRadians: 0,
   pitchRadians: -Math.PI / 2 + 0.01,
+} as const
+const QA_IGNITION_POSE = {
+  feetPosition: { x: 8.5, y: 65, z: 10.5 },
+  yawRadians: 0,
+  pitchRadians: 0,
 } as const
 
 const requireElement = (id: string): HTMLElement => {
@@ -621,6 +636,7 @@ const boot = async (): Promise<void> => {
   let grounded = false
   let breaksRequested = 0
   let placementsRequested = 0
+  let nextItemUseRequestId = 0
 
   // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
   // whole reason breaking works. `gameplayStages` takes the state as an
@@ -635,6 +651,11 @@ const boot = async (): Promise<void> => {
   const gameplayState = await Effect.runPromise(makeGameplayFrameState)
   const observedMobDrops: Array<MobDropEvent & { readonly renderId: string }> = []
   let nextMobDropId = 0
+  let lastObservedItemUse: ItemUseResult | undefined
+  const pendingItemUses = new Map<
+    string,
+    { readonly slotIndex: number; readonly heldItem: IgnitionItemType }
+  >()
 
   const registeredGameplay = await Effect.runPromise(
     registerModule({
@@ -918,6 +939,7 @@ const boot = async (): Promise<void> => {
 
   const gameplaySnapshot = () => {
     const reading = Effect.runSync(world.chunkStore.getBlock(KNOWN_TARGET_BLOCK))
+    const ignitionReading = Effect.runSync(world.chunkStore.getBlock(QA_IGNITION_CELL))
     const inventory = Effect.runSync(world.inventory.snapshot)
     const vitals = Effect.runSync(world.vitals.snapshot)
     const entities = Effect.runSync(world.entities.snapshot).entities
@@ -933,6 +955,7 @@ const boot = async (): Promise<void> => {
       entityCount: entities.length,
       renderedEntities: entityRenderProjection(),
       mobDrops: observedMobDrops.map(({ renderId: _, ...drop }) => drop),
+      itemUse: lastObservedItemUse ?? null,
       entities: entities.map((entity) => ({
         id: entity.id,
         kind: entity.kind,
@@ -944,11 +967,37 @@ const boot = async (): Promise<void> => {
         reading: reading._tag,
         block: reading._tag === 'Block' ? reading.block : null,
       },
+      ignitionTarget: {
+        position: QA_IGNITION_CELL,
+        reading: ignitionReading._tag,
+        block: ignitionReading._tag === 'Block' ? ignitionReading.block : null,
+      },
       persistence: {
         knownChunks: saveCoordinator.knownChunkCount(),
         retainedChunks: saveCoordinator.retainedChunkCount(),
       },
     }
+  }
+
+  const seedIgnitionEncounter = (heldItem: IgnitionItemType) => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+    playerVelocityY = 0
+    grounded = false
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add(heldItem, 2))
+    Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
+    Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_CELL, 0))
+    Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
+    Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, 2))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    pendingItemUses.clear()
+    lastObservedItemUse = undefined
+    markSessionDirty()
+    renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+    return gameplaySnapshot()
   }
 
   const registry = buildQaRegistry([
@@ -1060,6 +1109,23 @@ const boot = async (): Promise<void> => {
           inventoryInteraction.reset()
           markSessionDirty()
           renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          return gameplaySnapshot()
+        },
+        seedFireChargeIgnition: () => seedIgnitionEncounter('fire_charge'),
+        seedFlintAndSteelIgnition: () => seedIgnitionEncounter('flint_and_steel'),
+        seedRefusedFireChargeIgnition: () => {
+          seedIgnitionEncounter('fire_charge')
+          Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_CELL, 2))
+          nextItemUseRequestId += 1
+          const requestId = `item-use-${String(nextItemUseRequestId)}`
+          Effect.runSync(
+            requestItemUse(gameplayState, requestId, QA_IGNITION_CELL, 'fire_charge'),
+          )
+          pendingItemUses.set(requestId, {
+            slotIndex: selectedHotbarIndex,
+            heldItem: 'fire_charge',
+          })
+          markSessionDirty()
           return gameplaySnapshot()
         },
         seedMeleeDropEncounter: () => {
@@ -1277,10 +1343,11 @@ const boot = async (): Promise<void> => {
       let shouldAttemptPlacement = selected === undefined
 
       if (selected !== undefined) {
+        // A use action has one owner: food first, then ignition, then placement.
         const foodUse = resolveFoodUse({
-            held: selected.item,
-            vitals: Effect.runSync(world.vitals.snapshot),
-          })
+          held: selected.item,
+          vitals: Effect.runSync(world.vitals.snapshot),
+        })
 
         if (foodUse._tag === 'consume') {
           const removal = Effect.runSync(
@@ -1291,7 +1358,27 @@ const boot = async (): Promise<void> => {
             markSessionDirty()
           }
         } else if (foodUse._tag !== 'dead') {
-          shouldAttemptPlacement = true
+          if (isIgnitionItem(selected.item)) {
+            nextItemUseRequestId += 1
+            const requestId = `item-use-${String(nextItemUseRequestId)}`
+            const target = Effect.runSync(
+              requestTargetedItemUse(
+                gameplayState,
+                world.chunkStore,
+                playerApi,
+                requestId,
+                selected.item,
+              ),
+            )
+            if (Option.isSome(target)) {
+              pendingItemUses.set(requestId, {
+                slotIndex: selectedHotbarIndex,
+                heldItem: selected.item,
+              })
+            }
+          } else {
+            shouldAttemptPlacement = true
+          }
         }
       }
 
@@ -1350,6 +1437,21 @@ const boot = async (): Promise<void> => {
       Effect.runSync(weather.applyTransition(weatherAdvanced))
       presentWeather(weatherAdvanced)
       if (weatherAdvanced.weather !== weatherBeforeFrame.weather) markSessionDirty()
+    }
+
+    const itemUseResults = Effect.runSync(drainItemUseResults(gameplayState))
+    for (const result of itemUseResults) {
+      lastObservedItemUse = result
+      const pending = pendingItemUses.get(result.requestId)
+      pendingItemUses.delete(result.requestId)
+      if (
+        result.success
+        && result.heldItem === 'fire_charge'
+        && pending?.heldItem === result.heldItem
+      ) {
+        Effect.runSync(world.inventory.removeAt(pending.slotIndex, pending.heldItem, 1))
+      }
+      if (result.success) markSessionDirty()
     }
 
     const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
