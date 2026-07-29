@@ -142,6 +142,7 @@ import {
 import {
   applyArmorToDamage,
   armorPointsForEquipment,
+  armorDurabilityWearFromPreMitigationDamage,
   CREEPER_KIND,
   drainBlockUseResults,
   drainItemUseResults,
@@ -1320,7 +1321,18 @@ const bootGame = async (
     const reducedDamage = applyArmorToDamage(damage, armorPointsForEquipment(equipment))
     const healthBefore = Effect.runSync(world.vitals.view).healthPoints
     Effect.runSync(world.vitals.damage(reducedDamage))
-    if (Effect.runSync(world.vitals.view).healthPoints < healthBefore) {
+    const healthAfter = Effect.runSync(world.vitals.view).healthPoints
+    if (healthAfter < healthBefore) {
+      const wear = armorDurabilityWearFromPreMitigationDamage(damage)
+      if (wear > 0) {
+        for (const slot of ['head', 'chest', 'legs', 'feet'] as const) {
+          if (equipment.slots[slot] !== null) {
+            Effect.runSync(
+              world.inventory.damageAt({ _tag: 'Equipment', slot }, wear),
+            )
+          }
+        }
+      }
       audio.play('playerHurt')
     }
     if (playerIsDead()) resetSimState(false)

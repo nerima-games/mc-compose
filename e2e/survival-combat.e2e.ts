@@ -22,6 +22,14 @@ type RenderedEntitySnapshot = {
   readonly feetPosition: Position
   readonly category?: 'hostile' | 'item'
 }
+type EquipmentSnapshotEntry = {
+  readonly item: string
+  readonly count: number
+  readonly durability: {
+    readonly current: number
+    readonly max: number
+  } | null
+}
 type GameplaySnapshot = {
   readonly pose: Pose
   readonly vitals: {
@@ -39,11 +47,11 @@ type GameplaySnapshot = {
       readonly max: number
     } | null>
     readonly equipment: {
-      readonly head: { readonly item: string; readonly count: number } | null
-      readonly chest: { readonly item: string; readonly count: number } | null
-      readonly legs: { readonly item: string; readonly count: number } | null
-      readonly feet: { readonly item: string; readonly count: number } | null
-      readonly offhand: { readonly item: string; readonly count: number } | null
+      readonly head: EquipmentSnapshotEntry | null
+      readonly chest: EquipmentSnapshotEntry | null
+      readonly legs: EquipmentSnapshotEntry | null
+      readonly feet: EquipmentSnapshotEntry | null
+      readonly offhand: EquipmentSnapshotEntry | null
     }
   }
   readonly entityCount: number
@@ -137,16 +145,38 @@ test('reduces player damage with equipped iron armor', async ({ page }) => {
 
   const equipped = await callQa<GameplaySnapshot>(page, 'gameplay.seedIronArmor')
   expect(equipped.inventory.equipment).toMatchObject({
-    head: { item: 'iron_helmet', count: 1 },
-    chest: { item: 'iron_chestplate', count: 1 },
-    legs: { item: 'iron_leggings', count: 1 },
-    feet: { item: 'iron_boots', count: 1 },
+    head: {
+      item: 'iron_helmet',
+      count: 1,
+      durability: { current: 165, max: 165 },
+    },
+    chest: {
+      item: 'iron_chestplate',
+      count: 1,
+      durability: { current: 240, max: 240 },
+    },
+    legs: {
+      item: 'iron_leggings',
+      count: 1,
+      durability: { current: 225, max: 225 },
+    },
+    feet: {
+      item: 'iron_boots',
+      count: 1,
+      durability: { current: 195, max: 195 },
+    },
   })
   expect(equipped.vitals.healthPoints).toBe(20)
 
   const damaged = await callQa<GameplaySnapshot>(page, 'gameplay.damage')
-  expect(damaged.vitals.healthPoints).toBeCloseTo(18.4)
+  expect(damaged.vitals.healthPoints).toBeCloseTo(18.4, 5)
   expect(damaged.vitals.lastDamageCause).toBeUndefined()
+  expect(damaged.inventory.equipment).toMatchObject({
+    head: { durability: { current: 164, max: 165 } },
+    chest: { durability: { current: 239, max: 240 } },
+    legs: { durability: { current: 224, max: 225 } },
+    feet: { durability: { current: 194, max: 195 } },
+  })
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })
