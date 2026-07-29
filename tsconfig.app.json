@@ -22,7 +22,6 @@
     "types": ["node"],
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "noEmit": true,
-    "baseUrl": ".",
     "paths": {
       "@nerima-games/mc-render": ["../mc-render/index.ts"],
       "@nerima-games/mx-ui": ["../mx-ui/index.ts"],
