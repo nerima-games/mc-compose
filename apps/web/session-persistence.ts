@@ -13,8 +13,11 @@ import {
 } from '@nerima-games/mc-save'
 import {
   INITIAL_TIME_STATE,
+  INITIAL_WEATHER_STATE,
   isValidTimeState,
+  isValidWeatherState,
   type TimeState,
+  type WeatherState,
 } from '@nerima-games/mc-sim'
 import {
   CHUNK_FORMAT,
@@ -184,6 +187,7 @@ export type SessionState = {
   }
   readonly vitals: PlayerVitals
   readonly time: TimeState
+  readonly weather: WeatherState
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -213,6 +217,15 @@ const TimeStateSchema: Schema.Schema<TimeState> = Schema.Struct({
   }),
 )
 
+const WeatherStateSchema: Schema.Schema<WeatherState> = Schema.Struct({
+  weather: Schema.Literal('clear', 'rain', 'thunder'),
+  remainingSecs: FiniteNumberSchema,
+}).pipe(
+  Schema.filter(isValidWeatherState, {
+    message: () => 'Weather state violates simulation invariants',
+  }),
+)
+
 const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   seed: Schema.Number,
   dimension: Schema.Literal('overworld', 'nether', 'end'),
@@ -224,6 +237,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   inventory: Schema.Struct({ slots: Schema.Array(InventorySlotSchema) }),
   vitals: PlayerVitalsSchema,
   time: TimeStateSchema,
+  weather: WeatherStateSchema,
 })
 
 export type SessionChunkManifestEntry = {
@@ -303,11 +317,30 @@ const migrateSessionV2ToV3: Migration = {
   },
 }
 
+const migrateSessionV3ToV4: Migration = {
+  from: 3,
+  describe: 'add weather to the session state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v3 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'weather')
+        ? state
+        : { ...state, weather: { ...INITIAL_WEATHER_STATE } },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 3,
+  version: 4,
   schema: SessionHeadSchema,
-  migrations: [migrateSessionV1ToV2, migrateSessionV2ToV3],
+  migrations: [migrateSessionV1ToV2, migrateSessionV2ToV3, migrateSessionV3ToV4],
 })
 
 export class SessionManifestError extends Data.TaggedError('SessionManifestError')<{

@@ -14,6 +14,10 @@ type InventorySlot = null | { readonly itemId: string; readonly count: number }
 type GameplaySnapshot = {
   readonly pose: Pose
   readonly dimension: string
+  readonly weather: {
+    readonly weather: 'clear' | 'rain' | 'thunder'
+    readonly remainingSecs: number
+  }
   readonly vitals: {
     readonly foodTimerSecs: number
     readonly [key: string]: unknown
@@ -93,6 +97,9 @@ test('publishes a mined world, inventory, and exact pose across reload', async (
   await expect.poll(async () => (await snapshot(page)).target.block).toBe(AIR_BLOCK_ID)
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-player-grounded', 'true')
 
+  await callQa(page, 'gameplay.setWeather')
+  await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather', 'thunder')
+
   const published = await snapshot(page)
   const publishedHotbar = await hotbarText(page)
   expect(published.inventory.slots).toHaveLength(36)
@@ -103,11 +110,14 @@ test('publishes a mined world, inventory, and exact pose across reload', async (
   await page.reload()
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'persisted')
+  await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather', 'thunder')
 
   await expect.poll(async () => (await snapshot(page)).target.block).toBe(AIR_BLOCK_ID)
   const restored = await snapshot(page)
   expect(restored.pose).toEqual(published.pose)
   expect(restored.dimension).toBe(published.dimension)
+  expect(restored.weather.weather).toBe(published.weather.weather)
+  expect(Math.abs(restored.weather.remainingSecs - published.weather.remainingSecs)).toBeLessThan(5)
   expect(restored.inventory).toEqual(published.inventory)
   expect(await hotbarText(page)).toEqual(publishedHotbar)
   expect(faults.pageErrors).toEqual([])
@@ -136,11 +146,16 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
   const restored = await snapshot(page)
   expect(restored).toEqual({
     ...published,
+    weather: {
+      ...published.weather,
+      remainingSecs: expect.any(Number),
+    },
     vitals: {
       ...published.vitals,
       foodTimerSecs: expect.any(Number),
     },
   })
+  expect(Math.abs(restored.weather.remainingSecs - published.weather.remainingSecs)).toBeLessThan(5)
   expect(restored.vitals.foodTimerSecs).toBeGreaterThanOrEqual(0)
   expect(restored.vitals.foodTimerSecs).toBeLessThan(4)
   expect(faults.pageErrors).toEqual([])

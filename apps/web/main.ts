@@ -85,7 +85,11 @@
 import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Ref, Scope } from 'effect'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
-import { makeTimeService } from '@nerima-games/mc-sim'
+import {
+  makeTimeService,
+  makeWeatherService,
+  type WeatherState,
+} from '@nerima-games/mc-sim'
 import {
   chunkCoord,
   chunkSnapshotOf,
@@ -134,6 +138,7 @@ import {
   resolvePlayerMovement,
   solidityFromStore,
   spawnMobDrops,
+  weatherLightScale,
   PLAYER_HALF_HEIGHT,
   ZOMBIE_KIND,
   type MobBehaviour,
@@ -410,9 +415,18 @@ const boot = async (): Promise<void> => {
     await Effect.runPromise(world.vitals.restore(loadedSession.value.state.vitals))
   }
   const time = await Effect.runPromise(makeTimeService())
+  const weather = await Effect.runPromise(makeWeatherService())
   if (Option.isSome(loadedSession)) {
     await Effect.runPromise(time.restore(loadedSession.value.state.time))
+    await Effect.runPromise(weather.restore(loadedSession.value.state.weather))
   }
+
+  const presentWeather = (state: WeatherState): void => {
+    canvas.setAttribute('data-weather', state.weather)
+    canvas.setAttribute('data-weather-remaining-secs', String(state.remainingSecs))
+    canvas.style.filter = `brightness(${String(weatherLightScale(state.weather))})`
+  }
+  presentWeather(Effect.runSync(weather.snapshot))
 
   const reportPersistenceFailure = (error: unknown): void => {
     document.body.setAttribute('data-session-persistence', 'failed')
@@ -428,6 +442,7 @@ const boot = async (): Promise<void> => {
       inventory: Effect.runSync(world.inventory.snapshot),
       vitals: Effect.runSync(world.vitals.snapshot),
       time: Effect.runSync(time.snapshot),
+      weather: Effect.runSync(weather.snapshot),
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -909,6 +924,7 @@ const boot = async (): Promise<void> => {
     return {
       pose: Effect.runSync(playerApi.pose),
       dimension: Effect.runSync(playerApi.dimension),
+      weather: Effect.runSync(weather.snapshot),
       vitals,
       dead: vitals.healthPoints <= 0,
       inventory: {
@@ -940,6 +956,13 @@ const boot = async (): Promise<void> => {
       namespace: 'gameplay',
       commands: {
         snapshot: gameplaySnapshot,
+        setWeather: () => {
+          const qaWeather: WeatherState = { weather: 'thunder', remainingSecs: 300 }
+          Effect.runSync(weather.applyTransition(qaWeather))
+          presentWeather(qaWeather)
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
         setPose: () => {
           Effect.runSync(playerApi.restore(QA_POSE, Effect.runSync(playerApi.dimension)))
           playerVelocityY = 0
@@ -1098,7 +1121,7 @@ const boot = async (): Promise<void> => {
     if (document.visibilityState === 'hidden') requestBackgroundFlush()
   })
   // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
-  // Periodic publication persists the advancing clock even without gameplay mutations.
+  // Periodic publication persists advancing time and weather without gameplay mutations.
   window.addEventListener('pagehide', requestBackgroundFlush)
 
   // -------------------------------------------------------------------------
@@ -1302,6 +1325,9 @@ const boot = async (): Promise<void> => {
     Effect.runSync(Ref.set(gameplayState.targetPosition, resolvedFeet))
     Effect.runSync(time.advance(deltaSecs))
     Effect.runSync(Ref.set(gameplayState.timeOfDay, Effect.runSync(time.timeOfDay)))
+    const weatherBeforeFrame = Effect.runSync(weather.snapshot)
+    Effect.runSync(Ref.set(gameplayState.weather, weatherBeforeFrame))
+    Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
     Effect.runSync(streamAround(resolvedFeet.x, resolvedFeet.z))
     canvas.setAttribute(
       'data-player-feet',
@@ -1317,6 +1343,13 @@ const boot = async (): Promise<void> => {
       // second buries its own first occurrence in the console.
       failBoot('a frame stage defected', outcome.cause)
       return
+    }
+
+    const weatherAdvanced = Effect.runSync(Ref.get(gameplayState.weatherAdvanced))
+    if (weatherAdvanced !== undefined) {
+      Effect.runSync(weather.applyTransition(weatherAdvanced))
+      presentWeather(weatherAdvanced)
+      if (weatherAdvanced.weather !== weatherBeforeFrame.weather) markSessionDirty()
     }
 
     const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))

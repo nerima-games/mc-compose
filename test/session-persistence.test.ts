@@ -8,7 +8,7 @@ import {
   type SaveEnvelope,
   type StorageService,
 } from '@nerima-games/mc-save'
-import { INITIAL_TIME_STATE } from '@nerima-games/mc-sim'
+import { INITIAL_TIME_STATE, INITIAL_WEATHER_STATE } from '@nerima-games/mc-sim'
 import {
   CHUNK_SIZE_XZ,
   CHUNK_VOLUME,
@@ -47,6 +47,7 @@ const sessionState = (seed: number): SessionState => ({
     lastDamageCause: 'fall',
   },
   time: { ticks: 12_345, dayLengthTicks: 24_000 },
+  weather: { weather: 'rain', remainingSecs: 123.5 },
 })
 
 const chunk = (cx: number, cz: number, marker: number): Chunk => ({
@@ -150,10 +151,11 @@ describe('session persistence', () => {
       expect(Option.getOrThrow(loaded)).toEqual(saved)
       expect(saved.state.vitals).toEqual(sessionState(42).vitals)
       expect(saved.state.time).toEqual(sessionState(42).time)
+      expect(saved.state.weather).toEqual(sessionState(42).weather)
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 3,
+        version: 4,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -186,6 +188,7 @@ describe('session persistence', () => {
 
       expect(loaded.state.vitals).toEqual(SPAWN_PLAYER_VITALS)
       expect(loaded.state.time).toEqual(INITIAL_TIME_STATE)
+      expect(loaded.state.weather).toEqual(INITIAL_WEATHER_STATE)
       expect(storage.envelope(key)?.version).toBe(1)
     }).pipe(Effect.provide(storage.layer))
   })
@@ -195,6 +198,7 @@ describe('session persistence', () => {
     const key = sessionHeadKey('legacy-v2')
     const legacyState = { ...sessionState(84) } as Record<string, unknown>
     delete legacyState['time']
+    delete legacyState['weather']
     storage.setEnvelope(key, {
       format: SESSION_FORMAT_NAME,
       version: 2,
@@ -210,7 +214,54 @@ describe('session persistence', () => {
       const loaded = Option.getOrThrow(yield* loadSession('legacy-v2'))
 
       expect(loaded.state.time).toEqual(INITIAL_TIME_STATE)
+      expect(loaded.state.weather).toEqual(INITIAL_WEATHER_STATE)
       expect(storage.envelope(key)?.version).toBe(2)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a literal v3 session to the initial weather', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v3')
+    const legacyState = { ...sessionState(91) } as Record<string, unknown>
+    delete legacyState['weather']
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 3,
+      payload: {
+        sessionId: 'legacy-v3',
+        revision: 'r1',
+        state: legacyState,
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v3'))
+
+      expect(loaded.state.weather).toEqual(INITIAL_WEATHER_STATE)
+      expect(storage.envelope(key)?.version).toBe(3)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('does not repair an explicitly undefined v3 weather property', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-invalid-weather')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 3,
+      payload: {
+        sessionId: 'legacy-invalid-weather',
+        revision: 'r1',
+        state: { ...sessionState(42), weather: undefined },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession('legacy-invalid-weather'))
+
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 3 })
+      expect(storage.envelope(key)?.version).toBe(3)
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -316,6 +367,30 @@ describe('session persistence', () => {
       const error = yield* Effect.flip(loadSession('invalid-time'))
 
       expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 3 })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects persisted weather that violates simulation invariants', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('invalid-weather')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 4,
+      payload: {
+        sessionId: 'invalid-weather',
+        revision: 'r1',
+        state: {
+          ...sessionState(42),
+          weather: { weather: 'rain', remainingSecs: 0 },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession('invalid-weather'))
+
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 4 })
     }).pipe(Effect.provide(storage.layer))
   })
 
