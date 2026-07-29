@@ -116,6 +116,7 @@ import {
 import { redstoneModule } from '@nerima-games/mx-redstone'
 import {
   applyGravity,
+  CREEPER_KIND,
   drainMobDrops,
   drainPlayerDamages,
   EYE_LEVEL_OFFSET,
@@ -127,8 +128,10 @@ import {
   requestMobSpawn,
   requestTargetedBlockBreak,
   requestTargetedBlockPlacement,
+  requestTargetedPrimaryAttack,
   resolvePlayerMovement,
   solidityFromStore,
+  spawnMobDrops,
   PLAYER_HALF_HEIGHT,
   ZOMBIE_KIND,
   type MobBehaviour,
@@ -1004,6 +1007,47 @@ const boot = async (): Promise<void> => {
           markSessionDirty()
           return gameplaySnapshot()
         },
+        seedMeleeDropEncounter: () => {
+          respawnPlayer()
+          Effect.runSync(world.inventory.reset)
+          inventoryInteraction.reset()
+          const spawnPose = Effect.runSync(playerApi.pose)
+          Effect.runSync(playerApi.look(-spawnPose.yawRadians, -spawnPose.pitchRadians))
+          const currentPose = Effect.runSync(playerApi.pose)
+          const distance = 2
+          const horizontal = Math.cos(currentPose.pitchRadians)
+          const direction = {
+            x: -Math.sin(currentPose.yawRadians) * horizontal,
+            y: Math.sin(currentPose.pitchRadians),
+            z: -Math.cos(currentPose.yawRadians) * horizontal,
+          }
+          const eyeY = Math.floor(currentPose.feetPosition.y + EYE_LEVEL_OFFSET)
+          for (let zOffset = 0; zOffset >= -3; zOffset -= 1) {
+            Effect.runSync(world.chunkStore.setBlock({
+              x: Math.floor(currentPose.feetPosition.x),
+              y: eyeY,
+              z: Math.floor(currentPose.feetPosition.z) + zOffset,
+            }, 0))
+          }
+          Effect.runSync(
+            world.entities.spawn({
+              kind: CREEPER_KIND,
+              feetPosition: {
+                x: currentPose.feetPosition.x + direction.x * distance,
+                y: currentPose.feetPosition.y
+                  + EYE_LEVEL_OFFSET
+                  + direction.y * distance
+                  - 0.9,
+                z: currentPose.feetPosition.z + direction.z * distance,
+              },
+              healthPoints: 1,
+              behaviour: undefined,
+            }),
+          )
+          markSessionDirty()
+          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          return gameplaySnapshot()
+        },
       },
     },
     {
@@ -1152,13 +1196,22 @@ const boot = async (): Promise<void> => {
     Effect.runSync(playerApi.moveTo(resolvedFeet))
     if (looked || moved) markSessionDirty()
 
-    // The gameplay boundary owns both reach and DDA targeting. Compose only
-    // translates the input action, preserving its dependency direction.
+    // Gameplay resolves mob-versus-block priority atomically so one click
+    // cannot enqueue both interactions.
     if (!dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))) {
-      const target = Effect.runSync(requestTargetedBlockBreak(gameplayState, world.chunkStore, playerApi))
-      if (Option.isSome(target)) {
+      const result = Effect.runSync(
+        requestTargetedPrimaryAttack(
+          gameplayState,
+          world.chunkStore,
+          world.entities,
+          playerApi,
+        ),
+      )
+      if (result._tag === 'Block') {
         breaksRequested += 1
         canvas.setAttribute('data-breaks-requested', String(breaksRequested))
+        markSessionDirty()
+      } else if (result._tag === 'Melee') {
         markSessionDirty()
       }
     }
@@ -1221,6 +1274,10 @@ const boot = async (): Promise<void> => {
     }
 
     const mobDrops = Effect.runSync(drainMobDrops(gameplayState))
+    if (mobDrops.length > 0) {
+      Effect.runSync(spawnMobDrops(world.entities, mobDrops))
+      markSessionDirty()
+    }
     for (const drop of mobDrops) {
       nextMobDropId += 1
       observedMobDrops.push({ ...drop, renderId: `mob-drop-${nextMobDropId}` })

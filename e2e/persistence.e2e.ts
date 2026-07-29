@@ -14,6 +14,10 @@ type InventorySlot = null | { readonly itemId: string; readonly count: number }
 type GameplaySnapshot = {
   readonly pose: Pose
   readonly dimension: string
+  readonly vitals: {
+    readonly foodTimerSecs: number
+    readonly [key: string]: unknown
+  }
   readonly inventory: { readonly slots: ReadonlyArray<InventorySlot> }
   readonly target: {
     readonly position: Position
@@ -129,7 +133,16 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'persisted')
   await expect.poll(async () => (await snapshot(page)).target.block).toBe(AIR_BLOCK_ID)
-  expect(await snapshot(page)).toEqual(published)
+  const restored = await snapshot(page)
+  expect(restored).toEqual({
+    ...published,
+    vitals: {
+      ...published.vitals,
+      foodTimerSecs: expect.any(Number),
+    },
+  })
+  expect(restored.vitals.foodTimerSecs).toBeGreaterThanOrEqual(0)
+  expect(restored.vitals.foodTimerSecs).toBeLessThan(4)
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })

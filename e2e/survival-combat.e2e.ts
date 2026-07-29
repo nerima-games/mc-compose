@@ -28,6 +28,9 @@ type GameplaySnapshot = {
     readonly lastDamageCause?: string
   }
   readonly dead: boolean
+  readonly inventory: {
+    readonly slots: ReadonlyArray<{ readonly item: string; readonly count: number } | null>
+  }
   readonly entityCount: number
   readonly entities: ReadonlyArray<EntitySnapshot>
   readonly renderedEntities: ReadonlyArray<RenderedEntitySnapshot>
@@ -71,6 +74,12 @@ const selectedSlotIndex = async (hotbar: Locator): Promise<number> =>
 
 const framesDrawn = async (page: Page): Promise<number> =>
   Number(await page.locator('body').getAttribute('data-frames'))
+
+const inventoryCount = (current: GameplaySnapshot, item: string): number =>
+  current.inventory.slots.reduce(
+    (total, slot) => total + (slot?.item === item ? slot.count : 0),
+    0,
+  )
 
 test('renders a lethal zombie encounter and recovers through the Respawn control', async ({
   page,
@@ -167,6 +176,67 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
   await expect(deathOverlay).toBeHidden()
   await expect(respawn).toBeHidden()
   await expect.poll(() => framesDrawn(page)).toBeGreaterThan(framesAtDeath)
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('kills a hostile with a left click and collects its dropped item', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await page.goto('/')
+  const body = page.locator('body')
+  const canvas = page.locator('#game-canvas')
+  await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await canvas.hover()
+  await callQa<unknown>(page, 'gameplay.seedMeleeDropEncounter')
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return current.entities.map(({ kind, healthPoints }) => ({ kind, healthPoints }))
+  }).toEqual([{ kind: 'creeper', healthPoints: 1 }])
+  const gunpowderBefore = inventoryCount(await snapshot(page), 'gunpowder')
+
+  // Headless Chromium's SwiftShader backend cannot grant pointer lock. Model
+  // the granted state, then use a real canvas click for the attack itself.
+  await page.evaluate(() => {
+    const gameCanvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
+    if (gameCanvas === null) throw new Error('missing game canvas')
+    Object.defineProperty(document, 'pointerLockElement', {
+      configurable: true,
+      get: () => gameCanvas,
+    })
+    document.dispatchEvent(new Event('pointerlockchange'))
+  })
+  await canvas.click({ button: 'left' })
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return {
+      hostileKinds: current.entities
+        .filter((entity) => entity.kind !== 'dropped_item')
+        .map((entity) => entity.kind),
+      droppedKinds: current.entities
+        .filter((entity) => entity.kind === 'dropped_item')
+        .map((entity) => entity.kind),
+    }
+  }).toEqual({
+    hostileKinds: [],
+    droppedKinds: ['dropped_item'],
+  })
+
+  await page.keyboard.down('KeyW')
+  try {
+    await expect.poll(async () => {
+      const current = await snapshot(page)
+      return {
+        droppedItems: current.entities.filter((entity) => entity.kind === 'dropped_item').length,
+        gunpowder: inventoryCount(current, 'gunpowder'),
+      }
+    }).toEqual({ droppedItems: 0, gunpowder: gunpowderBefore + 1 })
+  } finally {
+    await page.keyboard.up('KeyW')
+  }
+
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })
