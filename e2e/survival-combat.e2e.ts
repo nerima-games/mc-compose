@@ -1,5 +1,7 @@
 import { expect, test, type ConsoleMessage, type Locator, type Page } from '@playwright/test'
 
+import { startGameSession } from './helpers/session'
+
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
 type Position = { readonly x: number; readonly y: number; readonly z: number }
@@ -105,7 +107,7 @@ const framesDrawn = async (page: Page): Promise<number> =>
 test('shows a damage caption without requiring autoplay unlock', async ({ page }) => {
   const faults = watchForFaults(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
   await callQa<unknown>(page, 'gameplay.damage')
@@ -145,7 +147,7 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
 }) => {
   const faults = watchForFaults(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   const body = page.locator('body')
   const hud = page.locator('#hud-root')
   const hotbar = hud.locator('[data-mx-ui="hotbar"]')
@@ -242,7 +244,7 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
 test('eats the selected potato through a right-click use action', async ({ page }) => {
   const faults = watchForFaults(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   const body = page.locator('body')
   const canvas = page.locator('#game-canvas')
   await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')
@@ -275,7 +277,7 @@ test('eats the selected potato through a right-click use action', async ({ page 
 test('consumes one fire charge only after successful ignition', async ({ page }) => {
   const faults = watchForFaults(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   const canvas = page.locator('#game-canvas')
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await canvas.hover()
@@ -313,7 +315,7 @@ test('consumes one fire charge only after successful ignition', async ({ page })
 test('does not consume a fire charge when ignition is refused', async ({ page }) => {
   const faults = watchForFaults(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedRefusedFireChargeIgnition')
   const chargesBefore = inventoryCount(seeded, 'fire_charge')
@@ -340,7 +342,7 @@ test('does not consume a fire charge when ignition is refused', async ({ page })
 test('damages flint and steel after successful ignition', async ({ page }) => {
   const faults = watchForFaults(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   const canvas = page.locator('#game-canvas')
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await canvas.hover()
@@ -376,7 +378,7 @@ test('damages flint and steel after successful ignition', async ({ page }) => {
 test('kills a hostile with a left click and collects its dropped item', async ({ page }) => {
   const faults = watchForFaults(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   const body = page.locator('body')
   const canvas = page.locator('#game-canvas')
   await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')

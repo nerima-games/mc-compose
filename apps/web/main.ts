@@ -106,6 +106,7 @@ import {
 } from '@nerima-games/mc-worldgen'
 import {
   browserInputLayer,
+  ESCAPE_KEY_CODE,
   InputService,
   chunkKeyOf,
   makeChunkStoreMesher,
@@ -117,14 +118,20 @@ import {
   type RenderEntity,
 } from '@nerima-games/mc-render'
 import {
+  createMainMenuView,
   createCrosshairView,
   createHudView,
   createInventoryView,
   hudViewModel,
+  initialMainMenuState,
   inventoryViewModel,
+  mainMenuViewModel,
   slotSnapshotOf,
   uiModule,
+  type CreateWorldRequest,
   type InventoryInteractionTarget,
+  type MainMenuState,
+  type SavedWorld,
 } from '@nerima-games/mx-ui'
 import {
   makeRuntimeRedstoneStages,
@@ -182,6 +189,7 @@ import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
 import {
+  listSessions,
   loadSession,
   makeSessionChunkSource,
   saveSession,
@@ -190,6 +198,11 @@ import {
   type PersistedLeverState,
   type SessionState,
 } from './session-persistence'
+import {
+  createUniqueSessionId,
+  sessionHref,
+  sessionIdFromSearch,
+} from './session-navigation'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -228,7 +241,6 @@ const WALK_EXHAUSTION_PER_METRE = 0.01
 const JUMP_SPEED_M_PER_S = 8.4
 const LOOK_SENSITIVITY = 0.0022
 const WORLD_SEED = 20260728
-const SESSION_ID = 'primary'
 const DATABASE_NAME = 'nerima-games-minecraft'
 const AUTOSAVE_INTERVAL_MS = 5_000
 const SAVE_DEBOUNCE_MS = 500
@@ -294,7 +306,66 @@ const failBoot = (reason: string, detail?: unknown): void => {
   console.error(`[mc-compose] boot failed: ${reason}`, detail)
 }
 
-const boot = async (): Promise<void> => {
+const bootTitle = async (): Promise<void> => {
+  const titleScreen = requireElement('title-screen')
+  const menuParent = requireElement('main-menu-root')
+  const titleStatus = requireElement('title-status')
+  titleScreen.hidden = false
+  document.body.setAttribute('data-mc-compose-route', 'title')
+
+  const scope = Effect.runSync(Scope.make())
+  const storageContext = await Effect.runPromise(
+    Effect.provideService(
+      Layer.build(indexedDbStorageLayer({ factory: indexedDB, databaseName: DATABASE_NAME })),
+      Scope.Scope,
+      scope,
+    ),
+  )
+  const sessions = await Effect.runPromise(Effect.provide(listSessions(), storageContext))
+  const savedWorlds: ReadonlyArray<SavedWorld> = sessions.map(({ sessionId }) => ({
+    sessionId,
+    name: sessionId,
+  }))
+  const existingIds = savedWorlds.map(({ sessionId }) => sessionId)
+  let menuState: MainMenuState = initialMainMenuState
+  let menuView: ReturnType<typeof createMainMenuView>
+
+  const openSession = (sessionId: string): void => {
+    window.location.assign(sessionHref(sessionId))
+  }
+  const createWorld = ({ name, mode }: CreateWorldRequest): void => {
+    if (mode === 'creative') {
+      titleStatus.textContent = 'Creative is not available yet.'
+      return
+    }
+    titleStatus.textContent = ''
+    openSession(createUniqueSessionId(name, existingIds))
+  }
+
+  menuView = createMainMenuView(document, menuParent, {
+    onStateChange: (state) => {
+      menuState = state
+      menuView.render(mainMenuViewModel(menuState, savedWorlds))
+    },
+    onCreateWorld: createWorld,
+    onLoadWorld: ({ sessionId }) => openSession(sessionId),
+    onOpenSettings: () => {
+      titleStatus.textContent = 'Options are not available yet.'
+    },
+  })
+  menuView.render(mainMenuViewModel(menuState, savedWorlds))
+  document.body.setAttribute('data-mc-compose-boot', 'running')
+}
+
+const bootGame = async (sessionId: string): Promise<void> => {
+  const gameShell = requireElement('game-shell')
+  const pauseOverlay = requireElement('pause-overlay')
+  const resumeButton = requireElement('resume-button')
+  const saveQuitButton = requireElement('save-quit-button')
+  const pauseError = requireElement('pause-error')
+  gameShell.hidden = false
+  document.body.setAttribute('data-mc-compose-route', 'session')
+  document.body.setAttribute('data-session-id', sessionId)
   const canvas = requireCanvas('game-canvas')
   const hudParent = requireElement('hud-root')
   const captionsParent = requireElement('sound-captions')
@@ -302,6 +373,7 @@ const boot = async (): Promise<void> => {
   const fpsValue = requireElement('fps-value')
   const stageList = requireElement('stage-order')
   let inventoryOpen = false
+  let paused = false
 
   // -------------------------------------------------------------------------
   // 1. Platform adapters
@@ -332,7 +404,7 @@ const boot = async (): Promise<void> => {
   const runStorage = <A, E>(effect: Effect.Effect<A, E, never>): Promise<A> =>
     Effect.runPromise(effect)
   const loadedSession = await runStorage(
-    Effect.provide(loadSession(SESSION_ID), storageContext),
+    Effect.provide(loadSession(sessionId), storageContext),
   )
 
   // POINTER LOCK IS THE HOST'S TO ASK FOR. mc-render's `InputService` treats a
@@ -343,7 +415,7 @@ const boot = async (): Promise<void> => {
   const inputLayer = browserInputLayer({
     targets: { window, document },
     canvas,
-    allowsPointerLock: () => !inventoryOpen,
+    allowsPointerLock: () => !inventoryOpen && !paused,
   })
 
   // The gesture the browser requires: pointer lock can only be requested from a
@@ -597,7 +669,7 @@ const boot = async (): Promise<void> => {
       runStorage(
         Effect.provide(
           saveSession({
-            sessionId: SESSION_ID,
+            sessionId,
             revision: crypto.randomUUID(),
             state,
             chunks,
@@ -1197,6 +1269,75 @@ const boot = async (): Promise<void> => {
     debounceTimer = window.setTimeout(flushDirty, SAVE_DEBOUNCE_MS)
   }
 
+  const setPaused = (next: boolean): void => {
+    paused = next
+    gameShell.inert = next
+    pauseOverlay.hidden = !next
+    document.body.setAttribute('data-session-paused', String(next))
+    if (next) {
+      if (document.pointerLockElement === canvas) document.exitPointerLock()
+      resumeButton.focus()
+      return
+    }
+    pauseError.textContent = ''
+    canvas.focus()
+  }
+
+  const handlePauseRequest = (): void => {
+    if (inventoryOpen) {
+      setInventoryOpen(false)
+      return
+    }
+    setPaused(!paused)
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.code === 'Escape' && !event.repeat) {
+      event.preventDefault()
+      event.stopPropagation()
+      handlePauseRequest()
+      return
+    }
+
+    if (!paused || event.code !== 'Tab') return
+    const pauseActions = [resumeButton, saveQuitButton].filter(
+      (button) => !button.hasAttribute('disabled'),
+    )
+    const firstAction = pauseActions[0]
+    const lastAction = pauseActions.at(-1)
+    if (firstAction === undefined || lastAction === undefined) return
+
+    const activeElement = document.activeElement
+    const activeIsPauseAction = pauseActions.some((button) => button === activeElement)
+    const allowsNativeFocusMove = event.shiftKey
+      ? activeElement !== firstAction && activeIsPauseAction
+      : activeElement !== lastAction && activeIsPauseAction
+    if (allowsNativeFocusMove) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    ;(event.shiftKey ? lastAction : firstAction).focus()
+  })
+  resumeButton.addEventListener('click', () => setPaused(false))
+  saveQuitButton.addEventListener('click', () => {
+    if (saveQuitButton.getAttribute('aria-busy') === 'true') return
+    saveQuitButton.setAttribute('aria-busy', 'true')
+    saveQuitButton.setAttribute('disabled', '')
+    pauseError.textContent = ''
+    void requestFlush()
+      .then(() => window.location.assign('/'))
+      .catch((error: unknown) => {
+        pauseError.textContent = 'Save failed. Your world is still open; please try again.'
+        console.error('[mc-compose] Save & Quit failed', error)
+      })
+      .finally(() => {
+        saveQuitButton.removeAttribute('aria-busy')
+        saveQuitButton.removeAttribute('disabled')
+      })
+  })
+
   // -------------------------------------------------------------------------
   // 5. QA surface
   // -------------------------------------------------------------------------
@@ -1510,6 +1651,20 @@ const boot = async (): Promise<void> => {
 
   const tick = (): void => {
     const nowSecs = readNow()
+    const frameInput = Effect.runSync(inputApi.snapshot)
+    if (frameInput.justPressed.has(ESCAPE_KEY_CODE)) {
+      handlePauseRequest()
+      Effect.runSync(inputApi.endFrame(frameInput))
+      previousSecs = nowSecs
+      requestAnimationFrame(tick)
+      return
+    }
+    if (paused) {
+      Effect.runSync(inputApi.endFrame(frameInput))
+      previousSecs = nowSecs
+      requestAnimationFrame(tick)
+      return
+    }
     const raw = previousSecs === undefined ? FIRST_FRAME_SECS : nowSecs - previousSecs
     previousSecs = nowSecs
     const deltaSecs = clampDelta(raw)
@@ -1524,7 +1679,7 @@ const boot = async (): Promise<void> => {
     //
     // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, which keeps a
     // backgrounded tab from returning with a multi-second physics step.
-    const walk = Effect.runSync(inputApi.snapshot)
+    const walk = frameInput
     const foodOutcome = Effect.runSync(world.vitals.advanceFoodTimer(deltaSecs))
     if (foodOutcome.signal !== 'none') markSessionDirty()
 
@@ -1864,6 +2019,11 @@ const boot = async (): Promise<void> => {
   }
 
   requestAnimationFrame(tick)
+}
+
+const boot = (): Promise<void> => {
+  const sessionId = sessionIdFromSearch(window.location.search)
+  return sessionId === undefined ? bootTitle() : bootGame(sessionId)
 }
 
 boot().catch((error: unknown) => {

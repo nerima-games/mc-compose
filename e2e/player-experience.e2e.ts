@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
+import { startGameSession } from './helpers/session'
+
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
 const callQa = async (page: Page, key: string): Promise<unknown> =>
@@ -15,7 +17,7 @@ const selectedSlotIndex = async (hotbar: Locator): Promise<number> =>
 
 test.describe('player inventory experience', () => {
   test('keeps HUD selection and the interactive inventory overlay in sync', async ({ page }) => {
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
     const hud = page.locator('#hud-root')
@@ -47,7 +49,7 @@ test.describe('player inventory experience', () => {
   })
 
   test('crafts four planks through the service and clears a draft on close', async ({ page }) => {
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
     await callQa(page, 'gameplay.seedCraftingLog')
 

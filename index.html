@@ -18,6 +18,30 @@
         font: 12px/1.4 monospace;
       }
 
+      [hidden] {
+        display: none !important;
+      }
+
+      #title-screen {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        box-sizing: border-box;
+        background:
+          radial-gradient(circle at 20% 20%, rgba(82, 122, 72, 0.22), transparent 36%),
+          linear-gradient(155deg, #182018, #0c100d 58%, #14110d);
+      }
+
+      #main-menu-root {
+        width: min(520px, 100%);
+      }
+
+      #game-shell {
+        position: fixed;
+        inset: 0;
+      }
+
       #game-canvas {
         display: block;
         width: 100vw;
@@ -105,26 +129,80 @@
         color: #f0f0f0;
         text-shadow: 0 1px 1px #000;
       }
+
+      #pause-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: grid;
+        place-items: center;
+        background: rgba(0, 0, 0, 0.72);
+      }
+
+      #pause-dialog {
+        width: min(360px, calc(100vw - 48px));
+        padding: 28px;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        background: #171914;
+        box-shadow: 0 18px 70px rgba(0, 0, 0, 0.55);
+      }
+
+      #pause-actions {
+        display: grid;
+        gap: 10px;
+      }
+
+      #pause-actions button {
+        min-height: 44px;
+        border: 1px solid #aeb89e;
+        background: #293123;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      #pause-error {
+        min-height: 1.4em;
+        color: #ff9b91;
+      }
     </style>
   </head>
   <body data-mc-compose-boot="starting">
-    <!-- THE drawing surface. mc-render's `makeWorldRenderer` creates the WebGL2
-         context on it (see apps/web/main.ts); this file still never calls
-         getContext, because a context created here would make
-         docs/e2e-triage.md #1 pass without mc-render drawing anything. It is
-         also the pointer-lock target and the element a click can land on. -->
-    <canvas id="game-canvas" tabindex="0"></canvas>
-    <div id="hud-root"></div>
-    <div id="inventory-root" hidden></div>
-    <div
-      id="sound-captions"
-      role="status"
-      aria-live="polite"
-      aria-atomic="false"
-      data-testid="sound-captions"
-    ></div>
-    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
-    <div id="stage-order" data-stage-count="0"></div>
+    <main id="title-screen" data-testid="title-screen" hidden>
+      <div id="main-menu-root"></div>
+      <p id="title-status" role="status" aria-live="polite"></p>
+    </main>
+    <div id="game-shell" data-testid="game-shell" hidden>
+      <!-- THE drawing surface. mc-render's `makeWorldRenderer` creates the WebGL2
+           context on it (see apps/web/main.ts); this file still never calls
+           getContext, because a context created here would make
+           docs/e2e-triage.md #1 pass without mc-render drawing anything. It is
+           also the pointer-lock target and the element a click can land on. -->
+      <canvas id="game-canvas" tabindex="0" aria-label="Minecraft game world"></canvas>
+      <div id="hud-root"></div>
+      <div id="inventory-root" hidden></div>
+      <div
+        id="sound-captions"
+        role="status"
+        aria-live="polite"
+        aria-atomic="false"
+        data-testid="sound-captions"
+      ></div>
+      <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+      <div id="stage-order" data-stage-count="0"></div>
+    </div>
+    <div id="pause-overlay" data-testid="pause-overlay" hidden>
+      <section id="pause-dialog" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+        <h1 id="pause-title">Game Paused</h1>
+        <div id="pause-actions">
+          <button id="resume-button" type="button" data-testid="resume-button">Resume</button>
+          <button id="save-quit-button" type="button" data-testid="save-quit-button">
+            Save &amp; Quit
+          </button>
+        </div>
+        <p id="pause-error" role="alert" aria-live="assertive"></p>
+      </section>
+    </div>
     <div id="boot-status" role="status" aria-live="polite"></div>
     <script type="module" src="/apps/web/main.ts"></script>
   </body>

@@ -1,5 +1,7 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
 
+import { startGameSession } from './helpers/session'
+
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const DATABASE_NAME = 'nerima-games-minecraft'
 const AIR_BLOCK_ID = 0
@@ -85,7 +87,7 @@ test('publishes a mined world, inventory, and exact pose across reload', async (
   const faults = watchForFaults(page)
   await deleteSessionDatabase(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect(page.locator('[data-mx-ui="hotbar"] [data-mx-ui="slot"]')).toHaveCount(9)
 
@@ -109,6 +111,7 @@ test('publishes a mined world, inventory, and exact pose across reload', async (
   await callQa(page, 'persistence.flush')
   await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
   await page.reload()
+  await expect(page).toHaveURL(/\?session=e2e$/u)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'persisted')
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather', 'thunder')
@@ -129,7 +132,7 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
   const faults = watchForFaults(page)
   await deleteSessionDatabase(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
   await callQa(page, 'gameplay.setPose')
@@ -141,6 +144,7 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
   const published = await snapshot(page)
 
   await page.reload()
+  await expect(page).toHaveURL(/\?session=e2e$/u)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'persisted')
   await expect.poll(async () => (await snapshot(page)).target.block).toBe(AIR_BLOCK_ID)
@@ -167,7 +171,7 @@ test('isolates and restores edits while travelling overworld to nether and back'
   const faults = watchForFaults(page)
   await deleteSessionDatabase(page)
 
-  await page.goto('/')
+  await startGameSession(page)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
   await callQa(page, 'gameplay.setPose')

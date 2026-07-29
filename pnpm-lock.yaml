@@ -30,8 +30,8 @@ importers:
         specifier: 0.1.2
         version: 0.1.2
       '@nerima-games/mx-ui':
-        specifier: 0.2.1
-        version: 0.2.1
+        specifier: 0.2.2
+        version: 0.2.2
       effect:
         specifier: ^3.20.0
         version: 3.22.0
@@ -324,8 +324,8 @@ packages:
     resolution: {integrity: sha512-wWPmWvji05kj3gd8Tiuq0MjXYInCf4wUsIH9yFjFooy16HHyxg7TMOH4CuWseU/G8+msGSurVcp9cqx0wpx2/A==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-redstone/0.1.2/899583ee0f6d3be4307ca1f93ce74ed464034e22}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
-  '@nerima-games/mx-ui@0.2.1':
-    resolution: {integrity: sha512-Gj8WSD0kB1VMswd6daEf57fYqIHTAabQcLAZaMHg995oKu7wbt7ApyU6fdt/rJ/+Z8oFOZiYTMuhY14Nt+uPyw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-ui/0.2.1/60486b5ea6756edd75bd1e7afa824eec97040aeb}
+  '@nerima-games/mx-ui@0.2.2':
+    resolution: {integrity: sha512-f0avrrPwoLUDQEWAr2gMnFfHpgs+bVsR2/A2K4bLD/PT3LyOBqM/H/hO/iR9DDVuCiFEAiJXqDNbc0uQC1vUsg==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-ui/0.2.2/de5c48a0bf631843c84f874def829dd80d43c15e}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
   '@oxlint/darwin-arm64@0.12.0':
@@ -1202,7 +1202,7 @@ snapshots:
     dependencies:
       effect: 3.22.0
 
-  '@nerima-games/mx-ui@0.2.1':
+  '@nerima-games/mx-ui@0.2.2':
     dependencies:
       effect: 3.22.0
 

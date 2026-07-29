@@ -23,6 +23,8 @@
  */
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
 
+import { startGameSession } from './helpers/session'
+
 /** docs/testing.md §3.3. Deliberately not the reference's `__TS_MINECRAFT_QA__`. */
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -122,7 +124,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
    * runs. A pixel assertion belongs here when a world reaches this page.
    */
   test('#1 WebGL2 canvas is present and active', async ({ page }) => {
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
     const probe = await page.evaluate(() => {
@@ -169,7 +171,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
   test('#3 no fatal startup errors before the frame starts', async ({ page }) => {
     const faults = watchForFaults(page)
 
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
     // `boot-status` is written only by `failBoot`. Empty means no path through
@@ -197,7 +199,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
    * nine things.
    */
   test('#3b the resolved stage order is the one the loaded modules declare', async ({ page }) => {
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
     const order = await page.locator('#stage-order').textContent()
@@ -239,7 +241,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
    * failure this is for.
    */
   test('#4 the frame loop runs and the FPS readout becomes non-zero', async ({ page }) => {
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
     // The FPS readout is recomputed on a 0.5s window, so the first value takes
@@ -267,7 +269,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
    * a deliberate change rather than as drift.
    */
   test('#4b the QA surface publishes the host persistence contract', async ({ page }) => {
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
     const surface = await page.evaluate(
@@ -315,7 +317,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
   test('#7 no fatal errors during a sustained session', async ({ page }) => {
     const faults = watchForFaults(page)
 
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
     await page.waitForTimeout(5_000)
@@ -341,7 +343,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
    * WITHOUT A CAST, and `apps/web/main.ts` passes `document` straight in.
    */
   test('mx-ui screens mount into the host-supplied parent', async ({ page }) => {
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
     await expect(page.locator('#hud-root [data-mx-ui="hud"]')).toHaveCount(1)
@@ -362,7 +364,7 @@ test.describe('the composed game has a world in it', () => {
     // this asks whether anything is IN it. Until `setChunk` had a caller the
     // two were indistinguishable from this page — a context on an empty scene
     // and a context on a world both clear to sky blue.
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
     const canvas = page.locator('#game-canvas')
@@ -375,7 +377,7 @@ test.describe('the composed game has a world in it', () => {
   })
 
   test('#6 the composed frame draws the world, not just the sky', async ({ page }) => {
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'generated')
 
     // Sampled INSIDE the page and in the same task as a draw: the renderer runs
@@ -417,7 +419,7 @@ test.describe('the player', () => {
     // THE ASSERTION THAT SEPARATES "a world is drawn" FROM "a world can be
     // stood on". Before collision, a player either hung in the air or fell
     // forever; neither is visible in a screenshot of the first frame.
-    await page.goto('/')
+    await startGameSession(page)
     await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'generated')
 
     await expect
@@ -435,7 +437,7 @@ test.describe('the player', () => {
   })
 
   test('#9 holding W moves the player, and the ground still holds', async ({ page }) => {
-    await page.goto('/')
+    await startGameSession(page)
     await expect
       .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
         timeout: 15_000,
@@ -492,7 +494,7 @@ test.describe('sustained play', () => {
     // passes every earlier test in this file and is the wrong shape: it bounds
     // the world by what fits in memory at once and never releases anything.
     // What this asserts is `syncWorld`'s ADD and its REMOVE.
-    await page.goto('/')
+    await startGameSession(page)
     await expect
       .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
         timeout: 15_000,
@@ -547,7 +549,7 @@ test.describe('sustained play', () => {
     })
     page.on('pageerror', (error) => fatal.push(String(error)))
 
-    await page.goto('/')
+    await startGameSession(page)
     await expect
       .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
         timeout: 15_000,
