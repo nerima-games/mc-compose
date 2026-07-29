@@ -213,6 +213,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
     // written anywhere in `apps/web/main.ts`.
     expect(order?.split(' ')).toEqual([
       'render:input',
+      'sim:physics',
       'gameplay:interactions',
       'gameplay:entities',
       'gameplay:fluids',

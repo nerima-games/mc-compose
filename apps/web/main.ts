@@ -91,8 +91,11 @@ import {
 } from '@nerima-games/mc-audio'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
+  makeSimFrameState,
   makeTimeService,
   makeWeatherService,
+  simStages,
+  type SimPhysicsConfig,
   type WeatherState,
 } from '@nerima-games/mc-sim'
 import {
@@ -130,7 +133,6 @@ import {
   type RedstoneComponentSnapshot,
 } from '@nerima-games/mx-redstone'
 import {
-  applyGravity,
   CREEPER_KIND,
   drainBlockUseResults,
   drainItemUseResults,
@@ -142,6 +144,8 @@ import {
   makeGeneratedWorld,
   isIgnitionItem,
   isPlaceableItem,
+  PLAYER_HALF_HEIGHT,
+  PLAYER_HALF_WIDTH,
   requestBowShot,
   requestItemUse,
   requestMobSpawn,
@@ -150,11 +154,9 @@ import {
   requestTargetedBlockUse,
   requestTargetedItemUse,
   requestTargetedPrimaryAttack,
-  resolvePlayerMovement,
   solidityFromStore,
   spawnMobDrops,
   weatherLightScale,
-  PLAYER_HALF_HEIGHT,
   ZOMBIE_KIND,
   type IgnitionItemType,
   type ItemUseResult,
@@ -826,10 +828,40 @@ const boot = async (): Promise<void> => {
   const playerApi = world.player
   readAudioListener = () => Effect.runSync(playerApi.pose).feetPosition
   const inputApi = Context.get(inputContext, InputService)
-  const isBlockSolid = solidityFromStore(currentChunkStore)
-
-  let playerVelocityY = 0
-  let grounded = false
+  const simState = await Effect.runPromise(makeSimFrameState)
+  const isGameplayBlockSolid = solidityFromStore(currentChunkStore)
+  const simPhysicsConfig: SimPhysicsConfig = {
+    resolve: {
+      halfWidth: PLAYER_HALF_WIDTH,
+      // mc-sim exposes this branded field but not the brand constructor.
+      halfHeight: PLAYER_HALF_HEIGHT as SimPhysicsConfig['resolve']['halfHeight'],
+      isBlockSolid: (blockX, blockY, blockZ) =>
+        isGameplayBlockSolid({ x: blockX, y: blockY, z: blockZ }),
+    },
+    walkSpeed: WALK_SPEED_M_PER_S,
+    jumpSpeed: JUMP_SPEED_M_PER_S,
+  }
+  const resetSimState = (physicsEnabled: boolean): void => {
+    Effect.runSync(Ref.set(simState.resolvedFeetPosition, Option.none()))
+    Effect.runSync(Ref.set(simState.movementIntent, { forward: 0, strafe: 0 }))
+    Effect.runSync(Ref.set(simState.jumpIntent, false))
+    Effect.runSync(Ref.set(simState.velocity, { x: 0, y: 0, z: 0 }))
+    Effect.runSync(Ref.set(simState.isGrounded, false))
+    Effect.runSync(
+      Ref.set(
+        simState.physicsConfig,
+        physicsEnabled ? Option.some(simPhysicsConfig) : Option.none(),
+      ),
+    )
+  }
+  const alignActiveDimension = (dimension: Dimension): boolean => {
+    if (currentChunkContext.dimension === dimension) return false
+    Effect.runSync(retainDimensionResidents(currentChunkContext))
+    currentChunkContext = getOrCreateDimensionChunkContext(dimension)
+    Effect.runSync(clearRenderedChunks)
+    redstoneDirty = true
+    return true
+  }
   let breaksRequested = 0
   let placementsRequested = 0
   let nextItemUseRequestId = 0
@@ -858,6 +890,14 @@ const boot = async (): Promise<void> => {
     { readonly dimension: Dimension; readonly position: { readonly x: number; readonly y: number; readonly z: number } }
   >()
 
+  const registeredSim = await Effect.runPromise(
+    registerModule({
+      name: '@nerima-games/mc-sim',
+      layers: EMPTY_MODULE_LAYER,
+      frameStages: Effect.succeed(simStages(simState, time, playerApi)),
+    }),
+  )
+
   const registeredGameplay = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mx-gameplay',
@@ -869,6 +909,7 @@ const boot = async (): Promise<void> => {
           world.entities,
           world.inventory,
           world.player,
+          time,
         ),
       ),
     }),
@@ -878,6 +919,7 @@ const boot = async (): Promise<void> => {
     registeredRender,
     registeredUi,
     registeredRedstone,
+    registeredSim,
     registeredGameplay,
   ]
 
@@ -948,6 +990,7 @@ const boot = async (): Promise<void> => {
     if (Effect.runSync(world.vitals.view).healthPoints < healthBefore) {
       audio.play('playerHurt')
     }
+    if (playerIsDead()) resetSimState(false)
   }
 
   const interactionStatus = (): string => {
@@ -1104,8 +1147,8 @@ const boot = async (): Promise<void> => {
     Effect.runSync(Ref.set(gameplayState.mobDrops, []))
     observedMobDrops.splice(0)
     Effect.runSync(world.player.restore(initialSpawnPose, initialSpawnDimension))
-    playerVelocityY = 0
-    grounded = false
+    alignActiveDimension(initialSpawnDimension)
+    resetSimState(true)
     setInventoryOpen(false)
     markSessionDirty()
   }
@@ -1214,8 +1257,7 @@ const boot = async (): Promise<void> => {
   const seedIgnitionEncounter = (heldItem: IgnitionItemType) => {
     respawnPlayer()
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
-    playerVelocityY = 0
-    grounded = false
+    resetSimState(true)
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add(heldItem, 2))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
@@ -1229,6 +1271,18 @@ const boot = async (): Promise<void> => {
     lastObservedItemUse = undefined
     markSessionDirty()
     renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const enterQaDimension = (dimension: Dimension) => {
+    const pose = Effect.runSync(playerApi.pose)
+    Effect.runSync(playerApi.restore(pose, dimension))
+    alignActiveDimension(dimension)
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(currentChunkContext, pose.feetPosition.x, pose.feetPosition.z),
+    )
+    markSessionDirty()
     return gameplaySnapshot()
   }
 
@@ -1246,21 +1300,12 @@ const boot = async (): Promise<void> => {
         },
         setPose: () => {
           Effect.runSync(playerApi.restore(QA_POSE, Effect.runSync(playerApi.dimension)))
-          playerVelocityY = 0
-          grounded = false
+          resetSimState(true)
           markSessionDirty()
           return gameplaySnapshot()
         },
-        enterNether: () => {
-          Effect.runSync(playerApi.restore(Effect.runSync(playerApi.pose), 'nether'))
-          markSessionDirty()
-          return gameplaySnapshot()
-        },
-        enterOverworld: () => {
-          Effect.runSync(playerApi.restore(Effect.runSync(playerApi.pose), 'overworld'))
-          markSessionDirty()
-          return gameplaySnapshot()
-        },
+        enterNether: () => enterQaDimension('nether'),
+        enterOverworld: () => enterQaDimension('overworld'),
         breakTarget: () => {
           if (playerIsDead()) return null
           const target = Effect.runSync(
@@ -1474,17 +1519,11 @@ const boot = async (): Promise<void> => {
     // The player, moved and stopped by the world
     // -----------------------------------------------------------------------
     //
-    // WIRING, NOT A RULE. Every decision here belongs to a module and is called
-    // rather than made: `resolvePlayerMovement` and `applyGravity` are
-    // mx-gameplay's, the pose lives in its `PlayerService`, and the camera is
-    // mc-render's mirror of that pose. What this loop contributes is the order.
+    // WIRING, NOT A RULE. mc-sim owns motion and collision; this loop supplies
+    // input intent before the frame and mirrors its authoritative state after.
     //
-    // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, and that clamp is
-    // now load-bearing twice over: it was there so a backgrounded tab does not
-    // return with a multi-second step, and it is also what keeps the resolver
-    // out of its tunnelling regime — `resolvePlayerMovement` resolves the box at
-    // the final position only, so a step large enough to jump a block sees
-    // nothing. mx-gameplay's own test states that limit.
+    // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, which keeps a
+    // backgrounded tab from returning with a multi-second physics step.
     const walk = Effect.runSync(inputApi.snapshot)
     const foodOutcome = Effect.runSync(world.vitals.advanceFoodTimer(deltaSecs))
     if (foodOutcome.signal !== 'none') markSessionDirty()
@@ -1511,72 +1550,97 @@ const boot = async (): Promise<void> => {
     const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
       !dead && !inventoryOpen && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
 
+    const attackTriggered =
+      !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
+    const useTriggered =
+      !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))
     const looked =
       !dead && !inventoryOpen && (walk.pointerDelta.x !== 0 || walk.pointerDelta.y !== 0)
     if (!dead && !inventoryOpen) {
       Effect.runSync(playerApi.look(-walk.pointerDelta.x * LOOK_SENSITIVITY, -walk.pointerDelta.y * LOOK_SENSITIVITY))
     }
-    const pose = Effect.runSync(playerApi.pose)
+    const poseBeforeFrame = Effect.runSync(playerApi.pose)
+    const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
+    Effect.runSync(Ref.set(simState.movementIntent, {
+      forward: held('moveForward') - held('moveBackward'),
+      strafe: held('moveRight') - held('moveLeft'),
+    }))
+    Effect.runSync(Ref.set(simState.jumpIntent, held('jump') > 0))
+    Effect.runSync(
+      Ref.set(simState.physicsConfig, dead ? Option.none() : Option.some(simPhysicsConfig)),
+    )
+    Effect.runSync(Ref.set(gameplayState.timeOfDay, Effect.runSync(time.timeOfDay)))
+    const weatherBeforeFrame = Effect.runSync(weather.snapshot)
+    Effect.runSync(Ref.set(gameplayState.weather, weatherBeforeFrame))
+    Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
 
-    let resolvedFeet = pose.feetPosition
-    if (dead) {
-      playerVelocityY = 0
-      grounded = false
-    } else {
-      const forward = held('moveForward') - held('moveBackward')
-      const strafe = held('moveRight') - held('moveLeft')
-      // Horizontal only, regardless of pitch: looking down and walking forward
-      // must not drive the player into the ground.
-      const sinYaw = Math.sin(pose.yawRadians)
-      const cosYaw = Math.cos(pose.yawRadians)
+    const outcome = Effect.runSyncExit(runFrame(deltaSecs))
 
-      playerVelocityY = grounded && held('jump') > 0
-        ? JUMP_SPEED_M_PER_S
-        : applyGravity(playerVelocityY, deltaSecs)
+    if (Exit.isFailure(outcome)) {
+      // A stage's error channel is `never`, so reaching here means a DEFECT.
+      // Stopping the loop is deliberate: a defect that repeats sixty times a
+      // second buries its own first occurrence in the console.
+      failBoot('a frame stage defected', outcome.cause)
+      return
+    }
 
-      const resolved = resolvePlayerMovement(
-        {
-          centre: {
-            x: pose.feetPosition.x,
-            y: pose.feetPosition.y + PLAYER_HALF_HEIGHT,
-            z: pose.feetPosition.z,
-          },
-          velocity: {
-            x: (-sinYaw * forward + cosYaw * strafe) * WALK_SPEED_M_PER_S,
-            y: playerVelocityY,
-            z: (-cosYaw * forward - sinYaw * strafe) * WALK_SPEED_M_PER_S,
-          },
-        },
-        deltaSecs,
-        isBlockSolid,
-      )
-
-      resolvedFeet = {
-        x: resolved.body.centre.x,
-        y: resolved.body.centre.y - PLAYER_HALF_HEIGHT,
-        z: resolved.body.centre.z,
+    const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
+    for (const event of playerDamages) {
+      applyPlayerDamage(event.damage)
+    }
+    if (playerDamages.length > 0) {
+      markSessionDirty()
+      if (playerIsDead()) {
+        setInventoryOpen(false)
+        if (document.pointerLockElement === canvas) document.exitPointerLock()
       }
+    }
+    const deadAfterFrame = playerIsDead()
+
+    let postFramePose = Effect.runSync(playerApi.pose)
+    let dimensionAfterFrame = Effect.runSync(playerApi.dimension)
+    if (
+      dead &&
+      (dimensionAfterFrame !== dimensionBeforeFrame ||
+        postFramePose.feetPosition.x !== poseBeforeFrame.feetPosition.x ||
+        postFramePose.feetPosition.y !== poseBeforeFrame.feetPosition.y ||
+        postFramePose.feetPosition.z !== poseBeforeFrame.feetPosition.z)
+    ) {
+      Effect.runSync(playerApi.restore(poseBeforeFrame, dimensionBeforeFrame))
+      postFramePose = poseBeforeFrame
+      dimensionAfterFrame = dimensionBeforeFrame
+    }
+
+    const dimensionChanged =
+      dimensionAfterFrame !== dimensionBeforeFrame ||
+      dimensionAfterFrame !== currentChunkContext.dimension
+    if (dimensionChanged) {
+      alignActiveDimension(dimensionAfterFrame)
+      resetSimState(!deadAfterFrame)
+      markSessionDirty()
+    }
+
+    const groundedAfterFrame = Effect.runSync(Ref.get(simState.isGrounded))
+    const moved =
+      dimensionChanged ||
+      postFramePose.feetPosition.x !== poseBeforeFrame.feetPosition.x ||
+      postFramePose.feetPosition.y !== poseBeforeFrame.feetPosition.y ||
+      postFramePose.feetPosition.z !== poseBeforeFrame.feetPosition.z
+    if (!deadAfterFrame && !dimensionChanged) {
       const horizontalDistance = Math.hypot(
-        resolvedFeet.x - pose.feetPosition.x,
-        resolvedFeet.z - pose.feetPosition.z,
+        postFramePose.feetPosition.x - poseBeforeFrame.feetPosition.x,
+        postFramePose.feetPosition.z - poseBeforeFrame.feetPosition.z,
       )
       if (horizontalDistance > 0) {
         Effect.runSync(world.vitals.addExhaustion(horizontalDistance * WALK_EXHAUSTION_PER_METRE))
       }
-      grounded = resolved.isGrounded
-      playerVelocityY = resolved.body.velocity.y
     }
-
-    const moved =
-      resolvedFeet.x !== pose.feetPosition.x ||
-      resolvedFeet.y !== pose.feetPosition.y ||
-      resolvedFeet.z !== pose.feetPosition.z
-    Effect.runSync(playerApi.moveTo(resolvedFeet))
     if (looked || moved) markSessionDirty()
+    Effect.runSync(Ref.set(gameplayState.targetPosition, postFramePose.feetPosition))
 
-    // Gameplay resolves mob-versus-block priority atomically so one click
-    // cannot enqueue both interactions.
-    if (!dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))) {
+    // Resolve click rays from the authoritative post-simulation pose. Requests
+    // enter gameplay's inbox and are consumed by the next frame.
+    if (!deadAfterFrame && attackTriggered) {
       const result = Effect.runSync(
         requestTargetedPrimaryAttack(
           gameplayState,
@@ -1595,13 +1659,12 @@ const boot = async (): Promise<void> => {
       }
     }
 
-    if (!dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))) {
+    if (!deadAfterFrame && useTriggered) {
       const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
       const selected = inventoryBeforeUse.slots[selectedHotbarIndex]
       let shouldAttemptPlacement = selected === undefined
 
       if (selected !== undefined) {
-        // A use action has one owner: food first, then ignition, then placement.
         const foodUse = resolveFoodUse({
           held: selected.item,
           vitals: Effect.runSync(world.vitals.snapshot),
@@ -1675,27 +1738,6 @@ const boot = async (): Promise<void> => {
       }
     }
 
-    // Stream from where the player ACTUALLY ended up, not from where they
-    // asked to go: a player stopped by a wall should not load the chunks behind
-    // it.
-    Effect.runSync(Ref.set(gameplayState.targetPosition, resolvedFeet))
-    Effect.runSync(time.advance(deltaSecs))
-    Effect.runSync(Ref.set(gameplayState.timeOfDay, Effect.runSync(time.timeOfDay)))
-    const weatherBeforeFrame = Effect.runSync(weather.snapshot)
-    Effect.runSync(Ref.set(gameplayState.weather, weatherBeforeFrame))
-    Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
-    const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
-
-    const outcome = Effect.runSyncExit(runFrame(deltaSecs))
-
-    if (Exit.isFailure(outcome)) {
-      // A stage's error channel is `never`, so reaching here means a DEFECT.
-      // Stopping the loop is deliberate: a defect that repeats sixty times a
-      // second buries its own first occurrence in the console.
-      failBoot('a frame stage defected', outcome.cause)
-      return
-    }
-
     // Placement requests are serviced after the frame-start redstone sync.
     // Only the success outbox proves that a component now exists in the store.
     const consumedPlacements = Effect.runSync(
@@ -1704,21 +1746,6 @@ const boot = async (): Promise<void> => {
     announceConfirmedPlacements(audio, consumedPlacements)
     if (consumedPlacements.some((item) => REDSTONE_PLACEMENT_ITEMS.has(item))) {
       redstoneDirty = true
-    }
-
-    const dimensionAfterFrame = Effect.runSync(playerApi.dimension)
-    if (
-      dimensionAfterFrame !== dimensionBeforeFrame ||
-      dimensionAfterFrame !== currentChunkContext.dimension
-    ) {
-      const previousContext = currentChunkContext
-      Effect.runSync(retainDimensionResidents(previousContext))
-      currentChunkContext = getOrCreateDimensionChunkContext(dimensionAfterFrame)
-      Effect.runSync(clearRenderedChunks)
-      playerVelocityY = 0
-      grounded = false
-      redstoneDirty = true
-      markSessionDirty()
     }
 
     for (const result of Effect.runSync(drainBlockUseResults(gameplayState))) {
@@ -1753,7 +1780,6 @@ const boot = async (): Promise<void> => {
     // Portal stages can replace both dimension and pose. Stream and present
     // only after the frame so the renderer never meshes the destination pose
     // against the source dimension's store.
-    const postFramePose = Effect.runSync(playerApi.pose)
     Effect.runSync(
       streamAround(
         currentChunkContext,
@@ -1765,7 +1791,7 @@ const boot = async (): Promise<void> => {
       'data-player-feet',
       `${postFramePose.feetPosition.x.toFixed(2)},${postFramePose.feetPosition.y.toFixed(2)},${postFramePose.feetPosition.z.toFixed(2)}`,
     )
-    canvas.setAttribute('data-player-grounded', String(grounded))
+    canvas.setAttribute('data-player-grounded', String(groundedAfterFrame))
 
     const weatherAdvanced = Effect.runSync(Ref.get(gameplayState.weatherAdvanced))
     if (weatherAdvanced !== undefined) {
@@ -1792,18 +1818,6 @@ const boot = async (): Promise<void> => {
         }
       }
       if (result.success) markSessionDirty()
-    }
-
-    const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
-    for (const event of playerDamages) {
-      applyPlayerDamage(event.damage)
-    }
-    if (playerDamages.length > 0) {
-      markSessionDirty()
-      if (playerIsDead()) {
-        setInventoryOpen(false)
-        if (document.pointerLockElement === canvas) document.exitPointerLock()
-      }
     }
 
     const mobDrops = Effect.runSync(drainMobDrops(gameplayState))
