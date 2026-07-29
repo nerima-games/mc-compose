@@ -345,12 +345,8 @@ test.describe('the composed game has a world in it', () => {
 
     const canvas = page.locator('#game-canvas')
 
-    // DECLARED, not inferred. The attribute distinguishes the development
-    // fixture from a generated world, so no screenshot of this page can be
-    // mistaken for the latter. When mc-worldgen publishes this becomes
-    // 'generated' and this assertion is the thing that has to be updated —
-    // which is the intended way to find it.
-    await expect(canvas).toHaveAttribute('data-world-source', 'fixture')
+    // DECLARED, not inferred. A static fixture cannot satisfy this check.
+    await expect(canvas).toHaveAttribute('data-world-source', 'generated')
 
     const meshed = Number(await canvas.getAttribute('data-chunks-meshed'))
     expect(meshed).toBeGreaterThan(0)
@@ -358,7 +354,7 @@ test.describe('the composed game has a world in it', () => {
 
   test('#6 the composed frame draws the world, not just the sky', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'fixture')
+    await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'generated')
 
     // Sampled INSIDE the page and in the same task as a draw: the renderer runs
     // with `preserveDrawingBuffer: false`, so a readPixels from a later task
@@ -400,7 +396,7 @@ test.describe('the player', () => {
     // stood on". Before collision, a player either hung in the air or fell
     // forever; neither is visible in a screenshot of the first frame.
     await page.goto('/')
-    await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'fixture')
+    await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'generated')
 
     await expect
       .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
@@ -488,21 +484,31 @@ test.describe('sustained play', () => {
 
     await page.locator('#game-canvas').click()
     await page.keyboard.down('KeyW')
-    await page.waitForTimeout(3_000)
-    await page.keyboard.up('KeyW')
+    try {
+      // More than the first fill: anything counted here loaded because the player
+      // moved. Poll the observable rather than guessing how many frames CI renders.
+      await expect
+        .poll(
+          async () =>
+            Number(
+              await page.locator('#game-canvas').getAttribute('data-chunks-streamed-in'),
+            ),
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThan(residentAtSpawn)
 
-    const streamedIn = Number(
-      await page.locator('#game-canvas').getAttribute('data-chunks-streamed-in'),
-    )
-    const dropped = Number(await page.locator('#game-canvas').getAttribute('data-chunks-dropped'))
-
-    // More than the first fill: anything counted here loaded because the player
-    // moved.
-    expect(streamedIn).toBeGreaterThan(residentAtSpawn)
-
-    // And the other half — the one that catches a renderer that only ever adds,
-    // which looks correct on screen and grows without bound.
-    expect(dropped).toBeGreaterThan(0)
+      // And the other half — the one that catches a renderer that only ever adds,
+      // which looks correct on screen and grows without bound.
+      await expect
+        .poll(
+          async () =>
+            Number(await page.locator('#game-canvas').getAttribute('data-chunks-dropped')),
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThan(0)
+    } finally {
+      await page.keyboard.up('KeyW')
+    }
   })
 
   test('#12 a sustained session stays healthy: frames advance, no defects, still standing', async ({

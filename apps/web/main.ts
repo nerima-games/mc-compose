@@ -26,32 +26,14 @@
  *   5. drives `runFrameWith` from `requestAnimationFrame`.
  *
  * ---------------------------------------------------------------------------
- * WHY THREE MODULES AND NOT SIX — read this before adding a fourth
+ * COMPOSED MODULES AND THE REMAINING NETWORK BOUNDARY
  * ---------------------------------------------------------------------------
  *
- * `mc-render`, `mx-ui` and `mx-redstone` are composed. `mx-gameplay` and
- * `mx-multiplayer` are NOT, and the reason is a measurement rather than a
- * preference:
- *
- *   - `gameplayModule` is `GameModule<never, never, never, ChunkStore |
- *     EntityManager | InventoryService>`. Registering it requires all three.
- *   - `multiplayerModule` requires `TransportPort`.
- *   - The ONLY implementations of any of the four in the organisation are in
- *     `mx-gameplay/test/support/*-double.ts` and
- *     `mx-multiplayer`'s test support. They are test doubles, and none is
- *     exported from a package's public API (`exports` is `"." : "./index.ts"`).
- *
- * A host that supplied its own `ChunkStore` would be writing the world's
- * storage in the composition layer, which is the exact failure
- * `domain/composition.ts` exists to prevent, and `InventoryService` is mc-sim's
- * — which `pnpm check:deps` refuses to let this repository import at all.
- * docs/e2e-triage.md §4.3 reached this same wall from the other side and called
- * it "設計上の未決事項"; this file is where that undecided item stops being
- * theoretical.
- *
- * COMPOSING A FAKE INSTEAD IS THE ONE THING THAT MUST NOT HAPPEN HERE.
- * docs/testing.md §3.4: 偽物のモジュールを4つ作って合成すれば、検証されるのは偽物である
- * — a green lamp with nothing behind it.
+ * `mc-render`, `mx-ui`, `mx-redstone` and `mx-gameplay` are composed. Gameplay
+ * supplies its public production services, including the generated chunk
+ * store shared with the renderer. `mx-multiplayer` remains outside this host
+ * until a production `TransportPort` is selected; composing a test transport
+ * would only verify the fake.
  *
  * ---------------------------------------------------------------------------
  * THERE IS A RENDERER NOW, AND THIS FILE STILL DOES NOT DRAW
@@ -95,19 +77,10 @@
  * this project has recorded that shape (§0.1 of the residual-work document
  * counts the others).
  *
- * WHAT IS ON THE SCREEN, precisely: nine-by-nine chunks of terrain from a
- * DEVELOPMENT FIXTURE, over the sky colour mc-render clears to. The fixture is
- * the output of the real `generateChunkAt` and `meshChunk`, produced
- * out-of-tree and loaded here with `fetch` — because rule 3 forbids this
- * repository from importing either, and `fetch` is not an import. The gate was
- * not touched.
- *
- * WHAT IS STILL NOT HERE, and `data-world-source="fixture"` on the canvas says
- * so where a screenshot cannot hide it: the world is finite, static and
- * identical every run. Nothing streams, nothing regenerates, nothing persists,
- * and there is no player entity or collision. When mc-worldgen publishes,
- * mc-render takes its declared edge, `syncWorld`'s `DirtySource` becomes
- * `ChunkStore.subscribeDirty`, and that attribute becomes `generated`.
+ * WHAT IS ON THE SCREEN: a deterministic generated world, streamed around the
+ * player through mx-gameplay's public world constructor. Gameplay collision,
+ * block edits and mc-render meshing all observe the same mc-worldgen store;
+ * dirty chunk notifications are the only render synchronization path.
  */
 import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Scope } from 'effect'
@@ -115,11 +88,11 @@ import {
   browserInputLayer,
   InputService,
   chunkKeyOf,
+  makeChunkStoreMesher,
   makeWorldRenderer,
   renderModule,
   syncWorld,
   type ChunkRef,
-  type MeshQuad,
 } from '@nerima-games/mc-render'
 import {
   createCrosshairView,
@@ -131,15 +104,15 @@ import {
 import { redstoneModule } from '@nerima-games/mx-redstone'
 import {
   applyGravity,
-  cellKey as gameplayCellKey,
-  chunkKey as gameplayChunkKey,
+  EYE_LEVEL_OFFSET,
   gameplayStages,
   makeGameplayFrameState,
-  makeInMemoryWorld,
+  makeGeneratedWorld,
   requestTargetedBlockBreak,
   resolvePlayerMovement,
   solidityFromStore,
   PLAYER_HALF_HEIGHT,
+  type MobBehaviour,
 } from '@nerima-games/mx-gameplay'
 import {
   composeGame,
@@ -186,67 +159,7 @@ const FPS_WINDOW_SECS = 0.5
 const WALK_SPEED_M_PER_S = 4.3
 const JUMP_SPEED_M_PER_S = 8.4
 const LOOK_SENSITIVITY = 0.0022
-
-/** A quad as the fixture stores it: mc-meshing's `Quad`, plus its resolved tile. */
-type FixtureQuad = MeshQuad & { readonly tile: number }
-
-type TerrainFixture = {
-  readonly seed: number
-  readonly totalQuads: number
-  /**
-   * Where the camera starts, in world space.
-   *
-   * COMPUTED BY mc-worldgen, not chosen by looking at a screenshot: the
-   * generator script calls `surfaceHeightAt(seed, x, z)` and adds the eye
-   * height. It travels with the terrain because it is a fact ABOUT that
-   * terrain — a spawn Y that did not come from the same seed would put the
-   * camera underground, which renders as a flat sky and reads as "the world
-   * did not load".
-   */
-  readonly spawn: {
-    readonly x: number
-    readonly y: number
-    readonly z: number
-    readonly yawRadians: number
-    readonly pitchRadians: number
-  }
-  readonly chunks: ReadonlyArray<{
-    readonly cx: number
-    readonly cz: number
-    readonly quads: ReadonlyArray<FixtureQuad>
-    /**
-     * Highest solid block per column, row-major over `lz * 16 + lx`.
-     *
-     * READ FROM THE CHUNK'S OWN BLOCKS by the generator, not inferred from the
-     * quads. A quad is a FACE — offset from its block by direction and spanning
-     * `width x height` after the greedy merge — so reconstructing solidity from
-     * quads is an off-by-one and a missing span at once. The first cut did
-     * exactly that and the player fell through the world to y = 0.
-     */
-    readonly heights: ReadonlyArray<number>
-  }>
-}
-
-/**
- * Load the development terrain fixture, or `undefined` if it is not there.
- *
- * UNDEFINED RATHER THAN A THROW. The fixture is a development artefact and a
- * build without it is a legitimate state — the page should come up with an
- * empty world and say so on the canvas, not fail to boot. That is the same
- * choice `NO_DRAW_TARGET` makes in mc-render: the absence is real and common,
- * and the honest response is to report it rather than to pretend.
- */
-const loadTerrainFixture = async (): Promise<TerrainFixture | undefined> => {
-  try {
-    const response = await fetch('/apps/web/terrain-fixture.json')
-    if (!response.ok) {
-      return undefined
-    }
-    return (await response.json()) as TerrainFixture
-  } catch {
-    return undefined
-  }
-}
+const WORLD_SEED = 20260728
 
 const requireElement = (id: string): HTMLElement => {
   const element = document.getElementById(id)
@@ -390,68 +303,34 @@ const boot = async (): Promise<void> => {
   })
 
   // -------------------------------------------------------------------------
-  // 2a. The world — A DEVELOPMENT FIXTURE, and it says so on the canvas
+  // 2a. The generated world, shared by gameplay and rendering
   // -------------------------------------------------------------------------
   //
-  // Until this existed the composed page cleared to sky blue over an empty
-  // scene: `setChunk` had no caller anywhere in the organisation, and every
-  // test passed. #1 was green because a WebGL2 context existed, which is a
-  // different claim from "there is a world".
-  //
-  // WHY IT IS A FIXTURE AND NOT `generateChunkAt`. `check-dependency-whitelist.ts`
-  // rule 3 forbids this repository from importing mc-worldgen or mc-meshing —
-  // the declared graph puts that edge on mc-render, which cannot take it until
-  // they are published (plan.md §6 Step 3). The fixture is the output of the
-  // real generators, produced out-of-tree and loaded as DATA. `fetch` is not an
-  // import, and the gate was not touched.
-  //
-  // WHAT THAT COSTS, STATED RATHER THAN HIDDEN: the world is finite, static and
-  // identical every run. Nothing regenerates, nothing persists, and walking off
-  // its edge shows sky. `data-world-source="fixture"` is on the canvas so that
-  // no screenshot of this page can be mistaken for a running world — the day
-  // mc-worldgen publishes, that attribute becomes `generated` and this comment
-  // becomes wrong, which is the intended way to find it.
-  const terrainSource = await loadTerrainFixture()
+  // ONE CONSTRUCTION. The gameplay adapter and the renderer-facing worldgen
+  // store returned here wrap the same store instance, so a mined block cannot
+  // disappear from collision while remaining visible (or vice versa).
+  const world = await Effect.runPromise(
+    makeGeneratedWorld<MobBehaviour>({ seed: WORLD_SEED }),
+  )
+  const spawnPose = await Effect.runPromise(world.player.pose)
+  const dirtyChunks = await Effect.runPromise(world.worldgenChunkStore.subscribeDirty)
+  const meshChunkFromStore = makeChunkStoreMesher(world.worldgenChunkStore)
+  canvas.setAttribute('data-world-source', 'generated')
+  canvas.setAttribute('data-world-seed', String(WORLD_SEED))
 
   // STREAMING, keyed to where the player is — not a one-shot load at boot.
   //
-  // `syncWorld` takes a `DirtySource` port precisely so the thing that decides
-  // WHICH chunks should be resident can live outside mc-render. Here that is a
-  // radius around the player; when mc-worldgen publishes it becomes
-  // `ChunkStore.subscribeDirty` and this closure is deleted, not rewritten.
-  //
-  // A BOOT-TIME LOAD OF EVERYTHING WOULD HAVE PASSED EVERY TEST WRITTEN SO FAR
-  // and is the wrong shape for a world a player walks through: it bounds the
-  // world by what fits in memory at once, and it means nothing is ever
-  // released. What this exercises instead is `syncWorld`'s add AND remove.
-  // 2, not 3: the fixture is a 7x7 square and a radius of 3 covers all of it
-  // from anywhere, so nothing would ever stream. Small enough that crossing a
-  // chunk boundary genuinely changes the resident set.
+  // A fixed radius bounds memory while still exercising both add and removal.
   const STREAM_RADIUS_CHUNKS = 2
   const streamLoaded = new Set<string>()
-  let quadsByKey = new Map<string, ReadonlyArray<FixtureQuad>>()
   let chunksStreamedIn = 0
   let chunksDropped = 0
-
-  if (terrainSource !== undefined) {
-    quadsByKey = new Map(
-      terrainSource.chunks.map((chunk) => [chunkKeyOf(chunk), chunk.quads]),
-    )
-    canvas.setAttribute('data-world-source', 'fixture')
-    console.log(
-      `[mc-compose] world: ${String(terrainSource.chunks.length)} chunks available from the ` +
-        `development fixture (seed ${String(terrainSource.seed)}); NOT a generated world`,
-    )
-  } else {
-    canvas.setAttribute('data-world-source', 'none')
-  }
 
   /**
    * Which chunks should be resident around a world position.
    *
-   * Filtered to what the fixture HAS, so the edge of the generated square is a
-   * boundary rather than a stream of misses — `syncWorld`'s mesher would answer
-   * `undefined` for each and defer it every frame forever.
+   * The world is unbounded horizontally, so every coordinate in the radius is
+   * loadable and no fixture-edge filtering is needed.
    */
   const desiredAround = (x: number, z: number): ReadonlyArray<ChunkRef> => {
     const cx0 = Math.floor(x / 16)
@@ -459,9 +338,7 @@ const boot = async (): Promise<void> => {
     const wanted: Array<ChunkRef> = []
     for (let cx = cx0 - STREAM_RADIUS_CHUNKS; cx <= cx0 + STREAM_RADIUS_CHUNKS; cx += 1) {
       for (let cz = cz0 - STREAM_RADIUS_CHUNKS; cz <= cz0 + STREAM_RADIUS_CHUNKS; cz += 1) {
-        if (quadsByKey.has(chunkKeyOf({ cx, cz }))) {
-          wanted.push({ cx, cz })
-        }
+        wanted.push({ cx, cz })
       }
     }
     return wanted
@@ -469,42 +346,34 @@ const boot = async (): Promise<void> => {
 
   const streamAround = (x: number, z: number): Effect.Effect<void> =>
     Effect.gen(function* () {
-      const report = yield* syncWorld(
-        worldRenderer,
-        {
-          drain: Effect.sync(() => {
-            const wanted = desiredAround(x, z)
-            const wantedKeys = new Set(wanted.map(chunkKeyOf))
-            const changed = wanted.filter((chunk) => !streamLoaded.has(chunkKeyOf(chunk)))
-            const removed = [...streamLoaded]
-              .filter((key) => !wantedKeys.has(key))
-              .map((key) => {
-                const [cx, cz] = key.split(',')
-                return { cx: Number(cx), cz: Number(cz) }
-              })
-            for (const chunk of changed) {
-              streamLoaded.add(chunkKeyOf(chunk))
-            }
-            for (const chunk of removed) {
-              streamLoaded.delete(chunkKeyOf(chunk))
-            }
-            return { changed, removed }
-          }),
-        },
-        (chunk) => Effect.sync(() => quadsByKey.get(chunkKeyOf(chunk))),
-        { tile: (quad: MeshQuad) => (quad as FixtureQuad).tile },
-      )
-      chunksStreamedIn += report.meshed
-      chunksDropped += report.removed
+      const wanted = desiredAround(x, z)
+      const wantedKeys = new Set(wanted.map(chunkKeyOf))
+      const changed = wanted.filter((chunk) => !streamLoaded.has(chunkKeyOf(chunk)))
+      const removed = [...streamLoaded]
+        .filter((key) => !wantedKeys.has(key))
+        .map((key) => {
+          const [cx, cz] = key.split(',')
+          return { cx: Number(cx), cz: Number(cz) }
+        })
+
+      for (const chunk of changed) {
+        yield* world.chunkStore.load(chunk)
+        streamLoaded.add(chunkKeyOf(chunk))
+      }
+      for (const chunk of removed) {
+        yield* world.chunkStore.unload(chunk)
+        streamLoaded.delete(chunkKeyOf(chunk))
+      }
+
+      yield* syncWorld(worldRenderer, dirtyChunks, meshChunkFromStore)
+      chunksStreamedIn += changed.length
+      chunksDropped += removed.length
       canvas.setAttribute('data-chunks-meshed', String(streamLoaded.size))
       canvas.setAttribute('data-chunks-streamed-in', String(chunksStreamedIn))
       canvas.setAttribute('data-chunks-dropped', String(chunksDropped))
     })
 
-  // The first fill, around the spawn, before the loop starts.
-  if (terrainSource !== undefined) {
-    await Effect.runPromise(streamAround(terrainSource.spawn.x, terrainSource.spawn.z))
-  }
+  await Effect.runPromise(streamAround(spawnPose.feetPosition.x, spawnPose.feetPosition.z))
 
   // `renderModule()` is called for its `frameStages` only; its `layers` field
   // is replaced by the browser adapter. The module's own header sanctions
@@ -515,7 +384,7 @@ const boot = async (): Promise<void> => {
   // is `NO_DRAW_TARGET`, which is what every Node consumer gets and what this
   // page got until the renderer existed.
   /**
-   * The starting pose, from the fixture.
+   * The starting pose, derived from the generated surface height.
    *
    * The TYPE IS DERIVED FROM THE FUNCTION rather than named, because
    * `CameraPoseSnapshot` lives in mc-render's kernel-vocabulary MIRROR and
@@ -528,23 +397,18 @@ const boot = async (): Promise<void> => {
    * `capturedAtSecs` a branded `MonotonicTimeSecs`. Neither has a runtime
    * representation and the renderer reads five numbers off this.
    *
-   * The default is `UNSET_CAMERA_POSE`, the origin — correct when there is no
-   * world, and visibly wrong when there is one, which is what its own header
-   * says it is for.
+   * The camera is eye-level above the player service's feet position.
    */
-  const initialPose =
-    terrainSource === undefined
-      ? undefined
-      : ({
-          position: {
-            x: terrainSource.spawn.x,
-            y: terrainSource.spawn.y,
-            z: terrainSource.spawn.z,
-          },
-          yawRadians: terrainSource.spawn.yawRadians,
-          pitchRadians: terrainSource.spawn.pitchRadians,
-          capturedAtSecs: 0,
-        } as unknown as NonNullable<Parameters<typeof renderModule>[3]>)
+  const initialPose = ({
+    position: {
+      x: spawnPose.feetPosition.x,
+      y: spawnPose.feetPosition.y + EYE_LEVEL_OFFSET,
+      z: spawnPose.feetPosition.z,
+    },
+    yawRadians: spawnPose.yawRadians,
+    pitchRadians: spawnPose.pitchRadians,
+    capturedAtSecs: 0,
+  } as unknown as NonNullable<Parameters<typeof renderModule>[3]>)
 
   const render = renderModule(undefined, undefined, worldRenderer, initialPose)
 
@@ -597,64 +461,6 @@ const boot = async (): Promise<void> => {
   // mx-gameplay's PUBLIC API — every member implemented, no `dieMessage`, and
   // mc-compose is allowed to import mx-gameplay. Nothing here reaches past it.
   //
-  // The store is seeded from the SAME fixture the renderer draws, so breaking a
-  // block changes the world the player is looking at rather than a second copy
-  // of it. That is the whole reason the two share a source: two worlds that
-  // agree at boot and diverge on the first edit is the bug this avoids.
-  // SEEDED FROM THE HEIGHTMAP, not from the quads. See `heights` above.
-  //
-  // Only the top `SOLID_DEPTH_BLOCKS` of each column are marked solid, which is
-  // a deliberate approximation and is stated rather than hidden: a player can
-  // stand on the surface and cannot walk through it, and the interior is not
-  // reachable without first passing a surface block. Caves under the surface
-  // are NOT represented — this world has no holes to fall into, and the day the
-  // store comes from mc-worldgen it will.
-  const SOLID_DEPTH_BLOCKS = 4
-  const worldBlocks = new Map<string, number>()
-  const loadedChunks: Array<string> = []
-  if (terrainSource !== undefined) {
-    for (const chunk of terrainSource.chunks) {
-      loadedChunks.push(gameplayChunkKey({ cx: chunk.cx, cz: chunk.cz }))
-      for (let lz = 0; lz < 16; lz += 1) {
-        for (let lx = 0; lx < 16; lx += 1) {
-          const top = chunk.heights[lz * 16 + lx] ?? -1
-          if (top < 0) {
-            continue
-          }
-          const x = chunk.cx * 16 + lx
-          const z = chunk.cz * 16 + lz
-          for (let y = top; y > top - SOLID_DEPTH_BLOCKS && y >= 0; y -= 1) {
-            worldBlocks.set(gameplayCellKey({ x, y, z }), 1)
-          }
-        }
-      }
-    }
-  }
-
-  // ONE CONSTRUCTION. `makeInMemoryWorld` hands back the Layer AND the handles,
-  // built from the same instances — see its header. Building a Layer here and
-  // constructing a second set for the loop is the `InputServiceLayer` failure
-  // mc-render records: two services, and the loop would move one player while
-  // `render:camera-mirror` mirrors the other.
-  const world = await Effect.runPromise(
-    makeInMemoryWorld({
-      world: { blocks: worldBlocks, loaded: loadedChunks },
-      ...(terrainSource === undefined
-        ? {}
-        : {
-            spawnPose: {
-              feetPosition: {
-                x: terrainSource.spawn.x,
-                y: terrainSource.spawn.y,
-                z: terrainSource.spawn.z,
-              },
-              yawRadians: terrainSource.spawn.yawRadians,
-              pitchRadians: terrainSource.spawn.pitchRadians,
-            },
-          }),
-    }),
-  )
-
   const playerApi = world.player
   const inputApi = Context.get(inputContext, InputService)
   const isBlockSolid = solidityFromStore(world.chunkStore)
@@ -683,7 +489,7 @@ const boot = async (): Promise<void> => {
         gameplayStages(
           gameplayState,
           world.chunkStore,
-          world.entities as Parameters<typeof gameplayStages>[2],
+          world.entities,
           world.inventory,
           world.player,
         ),
