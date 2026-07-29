@@ -83,7 +83,7 @@
  * dirty chunk notifications are the only render synchronization path.
  */
 import * as THREE from 'three'
-import { Context, Effect, Either, Exit, Layer, Option, Scope } from 'effect'
+import { Context, Effect, Either, Exit, Layer, Option, Ref, Scope } from 'effect'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   chunkCoord,
@@ -101,6 +101,7 @@ import {
   syncWorld,
   wrapHotbarSelection,
   type ChunkRef,
+  type RenderEntity,
 } from '@nerima-games/mc-render'
 import {
   createCrosshairView,
@@ -109,24 +110,29 @@ import {
   hudViewModel,
   inventoryViewModel,
   slotSnapshotOf,
-  spawnSnapshot,
   uiModule,
   type InventoryInteractionTarget,
 } from '@nerima-games/mx-ui'
 import { redstoneModule } from '@nerima-games/mx-redstone'
 import {
   applyGravity,
+  drainMobDrops,
+  drainPlayerDamages,
   EYE_LEVEL_OFFSET,
   gameplayStages,
   makeGameplayFrameState,
   makeGeneratedWorld,
   isPlaceableItem,
+  requestBowShot,
+  requestMobSpawn,
   requestTargetedBlockBreak,
   requestTargetedBlockPlacement,
   resolvePlayerMovement,
   solidityFromStore,
   PLAYER_HALF_HEIGHT,
+  ZOMBIE_KIND,
   type MobBehaviour,
+  type MobDropEvent,
 } from '@nerima-games/mx-gameplay'
 import {
   composeGame,
@@ -181,6 +187,7 @@ const FPS_WINDOW_SECS = 0.5
  * grouped and labelled so that deletion is one block rather than a search.
  */
 const WALK_SPEED_M_PER_S = 4.3
+const WALK_EXHAUSTION_PER_METRE = 0.01
 const JUMP_SPEED_M_PER_S = 8.4
 const LOOK_SENSITIVITY = 0.0022
 const WORLD_SEED = 20260728
@@ -389,10 +396,13 @@ const boot = async (): Promise<void> => {
         : {}),
     }),
   )
+  const initialSpawnPose = await Effect.runPromise(world.player.pose)
+  const initialSpawnDimension = await Effect.runPromise(world.player.dimension)
   if (Option.isSome(loadedSession)) {
     await Effect.runPromise(
       world.player.restore(loadedSession.value.state.player, loadedSession.value.state.dimension),
     )
+    await Effect.runPromise(world.vitals.restore(loadedSession.value.state.vitals))
   }
 
   const reportPersistenceFailure = (error: unknown): void => {
@@ -407,6 +417,7 @@ const boot = async (): Promise<void> => {
       dimension: Effect.runSync(world.player.dimension),
       player: Effect.runSync(world.player.pose),
       inventory: Effect.runSync(world.inventory.snapshot),
+      vitals: Effect.runSync(world.vitals.snapshot),
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -597,6 +608,8 @@ const boot = async (): Promise<void> => {
   // inbox nobody can reach, which is the 「callable but unreachable」 state that
   // repository has had to correct more than once.
   const gameplayState = await Effect.runPromise(makeGameplayFrameState)
+  const observedMobDrops: Array<MobDropEvent & { readonly renderId: string }> = []
+  let nextMobDropId = 0
 
   const registeredGameplay = await Effect.runPromise(
     registerModule({
@@ -679,6 +692,7 @@ const boot = async (): Promise<void> => {
     onCrafted: () => markSessionDirty(),
   })
   const initialInventory = Effect.runSync(world.inventory.snapshot)
+  const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
 
   const interactionStatus = (): string => {
     const status = inventoryInteraction.state().status
@@ -698,7 +712,7 @@ const boot = async (): Promise<void> => {
   const renderPlayerUi = (inventory: typeof initialInventory): void => {
     const draft = inventoryInteraction.state()
     hud.render(hudViewModel({
-      ...spawnSnapshot,
+      ...Effect.runSync(world.vitals.view),
       hotbar: inventory.slots.slice(0, 9).map((slot) => slotSnapshotOf(slot, undefined)),
       selectedHotbarIndex,
     }))
@@ -745,6 +759,7 @@ const boot = async (): Promise<void> => {
   }
 
   const activateInventoryTarget = (target: InventoryInteractionTarget): void => {
+    if (playerIsDead()) return
     inventoryFocus = target
     if (target.kind === 'crafting-output') {
       Effect.runSync(inventoryInteraction.craftOnce())
@@ -760,10 +775,12 @@ const boot = async (): Promise<void> => {
   }
 
   inventoryParent.addEventListener('click', (event) => {
+    if (playerIsDead()) return
     const target = targetOf(event.target)
     if (target !== undefined) activateInventoryTarget(target)
   })
   inventoryParent.addEventListener('keydown', (event) => {
+    if (playerIsDead()) return
     if (event.key !== 'Enter' && event.key !== ' ') return
     const target = targetOf(event.target)
     if (target === undefined) return
@@ -773,6 +790,7 @@ const boot = async (): Promise<void> => {
   })
 
   const setInventoryOpen = (open: boolean): void => {
+    if (open && playerIsDead()) return
     inventoryOpen = open
     inventoryParent.hidden = !open
     inventoryParent.setAttribute('aria-hidden', String(!open))
@@ -788,6 +806,29 @@ const boot = async (): Promise<void> => {
       document.exitPointerLock()
     }
   }
+
+  const respawnPlayer = (): void => {
+    Effect.runSync(world.vitals.respawn)
+    Effect.runSync(world.entities.reset)
+    Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
+    Effect.runSync(Ref.set(gameplayState.playerDamages, []))
+    Effect.runSync(Ref.set(gameplayState.pendingBowShots, []))
+    Effect.runSync(Ref.set(gameplayState.spawnAttempts, []))
+    Effect.runSync(Ref.set(gameplayState.mobDrops, []))
+    observedMobDrops.splice(0)
+    Effect.runSync(world.player.restore(initialSpawnPose, initialSpawnDimension))
+    playerVelocityY = 0
+    grounded = false
+    setInventoryOpen(false)
+    markSessionDirty()
+  }
+
+  hudParent.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return
+    const control = event.target.closest('[data-mx-ui="respawn"]')
+    if (control === null || !hudParent.contains(control)) return
+    respawnPlayer()
+  })
 
   renderPlayerUi(initialInventory)
 
@@ -830,15 +871,36 @@ const boot = async (): Promise<void> => {
   // 5. QA surface
   // -------------------------------------------------------------------------
 
+  const entityRenderProjection = (): ReadonlyArray<RenderEntity> =>
+    Effect.runSync(world.entities.snapshot).entities.map((entity) => ({
+      id: entity.id,
+      kind: entity.kind,
+      feetPosition: entity.feetPosition,
+      category: entity.kind === 'dropped_item' ? 'item' : 'hostile',
+    }))
+
   const gameplaySnapshot = () => {
     const reading = Effect.runSync(world.chunkStore.getBlock(KNOWN_TARGET_BLOCK))
     const inventory = Effect.runSync(world.inventory.snapshot)
+    const vitals = Effect.runSync(world.vitals.snapshot)
+    const entities = Effect.runSync(world.entities.snapshot).entities
     return {
       pose: Effect.runSync(playerApi.pose),
       dimension: Effect.runSync(playerApi.dimension),
+      vitals,
+      dead: vitals.healthPoints <= 0,
       inventory: {
         slots: inventory.slots.map((slot) => slot ?? null),
       },
+      entityCount: entities.length,
+      renderedEntities: entityRenderProjection(),
+      mobDrops: observedMobDrops.map(({ renderId: _, ...drop }) => drop),
+      entities: entities.map((entity) => ({
+        id: entity.id,
+        kind: entity.kind,
+        feetPosition: entity.feetPosition,
+        healthPoints: entity.healthPoints,
+      })),
       target: {
         position: KNOWN_TARGET_BLOCK,
         reading: reading._tag,
@@ -864,6 +926,7 @@ const boot = async (): Promise<void> => {
           return gameplaySnapshot()
         },
         breakTarget: () => {
+          if (playerIsDead()) return null
           const target = Effect.runSync(
             requestTargetedBlockBreak(gameplayState, world.chunkStore, playerApi),
           )
@@ -871,11 +934,74 @@ const boot = async (): Promise<void> => {
           return Option.isSome(target) ? target.value : null
         },
         seedCraftingLog: () => {
+          if (playerIsDead()) return gameplaySnapshot()
           Effect.runSync(world.inventory.reset)
           Effect.runSync(world.inventory.add('oak_log', 1))
           inventoryInteraction.reset()
           markSessionDirty()
           renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          return gameplaySnapshot()
+        },
+        damage: () => {
+          Effect.runSync(world.vitals.damage({ amount: 4, cause: 'generic' }))
+          markSessionDirty()
+          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          return gameplaySnapshot()
+        },
+        heal: () => {
+          Effect.runSync(world.vitals.heal(4))
+          markSessionDirty()
+          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          return gameplaySnapshot()
+        },
+        eat: () => {
+          Effect.runSync(world.vitals.eat(4, 0.3))
+          markSessionDirty()
+          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          return gameplaySnapshot()
+        },
+        respawn: () => {
+          respawnPlayer()
+          return gameplaySnapshot()
+        },
+        shoot: () => {
+          if (playerIsDead()) return gameplaySnapshot()
+          const currentPose = Effect.runSync(playerApi.pose)
+          const horizontal = Math.cos(currentPose.pitchRadians)
+          Effect.runSync(requestBowShot(gameplayState, {
+            origin: {
+              x: currentPose.feetPosition.x,
+              y: currentPose.feetPosition.y + EYE_LEVEL_OFFSET,
+              z: currentPose.feetPosition.z,
+            },
+            dirX: -Math.sin(currentPose.yawRadians) * horizontal,
+            dirY: Math.sin(currentPose.pitchRadians),
+            dirZ: -Math.cos(currentPose.yawRadians) * horizontal,
+            chargeSecs: 1,
+          }))
+          return gameplaySnapshot()
+        },
+        seedLethalZombieEncounter: () => {
+          respawnPlayer()
+          Effect.runSync(world.vitals.damage({ amount: 18, cause: 'generic' }))
+          const currentPose = Effect.runSync(playerApi.pose)
+          Effect.runSync(requestMobSpawn(gameplayState, {
+            kind: ZOMBIE_KIND,
+            feetPosition: {
+              x: currentPose.feetPosition.x + 0.5,
+              y: currentPose.feetPosition.y,
+              z: currentPose.feetPosition.z,
+            },
+            candidate: {
+              groundBlock: 2,
+              footBlock: 0,
+              headBlock: 0,
+              blockLight: 0,
+              timeOfDay: 0,
+              distanceToPlayerBlocksXZ: 16,
+            },
+          }))
+          markSessionDirty()
           return gameplaySnapshot()
         },
       },
@@ -938,11 +1064,20 @@ const boot = async (): Promise<void> => {
     // the final position only, so a step large enough to jump a block sees
     // nothing. mx-gameplay's own test states that limit.
     const walk = Effect.runSync(inputApi.snapshot)
-    if (Effect.runSync(inputApi.wasActionJustTriggered('openInventory'))) {
+    const foodOutcome = Effect.runSync(world.vitals.advanceFoodTimer(deltaSecs))
+    if (foodOutcome.signal !== 'none') markSessionDirty()
+
+    const dead = playerIsDead()
+    if (dead) {
+      if (inventoryOpen) setInventoryOpen(false)
+      if (document.pointerLockElement === canvas) document.exitPointerLock()
+    }
+
+    if (!dead && Effect.runSync(inputApi.wasActionJustTriggered('openInventory'))) {
       setInventoryOpen(!inventoryOpen)
     }
 
-    if (!inventoryOpen) {
+    if (!dead && !inventoryOpen) {
       selectedHotbarIndex = selectedHotbarAfterInput(
         selectedHotbarIndex,
         walk.wheelSteps,
@@ -952,46 +1087,64 @@ const boot = async (): Promise<void> => {
     }
 
     const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
-      !inventoryOpen && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
+      !dead && !inventoryOpen && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
 
     const looked =
-      !inventoryOpen && (walk.pointerDelta.x !== 0 || walk.pointerDelta.y !== 0)
-    if (!inventoryOpen) {
+      !dead && !inventoryOpen && (walk.pointerDelta.x !== 0 || walk.pointerDelta.y !== 0)
+    if (!dead && !inventoryOpen) {
       Effect.runSync(playerApi.look(-walk.pointerDelta.x * LOOK_SENSITIVITY, -walk.pointerDelta.y * LOOK_SENSITIVITY))
     }
     const pose = Effect.runSync(playerApi.pose)
 
-    const forward = held('moveForward') - held('moveBackward')
-    const strafe = held('moveRight') - held('moveLeft')
-    // Horizontal only, regardless of pitch: looking down and walking forward
-    // must not drive the player into the ground.
-    const sinYaw = Math.sin(pose.yawRadians)
-    const cosYaw = Math.cos(pose.yawRadians)
+    let resolvedFeet = pose.feetPosition
+    if (dead) {
+      playerVelocityY = 0
+      grounded = false
+    } else {
+      const forward = held('moveForward') - held('moveBackward')
+      const strafe = held('moveRight') - held('moveLeft')
+      // Horizontal only, regardless of pitch: looking down and walking forward
+      // must not drive the player into the ground.
+      const sinYaw = Math.sin(pose.yawRadians)
+      const cosYaw = Math.cos(pose.yawRadians)
 
-    playerVelocityY = grounded && held('jump') > 0 ? JUMP_SPEED_M_PER_S : applyGravity(playerVelocityY, deltaSecs)
+      playerVelocityY = grounded && held('jump') > 0
+        ? JUMP_SPEED_M_PER_S
+        : applyGravity(playerVelocityY, deltaSecs)
 
-    const resolved = resolvePlayerMovement(
-      {
-        centre: {
-          x: pose.feetPosition.x,
-          y: pose.feetPosition.y + PLAYER_HALF_HEIGHT,
-          z: pose.feetPosition.z,
+      const resolved = resolvePlayerMovement(
+        {
+          centre: {
+            x: pose.feetPosition.x,
+            y: pose.feetPosition.y + PLAYER_HALF_HEIGHT,
+            z: pose.feetPosition.z,
+          },
+          velocity: {
+            x: (-sinYaw * forward + cosYaw * strafe) * WALK_SPEED_M_PER_S,
+            y: playerVelocityY,
+            z: (-cosYaw * forward - sinYaw * strafe) * WALK_SPEED_M_PER_S,
+          },
         },
-        velocity: {
-          x: (-sinYaw * forward + cosYaw * strafe) * WALK_SPEED_M_PER_S,
-          y: playerVelocityY,
-          z: (-cosYaw * forward - sinYaw * strafe) * WALK_SPEED_M_PER_S,
-        },
-      },
-      deltaSecs,
-      isBlockSolid,
-    )
+        deltaSecs,
+        isBlockSolid,
+      )
 
-    const resolvedFeet = {
-      x: resolved.body.centre.x,
-      y: resolved.body.centre.y - PLAYER_HALF_HEIGHT,
-      z: resolved.body.centre.z,
+      resolvedFeet = {
+        x: resolved.body.centre.x,
+        y: resolved.body.centre.y - PLAYER_HALF_HEIGHT,
+        z: resolved.body.centre.z,
+      }
+      const horizontalDistance = Math.hypot(
+        resolvedFeet.x - pose.feetPosition.x,
+        resolvedFeet.z - pose.feetPosition.z,
+      )
+      if (horizontalDistance > 0) {
+        Effect.runSync(world.vitals.addExhaustion(horizontalDistance * WALK_EXHAUSTION_PER_METRE))
+      }
+      grounded = resolved.isGrounded
+      playerVelocityY = resolved.body.velocity.y
     }
+
     const moved =
       resolvedFeet.x !== pose.feetPosition.x ||
       resolvedFeet.y !== pose.feetPosition.y ||
@@ -1001,7 +1154,7 @@ const boot = async (): Promise<void> => {
 
     // The gameplay boundary owns both reach and DDA targeting. Compose only
     // translates the input action, preserving its dependency direction.
-    if (!inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))) {
+    if (!dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))) {
       const target = Effect.runSync(requestTargetedBlockBreak(gameplayState, world.chunkStore, playerApi))
       if (Option.isSome(target)) {
         breaksRequested += 1
@@ -1010,7 +1163,7 @@ const boot = async (): Promise<void> => {
       }
     }
 
-    if (!inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))) {
+    if (!dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))) {
       const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
       requestPlacementFromSelectedSlot(
         inventoryBeforeUse.slots,
@@ -1034,16 +1187,14 @@ const boot = async (): Promise<void> => {
       )
     }
 
-    grounded = resolved.isGrounded
-    playerVelocityY = resolved.body.velocity.y
-
     // Stream from where the player ACTUALLY ended up, not from where they
     // asked to go: a player stopped by a wall should not load the chunks behind
     // it.
-    Effect.runSync(streamAround(resolved.body.centre.x, resolved.body.centre.z))
+    Effect.runSync(Ref.set(gameplayState.targetPosition, resolvedFeet))
+    Effect.runSync(streamAround(resolvedFeet.x, resolvedFeet.z))
     canvas.setAttribute(
       'data-player-feet',
-      `${resolved.body.centre.x.toFixed(2)},${(resolved.body.centre.y - PLAYER_HALF_HEIGHT).toFixed(2)},${resolved.body.centre.z.toFixed(2)}`,
+      `${resolvedFeet.x.toFixed(2)},${resolvedFeet.y.toFixed(2)},${resolvedFeet.z.toFixed(2)}`,
     )
     canvas.setAttribute('data-player-grounded', String(grounded))
 
@@ -1057,6 +1208,25 @@ const boot = async (): Promise<void> => {
       return
     }
 
+    const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
+    for (const event of playerDamages) {
+      Effect.runSync(world.vitals.damage(event.damage))
+    }
+    if (playerDamages.length > 0) {
+      markSessionDirty()
+      if (playerIsDead()) {
+        setInventoryOpen(false)
+        if (document.pointerLockElement === canvas) document.exitPointerLock()
+      }
+    }
+
+    const mobDrops = Effect.runSync(drainMobDrops(gameplayState))
+    for (const drop of mobDrops) {
+      nextMobDropId += 1
+      observedMobDrops.push({ ...drop, renderId: `mob-drop-${nextMobDropId}` })
+    }
+
+    Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
     renderPlayerUi(Effect.runSync(world.inventory.snapshot))
 
     framesTotal += 1

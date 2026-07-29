@@ -279,7 +279,12 @@ test.describe('smoke — the composed frame in a real browser', () => {
 
     expect(surface?.sort()).toEqual([
       'gameplay.breakTarget',
+      'gameplay.damage',
+      'gameplay.eat',
+      'gameplay.heal',
+      'gameplay.respawn',
       'gameplay.seedCraftingLog',
+      'gameplay.seedLethalZombieEncounter',
       'gameplay.setPose',
       'gameplay.snapshot',
       'persistence.flush',
