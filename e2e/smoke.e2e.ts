@@ -450,7 +450,7 @@ test.describe('the player', () => {
  * #10 — BREAKING IS NOT TESTED HERE, AND THE REASON IS RECORDED UPSTREAM.
  *
  * The wiring exists: a left click is `attack`, `attack` calls
- * `requestBlockBreak`, `gameplay:interactions` drains the inbox and writes AIR,
+ * `requestTargetedBlockBreak`, `gameplay:interactions` drains the inbox and writes AIR,
  * and the collision predicate reads that same store. What cannot happen in this
  * runner is the CLICK: mc-render's `InputService` treats a click as a game
  * action only while the pointer is LOCKED — the closed-world predicate that
@@ -459,9 +459,9 @@ test.describe('the player', () => {
  * `apps/preview-render` exists because of the same limit.
  *
  * So the loop is tested one layer down, where it is reachable:
- * `mx-gameplay/test/break-loop.test.ts` enqueues a break through the same
- * public door this host calls, runs the real stage against the real in-memory
- * store, and asserts the block is gone and the drop is in the inventory.
+ * `mx-gameplay/test/break-loop.test.ts` resolves the first visible block and
+ * enqueues a break through the same public door this host calls, runs the real
+ * stage against the real store, and asserts the block is gone.
  *
  * A test that clicked and asserted nothing changed would be worse than this
  * comment, and a test that reached past the lock machine to fake the event

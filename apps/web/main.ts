@@ -110,7 +110,7 @@
  * `ChunkStore.subscribeDirty`, and that attribute becomes `generated`.
  */
 import * as THREE from 'three'
-import { Context, Effect, Either, Exit, Layer, Scope } from 'effect'
+import { Context, Effect, Either, Exit, Layer, Option, Scope } from 'effect'
 import {
   browserInputLayer,
   InputService,
@@ -136,7 +136,7 @@ import {
   gameplayStages,
   makeGameplayFrameState,
   makeInMemoryWorld,
-  requestBlockBreak,
+  requestTargetedBlockBreak,
   resolvePlayerMovement,
   solidityFromStore,
   PLAYER_HALF_HEIGHT,
@@ -832,23 +832,21 @@ const boot = async (): Promise<void> => {
       isBlockSolid,
     )
 
-    // BREAKING. The cell directly beneath the player's feet — not a raycast,
-    // because picking a target along the view ray is a DDA and DDA is
-    // mc-physics', which `check:deps` forbids this repository from importing.
-    // Naming that limit is better than approximating the raycast here: a
-    // hand-rolled ray march would be a second implementation of a rule another
-    // repository owns, and it would be wrong in ways nothing here could see.
+    const resolvedFeet = {
+      x: resolved.body.centre.x,
+      y: resolved.body.centre.y - PLAYER_HALF_HEIGHT,
+      z: resolved.body.centre.z,
+    }
+    Effect.runSync(playerApi.moveTo(resolvedFeet))
+
+    // The gameplay boundary owns both reach and DDA targeting. Compose only
+    // translates the input action, preserving its dependency direction.
     if (Effect.runSync(inputApi.wasActionJustTriggered('attack'))) {
-      const feetY = resolved.body.centre.y - PLAYER_HALF_HEIGHT
-      Effect.runSync(
-        requestBlockBreak(gameplayState, {
-          x: Math.floor(resolved.body.centre.x),
-          y: Math.floor(feetY) - 1,
-          z: Math.floor(resolved.body.centre.z),
-        }),
-      )
-      breaksRequested += 1
-      canvas.setAttribute('data-breaks-requested', String(breaksRequested))
+      const target = Effect.runSync(requestTargetedBlockBreak(gameplayState, world.chunkStore, playerApi))
+      if (Option.isSome(target)) {
+        breaksRequested += 1
+        canvas.setAttribute('data-breaks-requested', String(breaksRequested))
+      }
     }
 
     grounded = resolved.isGrounded
@@ -858,13 +856,6 @@ const boot = async (): Promise<void> => {
     // asked to go: a player stopped by a wall should not load the chunks behind
     // it.
     Effect.runSync(streamAround(resolved.body.centre.x, resolved.body.centre.z))
-    Effect.runSync(
-      playerApi.moveTo({
-        x: resolved.body.centre.x,
-        y: resolved.body.centre.y - PLAYER_HALF_HEIGHT,
-        z: resolved.body.centre.z,
-      }),
-    )
     canvas.setAttribute(
       'data-player-feet',
       `${resolved.body.centre.x.toFixed(2)},${(resolved.body.centre.y - PLAYER_HALF_HEIGHT).toFixed(2)},${resolved.body.centre.z.toFixed(2)}`,
