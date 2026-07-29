@@ -40,6 +40,9 @@ test('player settings persist and preserve Escape priority from title and pause'
   const sensitivity = page.locator('[data-sensitivity]')
   await sensitivity.fill('175')
   await page.locator('[data-audio-enabled]').uncheck()
+  await page.locator('[data-master]').fill('42')
+  await page.locator('[data-sfx]').fill('23')
+  await page.locator('[data-captions-enabled]').uncheck()
 
   const forwardBinding = page.locator('[data-binding-action="moveForward"]')
   const backwardBinding = page.locator('[data-binding-action="moveBackward"]')
@@ -55,6 +58,16 @@ test('player settings persist and preserve Escape priority from title and pause'
   await expect(settingsRoot).toBeVisible()
   await expect(page.locator('[data-settings-status]')).toHaveText('Key capture cancelled.')
   await expect(forwardBinding).toBeFocused()
+
+  await page.locator('[data-reset-bindings]').click()
+  await expect(forwardBinding).toHaveText('KeyW')
+  await expect(backwardBinding).toHaveText('KeyS')
+  await expect(page.locator('[data-settings-status]')).toHaveText('Key bindings reset.')
+  await forwardBinding.click()
+  await page.keyboard.press('KeyS')
+  await expect(forwardBinding).toHaveText('KeyS')
+  await expect(backwardBinding).toHaveText('KeyW')
+
   await page.keyboard.press('Escape')
   await expect(settingsRoot).toBeHidden()
   await expect(titleSettings).toBeFocused()
@@ -71,6 +84,9 @@ test('player settings persist and preserve Escape priority from title and pause'
   await expect(page.locator('[data-settings-close]')).toBeFocused()
   await expect(sensitivity).toHaveValue('175')
   await expect(page.locator('[data-audio-enabled]')).not.toBeChecked()
+  await expect(page.locator('[data-master]')).toHaveValue('42')
+  await expect(page.locator('[data-sfx]')).toHaveValue('23')
+  await expect(page.locator('[data-captions-enabled]')).not.toBeChecked()
   await expect(forwardBinding).toHaveText('KeyS')
 
   await page.keyboard.press('Escape')
@@ -78,6 +94,28 @@ test('player settings persist and preserve Escape priority from title and pause'
   await expect(page.getByTestId('settings-button')).toBeFocused()
   await expect(page.getByTestId('pause-overlay')).toBeVisible()
   await expect(page.locator('body')).toHaveAttribute('data-session-paused', 'true')
+})
+
+test('settings dialog stays within a narrow mobile viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 })
+  await page.goto('/')
+  await page.locator('[data-menu-entry="settings"]').click()
+
+  const layout = await page.getByTestId('settings-root').evaluate((root) => {
+    const dialog = root.querySelector<HTMLElement>('.settings-dialog')
+    if (dialog === null) throw new Error('settings dialog missing')
+    const bounds = dialog.getBoundingClientRect()
+    return {
+      dialogLeft: bounds.left,
+      dialogRight: bounds.right,
+      rootClientWidth: root.clientWidth,
+      rootScrollWidth: root.scrollWidth,
+    }
+  })
+
+  expect(layout.dialogLeft).toBeGreaterThanOrEqual(0)
+  expect(layout.dialogRight).toBeLessThanOrEqual(layout.rootClientWidth)
+  expect(layout.rootScrollWidth).toBe(layout.rootClientWidth)
 })
 
 test('rapid setting changes finish saving before title navigation', async ({ page }) => {

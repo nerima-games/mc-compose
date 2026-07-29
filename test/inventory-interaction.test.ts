@@ -32,18 +32,28 @@ const makeService = (options: {
   readonly inventory?: InteractionInventory<Item>
   readonly preview?: InteractionRecipeMatch<Item, Recipe>
   readonly craft?: InteractionCraftResult<Item>
+  readonly clickResult?: {
+    readonly _tag: 'PickedUp' | 'Placed' | 'Merged' | 'Swapped' | 'NoChange'
+    readonly carried: { readonly item: Item; readonly count: number } | undefined
+  }
+  readonly addLeftover?: number
 } = {}) => {
   const inventory = options.inventory ?? logs
+  const addCalls: Array<{ readonly item: Item; readonly count: number }> = []
   const previewCalls: Array<InteractionCraftGrid<Item>> = []
   const craftCalls: Array<InteractionCraftGrid<Item>> = []
   return {
     inventory,
+    addCalls,
     previewCalls,
     craftCalls,
     service: {
-      add: (_item: Item, _count: number) => Effect.succeed(0),
+      add: (item: Item, count: number) => Effect.sync(() => {
+        addCalls.push({ item, count })
+        return options.addLeftover ?? 0
+      }),
       click: (click: InventoryInteractionClick<Item>) =>
-        Effect.succeed({ _tag: 'NoChange' as const, carried: click.carried }),
+        Effect.succeed(options.clickResult ?? { _tag: 'NoChange' as const, carried: click.carried }),
       snapshot: Effect.succeed(inventory),
       previewCraft: (grid: InteractionCraftGrid<Item>) =>
         Effect.sync(() => {
@@ -108,6 +118,73 @@ describe('inventory interaction', () => {
     expect(result.carried).toBeUndefined()
     expect(result.status).toEqual(crafted)
     expect(dirtyCount).toBe(1)
+  })
+
+  it('configures a 3x3 grid without changing canonical carried inventory or dirty state', () => {
+    let dirtyCount = 0
+    const fixture = makeService({
+      clickResult: { _tag: 'PickedUp', carried: { item: 'stone', count: 2 } },
+    })
+    const interaction = createInventoryInteraction(fixture.service, {
+      onInventoryChanged: () => { dirtyCount += 1 },
+    })
+    Effect.runSync(interaction.clickInventoryItem(0, 'left'))
+    placeLog(interaction, 0)
+    Effect.runSync(interaction.preview())
+    const dirtyBeforeConfigure = dirtyCount
+
+    const configured = interaction.configureGrid(3, 3)
+
+    expect(configured).toEqual({
+      inventoryCarried: { item: 'stone', count: 2 },
+      carried: undefined,
+      grid: {
+        width: 3,
+        height: 3,
+        cells: Array.from({ length: 9 }, () => undefined),
+      },
+      preview: undefined,
+      status: undefined,
+    })
+    expect(dirtyCount).toBe(dirtyBeforeConfigure)
+    expect(fixture.addCalls).toHaveLength(0)
+  })
+
+  it('uses the configured cell count for interaction boundaries and craft previews', () => {
+    const fixture = makeService()
+    const interaction = createInventoryInteraction(fixture.service)
+    interaction.configureGrid(3, 3)
+    Effect.runSync(interaction.pickupInventoryItem(0))
+
+    const placed = interaction.interactCraftingCell(8)
+    const unchanged = interaction.interactCraftingCell(9)
+    Effect.runSync(interaction.preview())
+
+    expect(placed.grid.cells[8]).toEqual({ item: 'oak_log', count: 1 })
+    expect(unchanged).toEqual(placed)
+    expect(fixture.previewCalls[0]).toMatchObject({ width: 3, height: 3 })
+    expect(fixture.previewCalls[0]?.cells).toHaveLength(9)
+  })
+
+  it('preserves configured grid dimensions after a successful craft', () => {
+    const crafted: InteractionCraftResult<Item> = {
+      _tag: 'Crafted',
+      recipeId: 'oak_planks',
+      output: { item: 'oak_planks', count: 4 },
+    }
+    const fixture = makeService({ craft: crafted })
+    const interaction = createInventoryInteraction(fixture.service)
+    interaction.configureGrid(3, 3)
+    placeLog(interaction, 8)
+
+    const result = Effect.runSync(interaction.craftOnce())
+
+    expect(result.grid).toEqual({
+      width: 3,
+      height: 3,
+      cells: Array.from({ length: 9 }, () => undefined),
+    })
+    expect(fixture.craftCalls[0]).toMatchObject({ width: 3, height: 3 })
   })
 
   it.each<InteractionCraftResult<Item>>([
@@ -221,6 +298,49 @@ describe('inventory interaction', () => {
 
     expect(closed.inventoryCarried).toBeUndefined()
     expect(Effect.runSync(service.snapshot).slots[0]).toEqual(itemStack('stone', 3))
+  })
+
+  it('returns canonical carried inventory exactly once across consecutive closes', () => {
+    let dirtyCount = 0
+    const fixture = makeService({
+      clickResult: { _tag: 'PickedUp', carried: { item: 'stone', count: 2 } },
+    })
+    const interaction = createInventoryInteraction(fixture.service, {
+      onInventoryChanged: () => { dirtyCount += 1 },
+    })
+    Effect.runSync(interaction.clickInventoryItem(0, 'left'))
+    placeLog(interaction, 0)
+
+    const closed = Effect.runSync(interaction.close())
+    const closedAgain = Effect.runSync(interaction.close())
+
+    expect(fixture.addCalls).toEqual([{ item: 'stone', count: 2 }])
+    expect(closed.inventoryCarried).toBeUndefined()
+    expect(closed.carried).toBeUndefined()
+    expect(closed.grid.cells.every((cell) => cell === undefined)).toBe(true)
+    expect(closedAgain.inventoryCarried).toBeUndefined()
+    expect(dirtyCount).toBe(2)
+  })
+
+  it('preserves a canonical return leftover once when configuring a larger grid', () => {
+    const fixture = makeService({
+      clickResult: { _tag: 'PickedUp', carried: { item: 'stone', count: 2 } },
+      addLeftover: 1,
+    })
+    const interaction = createInventoryInteraction(fixture.service)
+    Effect.runSync(interaction.clickInventoryItem(0, 'left'))
+
+    const closed = Effect.runSync(interaction.close())
+    const configured = interaction.configureGrid(3, 3)
+
+    expect(fixture.addCalls).toEqual([{ item: 'stone', count: 2 }])
+    expect(closed.inventoryCarried).toEqual({ item: 'stone', count: 1 })
+    expect(configured.inventoryCarried).toEqual({ item: 'stone', count: 1 })
+    expect(configured.grid).toEqual({
+      width: 3,
+      height: 3,
+      cells: Array.from({ length: 9 }, () => undefined),
+    })
   })
 
   it('picks up an occupied cell and swaps it with a carried item', () => {

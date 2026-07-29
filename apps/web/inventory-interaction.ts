@@ -92,6 +92,10 @@ export type InventoryInteractionState<Item, Recipe, Count extends number = numbe
 
 export type InventoryInteractionController<Item, Recipe, Count extends number = number> = {
   readonly state: () => InventoryInteractionState<Item, Recipe, Count>
+  readonly configureGrid: (
+    width: number,
+    height: number,
+  ) => InventoryInteractionState<Item, Recipe, Count>
   readonly pickupInventoryItem: (
     inventoryIndex: number,
   ) => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
@@ -116,12 +120,13 @@ export type InventoryInteractionOptions = {
   readonly onInventoryChanged?: () => void
 }
 
-const EMPTY_CELLS = 4
-
-const emptyGrid = <Item, Count extends number>(): InteractionCraftGrid<Item, Count> => ({
-  width: 2,
-  height: 2,
-  cells: Array.from({ length: EMPTY_CELLS }, () => undefined),
+const emptyGrid = <Item, Count extends number>(
+  width = 2,
+  height = 2,
+): InteractionCraftGrid<Item, Count> => ({
+  width,
+  height,
+  cells: Array.from({ length: width * height }, () => undefined),
 })
 
 const oneItem = <Item, Count extends number>(
@@ -151,6 +156,23 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
   }
 
   const state = (): InventoryInteractionState<Item, Recipe, Count> => cloneState(current)
+
+  const configureGrid = (
+    width: number,
+    height: number,
+  ): InventoryInteractionState<Item, Recipe, Count> => {
+    if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+      throw new RangeError('Crafting grid dimensions must be positive integers')
+    }
+    current = {
+      inventoryCarried: current.inventoryCarried,
+      carried: undefined,
+      grid: emptyGrid(width, height),
+      preview: undefined,
+      status: undefined,
+    }
+    return state()
+  }
 
   const replaceDraft = (
     patch: Pick<InventoryInteractionState<Item, Recipe, Count>, 'carried' | 'grid'>,
@@ -216,7 +238,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
   const interactCraftingCell = (
     cellIndex: number,
   ): InventoryInteractionState<Item, Recipe, Count> => {
-    if (!Number.isInteger(cellIndex) || cellIndex < 0 || cellIndex >= EMPTY_CELLS) {
+    if (!Number.isInteger(cellIndex) || cellIndex < 0 || cellIndex >= current.grid.cells.length) {
       return state()
     }
 
@@ -236,7 +258,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     if (inventoryCarried === undefined) {
       return Effect.succeed(interactCraftingCell(cellIndex))
     }
-    if (!Number.isInteger(cellIndex) || cellIndex < 0 || cellIndex >= EMPTY_CELLS) {
+    if (!Number.isInteger(cellIndex) || cellIndex < 0 || cellIndex >= current.grid.cells.length) {
       return Effect.succeed(state())
     }
 
@@ -273,7 +295,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
         current = {
           inventoryCarried: current.inventoryCarried,
           carried: undefined,
-          grid: emptyGrid(),
+          grid: emptyGrid(current.grid.width, current.grid.height),
           preview: undefined,
           status: result,
         }
@@ -287,14 +309,18 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
 
   const close = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => {
     const inventoryCarried = current.inventoryCarried
-    if (inventoryCarried === undefined) return Effect.succeed(reset())
+    if (inventoryCarried === undefined) {
+      return Effect.succeed(configureGrid(current.grid.width, current.grid.height))
+    }
     return Effect.map(service.add(inventoryCarried.item, inventoryCarried.count), (leftover) => {
-      const closed = reset()
-      if (leftover > 0) {
-        current = {
-          ...closed,
-          inventoryCarried: { ...inventoryCarried, count: leftover as Count },
-        }
+      current = {
+        inventoryCarried: leftover > 0
+          ? { ...inventoryCarried, count: leftover as Count }
+          : undefined,
+        carried: undefined,
+        grid: emptyGrid(current.grid.width, current.grid.height),
+        preview: undefined,
+        status: undefined,
       }
       options.onInventoryChanged?.()
       return state()
@@ -303,6 +329,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
 
   return {
     state,
+    configureGrid,
     pickupInventoryItem,
     clickInventoryItem,
     interactCraftingCell,

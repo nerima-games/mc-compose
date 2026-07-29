@@ -15,6 +15,18 @@ const selectedSlotIndex = async (hotbar: Locator): Promise<number> =>
     slots.findIndex((slot) => slot.hasAttribute('data-selected')),
   )
 
+const grantPointerLock = async (page: Page): Promise<void> => {
+  await page.evaluate(() => {
+    const gameCanvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
+    if (gameCanvas === null) throw new Error('missing game canvas')
+    Object.defineProperty(document, 'pointerLockElement', {
+      configurable: true,
+      get: () => gameCanvas,
+    })
+    document.dispatchEvent(new Event('pointerlockchange'))
+  })
+}
+
 test.describe('player inventory experience', () => {
   test('keeps HUD selection and the interactive inventory overlay in sync', async ({ page }) => {
     await startGameSession(page)
@@ -35,6 +47,10 @@ test.describe('player inventory experience', () => {
 
     await page.keyboard.press('KeyE')
     await expect(inventory).toBeVisible()
+    await expect(inventory).toHaveAttribute('aria-label', 'Inventory')
+    await expect(
+      inventory.locator('[data-region="crafting-grid"] [data-mx-ui="slot"]'),
+    ).toHaveCount(4)
     await expect(page.locator('body')).toHaveAttribute('data-inventory-open', 'true')
     await expect.poll(() => selectedSlotIndex(inventoryHotbar)).toBe(2)
 
@@ -102,5 +118,30 @@ test.describe('player inventory experience', () => {
       inventory.locator('[data-mx-ui="crafting-outcome"]'),
     ).toHaveAttribute('data-crafting-state', 'unknown')
     await expect(output).toBeHidden()
+  })
+
+  test('opens an empty 3x3 crafting table through targeted canvas use', async ({ page }) => {
+    await startGameSession(page)
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+    await callQa(page, 'gameplay.seedCraftingTableEncounter')
+
+    const canvas = page.locator('#game-canvas')
+    const hudHotbarSlot = page.locator(
+      '#hud-root [data-mx-ui="hotbar"] [data-slot-index="0"]',
+    )
+    const inventory = page.locator('#inventory-root')
+    const craftingCells = inventory.locator(
+      '[data-region="crafting-grid"] [data-mx-ui="slot"]',
+    )
+
+    await expect(hudHotbarSlot).toHaveAttribute('data-empty', '')
+    await grantPointerLock(page)
+    await canvas.click({ button: 'right' })
+    await expect(inventory).toBeVisible()
+    await expect(inventory).toHaveAttribute('aria-label', 'Crafting Table')
+    await expect(craftingCells).toHaveCount(9)
+    await expect(
+      inventory.locator('[data-region="crafting-grid"] [data-mx-ui="slot"][data-empty]'),
+    ).toHaveCount(9)
   })
 })

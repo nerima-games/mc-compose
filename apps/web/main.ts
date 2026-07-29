@@ -94,6 +94,7 @@ import {
   makeTimeService,
   makeWeatherService,
   simStages,
+  type ItemStack,
   type SimPhysicsConfig,
   type WeatherState,
 } from '@nerima-games/mc-sim'
@@ -144,6 +145,7 @@ import {
   drainItemUseResults,
   drainMobDrops,
   drainPlayerDamages,
+  DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
   gameplayStages,
   makeGameplayFrameState,
@@ -162,12 +164,14 @@ import {
   requestTargetedPrimaryAttack,
   solidityFromStore,
   spawnMobDrops,
+  targetedRightClickRoute,
   weatherLightScale,
   ZOMBIE_KIND,
   type IgnitionItemType,
   type ItemUseResult,
   type MobBehaviour,
   type MobDropEvent,
+  type PlaceableItemType,
 } from '@nerima-games/mx-gameplay'
 import {
   composeGame,
@@ -273,6 +277,34 @@ const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'lever',
   'redstone_lamp',
 ])
+
+const EQUIPMENT_ONLY_ITEM_TYPES = [
+  'iron_helmet',
+  'iron_chestplate',
+  'iron_leggings',
+  'iron_boots',
+] as const satisfies ReadonlyArray<ItemStack['item']>
+
+type EquipmentOnlyItemType = (typeof EQUIPMENT_ONLY_ITEM_TYPES)[number]
+type GameplayUseItemType = Exclude<ItemStack['item'], EquipmentOnlyItemType>
+
+const EQUIPMENT_ONLY_ITEM_NAMES: ReadonlySet<string> = new Set(EQUIPMENT_ONLY_ITEM_TYPES)
+
+const isGameplayUseItemType = (item: ItemStack['item']): item is GameplayUseItemType =>
+  !EQUIPMENT_ONLY_ITEM_NAMES.has(item)
+
+const isPlaceableGameplayItem = (item: ItemStack['item']): item is PlaceableItemType =>
+  isGameplayUseItemType(item) && isPlaceableItem(item)
+
+type InventoryMode = 'player' | 'craftingTable'
+
+const INVENTORY_PRESENTATIONS = {
+  player: { label: 'Inventory', width: 2, height: 2 },
+  craftingTable: { label: 'Crafting Table', width: 3, height: 3 },
+} as const satisfies Record<
+  InventoryMode,
+  { readonly label: string; readonly width: number; readonly height: number }
+>
 
 type SettingsWriteQueue = {
   tail: Promise<void>
@@ -511,6 +543,7 @@ const bootGame = async (
   const fpsValue = requireElement('fps-value')
   const stageList = requireElement('stage-order')
   let inventoryOpen = false
+  let inventoryMode: InventoryMode = 'player'
   let paused = false
 
   const touchControlTargets = Object.fromEntries(TOUCH_CONTROL_ACTIONS.map((action) => {
@@ -1413,19 +1446,27 @@ const bootGame = async (
     focusRenderedTarget()
   })
 
-  const setInventoryOpen = (open: boolean): void => {
+  const setInventoryOpen = (open: boolean, mode: InventoryMode = 'player'): void => {
     if (open && playerIsDead()) return
     const previousOpen = inventoryOpen
-    if (previousOpen === open) return
+    const switchingMode = open && previousOpen && inventoryMode !== mode
+    if (previousOpen === open && !switchingMode) return
+
+    if (previousOpen && (!open || switchingMode)) {
+      Effect.runSync(inventoryInteraction.close())
+    }
+
     inventoryOpen = open
-    announceInventoryTransition(audio, previousOpen, open)
+    if (previousOpen !== open) announceInventoryTransition(audio, previousOpen, open)
     inventoryParent.hidden = !open
     inventoryParent.setAttribute('aria-hidden', String(!open))
     document.body.setAttribute('data-inventory-open', String(open))
     if (open) {
+      inventoryMode = mode
+      const presentation = INVENTORY_PRESENTATIONS[mode]
+      inventoryInteraction.configureGrid(presentation.width, presentation.height)
+      inventoryParent.setAttribute('aria-label', presentation.label)
       inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
-    } else {
-      Effect.runSync(inventoryInteraction.close())
     }
     renderPlayerUi()
     syncTouchControls()
@@ -1680,6 +1721,34 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedCraftingTableEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('crafting_table', 1))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 0))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, 2))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    nextBlockUseRequestId += 1
+    Effect.runSync(
+      requestTargetedBlockUse(
+        gameplayState,
+        currentChunkStore,
+        playerApi,
+        `block-use-${String(nextBlockUseRequestId)}`,
+        'crafting_table',
+      ),
+    )
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
   const enterQaDimension = (dimension: Dimension) => {
     const pose = Effect.runSync(playerApi.pose)
     Effect.runSync(playerApi.restore(pose, dimension))
@@ -1729,6 +1798,7 @@ const bootGame = async (
           renderPlayerUi()
           return gameplaySnapshot()
         },
+        seedCraftingTableEncounter,
         damage: () => {
           applyPlayerDamage({ amount: 4, cause: 'generic' })
           markSessionDirty()
@@ -1968,7 +2038,7 @@ const bootGame = async (
     }
 
     if (!dead && Effect.runSync(inputApi.wasActionJustTriggered('openInventory'))) {
-      setInventoryOpen(!inventoryOpen)
+      setInventoryOpen(!inventoryOpen, 'player')
     }
 
     if (!dead && !inventoryOpen) {
@@ -2100,81 +2170,88 @@ const bootGame = async (
     }
 
     if (!deadAfterFrame && useTriggered) {
-      const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
-      const selected = inventoryBeforeUse.slots[selectedHotbarIndex]
-      let shouldAttemptPlacement = selected === undefined
+      const route = Effect.runSync(
+        targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH),
+      )
+      if (route?.kind === 'craftingTable') {
+        setInventoryOpen(true, 'craftingTable')
+      } else {
+        const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
+        const selected = inventoryBeforeUse.slots[selectedHotbarIndex]
+        let shouldAttemptPlacement = selected === undefined
 
-      if (selected !== undefined) {
-        const foodUse = resolveFoodUse({
-          held: selected.item,
-          vitals: Effect.runSync(world.vitals.snapshot),
-        })
+        if (selected !== undefined && isGameplayUseItemType(selected.item)) {
+          const foodUse = resolveFoodUse({
+            held: selected.item,
+            vitals: Effect.runSync(world.vitals.snapshot),
+          })
 
-        if (foodUse._tag === 'consume') {
-          const removal = Effect.runSync(
-            world.inventory.removeAt(selectedHotbarIndex, selected.item, foodUse.count),
-          )
-          if (removal._tag === 'Removed') {
-            Effect.runSync(world.vitals.eat(foodUse.foodPoints, foodUse.saturationModifier))
-            markSessionDirty()
-          }
-        } else if (foodUse._tag !== 'dead') {
-          if (isIgnitionItem(selected.item)) {
-            nextItemUseRequestId += 1
-            const requestId = `item-use-${String(nextItemUseRequestId)}`
-            const target = Effect.runSync(
-              requestTargetedItemUse(
-                gameplayState,
-                currentChunkStore,
-                playerApi,
-                requestId,
-                selected.item,
-              ),
+          if (foodUse._tag === 'consume') {
+            const removal = Effect.runSync(
+              world.inventory.removeAt(selectedHotbarIndex, selected.item, foodUse.count),
             )
-            if (Option.isSome(target)) {
-              pendingItemUses.set(requestId, {
-                slotIndex: selectedHotbarIndex,
-                heldItem: selected.item,
-              })
-            }
-          } else {
-            shouldAttemptPlacement = true
-          }
-        }
-      }
-
-      if (shouldAttemptPlacement) {
-        requestPlacementFromSelectedSlot(
-          inventoryBeforeUse.slots,
-          selectedHotbarIndex,
-          isPlaceableItem,
-          (heldItem) => {
-            nextBlockUseRequestId += 1
-            const requestId = `block-use-${String(nextBlockUseRequestId)}`
-            const target = Effect.runSync(
-              requestTargetedBlockUse(
-                gameplayState,
-                currentChunkStore,
-                playerApi,
-                requestId,
-                heldItem,
-              ),
-            )
-            if (Option.isSome(target)) {
-              const reading = Effect.runSync(currentChunkStore.getBlock(target.value.position))
-              if (reading._tag === 'Block' && reading.block === 76) {
-                pendingBlockUses.set(requestId, {
-                  dimension: currentChunkContext.dimension,
-                  position: target.value.position,
-                })
-              } else {
-                placementsRequested += 1
-                canvas.setAttribute('data-placements-requested', String(placementsRequested))
-              }
+            if (removal._tag === 'Removed') {
+              Effect.runSync(world.vitals.eat(foodUse.foodPoints, foodUse.saturationModifier))
               markSessionDirty()
             }
-          },
-        )
+          } else if (foodUse._tag !== 'dead') {
+            if (isIgnitionItem(selected.item)) {
+              nextItemUseRequestId += 1
+              const requestId = `item-use-${String(nextItemUseRequestId)}`
+              const target = Effect.runSync(
+                requestTargetedItemUse(
+                  gameplayState,
+                  currentChunkStore,
+                  playerApi,
+                  requestId,
+                  selected.item,
+                ),
+              )
+              if (Option.isSome(target)) {
+                pendingItemUses.set(requestId, {
+                  slotIndex: selectedHotbarIndex,
+                  heldItem: selected.item,
+                })
+              }
+            } else {
+              shouldAttemptPlacement = true
+            }
+          }
+        }
+
+        if (shouldAttemptPlacement) {
+          requestPlacementFromSelectedSlot(
+            inventoryBeforeUse.slots,
+            selectedHotbarIndex,
+            isPlaceableGameplayItem,
+            (heldItem) => {
+              nextBlockUseRequestId += 1
+              const requestId = `block-use-${String(nextBlockUseRequestId)}`
+              const target = Effect.runSync(
+                requestTargetedBlockUse(
+                  gameplayState,
+                  currentChunkStore,
+                  playerApi,
+                  requestId,
+                  heldItem,
+                ),
+              )
+              if (Option.isSome(target)) {
+                const reading = Effect.runSync(currentChunkStore.getBlock(target.value.position))
+                if (reading._tag === 'Block' && reading.block === 76) {
+                  pendingBlockUses.set(requestId, {
+                    dimension: currentChunkContext.dimension,
+                    position: target.value.position,
+                  })
+                } else {
+                  placementsRequested += 1
+                  canvas.setAttribute('data-placements-requested', String(placementsRequested))
+                }
+                markSessionDirty()
+              }
+            },
+          )
+        }
       }
     }
 
