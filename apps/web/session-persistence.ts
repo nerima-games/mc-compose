@@ -20,6 +20,7 @@ import {
   type ChunkStoreApi,
   type Dimension,
 } from '@nerima-games/mc-worldgen'
+import type { isPlaceableItem } from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
 
@@ -35,9 +36,125 @@ const PositionSchema: Schema.Schema<SessionPosition> = Schema.Struct({
   z: Schema.Number,
 })
 
-const InventorySlotSchema = Schema.Union(
+type GameplayItemType = Parameters<typeof isPlaceableItem>[0]
+
+const exhaustiveItemTypes = <const Items extends ReadonlyArray<GameplayItemType>>(
+  ...items: [GameplayItemType] extends [Items[number]] ? Items : never
+): Items => items
+
+// mx-gameplay exposes the item union through its public API, but not its runtime roster.
+const SESSION_ITEM_TYPES = exhaustiveItemTypes(
+  'stone',
+  'cobblestone',
+  'dirt',
+  'grass_block',
+  'sand',
+  'gravel',
+  'oak_log',
+  'oak_planks',
+  'oak_leaves',
+  'glass',
+  'torch',
+  'glowstone',
+  'piston',
+  'stick',
+  'glowstone_dust',
+  'wooden_pickaxe',
+  'coal',
+  'iron_ingot',
+  'flint',
+  'gunpowder',
+  'blaze_powder',
+  'flint_and_steel',
+  'fire_charge',
+  'granite',
+  'diorite',
+  'andesite',
+  'deepslate',
+  'obsidian',
+  'smooth_basalt',
+  'calcite',
+  'amethyst_block',
+  'sandstone',
+  'prismarine',
+  'soul_sand',
+  'coal_block',
+  'iron_block',
+  'gold_block',
+  'diamond_block',
+  'redstone_block',
+  'lapis_block',
+  'emerald_block',
+  'redstone_torch',
+  'lever',
+  'stone_button',
+  'repeater',
+  'redstone_lamp',
+  'observer',
+  'comparator',
+  'dispenser',
+  'hopper',
+  'end_stone',
+  'end_portal_frame',
+  'end_portal_frame_filled',
+  'chorus_flower',
+  'chorus_plant',
+  'dragon_egg',
+  'end_crystal',
+  'end_rod',
+  'end_stone_bricks',
+  'ender_chest',
+  'purpur_block',
+  'purpur_pillar',
+  'purpur_slab',
+  'purpur_stairs',
+  'shulker_box',
+  'crafting_table',
+  'furnace',
+  'chest',
+  'door',
+  'oak_stairs',
+  'anvil',
+  'cauldron',
+  'bed',
+  'enchanting_table',
+  'brewing_stand',
+  'tnt',
+  'nether_brick',
+  'netherrack',
+  'raw_iron',
+  'raw_gold',
+  'diamond',
+  'emerald',
+  'lapis_lazuli',
+  'redstone_dust',
+  'amethyst_shard',
+  'wheat_seeds',
+  'potato',
+  'nether_wart',
+  'ladder',
+  'kelp',
+  'seagrass',
+  'rail',
+  'powered_rail',
+  'pressure_plate',
+  'stone_slab',
+  'string',
+  'snowball',
+)
+
+export type SessionInventorySlot =
+  | {
+      readonly item: GameplayItemType
+      readonly count: number
+    }
+  | undefined
+
+const InventoryItemSchema: Schema.Schema<GameplayItemType> = Schema.Literal(...SESSION_ITEM_TYPES)
+
+const InventorySlotSchema: Schema.Schema<SessionInventorySlot> = Schema.Union(
   Schema.Struct({
-    item: Schema.String.pipe(Schema.minLength(1)),
+    item: InventoryItemSchema,
     count: Schema.Number.pipe(Schema.int(), Schema.positive()),
   }),
   Schema.Undefined,
@@ -52,13 +169,7 @@ export type SessionState = {
     readonly pitchRadians: number
   }
   readonly inventory: {
-    readonly slots: ReadonlyArray<
-      | {
-          readonly item: string
-          readonly count: number
-        }
-      | undefined
-    >
+    readonly slots: ReadonlyArray<SessionInventorySlot>
   }
 }
 

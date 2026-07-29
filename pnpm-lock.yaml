@@ -15,8 +15,11 @@ importers:
         specifier: 0.1.1
         version: 0.1.1
       '@nerima-games/mx-gameplay':
-        specifier: 0.1.6
-        version: 0.1.6
+        specifier: 0.1.7
+        version: 0.1.7
+      '@nerima-games/mx-ui':
+        specifier: 0.2.0
+        version: 0.2.0
       effect:
         specifier: ^3.20.0
         version: 3.22.0
@@ -289,9 +292,13 @@ packages:
     resolution: {integrity: sha512-VI+LZIQV1f07+aAmvm/qN5spDsbJB2kbpEkzIjbdG4sNpgxqmXkJWULfP3axaCv40tNTAS54RVR6DpBBb6N6lw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-worldgen/0.1.1/0eae0d1c46e81807c0b440f19b5f9c4e7f4d91bf}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
-  '@nerima-games/mx-gameplay@0.1.6':
-    resolution: {integrity: sha512-bpdn2IbD8qGxTPbE4SbhbNbNqTmRzFJnPlyR5BKnzP1geieqMwrqxCHgZStZ/umzdjvHBbR/h82NaZAHCaW7qA==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-gameplay/0.1.6/c18e1af31f03c4b3644b1fddf05ed54dd6e5b28d}
+  '@nerima-games/mx-gameplay@0.1.7':
+    resolution: {integrity: sha512-PLkoIpq7udj+qegHmY1UKdUlAKFWCQpP5XvU5nBFuQHptdhKZ/u7D6lD5DLPqTLN2dwRE4y5OhorY+xUvSBiPw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-gameplay/0.1.7/6ad351a1eba1bc53268515b645424b7cc34d5564}
     engines: {node: '>=22.0.0', pnpm: '>=8.15.0'}
+
+  '@nerima-games/mx-ui@0.2.0':
+    resolution: {integrity: sha512-LD/xUDDharb+IxmFnExm2ipE671S+hcq7SwVj6SDyPaqkPJXwmzdQ1Xxh0ftO6sjkqeIn4lvCic2E4oRo2FDzA==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-ui/0.2.0/a95ff2bfa2e0f8b85bcecfdd93c5028b8495ce16}
+    engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
   '@oxlint/darwin-arm64@0.12.0':
     resolution: {integrity: sha512-UydkjcAImpmBn8JYaMPg0zJrwgWJMGvJagvCnyPfyiBRWAN83Kq+BDgJZgIq+2Te6kvlnoiHWNJKVJmpy0f0BA==}
@@ -1141,11 +1148,15 @@ snapshots:
     dependencies:
       effect: 3.22.0
 
-  '@nerima-games/mx-gameplay@0.1.6':
+  '@nerima-games/mx-gameplay@0.1.7':
     dependencies:
       '@nerima-games/mc-kernel': 0.2.0
       '@nerima-games/mc-sim': 0.1.1
       '@nerima-games/mc-worldgen': 0.1.0
+      effect: 3.22.0
+
+  '@nerima-games/mx-ui@0.2.0':
+    dependencies:
       effect: 3.22.0
 
   '@oxlint/darwin-arm64@0.12.0':

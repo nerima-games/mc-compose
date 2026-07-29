@@ -17,6 +17,7 @@ import {
 } from '@nerima-games/mc-worldgen'
 
 import {
+  SESSION_FORMAT_NAME,
   loadSession,
   makeSessionChunkSource,
   saveSession,
@@ -49,6 +50,8 @@ type ControlledStorage = {
   failChunkRemoves: boolean
   chunkWriteCount: number
   readonly keys: ReadonlyArray<string>
+  readonly envelope: (key: string) => SaveEnvelope | undefined
+  readonly setEnvelope: (key: string, envelope: SaveEnvelope) => void
 }
 
 const controlledStorage = (): ControlledStorage => {
@@ -115,6 +118,8 @@ const controlledStorage = (): ControlledStorage => {
     get keys() {
       return [...entries.keys()]
     },
+    envelope: (key) => entries.get(key),
+    setEnvelope: (key, envelope) => entries.set(key, envelope),
   }
 }
 
@@ -132,6 +137,35 @@ describe('session persistence', () => {
 
       expect(Option.getOrThrow(loaded)).toEqual(saved)
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects a saved session containing an unknown inventory item id', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('unknown-item')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 1,
+      payload: {
+        sessionId: 'unknown-item',
+        revision: 'r1',
+        state: {
+          ...sessionState(42),
+          inventory: { slots: [{ item: 'item_from_an_unknown_build', count: 1 }] },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession('unknown-item'))
+
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 1,
+      })
+      expect(storage.envelope(key)).toBeDefined()
     }).pipe(Effect.provide(storage.layer))
   })
 

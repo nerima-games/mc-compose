@@ -111,6 +111,7 @@ import {
   slotSnapshotOf,
   spawnSnapshot,
   uiModule,
+  type InventoryInteractionTarget,
 } from '@nerima-games/mx-ui'
 import { redstoneModule } from '@nerima-games/mx-redstone'
 import {
@@ -136,6 +137,7 @@ import {
 import { DeltaTimeSecs } from '../../domain/kernel-vocabulary'
 import { buildQaRegistry, describeQaApiError, installQaApi } from '../../domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
+import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
 import {
@@ -663,15 +665,38 @@ const boot = async (): Promise<void> => {
   createCrosshairView(document, hudParent, motion)
 
   inventoryParent.setAttribute('role', 'dialog')
-  inventoryParent.setAttribute('aria-label', 'Inventory (read only)')
-  inventoryParent.setAttribute('aria-readonly', 'true')
+  inventoryParent.setAttribute('aria-label', 'Inventory')
   inventoryParent.setAttribute('aria-hidden', 'true')
-  inventoryParent.setAttribute('data-readonly', 'true')
   document.body.setAttribute('data-inventory-open', 'false')
 
   let selectedHotbarIndex = 0
+  let inventoryFocus: InventoryInteractionTarget = {
+    kind: 'slot',
+    region: 'hotbar',
+    index: selectedHotbarIndex,
+  }
+  const inventoryInteraction = createInventoryInteraction(world.inventory, {
+    onCrafted: () => markSessionDirty(),
+  })
   const initialInventory = Effect.runSync(world.inventory.snapshot)
+
+  const interactionStatus = (): string => {
+    const status = inventoryInteraction.state().status
+    if (status === undefined) return ''
+    switch (status._tag) {
+      case 'Crafted':
+        return `Crafted ${String(status.output.count)} ${status.output.item}`
+      case 'MissingIngredients':
+        return 'Missing ingredients'
+      case 'NoRoom':
+        return 'Inventory is full'
+      case 'NoMatch':
+        return 'No matching recipe'
+    }
+  }
+
   const renderPlayerUi = (inventory: typeof initialInventory): void => {
+    const draft = inventoryInteraction.state()
     hud.render(hudViewModel({
       ...spawnSnapshot,
       hotbar: inventory.slots.slice(0, 9).map((slot) => slotSnapshotOf(slot, undefined)),
@@ -681,19 +706,84 @@ const boot = async (): Promise<void> => {
       inventory,
       selectedHotbarIndex,
       durabilityBySlot: undefined,
-      carried: undefined,
+      carried: draft.carried,
       armour: undefined,
       offhand: undefined,
-      crafting: undefined,
+      crafting: {
+        gridWidth: draft.grid.width,
+        grid: draft.grid.cells,
+        result: draft.preview,
+      },
       mergeableSlotIndices: undefined,
-    }))
+    }), {
+      focused: inventoryFocus,
+      status: interactionStatus(),
+    })
   }
+
+  const targetOf = (source: EventTarget | null): InventoryInteractionTarget | undefined => {
+    if (!(source instanceof Element)) return undefined
+    const interactive = source.closest<HTMLElement>('[role="button"]')
+    if (interactive === null || !inventoryParent.contains(interactive)) return undefined
+    if (interactive.matches('[data-mx-ui="crafting-output"]')) {
+      return { kind: 'crafting-output' }
+    }
+    if (!interactive.matches('[data-mx-ui="slot"]')) return undefined
+    const region = interactive.closest<HTMLElement>('[data-region]')?.dataset['region']
+    const index = Number(interactive.dataset['slotIndex'])
+    if (
+      !Number.isInteger(index) ||
+      (region !== 'hotbar' && region !== 'main' && region !== 'crafting-grid')
+    ) {
+      return undefined
+    }
+    return { kind: 'slot', region, index }
+  }
+
+  const focusRenderedTarget = (): void => {
+    inventoryParent.querySelector<HTMLElement>('[role="button"][tabindex="0"]')?.focus()
+  }
+
+  const activateInventoryTarget = (target: InventoryInteractionTarget): void => {
+    inventoryFocus = target
+    if (target.kind === 'crafting-output') {
+      Effect.runSync(inventoryInteraction.craftOnce())
+    } else if (target.region === 'crafting-grid') {
+      inventoryInteraction.interactCraftingCell(target.index)
+      Effect.runSync(inventoryInteraction.preview())
+    } else if (target.region === 'hotbar') {
+      Effect.runSync(inventoryInteraction.pickupInventoryItem(target.index))
+    } else if (target.region === 'main') {
+      Effect.runSync(inventoryInteraction.pickupInventoryItem(9 + target.index))
+    }
+    renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+  }
+
+  inventoryParent.addEventListener('click', (event) => {
+    const target = targetOf(event.target)
+    if (target !== undefined) activateInventoryTarget(target)
+  })
+  inventoryParent.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    const target = targetOf(event.target)
+    if (target === undefined) return
+    event.preventDefault()
+    activateInventoryTarget(target)
+    focusRenderedTarget()
+  })
 
   const setInventoryOpen = (open: boolean): void => {
     inventoryOpen = open
     inventoryParent.hidden = !open
     inventoryParent.setAttribute('aria-hidden', String(!open))
     document.body.setAttribute('data-inventory-open', String(open))
+    if (open) {
+      inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    } else {
+      inventoryInteraction.close()
+    }
+    renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+    if (open) window.requestAnimationFrame(focusRenderedTarget)
     if (open && document.pointerLockElement === canvas) {
       document.exitPointerLock()
     }
@@ -779,6 +869,14 @@ const boot = async (): Promise<void> => {
           )
           if (Option.isSome(target)) markSessionDirty()
           return Option.isSome(target) ? target.value : null
+        },
+        seedCraftingLog: () => {
+          Effect.runSync(world.inventory.reset)
+          Effect.runSync(world.inventory.add('oak_log', 1))
+          inventoryInteraction.reset()
+          markSessionDirty()
+          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          return gameplaySnapshot()
         },
       },
     },

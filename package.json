@@ -63,7 +63,8 @@
   "dependencies": {
     "@nerima-games/mc-save": "0.1.0",
     "@nerima-games/mc-worldgen": "0.1.1",
-    "@nerima-games/mx-gameplay": "0.1.6",
+    "@nerima-games/mx-gameplay": "0.1.7",
+    "@nerima-games/mx-ui": "0.2.0",
     "effect": "^3.20.0"
   },
   "devDependencies": {
