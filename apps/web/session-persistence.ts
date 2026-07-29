@@ -48,6 +48,12 @@ export type SessionPosition = {
   readonly z: number
 }
 
+export type PersistedLeverState = {
+  readonly dimension: Dimension
+  readonly position: SessionPosition
+  readonly active: boolean
+}
+
 const PositionSchema: Schema.Schema<SessionPosition> = Schema.Struct({
   x: Schema.Number,
   y: Schema.Number,
@@ -66,6 +72,9 @@ export type SessionState = {
   readonly vitals: PlayerVitals
   readonly time: TimeState
   readonly weather: WeatherState
+  readonly redstone: {
+    readonly levers: ReadonlyArray<PersistedLeverState>
+  }
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -125,6 +134,13 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   vitals: PlayerVitalsSchema,
   time: TimeStateSchema,
   weather: WeatherStateSchema,
+  redstone: Schema.Struct({
+    levers: Schema.Array(Schema.Struct({
+      dimension: DimensionSchema,
+      position: PositionSchema,
+      active: Schema.Boolean,
+    })),
+  }),
 })
 
 export type SessionChunkManifestEntry = {
@@ -284,9 +300,28 @@ const migrateSessionV5ToV6: Migration = {
   },
 }
 
+const migrateSessionV6ToV7: Migration = {
+  from: 6,
+  describe: 'add host-owned lever state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v6 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'redstone')
+        ? state
+        : { ...state, redstone: { levers: [] } },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 6,
+  version: 7,
   schema: SessionHeadSchema,
   migrations: [
     migrateSessionV1ToV2,
@@ -294,6 +329,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV3ToV4,
     migrateSessionV4ToV5,
     migrateSessionV5ToV6,
+    migrateSessionV6ToV7,
   ],
 })
 

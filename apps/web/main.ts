@@ -118,10 +118,16 @@ import {
   uiModule,
   type InventoryInteractionTarget,
 } from '@nerima-games/mx-ui'
-import { redstoneModule } from '@nerima-games/mx-redstone'
+import {
+  makeRuntimeRedstoneStages,
+  RedstoneWorldRuntime,
+  RedstoneWorldRuntimeLayer,
+  type RedstoneComponentSnapshot,
+} from '@nerima-games/mx-redstone'
 import {
   applyGravity,
   CREEPER_KIND,
+  drainBlockUseResults,
   drainItemUseResults,
   drainMobDrops,
   drainPlayerDamages,
@@ -136,7 +142,7 @@ import {
   requestMobSpawn,
   resolveFoodUse,
   requestTargetedBlockBreak,
-  requestTargetedBlockPlacement,
+  requestTargetedBlockUse,
   requestTargetedItemUse,
   requestTargetedPrimaryAttack,
   resolvePlayerMovement,
@@ -168,6 +174,7 @@ import {
   saveSession,
   snapshotResidentChunks,
   type DimensionChunk,
+  type PersistedLeverState,
   type SessionState,
 } from './session-persistence'
 
@@ -217,6 +224,11 @@ const QA_IGNITION_HIT_BLOCK = { x: 8, y: 66, z: 8 } as const
 const QA_IGNITION_CELL = { x: 8, y: 66, z: 9 } as const
 const QA_IGNITION_SUPPORT_BLOCK = { x: 8, y: 65, z: 9 } as const
 const QA_IGNITION_FLOOR_BLOCK = { x: 8, y: 64, z: 10 } as const
+const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
+  'redstone_dust',
+  'lever',
+  'redstone_lamp',
+])
 const QA_POSE = {
   feetPosition: { x: 8.5, y: 64.5, z: 8.5 },
   yawRadians: 0,
@@ -345,6 +357,13 @@ const boot = async (): Promise<void> => {
   const inputContext = await Effect.runPromise(
     Effect.provideService(Layer.build(inputLayer), Scope.Scope, scope),
   )
+  const redstoneContext = await Effect.runPromise(
+    Effect.provideService(Layer.build(RedstoneWorldRuntimeLayer), Scope.Scope, scope),
+  )
+  const redstoneRuntime = Context.get(redstoneContext, RedstoneWorldRuntime)
+  const runtimeRedstoneStages = await Effect.runPromise(
+    Effect.provide(makeRuntimeRedstoneStages, redstoneContext),
+  )
 
   // -------------------------------------------------------------------------
   // 2. Registration
@@ -447,6 +466,10 @@ const boot = async (): Promise<void> => {
       world.player.restore(loadedSession.value.state.player, loadedSession.value.state.dimension),
     )
     await Effect.runPromise(world.vitals.restore(loadedSession.value.state.vitals))
+  } else {
+    await Effect.runPromise(world.inventory.add('redstone_dust', 16))
+    await Effect.runPromise(world.inventory.add('lever', 4))
+    await Effect.runPromise(world.inventory.add('redstone_lamp', 8))
   }
   const time = await Effect.runPromise(makeTimeService())
   const weather = await Effect.runPromise(makeWeatherService())
@@ -485,6 +508,13 @@ const boot = async (): Promise<void> => {
   const initialChunkContext = makeDimensionChunkContext(initialDimension, world)
   dimensionContexts.set(initialDimension, initialChunkContext)
   let currentChunkContext = initialChunkContext
+  const leverKeyOf = (lever: Pick<PersistedLeverState, 'dimension' | 'position'>): string =>
+    JSON.stringify([lever.dimension, lever.position.x, lever.position.y, lever.position.z])
+  const leverStates = new Map<string, PersistedLeverState>(
+    (Option.isSome(loadedSession) ? loadedSession.value.state.redstone.levers : [])
+      .map((lever) => [leverKeyOf(lever), lever]),
+  )
+  let redstoneDirty = true
 
   const getOrCreateDimensionChunkContext = (
     dimension: Dimension,
@@ -533,6 +563,7 @@ const boot = async (): Promise<void> => {
       vitals: Effect.runSync(world.vitals.snapshot),
       time: Effect.runSync(time.snapshot),
       weather: Effect.runSync(weather.snapshot),
+      redstone: { levers: [...leverStates.values()] },
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -608,6 +639,8 @@ const boot = async (): Promise<void> => {
         context.streamLoaded.delete(chunkKeyOf(chunk))
       }
 
+      if (changed.length > 0 || removed.length > 0) redstoneDirty = true
+
       yield* syncWorld(worldRenderer, context.dirtyChunks, context.meshChunkFromStore)
       chunksStreamedIn += changed.length
       chunksDropped += removed.length
@@ -628,6 +661,51 @@ const boot = async (): Promise<void> => {
     const rendered = yield* worldRenderer.chunkKeys
     for (const key of rendered) yield* worldRenderer.removeChunk(key)
   })
+
+  const syncRedstoneSnapshot = (context: DimensionChunkContext): void => {
+    const residents = Effect.runSync(snapshotResidentChunks(context.worldgenChunkStore))
+    const components: Array<RedstoneComponentSnapshot> = []
+    const observedLevers = new Set<string>()
+    for (const chunk of residents) {
+      for (let lx = 0; lx < 16; lx += 1) {
+        for (let lz = 0; lz < 16; lz += 1) {
+          for (let y = 0; y < 256; y += 1) {
+            const block = chunk.blocks[y + lz * 256 + lx * 4096]
+            const kind = block === 74
+              ? 'wire'
+              : block === 76
+                ? 'lever'
+                : block === 79 || block === 80
+                  ? 'lamp'
+                  : undefined
+            if (kind === undefined) continue
+            const position = { x: chunk.coord.cx * 16 + lx, y, z: chunk.coord.cz * 16 + lz }
+            if (kind === 'lever') {
+              const key = leverKeyOf({ dimension: context.dimension, position })
+              observedLevers.add(key)
+              components.push({ position, kind, active: leverStates.get(key)?.active ?? false })
+            } else {
+              components.push({ position, kind })
+            }
+          }
+        }
+      }
+    }
+
+    for (const [key, lever] of leverStates) {
+      if (lever.dimension !== context.dimension) continue
+      const residentKey = chunkKeyOf({
+        cx: Math.floor(lever.position.x / 16),
+        cz: Math.floor(lever.position.z / 16),
+      })
+      if (context.streamLoaded.has(residentKey) && !observedLevers.has(key)) {
+        leverStates.delete(key)
+        markSessionDirty()
+      }
+    }
+    Effect.runSync(redstoneRuntime.syncSnapshot({ dimension: context.dimension, components }))
+    redstoneDirty = false
+  }
 
   await Effect.runPromise(
     streamAround(currentChunkContext, spawnPose.feetPosition.x, spawnPose.feetPosition.z),
@@ -700,7 +778,7 @@ const boot = async (): Promise<void> => {
     registerModule({
       name: '@nerima-games/mx-redstone',
       layers: EMPTY_MODULE_LAYER,
-      frameStages: redstoneModule.frameStages,
+      frameStages: Effect.succeed(runtimeRedstoneStages),
     }),
   )
 
@@ -728,6 +806,7 @@ const boot = async (): Promise<void> => {
   let breaksRequested = 0
   let placementsRequested = 0
   let nextItemUseRequestId = 0
+  let nextBlockUseRequestId = 0
 
   // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
   // whole reason breaking works. `gameplayStages` takes the state as an
@@ -746,6 +825,10 @@ const boot = async (): Promise<void> => {
   const pendingItemUses = new Map<
     string,
     { readonly slotIndex: number; readonly heldItem: IgnitionItemType }
+  >()
+  const pendingBlockUses = new Map<
+    string,
+    { readonly dimension: Dimension; readonly position: { readonly x: number; readonly y: number; readonly z: number } }
   >()
 
   const registeredGameplay = await Effect.runPromise(
@@ -1332,6 +1415,7 @@ const boot = async (): Promise<void> => {
     const raw = previousSecs === undefined ? FIRST_FRAME_SECS : nowSecs - previousSecs
     previousSecs = nowSecs
     const deltaSecs = clampDelta(raw)
+    if (redstoneDirty) syncRedstoneSnapshot(currentChunkContext)
 
     // -----------------------------------------------------------------------
     // The player, moved and stopped by the world
@@ -1451,6 +1535,7 @@ const boot = async (): Promise<void> => {
       if (result._tag === 'Block') {
         breaksRequested += 1
         canvas.setAttribute('data-breaks-requested', String(breaksRequested))
+        redstoneDirty = true
         markSessionDirty()
       } else if (result._tag === 'Melee') {
         markSessionDirty()
@@ -1508,17 +1593,28 @@ const boot = async (): Promise<void> => {
           selectedHotbarIndex,
           isPlaceableItem,
           (heldItem) => {
+            nextBlockUseRequestId += 1
+            const requestId = `block-use-${String(nextBlockUseRequestId)}`
             const target = Effect.runSync(
-              requestTargetedBlockPlacement(
+              requestTargetedBlockUse(
                 gameplayState,
                 currentChunkStore,
                 playerApi,
+                requestId,
                 heldItem,
               ),
             )
             if (Option.isSome(target)) {
-              placementsRequested += 1
-              canvas.setAttribute('data-placements-requested', String(placementsRequested))
+              const reading = Effect.runSync(currentChunkStore.getBlock(target.value.position))
+              if (reading._tag === 'Block' && reading.block === 76) {
+                pendingBlockUses.set(requestId, {
+                  dimension: currentChunkContext.dimension,
+                  position: target.value.position,
+                })
+              } else {
+                placementsRequested += 1
+                canvas.setAttribute('data-placements-requested', String(placementsRequested))
+              }
               markSessionDirty()
             }
           },
@@ -1547,6 +1643,15 @@ const boot = async (): Promise<void> => {
       return
     }
 
+    // Placement requests are serviced after the frame-start redstone sync.
+    // Only the success outbox proves that a component now exists in the store.
+    const consumedPlacements = Effect.runSync(
+      Ref.getAndSet(gameplayState.consumedItems, []),
+    )
+    if (consumedPlacements.some((item) => REDSTONE_PLACEMENT_ITEMS.has(item))) {
+      redstoneDirty = true
+    }
+
     const dimensionAfterFrame = Effect.runSync(playerApi.dimension)
     if (
       dimensionAfterFrame !== dimensionBeforeFrame ||
@@ -1558,6 +1663,36 @@ const boot = async (): Promise<void> => {
       Effect.runSync(clearRenderedChunks)
       playerVelocityY = 0
       grounded = false
+      redstoneDirty = true
+      markSessionDirty()
+    }
+
+    for (const result of Effect.runSync(drainBlockUseResults(gameplayState))) {
+      const pending = pendingBlockUses.get(result.requestId)
+      pendingBlockUses.delete(result.requestId)
+      if (
+        pending !== undefined &&
+        result.success &&
+        result.outcome._tag === 'ToggleLever' &&
+        result.outcome.position.x === pending.position.x &&
+        result.outcome.position.y === pending.position.y &&
+        result.outcome.position.z === pending.position.z
+      ) {
+        const key = leverKeyOf(pending)
+        leverStates.set(key, {
+          dimension: pending.dimension,
+          position: pending.position,
+          active: !(leverStates.get(key)?.active ?? false),
+        })
+        redstoneDirty = true
+        markSessionDirty()
+      }
+    }
+
+    for (const transition of Effect.runSync(redstoneRuntime.drainLampTransitions)) {
+      const context = dimensionContexts.get(transition.dimension as Dimension)
+      if (context === undefined) continue
+      Effect.runSync(context.chunkStore.setBlock(transition.position, transition.lit ? 80 : 79))
       markSessionDirty()
     }
 

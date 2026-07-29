@@ -67,6 +67,13 @@ const sessionState = (seed: number): SessionState => {
     storage: storageFromInventory({
       slots: Array.from({ length: INVENTORY_SLOT_COUNT }, (_, index) => inventory.slots[index]),
     } as Inventory),
+    redstone: {
+      levers: [{
+        dimension: 'nether',
+        position: { x: -3, y: 71, z: 12 },
+        active: true,
+      }],
+    },
   }
 }
 
@@ -179,11 +186,33 @@ describe('session persistence', () => {
       expect(saved.state.vitals).toEqual(sessionState(42).vitals)
       expect(saved.state.time).toEqual(sessionState(42).time)
       expect(saved.state.weather).toEqual(sessionState(42).weather)
+      expect(saved.state.redstone).toEqual(sessionState(42).redstone)
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 6,
+        version: 7,
       })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates v6 sessions with an empty lever state', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v6')
+    const { redstone: _redstone, ...v6State } = sessionState(42)
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 6,
+      payload: {
+        sessionId: 'legacy-v6',
+        revision: 'r1',
+        state: v6State,
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v6'))
+      expect(loaded.state.redstone).toEqual({ levers: [] })
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -363,7 +392,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(6)
+      expect(storage.envelope(headKey)?.version).toBe(7)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )

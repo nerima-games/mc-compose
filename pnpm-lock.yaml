@@ -21,8 +21,11 @@ importers:
         specifier: 0.1.1
         version: 0.1.1
       '@nerima-games/mx-gameplay':
-        specifier: 0.1.15
-        version: 0.1.15
+        specifier: 0.1.18
+        version: 0.1.18
+      '@nerima-games/mx-redstone':
+        specifier: 0.1.2
+        version: 0.1.2
       '@nerima-games/mx-ui':
         specifier: 0.2.1
         version: 0.2.1
@@ -310,9 +313,13 @@ packages:
     resolution: {integrity: sha512-VI+LZIQV1f07+aAmvm/qN5spDsbJB2kbpEkzIjbdG4sNpgxqmXkJWULfP3axaCv40tNTAS54RVR6DpBBb6N6lw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-worldgen/0.1.1/0eae0d1c46e81807c0b440f19b5f9c4e7f4d91bf}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
-  '@nerima-games/mx-gameplay@0.1.15':
-    resolution: {integrity: sha512-M0tasU1TwhfdwdFqkPxMfskgo0sR306H19Q/urPgA1O9cpsPg0osXUiG6ie5d/kbATcHio6DKSRjRaNbQjweaw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-gameplay/0.1.15/3bfb2e5f391a7f4e9f13686997c9698c2a86a4c3}
+  '@nerima-games/mx-gameplay@0.1.18':
+    resolution: {integrity: sha512-gW5jSYl3oWr4si7IGh5V96aV4ofDDOCyQjE62LmKRzWbrF8Y93B2D2mrsv51WhGyhtpZsZ9fhBZvAr9UKi4n3w==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-gameplay/0.1.18/3b9e5ce3902bc8f21387b94bf2221d848b39b322}
     engines: {node: '>=22.0.0', pnpm: '>=8.15.0'}
+
+  '@nerima-games/mx-redstone@0.1.2':
+    resolution: {integrity: sha512-wWPmWvji05kj3gd8Tiuq0MjXYInCf4wUsIH9yFjFooy16HHyxg7TMOH4CuWseU/G8+msGSurVcp9cqx0wpx2/A==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-redstone/0.1.2/899583ee0f6d3be4307ca1f93ce74ed464034e22}
+    engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
   '@nerima-games/mx-ui@0.2.1':
     resolution: {integrity: sha512-Gj8WSD0kB1VMswd6daEf57fYqIHTAabQcLAZaMHg995oKu7wbt7ApyU6fdt/rJ/+Z8oFOZiYTMuhY14Nt+uPyw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-ui/0.2.1/60486b5ea6756edd75bd1e7afa824eec97040aeb}
@@ -1182,11 +1189,15 @@ snapshots:
     dependencies:
       effect: 3.22.0
 
-  '@nerima-games/mx-gameplay@0.1.15':
+  '@nerima-games/mx-gameplay@0.1.18':
     dependencies:
       '@nerima-games/mc-kernel': 0.2.0
       '@nerima-games/mc-sim': 0.1.4
       '@nerima-games/mc-worldgen': 0.1.0
+      effect: 3.22.0
+
+  '@nerima-games/mx-redstone@0.1.2':
+    dependencies:
       effect: 3.22.0
 
   '@nerima-games/mx-ui@0.2.1':
