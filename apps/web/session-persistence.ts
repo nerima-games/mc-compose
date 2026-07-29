@@ -12,10 +12,15 @@ import {
   type StorageError,
 } from '@nerima-games/mc-save'
 import {
+  INVENTORY_SLOT_COUNT,
   INITIAL_TIME_STATE,
   INITIAL_WEATHER_STATE,
   isValidTimeState,
   isValidWeatherState,
+  storageFromInventory,
+  validatePlayerStorageSnapshot,
+  type Inventory,
+  type PlayerStorage,
   type TimeState,
   type WeatherState,
 } from '@nerima-games/mc-sim'
@@ -32,7 +37,6 @@ import {
 import {
   isValidPlayerVitals,
   SPAWN_PLAYER_VITALS,
-  type isPlaceableItem,
   type PlayerVitals,
 } from '@nerima-games/mx-gameplay'
 
@@ -50,130 +54,6 @@ const PositionSchema: Schema.Schema<SessionPosition> = Schema.Struct({
   z: Schema.Number,
 })
 
-type GameplayItemType = Parameters<typeof isPlaceableItem>[0]
-
-const exhaustiveItemTypes = <const Items extends ReadonlyArray<GameplayItemType>>(
-  ...items: [GameplayItemType] extends [Items[number]] ? Items : never
-): Items => items
-
-// mx-gameplay exposes the item union through its public API, but not its runtime roster.
-const SESSION_ITEM_TYPES = exhaustiveItemTypes(
-  'stone',
-  'cobblestone',
-  'dirt',
-  'grass_block',
-  'sand',
-  'gravel',
-  'oak_log',
-  'oak_planks',
-  'oak_leaves',
-  'glass',
-  'torch',
-  'glowstone',
-  'piston',
-  'stick',
-  'glowstone_dust',
-  'wooden_pickaxe',
-  'coal',
-  'iron_ingot',
-  'flint',
-  'gunpowder',
-  'blaze_powder',
-  'flint_and_steel',
-  'fire_charge',
-  'granite',
-  'diorite',
-  'andesite',
-  'deepslate',
-  'obsidian',
-  'smooth_basalt',
-  'calcite',
-  'amethyst_block',
-  'sandstone',
-  'prismarine',
-  'soul_sand',
-  'coal_block',
-  'iron_block',
-  'gold_block',
-  'diamond_block',
-  'redstone_block',
-  'lapis_block',
-  'emerald_block',
-  'redstone_torch',
-  'lever',
-  'stone_button',
-  'repeater',
-  'redstone_lamp',
-  'observer',
-  'comparator',
-  'dispenser',
-  'hopper',
-  'end_stone',
-  'end_portal_frame',
-  'end_portal_frame_filled',
-  'chorus_flower',
-  'chorus_plant',
-  'dragon_egg',
-  'end_crystal',
-  'end_rod',
-  'end_stone_bricks',
-  'ender_chest',
-  'purpur_block',
-  'purpur_pillar',
-  'purpur_slab',
-  'purpur_stairs',
-  'shulker_box',
-  'crafting_table',
-  'furnace',
-  'chest',
-  'door',
-  'oak_stairs',
-  'anvil',
-  'cauldron',
-  'bed',
-  'enchanting_table',
-  'brewing_stand',
-  'tnt',
-  'nether_brick',
-  'netherrack',
-  'raw_iron',
-  'raw_gold',
-  'diamond',
-  'emerald',
-  'lapis_lazuli',
-  'redstone_dust',
-  'amethyst_shard',
-  'wheat_seeds',
-  'potato',
-  'nether_wart',
-  'ladder',
-  'kelp',
-  'seagrass',
-  'rail',
-  'powered_rail',
-  'pressure_plate',
-  'stone_slab',
-  'string',
-  'snowball',
-)
-
-export type SessionInventorySlot =
-  | {
-      readonly item: GameplayItemType
-      readonly count: number
-    }
-  | undefined
-
-const InventoryItemSchema: Schema.Schema<GameplayItemType> = Schema.Literal(...SESSION_ITEM_TYPES)
-
-const InventorySlotSchema: Schema.Schema<SessionInventorySlot> = Schema.Union(
-  Schema.Struct({
-    item: InventoryItemSchema,
-    count: Schema.Number.pipe(Schema.int(), Schema.positive()),
-  }),
-  Schema.Undefined,
-)
-
 export type SessionState = {
   readonly seed: number
   readonly dimension: Dimension
@@ -182,9 +62,7 @@ export type SessionState = {
     readonly yawRadians: number
     readonly pitchRadians: number
   }
-  readonly inventory: {
-    readonly slots: ReadonlyArray<SessionInventorySlot>
-  }
+  readonly storage: PlayerStorage
   readonly vitals: PlayerVitals
   readonly time: TimeState
   readonly weather: WeatherState
@@ -228,6 +106,13 @@ const WeatherStateSchema: Schema.Schema<WeatherState> = Schema.Struct({
 
 const DimensionSchema: Schema.Schema<Dimension> = Schema.Literal('overworld', 'nether', 'end')
 
+const PlayerStorageSchema = Schema.Unknown.pipe(
+  Schema.filter(
+    (value): value is PlayerStorage => validatePlayerStorageSnapshot(value)._tag === 'Valid',
+    { message: () => 'Player storage violates persistence invariants' },
+  ),
+) as unknown as Schema.Schema<PlayerStorage>
+
 const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   seed: Schema.Number,
   dimension: DimensionSchema,
@@ -236,7 +121,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
     yawRadians: Schema.Number,
     pitchRadians: Schema.Number,
   }),
-  inventory: Schema.Struct({ slots: Schema.Array(InventorySlotSchema) }),
+  storage: PlayerStorageSchema,
   vitals: PlayerVitalsSchema,
   time: TimeStateSchema,
   weather: WeatherStateSchema,
@@ -365,15 +250,50 @@ const migrateSessionV4ToV5: Migration = {
   },
 }
 
+const migrateSessionV5ToV6: Migration = {
+  from: 5,
+  describe: 'replace the legacy inventory with complete player storage',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    const inventory = asRecord(state?.['inventory'])
+    const legacySlots = inventory?.['slots']
+    if (
+      head === undefined
+      || state === undefined
+      || !Array.isArray(legacySlots)
+      || legacySlots.length > INVENTORY_SLOT_COUNT
+    ) {
+      return Effect.fail(
+        `Session v5 payload must contain an inventory with at most ${String(INVENTORY_SLOT_COUNT)} slots`,
+      )
+    }
+
+    const slots = Array.from(
+      { length: INVENTORY_SLOT_COUNT },
+      (_, index) => legacySlots[index],
+    )
+    const { inventory: _legacyInventory, ...currentState } = state
+    return Effect.succeed({
+      ...head,
+      state: {
+        ...currentState,
+        storage: storageFromInventory({ slots } as Inventory),
+      },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 5,
+  version: 6,
   schema: SessionHeadSchema,
   migrations: [
     migrateSessionV1ToV2,
     migrateSessionV2ToV3,
     migrateSessionV3ToV4,
     migrateSessionV4ToV5,
+    migrateSessionV5ToV6,
   ],
 })
 

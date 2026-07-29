@@ -437,16 +437,12 @@ const boot = async (): Promise<void> => {
       seed: activeSeed,
       chunkSource: chunkSourceFor(initialDimension),
       dimension: initialDimension,
-      ...(Option.isSome(loadedSession)
-        ? {
-            inventory: loadedSession.value.state.inventory.slots as never,
-          }
-        : {}),
     }),
   )
   const initialSpawnPose = await Effect.runPromise(world.player.pose)
   const initialSpawnDimension = await Effect.runPromise(world.player.dimension)
   if (Option.isSome(loadedSession)) {
+    await Effect.runPromise(world.inventory.restoreStorage(loadedSession.value.state.storage))
     await Effect.runPromise(
       world.player.restore(loadedSession.value.state.player, loadedSession.value.state.dimension),
     )
@@ -533,7 +529,7 @@ const boot = async (): Promise<void> => {
       seed: activeSeed,
       dimension: Effect.runSync(world.player.dimension),
       player: Effect.runSync(world.player.pose),
-      inventory: Effect.runSync(world.inventory.snapshot),
+      storage: Effect.runSync(world.inventory.storageSnapshot),
       vitals: Effect.runSync(world.vitals.snapshot),
       time: Effect.runSync(time.snapshot),
       weather: Effect.runSync(weather.snapshot),
@@ -833,7 +829,6 @@ const boot = async (): Promise<void> => {
     onCrafted: () => markSessionDirty(),
     onInventoryChanged: () => markSessionDirty(),
   })
-  const initialInventory = Effect.runSync(world.inventory.snapshot)
   const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
 
   const interactionStatus = (): string => {
@@ -851,20 +846,37 @@ const boot = async (): Promise<void> => {
     }
   }
 
-  const renderPlayerUi = (inventory: typeof initialInventory): void => {
+  const renderPlayerUi = (): void => {
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const durabilityBySlot = new Map<number, number>()
+    storage.inventoryDurability.forEach((durability, slotIndex) => {
+      if (durability !== null) {
+        durabilityBySlot.set(slotIndex, durability.current / durability.max)
+      }
+    })
+    const equipment = storage.equipment.slots
+    const equipmentSlot = (slot: typeof equipment.head) =>
+      slot === null ? undefined : { item: slot.item, count: slot.count }
     const draft = inventoryInteraction.state()
     hud.render(hudViewModel({
       ...Effect.runSync(world.vitals.view),
-      hotbar: inventory.slots.slice(0, 9).map((slot) => slotSnapshotOf(slot, undefined)),
+      hotbar: storage.inventory.slots
+        .slice(0, 9)
+        .map((slot, slotIndex) => slotSnapshotOf(slot, durabilityBySlot.get(slotIndex))),
       selectedHotbarIndex,
     }))
     inventoryView.render(inventoryViewModel({
-      inventory,
+      inventory: storage.inventory,
       selectedHotbarIndex,
-      durabilityBySlot: undefined,
+      durabilityBySlot,
       carried: draft.inventoryCarried ?? draft.carried,
-      armour: undefined,
-      offhand: undefined,
+      armour: [
+        equipmentSlot(equipment.head),
+        equipmentSlot(equipment.chest),
+        equipmentSlot(equipment.legs),
+        equipmentSlot(equipment.feet),
+      ],
+      offhand: equipmentSlot(equipment.offhand),
       crafting: {
         gridWidth: draft.grid.width,
         grid: draft.grid.cells,
@@ -916,7 +928,7 @@ const boot = async (): Promise<void> => {
     } else if (target.region === 'main') {
       Effect.runSync(inventoryInteraction.clickInventoryItem(9 + target.index, button))
     }
-    renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+    renderPlayerUi()
   }
 
   inventoryParent.addEventListener('click', (event) => {
@@ -953,7 +965,7 @@ const boot = async (): Promise<void> => {
     } else {
       Effect.runSync(inventoryInteraction.close())
     }
-    renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+    renderPlayerUi()
     if (open) window.requestAnimationFrame(focusRenderedTarget)
     if (open && document.pointerLockElement === canvas) {
       document.exitPointerLock()
@@ -983,7 +995,7 @@ const boot = async (): Promise<void> => {
     respawnPlayer()
   })
 
-  renderPlayerUi(initialInventory)
+  renderPlayerUi()
 
   // -------------------------------------------------------------------------
   // 4a. Durable session publication
@@ -1035,7 +1047,8 @@ const boot = async (): Promise<void> => {
   const gameplaySnapshot = () => {
     const reading = Effect.runSync(currentChunkStore.getBlock(KNOWN_TARGET_BLOCK))
     const ignitionReading = Effect.runSync(currentChunkStore.getBlock(QA_IGNITION_CELL))
-    const inventory = Effect.runSync(world.inventory.snapshot)
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const inventory = storage.inventory
     const vitals = Effect.runSync(world.vitals.snapshot)
     const entities = Effect.runSync(world.entities.snapshot).entities
     return {
@@ -1047,6 +1060,7 @@ const boot = async (): Promise<void> => {
       dead: vitals.healthPoints <= 0,
       inventory: {
         slots: inventory.slots.map((slot) => slot ?? null),
+        durability: storage.inventoryDurability,
       },
       entityCount: entities.length,
       renderedEntities: entityRenderProjection(),
@@ -1092,7 +1106,7 @@ const boot = async (): Promise<void> => {
     pendingItemUses.clear()
     lastObservedItemUse = undefined
     markSessionDirty()
-    renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+    renderPlayerUi()
     return gameplaySnapshot()
   }
 
@@ -1139,25 +1153,25 @@ const boot = async (): Promise<void> => {
           Effect.runSync(world.inventory.add('oak_log', 1))
           inventoryInteraction.reset()
           markSessionDirty()
-          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          renderPlayerUi()
           return gameplaySnapshot()
         },
         damage: () => {
           Effect.runSync(world.vitals.damage({ amount: 4, cause: 'generic' }))
           markSessionDirty()
-          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          renderPlayerUi()
           return gameplaySnapshot()
         },
         heal: () => {
           Effect.runSync(world.vitals.heal(4))
           markSessionDirty()
-          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          renderPlayerUi()
           return gameplaySnapshot()
         },
         eat: () => {
           Effect.runSync(world.vitals.eat(4, 0.3))
           markSessionDirty()
-          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          renderPlayerUi()
           return gameplaySnapshot()
         },
         respawn: () => {
@@ -1214,7 +1228,7 @@ const boot = async (): Promise<void> => {
           inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
           inventoryInteraction.reset()
           markSessionDirty()
-          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          renderPlayerUi()
           return gameplaySnapshot()
         },
         seedFireChargeIgnition: () => seedIgnitionEncounter('fire_charge'),
@@ -1272,7 +1286,7 @@ const boot = async (): Promise<void> => {
             }),
           )
           markSessionDirty()
-          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          renderPlayerUi()
           return gameplaySnapshot()
         },
       },
@@ -1576,12 +1590,17 @@ const boot = async (): Promise<void> => {
       lastObservedItemUse = result
       const pending = pendingItemUses.get(result.requestId)
       pendingItemUses.delete(result.requestId)
-      if (
-        result.success
-        && result.heldItem === 'fire_charge'
-        && pending?.heldItem === result.heldItem
-      ) {
-        Effect.runSync(world.inventory.removeAt(pending.slotIndex, pending.heldItem, 1))
+      if (result.success && pending?.heldItem === result.heldItem) {
+        if (result.heldItem === 'fire_charge') {
+          Effect.runSync(world.inventory.removeAt(pending.slotIndex, pending.heldItem, 1))
+        } else if (
+          Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]?.item
+          === 'flint_and_steel'
+        ) {
+          Effect.runSync(
+            world.inventory.damageAt({ _tag: 'Inventory', slotIndex: pending.slotIndex }, 1),
+          )
+        }
       }
       if (result.success) markSessionDirty()
     }
@@ -1609,7 +1628,7 @@ const boot = async (): Promise<void> => {
     }
 
     Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
-    renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+    renderPlayerUi()
 
     framesTotal += 1
     framesThisWindow += 1

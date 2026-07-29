@@ -8,7 +8,15 @@ import {
   type SaveEnvelope,
   type StorageService,
 } from '@nerima-games/mc-save'
-import { INITIAL_TIME_STATE, INITIAL_WEATHER_STATE } from '@nerima-games/mc-sim'
+import {
+  FLINT_AND_STEEL_MAX_DURABILITY,
+  INITIAL_TIME_STATE,
+  INITIAL_WEATHER_STATE,
+  INVENTORY_SLOT_COUNT,
+  equipFromInventory,
+  storageFromInventory,
+  type Inventory,
+} from '@nerima-games/mc-sim'
 import {
   CHUNK_SIZE_XZ,
   CHUNK_VOLUME,
@@ -30,9 +38,9 @@ import {
   type SessionState,
 } from '../apps/web/session-persistence'
 
-const sessionState = (seed: number): SessionState => ({
+const legacySessionState = (seed: number) => ({
   seed,
-  dimension: 'overworld',
+  dimension: 'overworld' as const,
   player: {
     feetPosition: { x: 1.5, y: 64, z: -2.5 },
     yawRadians: 0.25,
@@ -49,8 +57,18 @@ const sessionState = (seed: number): SessionState => ({
     lastDamageCause: 'fall',
   },
   time: { ticks: 12_345, dayLengthTicks: 24_000 },
-  weather: { weather: 'rain', remainingSecs: 123.5 },
+  weather: { weather: 'rain' as const, remainingSecs: 123.5 },
 })
+
+const sessionState = (seed: number): SessionState => {
+  const { inventory, ...state } = legacySessionState(seed)
+  return {
+    ...state,
+    storage: storageFromInventory({
+      slots: Array.from({ length: INVENTORY_SLOT_COUNT }, (_, index) => inventory.slots[index]),
+    } as Inventory),
+  }
+}
 
 const chunk = (cx: number, cz: number, marker: number): Chunk => ({
   coord: chunkCoord(cx, cz),
@@ -164,8 +182,116 @@ describe('session persistence', () => {
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 5,
+        version: 6,
       })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('round-trips partially damaged equipped tools', () => {
+    const storage = controlledStorage()
+    const inventory = {
+      slots: Array.from({ length: INVENTORY_SLOT_COUNT }, (_, index) =>
+        index === 0 ? { item: 'flint_and_steel' as const, count: 1 } : undefined,
+      ),
+    } as Inventory
+    const initialStorage = storageFromInventory(inventory)
+    const damagedStorage = {
+      ...initialStorage,
+      inventoryDurability: initialStorage.inventoryDurability.map((durability, index) =>
+        index === 0 ? { current: 17, max: FLINT_AND_STEEL_MAX_DURABILITY } : durability,
+      ),
+    }
+    const equippedStorage = equipFromInventory(damagedStorage, 0, 'offhand').storage
+
+    return Effect.gen(function* () {
+      yield* saveSession({
+        sessionId: 'durable-equipment',
+        revision: 'r1',
+        state: { ...sessionState(42), storage: equippedStorage },
+        chunks: [],
+      })
+
+      const loaded = Option.getOrThrow(yield* loadSession('durable-equipment'))
+      expect(loaded.state.storage).toEqual(equippedStorage)
+      expect(loaded.state.storage.equipment.slots.offhand).toMatchObject({
+        item: 'flint_and_steel',
+        count: 1,
+        durability: { current: 17, max: FLINT_AND_STEEL_MAX_DURABILITY },
+      })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a literal v5 inventory to complete player storage', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v5')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 5,
+      payload: {
+        sessionId: 'legacy-v5',
+        revision: 'r1',
+        state: {
+          ...legacySessionState(42),
+          inventory: { slots: [{ item: 'flint_and_steel', count: 1 }] },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v5'))
+
+      expect(loaded.state.storage.inventory.slots).toHaveLength(INVENTORY_SLOT_COUNT)
+      expect(loaded.state.storage.inventoryDurability).toHaveLength(INVENTORY_SLOT_COUNT)
+      expect(loaded.state.storage.inventoryDurability[0]).toEqual({
+        current: FLINT_AND_STEEL_MAX_DURABILITY,
+        max: FLINT_AND_STEEL_MAX_DURABILITY,
+      })
+      expect(loaded.state.storage.equipment.slots).toEqual({
+        head: null,
+        chest: null,
+        legs: null,
+        feet: null,
+        offhand: null,
+      })
+      expect(storage.envelope(key)?.version).toBe(5)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects a v6 player storage that violates durability invariants', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('invalid-v6-storage')
+    const validStorage = storageFromInventory({
+      slots: Array.from({ length: INVENTORY_SLOT_COUNT }, (_, index) =>
+        index === 0 ? { item: 'flint_and_steel' as const, count: 1 } : undefined,
+      ),
+    } as Inventory)
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 6,
+      payload: {
+        sessionId: 'invalid-v6-storage',
+        revision: 'r1',
+        state: {
+          ...sessionState(42),
+          storage: {
+            ...validStorage,
+            inventoryDurability: Array.from({ length: INVENTORY_SLOT_COUNT }, () => null),
+          },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession('invalid-v6-storage'))
+
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 6,
+      })
+      expect(storage.envelope(key)?.version).toBe(6)
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -211,7 +337,7 @@ describe('session persistence', () => {
         payload: {
           sessionId: 'legacy-v4',
           revision: 'r1',
-          state: { ...sessionState(42), dimension: 'nether' },
+          state: { ...legacySessionState(42), dimension: 'nether' },
           chunks: [{ coord: chunkCoord(0, 0), key: legacyChunkKey }],
         },
       })
@@ -220,6 +346,8 @@ describe('session persistence', () => {
       expect(loaded.chunks).toEqual([
         { dimension: 'overworld', coord: chunkCoord(0, 0), key: legacyChunkKey },
       ])
+      expect(loaded.state.storage.inventory.slots).toHaveLength(INVENTORY_SLOT_COUNT)
+      expect(loaded.state.storage.inventoryDurability).toHaveLength(INVENTORY_SLOT_COUNT)
       expect(storage.envelope(headKey)?.version).toBe(4)
 
       const loadedChunks = yield* makeSessionChunkSource(
@@ -235,7 +363,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(5)
+      expect(storage.envelope(headKey)?.version).toBe(6)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )
@@ -278,7 +406,7 @@ describe('session persistence', () => {
   it.effect('migrates a literal v2 session to the initial simulation time', () => {
     const storage = controlledStorage()
     const key = sessionHeadKey('legacy-v2')
-    const legacyState = { ...sessionState(84) } as Record<string, unknown>
+    const legacyState = { ...legacySessionState(84) } as Record<string, unknown>
     delete legacyState['time']
     delete legacyState['weather']
     storage.setEnvelope(key, {
@@ -304,7 +432,7 @@ describe('session persistence', () => {
   it.effect('migrates a literal v3 session to the initial weather', () => {
     const storage = controlledStorage()
     const key = sessionHeadKey('legacy-v3')
-    const legacyState = { ...sessionState(91) } as Record<string, unknown>
+    const legacyState = { ...legacySessionState(91) } as Record<string, unknown>
     delete legacyState['weather']
     storage.setEnvelope(key, {
       format: SESSION_FORMAT_NAME,
@@ -334,7 +462,7 @@ describe('session persistence', () => {
       payload: {
         sessionId: 'legacy-invalid-weather',
         revision: 'r1',
-        state: { ...sessionState(42), weather: undefined },
+        state: { ...legacySessionState(42), weather: undefined },
         chunks: [],
       },
     })
@@ -356,7 +484,7 @@ describe('session persistence', () => {
       payload: {
         sessionId: 'legacy-invalid-vitals',
         revision: 'r1',
-        state: { ...sessionState(42), vitals: undefined },
+        state: { ...legacySessionState(42), vitals: undefined },
         chunks: [],
       },
     })
@@ -414,8 +542,11 @@ describe('session persistence', () => {
         sessionId: 'non-finite-vitals',
         revision: 'r1',
         state: {
-          ...sessionState(42),
-          vitals: { ...sessionState(42).vitals, healthPoints: Number.POSITIVE_INFINITY },
+          ...legacySessionState(42),
+          vitals: {
+            ...legacySessionState(42).vitals,
+            healthPoints: Number.POSITIVE_INFINITY,
+          },
         },
         chunks: [],
       },
@@ -438,7 +569,7 @@ describe('session persistence', () => {
         sessionId: 'invalid-time',
         revision: 'r1',
         state: {
-          ...sessionState(42),
+          ...legacySessionState(42),
           time: { ticks: Number.POSITIVE_INFINITY, dayLengthTicks: 24_000 },
         },
         chunks: [],
@@ -462,7 +593,7 @@ describe('session persistence', () => {
         sessionId: 'invalid-weather',
         revision: 'r1',
         state: {
-          ...sessionState(42),
+          ...legacySessionState(42),
           weather: { weather: 'rain', remainingSecs: 0 },
         },
         chunks: [],
@@ -486,8 +617,8 @@ describe('session persistence', () => {
         sessionId: 'invalid-vitals',
         revision: 'r1',
         state: {
-          ...sessionState(42),
-          vitals: { ...sessionState(42).vitals, healthPoints: 21, maxHealthPoints: 20 },
+          ...legacySessionState(42),
+          vitals: { ...legacySessionState(42).vitals, healthPoints: 21, maxHealthPoints: 20 },
         },
         chunks: [],
       },
@@ -510,7 +641,7 @@ describe('session persistence', () => {
         sessionId: 'unknown-item',
         revision: 'r1',
         state: {
-          ...sessionState(42),
+          ...legacySessionState(42),
           inventory: { slots: [{ item: 'item_from_an_unknown_build', count: 1 }] },
         },
         chunks: [],

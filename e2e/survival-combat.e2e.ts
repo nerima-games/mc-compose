@@ -32,6 +32,10 @@ type GameplaySnapshot = {
   readonly dead: boolean
   readonly inventory: {
     readonly slots: ReadonlyArray<{ readonly item: string; readonly count: number } | null>
+    readonly durability: ReadonlyArray<{
+      readonly current: number
+      readonly max: number
+    } | null>
   }
   readonly entityCount: number
   readonly entities: ReadonlyArray<EntitySnapshot>
@@ -307,7 +311,7 @@ test('does not consume a fire charge when ignition is refused', async ({ page })
   expect(faults.consoleErrors).toEqual([])
 })
 
-test('does not consume flint and steel after successful ignition', async ({ page }) => {
+test('damages flint and steel after successful ignition', async ({ page }) => {
   const faults = watchForFaults(page)
 
   await page.goto('/')
@@ -316,6 +320,8 @@ test('does not consume flint and steel after successful ignition', async ({ page
   await canvas.hover()
   const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedFlintAndSteelIgnition')
   const toolsBefore = inventoryCount(seeded, 'flint_and_steel')
+  const durabilityBefore = seeded.inventory.durability[0]?.current
+  expect(durabilityBefore).toBe(64)
 
   await grantPointerLock(page)
   await canvas.click({ button: 'right' })
@@ -327,12 +333,14 @@ test('does not consume flint and steel after successful ignition', async ({ page
       success: current.itemUse?.success,
       outcome: current.itemUse?.outcome.outcome._tag,
       tools: inventoryCount(current, 'flint_and_steel'),
+      durability: current.inventory.durability[0]?.current,
     }
   }).toEqual({
     item: 'flint_and_steel',
     success: true,
     outcome: 'Lit',
     tools: toolsBefore,
+    durability: 63,
   })
 
   expect(faults.pageErrors).toEqual([])
