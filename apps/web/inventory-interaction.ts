@@ -43,7 +43,35 @@ export type InteractionCraftResult<Item, Count extends number = number> =
     }
   | { readonly _tag: 'NoRoom' }
 
+export type InventoryInteractionClick<Item, Count extends number = number> =
+  | {
+      readonly _tag: 'LeftClick'
+      readonly slotIndex: number
+      readonly carried: InteractionSlot<Item, Count>
+    }
+  | {
+      readonly _tag: 'RightClick'
+      readonly slotIndex: number
+      readonly carried: InteractionSlot<Item, Count>
+    }
+
+export type InventoryInteractionClickResult<Item, Count extends number = number> = {
+  readonly _tag:
+    | 'PickedUp'
+    | 'Placed'
+    | 'Merged'
+    | 'Swapped'
+    | 'NoChange'
+    | 'InvalidSlot'
+    | 'InvalidCount'
+  readonly carried: InteractionSlot<Item, Count>
+}
+
 export type InventoryInteractionService<Item, Recipe, Count extends number = number> = {
+  readonly add: (item: Item, count: number) => Effect.Effect<number>
+  readonly click: (
+    click: InventoryInteractionClick<Item, Count>,
+  ) => Effect.Effect<InventoryInteractionClickResult<Item, Count>>
   readonly snapshot: Effect.Effect<InteractionInventory<Item, Count>>
   readonly previewCraft: (
     grid: InteractionCraftGrid<Item, Count>,
@@ -54,6 +82,8 @@ export type InventoryInteractionService<Item, Recipe, Count extends number = num
 }
 
 export type InventoryInteractionState<Item, Recipe, Count extends number = number> = {
+  /** Canonical inventory stack held by the pointer. Kept separate from crafting drafts. */
+  readonly inventoryCarried: InteractionSlot<Item, Count>
   readonly carried: InteractionSlot<Item, Count>
   readonly grid: InteractionCraftGrid<Item, Count>
   readonly preview: InteractionRecipeMatch<Item, Recipe, Count> | undefined
@@ -65,17 +95,25 @@ export type InventoryInteractionController<Item, Recipe, Count extends number = 
   readonly pickupInventoryItem: (
     inventoryIndex: number,
   ) => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
+  readonly clickInventoryItem: (
+    inventoryIndex: number,
+    button: 'left' | 'right',
+  ) => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
   readonly interactCraftingCell: (
     cellIndex: number,
   ) => InventoryInteractionState<Item, Recipe, Count>
+  readonly interactCraftingCellFromInventory: (
+    cellIndex: number,
+  ) => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
   readonly preview: () => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
   readonly craftOnce: () => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
   readonly reset: () => InventoryInteractionState<Item, Recipe, Count>
-  readonly close: () => InventoryInteractionState<Item, Recipe, Count>
+  readonly close: () => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
 }
 
 export type InventoryInteractionOptions = {
   readonly onCrafted?: () => void
+  readonly onInventoryChanged?: () => void
 }
 
 const EMPTY_CELLS = 4
@@ -105,6 +143,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
   options: InventoryInteractionOptions = {},
 ): InventoryInteractionController<Item, Recipe, Count> => {
   let current: InventoryInteractionState<Item, Recipe, Count> = {
+    inventoryCarried: undefined,
     carried: undefined,
     grid: emptyGrid(),
     preview: undefined,
@@ -117,6 +156,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     patch: Pick<InventoryInteractionState<Item, Recipe, Count>, 'carried' | 'grid'>,
   ): InventoryInteractionState<Item, Recipe, Count> => {
     current = {
+      inventoryCarried: current.inventoryCarried,
       ...patch,
       preview: undefined,
       status: undefined,
@@ -126,6 +166,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
 
   const reset = (): InventoryInteractionState<Item, Recipe, Count> => {
     current = {
+      inventoryCarried: undefined,
       carried: undefined,
       grid: emptyGrid(),
       preview: undefined,
@@ -143,6 +184,35 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
       return replaceDraft({ carried: oneItem(selected), grid: current.grid })
     })
 
+  const clickInventoryItem = (
+    inventoryIndex: number,
+    button: 'left' | 'right',
+  ): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> =>
+    Effect.map(
+      service.click({
+        _tag: button === 'left' ? 'LeftClick' : 'RightClick',
+        slotIndex: inventoryIndex,
+        carried: current.inventoryCarried,
+      }),
+      (result) => {
+        current = {
+          ...current,
+          inventoryCarried: result.carried,
+          preview: undefined,
+          status: undefined,
+        }
+        if (
+          result._tag === 'PickedUp' ||
+          result._tag === 'Placed' ||
+          result._tag === 'Merged' ||
+          result._tag === 'Swapped'
+        ) {
+          options.onInventoryChanged?.()
+        }
+        return state()
+      },
+    )
+
   const interactCraftingCell = (
     cellIndex: number,
   ): InventoryInteractionState<Item, Recipe, Count> => {
@@ -159,6 +229,35 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     })
   }
 
+  const interactCraftingCellFromInventory = (
+    cellIndex: number,
+  ): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => {
+    const inventoryCarried = current.inventoryCarried
+    if (inventoryCarried === undefined) {
+      return Effect.succeed(interactCraftingCell(cellIndex))
+    }
+    if (!Number.isInteger(cellIndex) || cellIndex < 0 || cellIndex >= EMPTY_CELLS) {
+      return Effect.succeed(state())
+    }
+
+    return Effect.map(service.add(inventoryCarried.item, inventoryCarried.count), (leftover) => {
+      if (leftover > 0) {
+        current = {
+          ...current,
+          inventoryCarried: { ...inventoryCarried, count: leftover as Count },
+        }
+        return state()
+      }
+      current = {
+        ...current,
+        inventoryCarried: undefined,
+        carried: oneItem(inventoryCarried),
+      }
+      options.onInventoryChanged?.()
+      return interactCraftingCell(cellIndex)
+    })
+  }
+
   const preview = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => {
     const grid = current.grid
     return Effect.map(service.previewCraft(grid), (match) => {
@@ -172,6 +271,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     return Effect.map(service.craft(grid), (result) => {
       if (result._tag === 'Crafted') {
         current = {
+          inventoryCarried: current.inventoryCarried,
           carried: undefined,
           grid: emptyGrid(),
           preview: undefined,
@@ -185,13 +285,31 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     })
   }
 
+  const close = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => {
+    const inventoryCarried = current.inventoryCarried
+    if (inventoryCarried === undefined) return Effect.succeed(reset())
+    return Effect.map(service.add(inventoryCarried.item, inventoryCarried.count), (leftover) => {
+      const closed = reset()
+      if (leftover > 0) {
+        current = {
+          ...closed,
+          inventoryCarried: { ...inventoryCarried, count: leftover as Count },
+        }
+      }
+      options.onInventoryChanged?.()
+      return state()
+    })
+  }
+
   return {
     state,
     pickupInventoryItem,
+    clickInventoryItem,
     interactCraftingCell,
+    interactCraftingCellFromInventory,
     preview,
     craftOnce,
     reset,
-    close: reset,
+    close,
   }
 }

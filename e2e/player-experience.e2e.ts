@@ -72,6 +72,19 @@ test.describe('player inventory experience', () => {
     await expect(hotbarSlot).toHaveAttribute('aria-label', /oak_planks, 4/)
     await expect(page.locator('body')).toHaveAttribute('data-session-persistence', /dirty|saved/)
 
+    const mainSlot = inventory.locator('[data-region="main"] [data-slot-index="0"]')
+    await hotbarSlot.click({ button: 'right' })
+    await expect(hotbarSlot).toHaveAttribute('aria-label', /oak_planks, 2/)
+    await mainSlot.click({ button: 'right' })
+    await expect(mainSlot).toHaveAttribute('aria-label', /oak_planks, 1/)
+    await mainSlot.click({ button: 'right' })
+    await expect(mainSlot).toHaveAttribute('aria-label', /oak_planks, 2/)
+
+    await mainSlot.click()
+    await expect(mainSlot).toHaveAttribute('aria-label', /empty/)
+    await hotbarSlot.click()
+    await expect(hotbarSlot).toHaveAttribute('aria-label', /oak_planks, 4/)
+
     await callQa(page, 'gameplay.seedCraftingLog')
     await hotbarSlot.click()
     await craftingCell.focus()

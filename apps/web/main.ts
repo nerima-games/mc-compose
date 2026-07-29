@@ -700,6 +700,7 @@ const boot = async (): Promise<void> => {
   }
   const inventoryInteraction = createInventoryInteraction(world.inventory, {
     onCrafted: () => markSessionDirty(),
+    onInventoryChanged: () => markSessionDirty(),
   })
   const initialInventory = Effect.runSync(world.inventory.snapshot)
   const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
@@ -730,7 +731,7 @@ const boot = async (): Promise<void> => {
       inventory,
       selectedHotbarIndex,
       durabilityBySlot: undefined,
-      carried: draft.carried,
+      carried: draft.inventoryCarried ?? draft.carried,
       armour: undefined,
       offhand: undefined,
       crafting: {
@@ -768,18 +769,21 @@ const boot = async (): Promise<void> => {
     inventoryParent.querySelector<HTMLElement>('[role="button"][tabindex="0"]')?.focus()
   }
 
-  const activateInventoryTarget = (target: InventoryInteractionTarget): void => {
+  const activateInventoryTarget = (
+    target: InventoryInteractionTarget,
+    button: 'left' | 'right' = 'left',
+  ): void => {
     if (playerIsDead()) return
     inventoryFocus = target
     if (target.kind === 'crafting-output') {
       Effect.runSync(inventoryInteraction.craftOnce())
     } else if (target.region === 'crafting-grid') {
-      inventoryInteraction.interactCraftingCell(target.index)
+      Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
       Effect.runSync(inventoryInteraction.preview())
     } else if (target.region === 'hotbar') {
-      Effect.runSync(inventoryInteraction.pickupInventoryItem(target.index))
+      Effect.runSync(inventoryInteraction.clickInventoryItem(target.index, button))
     } else if (target.region === 'main') {
-      Effect.runSync(inventoryInteraction.pickupInventoryItem(9 + target.index))
+      Effect.runSync(inventoryInteraction.clickInventoryItem(9 + target.index, button))
     }
     renderPlayerUi(Effect.runSync(world.inventory.snapshot))
   }
@@ -788,6 +792,14 @@ const boot = async (): Promise<void> => {
     if (playerIsDead()) return
     const target = targetOf(event.target)
     if (target !== undefined) activateInventoryTarget(target)
+  })
+  inventoryParent.addEventListener('contextmenu', (event) => {
+    if (playerIsDead()) return
+    const target = targetOf(event.target)
+    if (target === undefined) return
+    event.preventDefault()
+    if (target.kind !== 'slot' || target.region === 'crafting-grid') return
+    activateInventoryTarget(target, 'right')
   })
   inventoryParent.addEventListener('keydown', (event) => {
     if (playerIsDead()) return
@@ -808,7 +820,7 @@ const boot = async (): Promise<void> => {
     if (open) {
       inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
     } else {
-      inventoryInteraction.close()
+      Effect.runSync(inventoryInteraction.close())
     }
     renderPlayerUi(Effect.runSync(world.inventory.snapshot))
     if (open) window.requestAnimationFrame(focusRenderedTarget)

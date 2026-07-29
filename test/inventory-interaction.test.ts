@@ -1,9 +1,15 @@
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
-import type { InMemoryWorld } from '@nerima-games/mx-gameplay'
+import {
+  emptyInventory,
+  itemStack,
+  makeInventoryService,
+  type Inventory,
+} from '@nerima-games/mc-sim'
 
 import {
   createInventoryInteraction,
+  type InventoryInteractionClick,
   type InteractionCraftGrid,
   type InteractionCraftResult,
   type InteractionInventory,
@@ -15,12 +21,6 @@ type Item = 'oak_log' | 'oak_planks' | 'stone'
 type Recipe = {
   readonly id: string
 }
-
-const acceptsGameplayInventory = (inventory: InMemoryWorld<never>['inventory']): void => {
-  createInventoryInteraction(inventory)
-}
-
-void acceptsGameplayInventory
 
 const logs: InteractionInventory<Item> = {
   slots: [{ item: 'oak_log', count: 4 }, undefined],
@@ -41,6 +41,9 @@ const makeService = (options: {
     previewCalls,
     craftCalls,
     service: {
+      add: (_item: Item, _count: number) => Effect.succeed(0),
+      click: (click: InventoryInteractionClick<Item>) =>
+        Effect.succeed({ _tag: 'NoChange' as const, carried: click.carried }),
       snapshot: Effect.succeed(inventory),
       previewCraft: (grid: InteractionCraftGrid<Item>) =>
         Effect.sync(() => {
@@ -133,9 +136,10 @@ describe('inventory interaction', () => {
     Effect.runSync(interaction.pickupInventoryItem(0))
     Effect.runSync(interaction.preview())
 
-    const closed = interaction.close()
+    const closed = Effect.runSync(interaction.close())
 
     expect(closed).toEqual({
+      inventoryCarried: undefined,
       carried: undefined,
       grid: {
         width: 2,
@@ -145,6 +149,78 @@ describe('inventory interaction', () => {
       preview: undefined,
       status: undefined,
     })
+  })
+
+  it('uses canonical left-click pickup, placement, merging, and swapping', () => {
+    const initial: Inventory = {
+      slots: [
+        itemStack('stone', 60),
+        itemStack('stone', 10),
+        itemStack('dirt', 7),
+        ...emptyInventory().slots.slice(3),
+      ],
+    }
+    const service = Effect.runSync(makeInventoryService(initial))
+    const interaction = createInventoryInteraction(service)
+
+    expect(Effect.runSync(interaction.clickInventoryItem(1, 'left')).inventoryCarried)
+      .toEqual(itemStack('stone', 10))
+    expect(Effect.runSync(interaction.clickInventoryItem(0, 'left')).inventoryCarried)
+      .toEqual(itemStack('stone', 6))
+    expect(Effect.runSync(service.snapshot).slots[0]).toEqual(itemStack('stone', 64))
+
+    expect(Effect.runSync(interaction.clickInventoryItem(2, 'left')).inventoryCarried)
+      .toEqual(itemStack('dirt', 7))
+    expect(Effect.runSync(service.snapshot).slots[2]).toEqual(itemStack('stone', 6))
+
+    expect(Effect.runSync(interaction.clickInventoryItem(3, 'left')).inventoryCarried)
+      .toBeUndefined()
+    expect(Effect.runSync(service.snapshot).slots[3]).toEqual(itemStack('dirt', 7))
+  })
+
+  it('uses canonical right-click half pickup and one-item placement', () => {
+    const initial: Inventory = {
+      slots: [itemStack('stone', 5), ...emptyInventory().slots.slice(1)],
+    }
+    const service = Effect.runSync(makeInventoryService(initial))
+    const interaction = createInventoryInteraction(service)
+
+    expect(Effect.runSync(interaction.clickInventoryItem(0, 'right')).inventoryCarried)
+      .toEqual(itemStack('stone', 3))
+    expect(Effect.runSync(service.snapshot).slots[0]).toEqual(itemStack('stone', 2))
+
+    expect(Effect.runSync(interaction.clickInventoryItem(1, 'right')).inventoryCarried)
+      .toEqual(itemStack('stone', 2))
+    expect(Effect.runSync(service.snapshot).slots[1]).toEqual(itemStack('stone', 1))
+  })
+
+  it('returns a real carried stack before creating a one-item crafting draft', () => {
+    const initial: Inventory = {
+      slots: [itemStack('oak_log', 4), ...emptyInventory().slots.slice(1)],
+    }
+    const service = Effect.runSync(makeInventoryService(initial))
+    const interaction = createInventoryInteraction(service)
+
+    Effect.runSync(interaction.clickInventoryItem(0, 'left'))
+    const drafted = Effect.runSync(interaction.interactCraftingCellFromInventory(0))
+
+    expect(drafted.inventoryCarried).toBeUndefined()
+    expect(drafted.grid.cells[0]).toEqual(itemStack('oak_log', 1))
+    expect(Effect.runSync(service.snapshot).slots[0]).toEqual(itemStack('oak_log', 4))
+  })
+
+  it('returns a real carried stack to canonical inventory on close', () => {
+    const initial: Inventory = {
+      slots: [itemStack('stone', 3), ...emptyInventory().slots.slice(1)],
+    }
+    const service = Effect.runSync(makeInventoryService(initial))
+    const interaction = createInventoryInteraction(service)
+
+    Effect.runSync(interaction.clickInventoryItem(0, 'left'))
+    const closed = Effect.runSync(interaction.close())
+
+    expect(closed.inventoryCarried).toBeUndefined()
+    expect(Effect.runSync(service.snapshot).slots[0]).toEqual(itemStack('stone', 3))
   })
 
   it('picks up an occupied cell and swaps it with a carried item', () => {
