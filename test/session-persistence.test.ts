@@ -29,6 +29,8 @@ import { SPAWN_PLAYER_VITALS } from '@nerima-games/mx-gameplay'
 
 import {
   SESSION_FORMAT_NAME,
+  deleteSession,
+  listSessions,
   loadSession,
   makeSessionChunkSource,
   saveSession,
@@ -192,6 +194,104 @@ describe('session persistence', () => {
         format: SESSION_FORMAT_NAME,
         version: 7,
       })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('lists only valid canonical session heads in lexical session id order', () => {
+    const storage = controlledStorage()
+    const specialSessionId = 'world / %?'
+
+    return Effect.gen(function* () {
+      yield* saveSession({
+        sessionId: specialSessionId,
+        revision: 'r1',
+        state: sessionState(3),
+        chunks: [],
+      })
+      yield* saveSession({
+        sessionId: 'alpha',
+        revision: 'r2',
+        state: sessionState(1),
+        chunks: [],
+      })
+      storage.setEnvelope(sessionHeadKey('corrupted'), {
+        format: SESSION_FORMAT_NAME,
+        version: 7,
+        payload: { invalid: true },
+      })
+      storage.setEnvelope('unrelated/head', {
+        format: SESSION_FORMAT_NAME,
+        version: 7,
+        payload: {},
+      })
+      storage.setEnvelope('mc-compose/session/%61lpha/head', storage.envelope(sessionHeadKey('alpha'))!)
+      storage.setEnvelope('mc-compose/session/%E0%A4%A/head', storage.envelope(sessionHeadKey('alpha'))!)
+      storage.setEnvelope('mc-compose/session/alpha/revision/orphan/head', {
+        format: SESSION_FORMAT_NAME,
+        version: 7,
+        payload: {},
+      })
+
+      const sessions = yield* listSessions()
+
+      expect(sessions.map(({ sessionId }) => sessionId)).toEqual(['alpha', specialSessionId])
+      expect(sessions.map(({ revision }) => revision)).toEqual(['r2', 'r1'])
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('deletes a session including orphan revisions without touching another session', () => {
+    const storage = controlledStorage()
+    const deletedSessionId = 'world / one'
+    const headlessSessionId = 'headless'
+    const retainedSessionId = 'world / one-more'
+
+    return Effect.gen(function* () {
+      yield* saveSession({
+        sessionId: deletedSessionId,
+        revision: 'current',
+        state: sessionState(1),
+        chunks: [dimensionChunk('overworld', 0, 0, 4)],
+      })
+      yield* saveSession({
+        sessionId: retainedSessionId,
+        revision: 'current',
+        state: sessionState(2),
+        chunks: [dimensionChunk('overworld', 1, 0, 7)],
+      })
+      const orphanKey = sessionChunkKey(
+        deletedSessionId,
+        'orphan',
+        'nether',
+        chunkCoord(-2, 3),
+      )
+      storage.setEnvelope(orphanKey, storage.envelope(
+        sessionChunkKey(deletedSessionId, 'current', 'overworld', chunkCoord(0, 0)),
+      )!)
+      storage.setEnvelope(sessionHeadKey(deletedSessionId), {
+        format: SESSION_FORMAT_NAME,
+        version: 7,
+        payload: { invalid: true },
+      })
+      const headlessOrphanKey = sessionChunkKey(
+        headlessSessionId,
+        'orphan',
+        'end',
+        chunkCoord(4, -1),
+      )
+      storage.setEnvelope(headlessOrphanKey, storage.envelope(orphanKey)!)
+
+      yield* deleteSession(deletedSessionId)
+      yield* deleteSession(headlessSessionId)
+
+      expect(storage.keys.some((key) =>
+        key.startsWith(`mc-compose/session/${encodeURIComponent(deletedSessionId)}/`),
+      )).toBe(false)
+      expect(storage.keys).not.toContain(headlessOrphanKey)
+      expect(storage.keys).toContain(sessionHeadKey(retainedSessionId))
+      expect(storage.keys).toContain(
+        sessionChunkKey(retainedSessionId, 'current', 'overworld', chunkCoord(1, 0)),
+      )
+      expect(Option.isSome(yield* loadSession(retainedSessionId))).toBe(true)
     }).pipe(Effect.provide(storage.layer))
   })
 

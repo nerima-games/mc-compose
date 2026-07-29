@@ -364,6 +364,59 @@ export const loadSession = (
 ): Effect.Effect<Option.Option<SessionHead>, SessionPersistenceError, StoragePort> =>
   loadFrom(SESSION_FORMAT, sessionHeadKey(sessionId))
 
+const SESSION_KEY_PREFIX = 'mc-compose/session/'
+const SESSION_HEAD_KEY_PATTERN = /^mc-compose\/session\/([^/]+)\/head$/u
+
+const sessionIdFromHeadKey = (key: SaveKey): string | undefined => {
+  const match = SESSION_HEAD_KEY_PATTERN.exec(key)
+  if (match === null) return undefined
+
+  try {
+    const sessionId = decodeURIComponent(match[1]!)
+    return sessionHeadKey(sessionId) === key ? sessionId : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Enumerate valid session heads, ignoring malformed keys and independently corrupted sessions. */
+export const listSessions = (): Effect.Effect<
+  ReadonlyArray<SessionHead>,
+  StorageError,
+  StoragePort
+> =>
+  Effect.gen(function* () {
+    const storage = yield* StoragePort
+    const keys = yield* storage.keys
+    const sessionIds = keys
+      .map(sessionIdFromHeadKey)
+      .filter((sessionId): sessionId is string => sessionId !== undefined)
+      .sort()
+
+    const sessions = yield* Effect.forEach(sessionIds, (sessionId) =>
+      loadSession(sessionId).pipe(
+        Effect.map(Option.filter((head) => head.sessionId === sessionId)),
+        Effect.catchAll(() => Effect.succeed(Option.none<SessionHead>())),
+      ),
+    )
+    return sessions.flatMap(Option.toArray)
+  })
+
+/** Remove every record belonging to one encoded session key prefix. */
+export const deleteSession = (
+  sessionId: string,
+): Effect.Effect<void, StorageError, StoragePort> =>
+  Effect.gen(function* () {
+    const storage = yield* StoragePort
+    const prefix = `${SESSION_KEY_PREFIX}${encodeURIComponent(sessionId)}/`
+    const keys = yield* storage.keys
+    yield* Effect.forEach(
+      keys.filter((key) => key.startsWith(prefix)),
+      (key) => storage.remove(key),
+      { discard: true },
+    )
+  })
+
 export type SaveSessionInput = {
   readonly sessionId: string
   readonly revision: string
