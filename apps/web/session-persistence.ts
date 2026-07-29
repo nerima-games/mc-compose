@@ -226,9 +226,11 @@ const WeatherStateSchema: Schema.Schema<WeatherState> = Schema.Struct({
   }),
 )
 
+const DimensionSchema: Schema.Schema<Dimension> = Schema.Literal('overworld', 'nether', 'end')
+
 const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   seed: Schema.Number,
-  dimension: Schema.Literal('overworld', 'nether', 'end'),
+  dimension: DimensionSchema,
   player: Schema.Struct({
     feetPosition: PositionSchema,
     yawRadians: Schema.Number,
@@ -241,8 +243,14 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
 })
 
 export type SessionChunkManifestEntry = {
+  readonly dimension: Dimension
   readonly coord: ChunkCoord
   readonly key: string
+}
+
+export type DimensionChunk = {
+  readonly dimension: Dimension
+  readonly chunk: Chunk
 }
 
 export type SessionHead = {
@@ -254,12 +262,14 @@ export type SessionHead = {
 
 type SessionHeadEncoded = Omit<SessionHead, 'chunks'> & {
   readonly chunks: ReadonlyArray<{
+    readonly dimension: Dimension
     readonly coord: { readonly cx: number; readonly cz: number }
     readonly key: string
   }>
 }
 
 const ChunkManifestEntrySchema = Schema.Struct({
+  dimension: DimensionSchema,
   coord: Schema.Struct({
     cx: Schema.Number.pipe(Schema.fromBrand(ChunkAxis)),
     cz: Schema.Number.pipe(Schema.fromBrand(ChunkAxis)),
@@ -336,15 +346,40 @@ const migrateSessionV3ToV4: Migration = {
   },
 }
 
+const migrateSessionV4ToV5: Migration = {
+  from: 4,
+  describe: 'assign legacy chunks to the overworld dimension',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    if (head === undefined || !Array.isArray(head['chunks'])) {
+      return Effect.fail('Session v4 payload must contain a chunks array')
+    }
+
+    return Effect.succeed({
+      ...head,
+      chunks: head['chunks'].map((entry) => {
+        const chunk = asRecord(entry)
+        return chunk === undefined ? entry : { ...chunk, dimension: 'overworld' }
+      }),
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 4,
+  version: 5,
   schema: SessionHeadSchema,
-  migrations: [migrateSessionV1ToV2, migrateSessionV2ToV3, migrateSessionV3ToV4],
+  migrations: [
+    migrateSessionV1ToV2,
+    migrateSessionV2ToV3,
+    migrateSessionV3ToV4,
+    migrateSessionV4ToV5,
+  ],
 })
 
 export class SessionManifestError extends Data.TaggedError('SessionManifestError')<{
   readonly reason: 'duplicate-coordinate' | 'missing-chunk'
+  readonly dimension: Dimension
   readonly coord: ChunkCoord
   readonly key: string
 }> {}
@@ -358,9 +393,14 @@ export type SessionPersistenceError =
 export const sessionHeadKey = (sessionId: string): SaveKey =>
   SaveKey(`mc-compose/session/${encodeURIComponent(sessionId)}/head`)
 
-export const sessionChunkKey = (sessionId: string, revision: string, coord: ChunkCoord): SaveKey =>
+export const sessionChunkKey = (
+  sessionId: string,
+  revision: string,
+  dimension: Dimension,
+  coord: ChunkCoord,
+): SaveKey =>
   SaveKey(
-    `mc-compose/session/${encodeURIComponent(sessionId)}/revision/${encodeURIComponent(revision)}/chunk/${String(coord.cx)}/${String(coord.cz)}`,
+    `mc-compose/session/${encodeURIComponent(sessionId)}/revision/${encodeURIComponent(revision)}/dimension/${encodeURIComponent(dimension)}/chunk/${String(coord.cx)}/${String(coord.cz)}`,
   )
 
 export const loadSession = (
@@ -372,7 +412,7 @@ export type SaveSessionInput = {
   readonly sessionId: string
   readonly revision: string
   readonly state: SessionState
-  readonly chunks: ReadonlyArray<Chunk>
+  readonly chunks: ReadonlyArray<DimensionChunk>
 }
 
 /** Write revision chunks first, atomically publish their manifest, then collect the old revision. */
@@ -381,15 +421,17 @@ export const saveSession = (
 ): Effect.Effect<SessionHead, SessionPersistenceError, StoragePort> =>
   Effect.gen(function* () {
     const manifest = input.chunks.map(
-      (chunk): SessionChunkManifestEntry => ({
+      ({ dimension, chunk }): SessionChunkManifestEntry => ({
+        dimension,
         coord: chunk.coord,
-        key: sessionChunkKey(input.sessionId, input.revision, chunk.coord),
+        key: sessionChunkKey(input.sessionId, input.revision, dimension, chunk.coord),
       }),
     )
     const duplicate = duplicateManifestEntry(manifest)
     if (duplicate !== undefined) {
       return yield* new SessionManifestError({
         reason: 'duplicate-coordinate',
+        dimension: duplicate.dimension,
         coord: duplicate.coord,
         key: duplicate.key,
       })
@@ -413,7 +455,7 @@ export const saveSession = (
     }
 
     yield* Effect.gen(function* () {
-      yield* Effect.forEach(input.chunks, (chunk, index) =>
+      yield* Effect.forEach(input.chunks, ({ chunk }, index) =>
         saveTo(CHUNK_FORMAT, SaveKey(manifest[index]!.key), chunk),
       )
       yield* saveTo(SESSION_FORMAT, headKey, nextHead)
@@ -452,14 +494,15 @@ export const saveSession = (
     return nextHead
   })
 
-const coordId = (coord: ChunkCoord): string => `${String(coord.cx)},${String(coord.cz)}`
+const coordId = (dimension: Dimension, coord: ChunkCoord): string =>
+  `${dimension}:${String(coord.cx)},${String(coord.cz)}`
 
 const duplicateManifestEntry = (
   entries: ReadonlyArray<SessionChunkManifestEntry>,
 ): SessionChunkManifestEntry | undefined => {
   const coords = new Set<string>()
   for (const entry of entries) {
-    const id = coordId(entry.coord)
+    const id = coordId(entry.dimension, entry.coord)
     if (coords.has(id)) return entry
     coords.add(id)
   }
@@ -468,12 +511,13 @@ const duplicateManifestEntry = (
 
 export type LoadedSessionChunks = {
   readonly source: ChunkSource
-  readonly chunks: ReadonlyArray<Chunk>
+  readonly chunks: ReadonlyArray<DimensionChunk>
 }
 
 /** Validate and preload the manifest so streaming never reaches asynchronous storage. */
 export const makeSessionChunkSource = (
   head: SessionHead,
+  dimension: Dimension,
   fallback: ChunkSource,
 ): Effect.Effect<LoadedSessionChunks, SessionPersistenceError, StoragePort> =>
   Effect.gen(function* () {
@@ -481,30 +525,40 @@ export const makeSessionChunkSource = (
     if (duplicate !== undefined) {
       return yield* new SessionManifestError({
         reason: 'duplicate-coordinate',
+        dimension: duplicate.dimension,
         coord: duplicate.coord,
         key: duplicate.key,
       })
     }
 
-    const savedChunks = new Map<string, Chunk>()
+    const savedChunks = new Map<string, DimensionChunk>()
     for (const entry of head.chunks) {
       const loaded = yield* loadFrom(CHUNK_FORMAT, SaveKey(entry.key))
       if (Option.isNone(loaded)) {
         return yield* new SessionManifestError({
           reason: 'missing-chunk',
+          dimension: entry.dimension,
           coord: entry.coord,
           key: entry.key,
         })
       }
-      savedChunks.set(coordId(entry.coord), chunkSnapshotOf(loaded.value))
+      savedChunks.set(coordId(entry.dimension, entry.coord), {
+        dimension: entry.dimension,
+        chunk: chunkSnapshotOf(loaded.value),
+      })
     }
 
     return {
       source: (coord) => {
-        const saved = savedChunks.get(coordId(coord))
-        return saved === undefined ? fallback(coord) : Effect.sync(() => chunkSnapshotOf(saved))
+        const saved = savedChunks.get(coordId(dimension, coord))
+        return saved === undefined
+          ? fallback(coord)
+          : Effect.sync(() => chunkSnapshotOf(saved.chunk))
       },
-      chunks: [...savedChunks.values()].map(chunkSnapshotOf),
+      chunks: [...savedChunks.values()].map(({ dimension: savedDimension, chunk }) => ({
+        dimension: savedDimension,
+        chunk: chunkSnapshotOf(chunk),
+      })),
     }
   })
 

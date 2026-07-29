@@ -15,6 +15,7 @@ import {
   chunkCoord,
   type Chunk,
   type ChunkSource,
+  type Dimension,
 } from '@nerima-games/mc-worldgen'
 import { SPAWN_PLAYER_VITALS } from '@nerima-games/mx-gameplay'
 
@@ -25,6 +26,7 @@ import {
   saveSession,
   sessionChunkKey,
   sessionHeadKey,
+  type DimensionChunk,
   type SessionState,
 } from '../apps/web/session-persistence'
 
@@ -55,6 +57,13 @@ const chunk = (cx: number, cz: number, marker: number): Chunk => ({
   blocks: new Uint8Array(CHUNK_VOLUME).fill(marker),
   biomes: Array.from({ length: CHUNK_SIZE_XZ * CHUNK_SIZE_XZ }, () => 'PLAINS'),
 })
+
+const dimensionChunk = (
+  dimension: Dimension,
+  cx: number,
+  cz: number,
+  marker: number,
+): DimensionChunk => ({ dimension, chunk: chunk(cx, cz, marker) })
 
 type ControlledStorage = {
   readonly layer: Layer.Layer<StoragePort>
@@ -144,7 +153,7 @@ describe('session persistence', () => {
         sessionId: 'primary world',
         revision: 'r1',
         state: sessionState(42),
-        chunks: [chunk(0, 0, 3), chunk(-1, 2, 7)],
+        chunks: [dimensionChunk('overworld', 0, 0, 3), dimensionChunk('overworld', -1, 2, 7)],
       })
       const loaded = yield* loadSession('primary world')
 
@@ -155,8 +164,81 @@ describe('session persistence', () => {
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 4,
+        version: 5,
       })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('keeps equal chunk coordinates distinct across dimensions', () => {
+    const storage = controlledStorage()
+    const fallback: ChunkSource = (coord) => Effect.succeed(chunk(coord.cx, coord.cz, 9))
+
+    return Effect.gen(function* () {
+      const head = yield* saveSession({
+        sessionId: 'dimension-coordinates',
+        revision: 'r1',
+        state: sessionState(42),
+        chunks: [dimensionChunk('overworld', 0, 0, 3), dimensionChunk('nether', 0, 0, 7)],
+      })
+      const overworld = yield* makeSessionChunkSource(head, 'overworld', fallback)
+      const nether = yield* makeSessionChunkSource(head, 'nether', fallback)
+
+      expect(head.chunks.map(({ dimension }) => dimension)).toEqual(['overworld', 'nether'])
+      expect(head.chunks[0]!.key).toContain('/dimension/overworld/chunk/0/0')
+      expect(head.chunks[1]!.key).toContain('/dimension/nether/chunk/0/0')
+      expect(Effect.runSync(overworld.source(chunkCoord(0, 0))).blocks[0]).toBe(3)
+      expect(Effect.runSync(nether.source(chunkCoord(0, 0))).blocks[0]).toBe(7)
+      expect(overworld.chunks).toHaveLength(2)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('loads literal v4 chunks as overworld without rewriting and collects legacy keys', () => {
+    const storage = controlledStorage()
+    const headKey = sessionHeadKey('legacy-v4')
+    const legacyChunkKey = 'mc-compose/session/legacy-v4/revision/r1/chunk/0/0'
+
+    return Effect.gen(function* () {
+      const seed = yield* saveSession({
+        sessionId: 'legacy-v4',
+        revision: 'seed',
+        state: sessionState(42),
+        chunks: [dimensionChunk('overworld', 0, 0, 5)],
+      })
+      storage.setEnvelope(legacyChunkKey, storage.envelope(seed.chunks[0]!.key)!)
+      storage.setEnvelope(headKey, {
+        format: SESSION_FORMAT_NAME,
+        version: 4,
+        payload: {
+          sessionId: 'legacy-v4',
+          revision: 'r1',
+          state: { ...sessionState(42), dimension: 'nether' },
+          chunks: [{ coord: chunkCoord(0, 0), key: legacyChunkKey }],
+        },
+      })
+
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v4'))
+      expect(loaded.chunks).toEqual([
+        { dimension: 'overworld', coord: chunkCoord(0, 0), key: legacyChunkKey },
+      ])
+      expect(storage.envelope(headKey)?.version).toBe(4)
+
+      const loadedChunks = yield* makeSessionChunkSource(
+        loaded,
+        'overworld',
+        (coord) => Effect.succeed(chunk(coord.cx, coord.cz, 9)),
+      )
+      yield* saveSession({
+        sessionId: 'legacy-v4',
+        revision: 'r2',
+        state: loaded.state,
+        chunks: loadedChunks.chunks,
+      })
+
+      expect(storage.envelope(legacyChunkKey)).toBeUndefined()
+      expect(storage.envelope(headKey)?.version).toBe(5)
+      expect(storage.keys).toContain(
+        sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
+      )
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -461,10 +543,10 @@ describe('session persistence', () => {
         sessionId: 'source-order',
         revision: 'r1',
         state: sessionState(1),
-        chunks: [chunk(0, 0, 4)],
+        chunks: [dimensionChunk('overworld', 0, 0, 4)],
       })
-      const loaded = yield* makeSessionChunkSource(head, fallback)
-      loaded.chunks[0]!.blocks[0] = 8
+      const loaded = yield* makeSessionChunkSource(head, 'overworld', fallback)
+      loaded.chunks[0]!.chunk.blocks[0] = 8
       const persisted = Effect.runSync(loaded.source(chunkCoord(0, 0)))
       expect(persisted.blocks[0]).toBe(4)
       persisted.blocks[0] = 6
@@ -472,7 +554,7 @@ describe('session persistence', () => {
       const missing = Effect.runSync(loaded.source(chunkCoord(1, 0)))
 
       expect(persistedAgain.blocks[0]).toBe(4)
-      expect(loaded.chunks[0]!.blocks[0]).toBe(8)
+      expect(loaded.chunks[0]!.chunk.blocks[0]).toBe(8)
       expect(missing.blocks[0]).toBe(9)
       expect(generated).toEqual(['1,0'])
     }).pipe(Effect.provide(storage.layer))
@@ -490,10 +572,16 @@ describe('session persistence', () => {
       const coord = chunkCoord(3, -2)
       const invalidHead = {
         ...head,
-        chunks: [{ coord, key: sessionChunkKey(head.sessionId, head.revision, coord) }],
+        chunks: [
+          {
+            dimension: 'overworld' as const,
+            coord,
+            key: sessionChunkKey(head.sessionId, head.revision, 'overworld', coord),
+          },
+        ],
       }
       const error = yield* Effect.flip(
-        makeSessionChunkSource(invalidHead, (missingCoord) =>
+        makeSessionChunkSource(invalidHead, 'overworld', (missingCoord) =>
           Effect.succeed(chunk(missingCoord.cx, missingCoord.cz, 9)),
         ),
       )
@@ -501,6 +589,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SessionManifestError',
         reason: 'missing-chunk',
+        dimension: 'overworld',
         coord,
       })
     }).pipe(Effect.provide(storage.layer))
@@ -513,11 +602,11 @@ describe('session persistence', () => {
         sessionId: 'duplicate-coordinate',
         revision: 'r1',
         state: sessionState(1),
-        chunks: [chunk(0, 0, 4)],
+        chunks: [dimensionChunk('overworld', 0, 0, 4)],
       })
       const duplicateHead = { ...head, chunks: [head.chunks[0]!, head.chunks[0]!] }
       const error = yield* Effect.flip(
-        makeSessionChunkSource(duplicateHead, (coord) =>
+        makeSessionChunkSource(duplicateHead, 'overworld', (coord) =>
           Effect.succeed(chunk(coord.cx, coord.cz, 9)),
         ),
       )
@@ -525,6 +614,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SessionManifestError',
         reason: 'duplicate-coordinate',
+        dimension: 'overworld',
         coord: chunkCoord(0, 0),
       })
     }).pipe(Effect.provide(storage.layer))
@@ -539,13 +629,17 @@ describe('session persistence', () => {
           sessionId: 'duplicate-save',
           revision: 'r1',
           state: sessionState(1),
-          chunks: [chunk(coord.cx, coord.cz, 4), chunk(coord.cx, coord.cz, 7)],
+          chunks: [
+            dimensionChunk('overworld', coord.cx, coord.cz, 4),
+            dimensionChunk('overworld', coord.cx, coord.cz, 7),
+          ],
         }),
       )
 
       expect(error).toMatchObject({
         _tag: 'SessionManifestError',
         reason: 'duplicate-coordinate',
+        dimension: 'overworld',
         coord,
       })
       expect(storage.chunkWriteCount).toBe(0)
@@ -560,16 +654,19 @@ describe('session persistence', () => {
         sessionId: 'chunk-failure',
         revision: 'r1',
         state: sessionState(1),
-        chunks: [chunk(0, 0, 1)],
+        chunks: [dimensionChunk('overworld', 0, 0, 1)],
       })
-      const failedKey = sessionChunkKey('chunk-failure', 'r2', chunkCoord(1, 0))
+      const failedKey = sessionChunkKey('chunk-failure', 'r2', 'overworld', chunkCoord(1, 0))
       storage.failChunkKey = failedKey
       const error = yield* Effect.flip(
         saveSession({
           sessionId: 'chunk-failure',
           revision: 'r2',
           state: sessionState(2),
-          chunks: [chunk(0, 0, 2), chunk(1, 0, 3)],
+          chunks: [
+            dimensionChunk('overworld', 0, 0, 2),
+            dimensionChunk('overworld', 1, 0, 3),
+          ],
         }),
       )
 
@@ -588,7 +685,7 @@ describe('session persistence', () => {
         sessionId: 'head-failure',
         revision: 'r1',
         state: sessionState(1),
-        chunks: [chunk(0, 0, 1)],
+        chunks: [dimensionChunk('overworld', 0, 0, 1)],
       })
       storage.failNextHeadWrite = true
       const error = yield* Effect.flip(
@@ -596,7 +693,7 @@ describe('session persistence', () => {
           sessionId: 'head-failure',
           revision: 'r2',
           state: sessionState(2),
-          chunks: [chunk(0, 0, 2)],
+          chunks: [dimensionChunk('overworld', 0, 0, 2)],
         }),
       )
 
@@ -620,20 +717,28 @@ describe('session persistence', () => {
         sessionId: 'same-revision-failure',
         revision: 'r1',
         state: sessionState(1),
-        chunks: [chunk(0, 0, 1)],
+        chunks: [dimensionChunk('overworld', 0, 0, 1)],
       })
-      storage.failChunkKey = sessionChunkKey('same-revision-failure', 'r1', chunkCoord(1, 0))
+      storage.failChunkKey = sessionChunkKey(
+        'same-revision-failure',
+        'r1',
+        'overworld',
+        chunkCoord(1, 0),
+      )
       yield* Effect.flip(
         saveSession({
           sessionId: 'same-revision-failure',
           revision: 'r1',
           state: sessionState(2),
-          chunks: [chunk(0, 0, 8), chunk(1, 0, 9)],
+          chunks: [
+            dimensionChunk('overworld', 0, 0, 8),
+            dimensionChunk('overworld', 1, 0, 9),
+          ],
         }),
       )
 
       const head = Option.getOrThrow(yield* loadSession('same-revision-failure'))
-      const loaded = yield* makeSessionChunkSource(head, (coord) =>
+      const loaded = yield* makeSessionChunkSource(head, 'overworld', (coord) =>
         Effect.succeed(chunk(coord.cx, coord.cz, 7)),
       )
       expect(head.state.seed).toBe(1)
@@ -649,17 +754,17 @@ describe('session persistence', () => {
         sessionId: 'bounded',
         revision: 'r1',
         state: sessionState(1),
-        chunks: [chunk(0, 0, 1), chunk(1, 0, 1)],
+        chunks: [dimensionChunk('overworld', 0, 0, 1), dimensionChunk('overworld', 1, 0, 1)],
       })
       yield* saveSession({
         sessionId: 'bounded',
         revision: 'r2',
         state: sessionState(2),
-        chunks: [chunk(2, 0, 2)],
+        chunks: [dimensionChunk('overworld', 2, 0, 2)],
       })
 
       expect(storage.keys.filter((key) => key.includes('/chunk/'))).toEqual([
-        sessionChunkKey('bounded', 'r2', chunkCoord(2, 0)),
+        sessionChunkKey('bounded', 'r2', 'overworld', chunkCoord(2, 0)),
       ])
 
       yield* saveSession({
@@ -679,14 +784,14 @@ describe('session persistence', () => {
         sessionId: 'cleanup-failure',
         revision: 'r1',
         state: sessionState(1),
-        chunks: [chunk(0, 0, 1)],
+        chunks: [dimensionChunk('overworld', 0, 0, 1)],
       })
       storage.failChunkRemoves = true
       const saved = yield* saveSession({
         sessionId: 'cleanup-failure',
         revision: 'r2',
         state: sessionState(2),
-        chunks: [chunk(1, 0, 2)],
+        chunks: [dimensionChunk('overworld', 1, 0, 2)],
       })
 
       expect(saved.revision).toBe('r2')

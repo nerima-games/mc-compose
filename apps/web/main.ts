@@ -94,7 +94,7 @@ import {
   chunkCoord,
   chunkSnapshotOf,
   generatedChunkSource,
-  type Chunk,
+  type ChunkSource,
 } from '@nerima-games/mc-worldgen'
 import {
   browserInputLayer,
@@ -167,6 +167,7 @@ import {
   makeSessionChunkSource,
   saveSession,
   snapshotResidentChunks,
+  type DimensionChunk,
   type SessionState,
 } from './session-persistence'
 
@@ -391,7 +392,11 @@ const boot = async (): Promise<void> => {
   // store returned here wrap the same store instance, so a mined block cannot
   // disappear from collision while remaining visible (or vice versa).
   let activeSeed = WORLD_SEED
-  let initialKnownChunks: ReadonlyArray<Chunk> = []
+  let initialKnownChunks: ReadonlyArray<DimensionChunk> = []
+  type Dimension = SessionState['dimension']
+  const initialDimension: Dimension = Option.isSome(loadedSession)
+    ? loadedSession.value.state.dimension
+    : 'overworld'
 
   const generatedSource = generatedChunkSource(
     Option.isSome(loadedSession) ? loadedSession.value.state.seed : WORLD_SEED,
@@ -399,23 +404,41 @@ const boot = async (): Promise<void> => {
   const restored = Option.isSome(loadedSession)
     ? await runStorage(
         Effect.provide(
-          makeSessionChunkSource(loadedSession.value, generatedSource),
+          makeSessionChunkSource(loadedSession.value, initialDimension, generatedSource),
           storageContext,
         ),
       )
     : undefined
   if (Option.isSome(loadedSession)) {
     activeSeed = loadedSession.value.state.seed
-    initialKnownChunks = (restored?.chunks ?? []).map(chunkSnapshotOf)
+    initialKnownChunks = (restored?.chunks ?? []).map(({ dimension, chunk }) => ({
+      dimension,
+      chunk: chunkSnapshotOf(chunk),
+    }))
+  }
+
+  const persistedChunks = new Map(
+    (restored?.chunks ?? []).map(({ dimension, chunk }) => [
+      `${dimension}:${String(chunk.coord.cx)},${String(chunk.coord.cz)}`,
+      chunk,
+    ]),
+  )
+  const chunkSourceFor = (dimension: Dimension): ChunkSource => (coord) => {
+    const persisted = persistedChunks.get(
+      `${dimension}:${String(coord.cx)},${String(coord.cz)}`,
+    )
+    return persisted === undefined
+      ? generatedSource(coord)
+      : Effect.sync(() => chunkSnapshotOf(persisted))
   }
 
   const world = await Effect.runPromise(
     makeGeneratedWorld<MobBehaviour>({
       seed: activeSeed,
-      ...(restored === undefined ? {} : { chunkSource: restored.source }),
+      chunkSource: chunkSourceFor(initialDimension),
+      dimension: initialDimension,
       ...(Option.isSome(loadedSession)
         ? {
-            dimension: loadedSession.value.state.dimension,
             inventory: loadedSession.value.state.inventory.slots as never,
           }
         : {}),
@@ -443,13 +466,69 @@ const boot = async (): Promise<void> => {
   }
   presentWeather(Effect.runSync(weather.snapshot))
 
+  type DimensionChunkContext = {
+    readonly dimension: Dimension
+    readonly chunkStore: typeof world.chunkStore
+    readonly worldgenChunkStore: typeof world.worldgenChunkStore
+    readonly dirtyChunks: Parameters<typeof syncWorld>[1]
+    readonly meshChunkFromStore: Parameters<typeof syncWorld>[2]
+    readonly streamLoaded: Set<string>
+  }
+  const makeDimensionChunkContext = (
+    dimension: Dimension,
+    dimensionWorld: typeof world,
+  ): DimensionChunkContext => ({
+    dimension,
+    chunkStore: dimensionWorld.chunkStore,
+    worldgenChunkStore: dimensionWorld.worldgenChunkStore,
+    dirtyChunks: Effect.runSync(dimensionWorld.worldgenChunkStore.subscribeDirty),
+    meshChunkFromStore: makeChunkStoreMesher(dimensionWorld.worldgenChunkStore),
+    streamLoaded: new Set<string>(),
+  })
+  const dimensionContexts = new Map<Dimension, DimensionChunkContext>()
+  const initialChunkContext = makeDimensionChunkContext(initialDimension, world)
+  dimensionContexts.set(initialDimension, initialChunkContext)
+  let currentChunkContext = initialChunkContext
+
+  const getOrCreateDimensionChunkContext = (
+    dimension: Dimension,
+  ): DimensionChunkContext => {
+    const existing = dimensionContexts.get(dimension)
+    if (existing !== undefined) return existing
+    const dimensionWorld = Effect.runSync(
+      makeGeneratedWorld<MobBehaviour>({
+        seed: activeSeed,
+        chunkSource: chunkSourceFor(dimension),
+        dimension,
+      }),
+    )
+    const created = makeDimensionChunkContext(dimension, dimensionWorld)
+    dimensionContexts.set(dimension, created)
+    return created
+  }
+
+  // Gameplay stages keep one stable service reference while every operation is
+  // dispatched to the currently active dimension's backing store.
+  const currentChunkStore = new Proxy(world.chunkStore, {
+    get: (_target, property) => Reflect.get(currentChunkContext.chunkStore, property),
+  }) as typeof world.chunkStore
+
   const reportPersistenceFailure = (error: unknown): void => {
     document.body.setAttribute('data-session-persistence', 'failed')
     console.error('[mc-compose] session persistence failed', error)
   }
   const saveCoordinator = createSessionSaveCoordinator<SessionState>({
     initialKnownChunks,
-    snapshotResidents: () => Effect.runPromise(snapshotResidentChunks(world.worldgenChunkStore)),
+    snapshotResidents: async () => {
+      const residents = await Promise.all(
+        [...dimensionContexts.values()].map(async (context) =>
+          (await Effect.runPromise(snapshotResidentChunks(context.worldgenChunkStore))).map(
+            (chunk): DimensionChunk => ({ dimension: context.dimension, chunk }),
+          ),
+        ),
+      )
+      return residents.flat()
+    },
     snapshotState: () => ({
       seed: activeSeed,
       dimension: Effect.runSync(world.player.dimension),
@@ -475,8 +554,6 @@ const boot = async (): Promise<void> => {
   })
   let markSessionDirty = (): void => {}
   const spawnPose = await Effect.runPromise(world.player.pose)
-  const dirtyChunks = await Effect.runPromise(world.worldgenChunkStore.subscribeDirty)
-  const meshChunkFromStore = makeChunkStoreMesher(world.worldgenChunkStore)
   canvas.setAttribute('data-world-source', restored === undefined ? 'generated' : 'persisted')
   canvas.setAttribute('data-world-seed', String(activeSeed))
 
@@ -484,7 +561,6 @@ const boot = async (): Promise<void> => {
   //
   // A fixed radius bounds memory while still exercising both add and removal.
   const STREAM_RADIUS_CHUNKS = 2
-  const streamLoaded = new Set<string>()
   let chunksStreamedIn = 0
   let chunksDropped = 0
 
@@ -506,41 +582,60 @@ const boot = async (): Promise<void> => {
     return wanted
   }
 
-  const streamAround = (x: number, z: number): Effect.Effect<void> =>
+  const streamAround = (
+    context: DimensionChunkContext,
+    x: number,
+    z: number,
+  ): Effect.Effect<void> =>
     Effect.gen(function* () {
       const wanted = desiredAround(x, z)
       const wantedKeys = new Set(wanted.map(chunkKeyOf))
-      const changed = wanted.filter((chunk) => !streamLoaded.has(chunkKeyOf(chunk)))
-      const removed = [...streamLoaded]
+      const changed = wanted.filter((chunk) => !context.streamLoaded.has(chunkKeyOf(chunk)))
+      const removed = [...context.streamLoaded]
         .filter((key) => !wantedKeys.has(key))
         .map((key) => {
           const [cx, cz] = key.split(',')
           return { cx: Number(cx), cz: Number(cz) }
-        })
+      })
 
       for (const chunk of changed) {
-        yield* world.chunkStore.load(chunk)
-        streamLoaded.add(chunkKeyOf(chunk))
+        yield* context.chunkStore.load(chunk)
+        context.streamLoaded.add(chunkKeyOf(chunk))
       }
       for (const chunk of removed) {
-        const snapshot = yield* world.worldgenChunkStore.snapshot(chunkCoord(chunk.cx, chunk.cz))
+        const snapshot = yield* context.worldgenChunkStore.snapshot(chunkCoord(chunk.cx, chunk.cz))
         if (snapshot !== undefined) {
-          saveCoordinator.retainChunk(snapshot)
+          saveCoordinator.retainChunk({ dimension: context.dimension, chunk: snapshot })
           markSessionDirty()
         }
-        yield* world.chunkStore.unload(chunk)
-        streamLoaded.delete(chunkKeyOf(chunk))
+        yield* context.chunkStore.unload(chunk)
+        context.streamLoaded.delete(chunkKeyOf(chunk))
       }
 
-      yield* syncWorld(worldRenderer, dirtyChunks, meshChunkFromStore)
+      yield* syncWorld(worldRenderer, context.dirtyChunks, context.meshChunkFromStore)
       chunksStreamedIn += changed.length
       chunksDropped += removed.length
-      canvas.setAttribute('data-chunks-meshed', String(streamLoaded.size))
+      canvas.setAttribute('data-chunks-meshed', String(context.streamLoaded.size))
       canvas.setAttribute('data-chunks-streamed-in', String(chunksStreamedIn))
       canvas.setAttribute('data-chunks-dropped', String(chunksDropped))
     })
 
-  await Effect.runPromise(streamAround(spawnPose.feetPosition.x, spawnPose.feetPosition.z))
+  const retainDimensionResidents = (context: DimensionChunkContext): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const residents = yield* snapshotResidentChunks(context.worldgenChunkStore)
+      for (const chunk of residents) {
+        saveCoordinator.retainChunk({ dimension: context.dimension, chunk })
+      }
+    })
+
+  const clearRenderedChunks: Effect.Effect<void> = Effect.gen(function* () {
+    const rendered = yield* worldRenderer.chunkKeys
+    for (const key of rendered) yield* worldRenderer.removeChunk(key)
+  })
+
+  await Effect.runPromise(
+    streamAround(currentChunkContext, spawnPose.feetPosition.x, spawnPose.feetPosition.z),
+  )
 
   // `renderModule()` is called for its `frameStages` only; its `layers` field
   // is replaced by the browser adapter. The module's own header sanctions
@@ -630,7 +725,7 @@ const boot = async (): Promise<void> => {
   //
   const playerApi = world.player
   const inputApi = Context.get(inputContext, InputService)
-  const isBlockSolid = solidityFromStore(world.chunkStore)
+  const isBlockSolid = solidityFromStore(currentChunkStore)
 
   let playerVelocityY = 0
   let grounded = false
@@ -664,7 +759,7 @@ const boot = async (): Promise<void> => {
       frameStages: Effect.succeed(
         gameplayStages(
           gameplayState,
-          world.chunkStore,
+          currentChunkStore,
           world.entities,
           world.inventory,
           world.player,
@@ -938,14 +1033,15 @@ const boot = async (): Promise<void> => {
     }))
 
   const gameplaySnapshot = () => {
-    const reading = Effect.runSync(world.chunkStore.getBlock(KNOWN_TARGET_BLOCK))
-    const ignitionReading = Effect.runSync(world.chunkStore.getBlock(QA_IGNITION_CELL))
+    const reading = Effect.runSync(currentChunkStore.getBlock(KNOWN_TARGET_BLOCK))
+    const ignitionReading = Effect.runSync(currentChunkStore.getBlock(QA_IGNITION_CELL))
     const inventory = Effect.runSync(world.inventory.snapshot)
     const vitals = Effect.runSync(world.vitals.snapshot)
     const entities = Effect.runSync(world.entities.snapshot).entities
     return {
       pose: Effect.runSync(playerApi.pose),
       dimension: Effect.runSync(playerApi.dimension),
+      activeChunkDimension: currentChunkContext.dimension,
       weather: Effect.runSync(weather.snapshot),
       vitals,
       dead: vitals.healthPoints <= 0,
@@ -986,10 +1082,10 @@ const boot = async (): Promise<void> => {
     grounded = false
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add(heldItem, 2))
-    Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
-    Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_CELL, 0))
-    Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
-    Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 0))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, 2))
     selectedHotbarIndex = 0
     inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
     inventoryInteraction.reset()
@@ -1019,10 +1115,20 @@ const boot = async (): Promise<void> => {
           markSessionDirty()
           return gameplaySnapshot()
         },
+        enterNether: () => {
+          Effect.runSync(playerApi.restore(Effect.runSync(playerApi.pose), 'nether'))
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
+        enterOverworld: () => {
+          Effect.runSync(playerApi.restore(Effect.runSync(playerApi.pose), 'overworld'))
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
         breakTarget: () => {
           if (playerIsDead()) return null
           const target = Effect.runSync(
-            requestTargetedBlockBreak(gameplayState, world.chunkStore, playerApi),
+            requestTargetedBlockBreak(gameplayState, currentChunkStore, playerApi),
           )
           if (Option.isSome(target)) markSessionDirty()
           return Option.isSome(target) ? target.value : null
@@ -1115,7 +1221,7 @@ const boot = async (): Promise<void> => {
         seedFlintAndSteelIgnition: () => seedIgnitionEncounter('flint_and_steel'),
         seedRefusedFireChargeIgnition: () => {
           seedIgnitionEncounter('fire_charge')
-          Effect.runSync(world.chunkStore.setBlock(QA_IGNITION_CELL, 2))
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 2))
           nextItemUseRequestId += 1
           const requestId = `item-use-${String(nextItemUseRequestId)}`
           Effect.runSync(
@@ -1144,7 +1250,7 @@ const boot = async (): Promise<void> => {
           }
           const eyeY = Math.floor(currentPose.feetPosition.y + EYE_LEVEL_OFFSET)
           for (let zOffset = 0; zOffset >= -3; zOffset -= 1) {
-            Effect.runSync(world.chunkStore.setBlock({
+            Effect.runSync(currentChunkStore.setBlock({
               x: Math.floor(currentPose.feetPosition.x),
               y: eyeY,
               z: Math.floor(currentPose.feetPosition.z) + zOffset,
@@ -1323,7 +1429,7 @@ const boot = async (): Promise<void> => {
       const result = Effect.runSync(
         requestTargetedPrimaryAttack(
           gameplayState,
-          world.chunkStore,
+          currentChunkStore,
           world.entities,
           playerApi,
         ),
@@ -1364,7 +1470,7 @@ const boot = async (): Promise<void> => {
             const target = Effect.runSync(
               requestTargetedItemUse(
                 gameplayState,
-                world.chunkStore,
+                currentChunkStore,
                 playerApi,
                 requestId,
                 selected.item,
@@ -1391,7 +1497,7 @@ const boot = async (): Promise<void> => {
             const target = Effect.runSync(
               requestTargetedBlockPlacement(
                 gameplayState,
-                world.chunkStore,
+                currentChunkStore,
                 playerApi,
                 heldItem,
               ),
@@ -1415,12 +1521,7 @@ const boot = async (): Promise<void> => {
     const weatherBeforeFrame = Effect.runSync(weather.snapshot)
     Effect.runSync(Ref.set(gameplayState.weather, weatherBeforeFrame))
     Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
-    Effect.runSync(streamAround(resolvedFeet.x, resolvedFeet.z))
-    canvas.setAttribute(
-      'data-player-feet',
-      `${resolvedFeet.x.toFixed(2)},${resolvedFeet.y.toFixed(2)},${resolvedFeet.z.toFixed(2)}`,
-    )
-    canvas.setAttribute('data-player-grounded', String(grounded))
+    const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
 
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
 
@@ -1431,6 +1532,37 @@ const boot = async (): Promise<void> => {
       failBoot('a frame stage defected', outcome.cause)
       return
     }
+
+    const dimensionAfterFrame = Effect.runSync(playerApi.dimension)
+    if (
+      dimensionAfterFrame !== dimensionBeforeFrame ||
+      dimensionAfterFrame !== currentChunkContext.dimension
+    ) {
+      const previousContext = currentChunkContext
+      Effect.runSync(retainDimensionResidents(previousContext))
+      currentChunkContext = getOrCreateDimensionChunkContext(dimensionAfterFrame)
+      Effect.runSync(clearRenderedChunks)
+      playerVelocityY = 0
+      grounded = false
+      markSessionDirty()
+    }
+
+    // Portal stages can replace both dimension and pose. Stream and present
+    // only after the frame so the renderer never meshes the destination pose
+    // against the source dimension's store.
+    const postFramePose = Effect.runSync(playerApi.pose)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        postFramePose.feetPosition.x,
+        postFramePose.feetPosition.z,
+      ),
+    )
+    canvas.setAttribute(
+      'data-player-feet',
+      `${postFramePose.feetPosition.x.toFixed(2)},${postFramePose.feetPosition.y.toFixed(2)},${postFramePose.feetPosition.z.toFixed(2)}`,
+    )
+    canvas.setAttribute('data-player-grounded', String(grounded))
 
     const weatherAdvanced = Effect.runSync(Ref.get(gameplayState.weatherAdvanced))
     if (weatherAdvanced !== undefined) {

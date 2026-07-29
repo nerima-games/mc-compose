@@ -14,6 +14,7 @@ type InventorySlot = null | { readonly itemId: string; readonly count: number }
 type GameplaySnapshot = {
   readonly pose: Pose
   readonly dimension: string
+  readonly activeChunkDimension: string
   readonly weather: {
     readonly weather: 'clear' | 'rain' | 'thunder'
     readonly remainingSecs: number
@@ -158,6 +159,33 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
   expect(Math.abs(restored.weather.remainingSecs - published.weather.remainingSecs)).toBeLessThan(5)
   expect(restored.vitals.foodTimerSecs).toBeGreaterThanOrEqual(0)
   expect(restored.vitals.foodTimerSecs).toBeLessThan(4)
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('isolates and restores edits while travelling overworld to nether and back', async ({ page }) => {
+  const faults = watchForFaults(page)
+  await deleteSessionDatabase(page)
+
+  await page.goto('/')
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await callQa(page, 'gameplay.setPose')
+  expect(await callQa<unknown>(page, 'gameplay.breakTarget')).not.toBeNull()
+  await expect.poll(async () => (await snapshot(page)).target.block).toBe(AIR_BLOCK_ID)
+
+  await callQa(page, 'gameplay.enterNether')
+  await expect.poll(async () => (await snapshot(page)).activeChunkDimension).toBe('nether')
+  const nether = await snapshot(page)
+  expect(nether.dimension).toBe('nether')
+  expect(nether.target.reading).toBe('Block')
+  expect(nether.target.block).not.toBe(AIR_BLOCK_ID)
+
+  await callQa(page, 'gameplay.enterOverworld')
+  await expect.poll(async () => (await snapshot(page)).activeChunkDimension).toBe('overworld')
+  const overworld = await snapshot(page)
+  expect(overworld.dimension).toBe('overworld')
+  expect(overworld.target.block).toBe(AIR_BLOCK_ID)
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })
