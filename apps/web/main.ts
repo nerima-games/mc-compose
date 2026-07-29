@@ -85,7 +85,6 @@
 import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Ref, Scope } from 'effect'
 import {
-  DEFAULT_VOLUME_SETTINGS,
   makeWebAudioBackend,
   type Vec3,
 } from '@nerima-games/mc-audio'
@@ -189,6 +188,14 @@ import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
 import {
+  DEFAULT_PLAYER_SETTINGS,
+  PLAYER_BINDING_ACTIONS,
+  loadPlayerSettings,
+  savePlayerSettings,
+  type PlayerSettingsV1,
+} from './settings'
+import { createSettingsView } from './settings-view'
+import {
   listSessions,
   loadSession,
   makeSessionChunkSource,
@@ -256,6 +263,40 @@ const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'lever',
   'redstone_lamp',
 ])
+
+type SettingsWriteQueue = {
+  tail: Promise<void>
+  failure: { readonly error: unknown } | undefined
+}
+
+const makeSettingsWriteQueue = (): SettingsWriteQueue => ({
+  tail: Promise.resolve(),
+  failure: undefined,
+})
+
+const enqueueSettingsWrite = (
+  queue: SettingsWriteQueue,
+  write: () => Promise<void>,
+  onSuccess: () => void,
+  onFailure: (error: unknown) => void,
+): void => {
+  queue.tail = queue.tail
+    .then(write)
+    .then(() => {
+      queue.failure = undefined
+      onSuccess()
+    })
+    .catch((error: unknown) => {
+      queue.failure = { error }
+      onFailure(error)
+    })
+}
+
+const drainSettingsWrites = async (queue: SettingsWriteQueue): Promise<void> => {
+  await queue.tail
+  if (queue.failure !== undefined) throw queue.failure.error
+}
+
 const QA_POSE = {
   feetPosition: { x: 8.5, y: 64.5, z: 8.5 },
   yawRadians: 0,
@@ -312,6 +353,7 @@ const bootTitle = async (): Promise<void> => {
   const titleScreen = requireElement('title-screen')
   const menuParent = requireElement('main-menu-root')
   const titleStatus = requireElement('title-status')
+  const settingsRoot = requireElement('settings-root')
   titleScreen.hidden = false
   document.body.setAttribute('data-mc-compose-route', 'title')
 
@@ -324,6 +366,31 @@ const bootTitle = async (): Promise<void> => {
     ),
   )
   const sessions = await Effect.runPromise(Effect.provide(listSessions(), storageContext))
+  let playerSettings = await Effect.runPromise(
+    Effect.provide(loadPlayerSettings(), storageContext),
+  ).catch(() => DEFAULT_PLAYER_SETTINGS)
+  const settingsWrites = makeSettingsWriteQueue()
+  let settingsView: ReturnType<typeof createSettingsView>
+  const persistPlayerSettings = (next: PlayerSettingsV1): void => {
+    document.body.setAttribute('data-player-settings-persistence', 'dirty')
+    settingsView.clearPersistenceError()
+    enqueueSettingsWrite(
+      settingsWrites,
+      () => Effect.runPromise(Effect.provide(savePlayerSettings(next), storageContext)),
+      () => {
+        if (playerSettings === next) {
+          document.body.setAttribute('data-player-settings-persistence', 'saved')
+        }
+      },
+      (error) => {
+        document.body.setAttribute('data-player-settings-persistence', 'error')
+        const message = 'Settings could not be saved.'
+        titleStatus.textContent = message
+        settingsView.reportPersistenceError(message)
+        console.error('[mc-compose] player settings persistence failed', error)
+      },
+    )
+  }
   const savedWorlds: ReadonlyArray<SavedWorld> = sessions.map(({ sessionId, metadata }) => ({
     sessionId,
     name: metadata.name,
@@ -331,18 +398,49 @@ const bootTitle = async (): Promise<void> => {
   const existingIds = savedWorlds.map(({ sessionId }) => sessionId)
   let menuState: MainMenuState = initialMainMenuState
   let menuView: ReturnType<typeof createMainMenuView>
+  settingsView = createSettingsView(document, settingsRoot, {
+    onChange: (next) => {
+      playerSettings = next
+      persistPlayerSettings(next)
+    },
+    onClose: () => {
+      titleScreen.inert = false
+    },
+  })
 
-  const openSession = (sessionId: string): void => {
-    window.location.assign(sessionHref(sessionId))
+  let titleNavigationPending = false
+  const setTitleNavigationPending = (pending: boolean): void => {
+    titleNavigationPending = pending
+    if (pending) menuParent.setAttribute('aria-busy', 'true')
+    else menuParent.removeAttribute('aria-busy')
+    for (const control of menuParent.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button, input')) {
+      control.disabled = pending
+    }
   }
-  const createWorld = ({ name, mode }: CreateWorldRequest): void => {
+
+  const navigateAfterSettingsSaved = async (href: string): Promise<void> => {
+    if (titleNavigationPending) return
+    setTitleNavigationPending(true)
+    try {
+      await drainSettingsWrites(settingsWrites)
+      window.location.assign(href)
+    } catch (error: unknown) {
+      setTitleNavigationPending(false)
+      titleStatus.textContent = 'Could not finish saving settings. Please try again.'
+      console.error('[mc-compose] navigation blocked by settings persistence failure', error)
+    }
+  }
+  const openSession = async (sessionId: string): Promise<void> => {
+    await navigateAfterSettingsSaved(sessionHref(sessionId))
+  }
+  const createWorld = async ({ name, mode }: CreateWorldRequest): Promise<void> => {
     if (mode === 'creative') {
       titleStatus.textContent = 'Creative is not available yet.'
       return
     }
     titleStatus.textContent = ''
     const sessionId = createUniqueSessionId(name, existingIds)
-    window.location.assign(createSessionHref(sessionId, { name, mode }))
+    await navigateAfterSettingsSaved(createSessionHref(sessionId, { name, mode }))
   }
 
   menuView = createMainMenuView(document, menuParent, {
@@ -350,13 +448,33 @@ const bootTitle = async (): Promise<void> => {
       menuState = state
       menuView.render(mainMenuViewModel(menuState, savedWorlds))
     },
-    onCreateWorld: createWorld,
-    onLoadWorld: ({ sessionId }) => openSession(sessionId),
+    onCreateWorld: (request) => {
+      void createWorld(request)
+    },
+    onLoadWorld: ({ sessionId }) => {
+      void openSession(sessionId)
+    },
     onOpenSettings: () => {
-      titleStatus.textContent = 'Options are not available yet.'
+      const returnFocus = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : menuParent
+      titleStatus.textContent = ''
+      titleScreen.inert = true
+      settingsView.open(playerSettings, returnFocus)
     },
   })
   menuView.render(mainMenuViewModel(menuState, savedWorlds))
+  const handleTitlePageHide = (event: PageTransitionEvent): void => {
+    if (!event.persisted) settingsView.dispose()
+  }
+  window.addEventListener('pagehide', handleTitlePageHide)
+  const hot = (import.meta as ImportMeta & {
+    readonly hot?: { readonly dispose: (handler: () => void) => void }
+  }).hot
+  hot?.dispose(() => {
+    window.removeEventListener('pagehide', handleTitlePageHide)
+    settingsView.dispose()
+  })
   document.body.setAttribute('data-mc-compose-boot', 'running')
 }
 
@@ -367,8 +485,10 @@ const bootGame = async (
   const gameShell = requireElement('game-shell')
   const pauseOverlay = requireElement('pause-overlay')
   const resumeButton = requireElement('resume-button')
+  const settingsButton = requireElement('settings-button')
   const saveQuitButton = requireElement('save-quit-button')
   const pauseError = requireElement('pause-error')
+  const settingsRoot = requireElement('settings-root')
   gameShell.hidden = false
   document.body.setAttribute('data-mc-compose-route', 'session')
   document.body.setAttribute('data-session-id', sessionId)
@@ -389,17 +509,6 @@ const bootGame = async (
   // is `Layer.scoped` and removes its listeners when the scope closes; closing
   // it here would install the listeners and immediately take them away.
   const scope = Effect.runSync(Scope.make())
-  let readAudioListener = (): Vec3 => ({ x: 0, y: 0, z: 0 })
-  const audioBackend = Effect.runSync(makeWebAudioBackend({
-    global: globalThis,
-    initialMasterGain: DEFAULT_VOLUME_SETTINGS.master,
-  }))
-  const audio = Effect.runSync(makeAudioRuntime({
-    backend: audioBackend,
-    nowSecs: browserClock.monotonicSecs,
-    listener: () => readAudioListener(),
-  }))
-
   const storageContext = await Effect.runPromise(
     Effect.provideService(
       Layer.build(indexedDbStorageLayer({ factory: indexedDB, databaseName: DATABASE_NAME })),
@@ -409,6 +518,21 @@ const bootGame = async (
   )
   const runStorage = <A, E>(effect: Effect.Effect<A, E, never>): Promise<A> =>
     Effect.runPromise(effect)
+  let playerSettings: PlayerSettingsV1 = await runStorage(
+    Effect.provide(loadPlayerSettings(), storageContext),
+  ).catch(() => DEFAULT_PLAYER_SETTINGS)
+  const settingsWrites = makeSettingsWriteQueue()
+  let readAudioListener = (): Vec3 => ({ x: 0, y: 0, z: 0 })
+  const audioBackend = Effect.runSync(makeWebAudioBackend({
+    global: globalThis,
+    initialMasterGain: playerSettings.audioEnabled ? playerSettings.masterVolume : 0,
+  }))
+  const audio = Effect.runSync(makeAudioRuntime({
+    backend: audioBackend,
+    nowSecs: browserClock.monotonicSecs,
+    listener: () => readAudioListener(),
+    settings: playerSettings,
+  }))
   const loadedSession = await runStorage(
     Effect.provide(loadSession(sessionId), storageContext),
   )
@@ -424,6 +548,7 @@ const bootGame = async (
   const inputLayer = browserInputLayer({
     targets: { window, document },
     canvas,
+    bindings: playerSettings.bindings,
     allowsPointerLock: () => !inventoryOpen && !paused,
   })
 
@@ -910,6 +1035,16 @@ const bootGame = async (
   const playerApi = world.player
   readAudioListener = () => Effect.runSync(playerApi.pose).feetPosition
   const inputApi = Context.get(inputContext, InputService)
+  const applyBindings = (bindings: PlayerSettingsV1['bindings']): void => {
+    for (const action of PLAYER_BINDING_ACTIONS) {
+      Effect.runSync(inputApi.rebind(action, `PlayerSettingsTemporary:${action}`))
+    }
+    for (const action of PLAYER_BINDING_ACTIONS) {
+      const code = bindings[action] ?? DEFAULT_PLAYER_SETTINGS.bindings[action]
+      if (code === undefined) throw new Error(`Missing default binding for ${action}`)
+      Effect.runSync(inputApi.rebind(action, code))
+    }
+  }
   const simState = await Effect.runPromise(makeSimFrameState)
   const isGameplayBlockSolid = solidityFromStore(currentChunkStore)
   const simPhysicsConfig: SimPhysicsConfig = {
@@ -1279,6 +1414,37 @@ const bootGame = async (
     debounceTimer = window.setTimeout(flushDirty, SAVE_DEBOUNCE_MS)
   }
 
+  let settingsView: ReturnType<typeof createSettingsView>
+  settingsView = createSettingsView(document, settingsRoot, {
+    onChange: (next) => {
+      playerSettings = next
+      applyBindings(next.bindings)
+      audio.configure(next)
+      document.body.setAttribute('data-player-settings-persistence', 'dirty')
+      pauseError.textContent = ''
+      settingsView.clearPersistenceError()
+      enqueueSettingsWrite(
+        settingsWrites,
+        () => runStorage(Effect.provide(savePlayerSettings(next), storageContext)),
+        () => {
+          if (playerSettings === next) {
+            document.body.setAttribute('data-player-settings-persistence', 'saved')
+          }
+        },
+        (error) => {
+          document.body.setAttribute('data-player-settings-persistence', 'error')
+          const message = 'Settings could not be saved.'
+          pauseError.textContent = message
+          settingsView.reportPersistenceError(message)
+          console.error('[mc-compose] player settings persistence failed', error)
+        },
+      )
+    },
+    onClose: () => {
+      pauseOverlay.inert = false
+    },
+  })
+
   const setPaused = (next: boolean): void => {
     paused = next
     gameShell.inert = next
@@ -1302,6 +1468,7 @@ const bootGame = async (
   }
 
   document.addEventListener('keydown', (event) => {
+    if (settingsView.isOpen()) return
     if (event.code === 'Escape' && !event.repeat) {
       event.preventDefault()
       event.stopPropagation()
@@ -1310,7 +1477,7 @@ const bootGame = async (
     }
 
     if (!paused || event.code !== 'Tab') return
-    const pauseActions = [resumeButton, saveQuitButton].filter(
+    const pauseActions = [resumeButton, settingsButton, saveQuitButton].filter(
       (button) => !button.hasAttribute('disabled'),
     )
     const firstAction = pauseActions[0]
@@ -1331,12 +1498,16 @@ const bootGame = async (
     ;(event.shiftKey ? lastAction : firstAction).focus()
   })
   resumeButton.addEventListener('click', () => setPaused(false))
+  settingsButton.addEventListener('click', () => {
+    pauseOverlay.inert = true
+    settingsView.open(playerSettings, settingsButton)
+  })
   saveQuitButton.addEventListener('click', () => {
     if (saveQuitButton.getAttribute('aria-busy') === 'true') return
     saveQuitButton.setAttribute('aria-busy', 'true')
     saveQuitButton.setAttribute('disabled', '')
     pauseError.textContent = ''
-    void requestFlush()
+    void Promise.all([requestFlush(), drainSettingsWrites(settingsWrites)])
       .then(() => window.location.assign('/'))
       .catch((error: unknown) => {
         pauseError.textContent = 'Save failed. Your world is still open; please try again.'
@@ -1634,12 +1805,18 @@ const bootGame = async (
   // Periodic publication persists advancing time and weather without gameplay mutations.
   window.addEventListener('pagehide', (event) => {
     requestBackgroundFlush()
-    if (!event.persisted) audio.close()
+    if (!event.persisted) {
+      settingsView.dispose()
+      audio.close()
+    }
   })
   const hot = (import.meta as ImportMeta & {
     readonly hot?: { readonly dispose: (handler: () => void) => void }
   }).hot
-  hot?.dispose(() => audio.close())
+  hot?.dispose(() => {
+    settingsView.dispose()
+    audio.close()
+  })
 
   // -------------------------------------------------------------------------
   // 6. The frame
@@ -1722,7 +1899,10 @@ const bootGame = async (
     const looked =
       !dead && !inventoryOpen && (walk.pointerDelta.x !== 0 || walk.pointerDelta.y !== 0)
     if (!dead && !inventoryOpen) {
-      Effect.runSync(playerApi.look(-walk.pointerDelta.x * LOOK_SENSITIVITY, -walk.pointerDelta.y * LOOK_SENSITIVITY))
+      Effect.runSync(playerApi.look(
+        -walk.pointerDelta.x * LOOK_SENSITIVITY * playerSettings.sensitivity,
+        -walk.pointerDelta.y * LOOK_SENSITIVITY * playerSettings.sensitivity,
+      ))
     }
     const poseBeforeFrame = Effect.runSync(playerApi.pose)
     const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
@@ -1997,7 +2177,7 @@ const bootGame = async (
 
     Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
     renderPlayerUi()
-    const captions = audio.visible(nowSecs)
+    const captions = playerSettings.captionsEnabled ? audio.visible(nowSecs) : []
     const nextCaptionSignature = captionRenderSignature(captions)
     if (nextCaptionSignature !== renderedCaptionSignature) {
       captionsParent.replaceChildren(...captions.map((caption) => {

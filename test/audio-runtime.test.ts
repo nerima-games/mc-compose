@@ -62,6 +62,26 @@ describe('web audio runtime', () => {
     expect(runtime.snapshot(0).cueIds).toEqual(['inventoryOpen'])
   })
 
+  it('applies volume and mute changes immediately', async () => {
+    const recording = await Effect.runPromise(makeRecordingBackend('ready'))
+    const runtime = await Effect.runPromise(
+      makeAudioRuntime({
+        backend: makeBackend(recording.backend, { unlocks: 0, closes: 0 }),
+        nowSecs: Effect.succeed(0),
+        listener: () => ({ x: 0, y: 0, z: 0 }),
+      }),
+    )
+
+    runtime.configure({ masterVolume: 0.4, sfxVolume: 0.25, audioEnabled: true })
+    runtime.play('playerHurt')
+    runtime.configure({ masterVolume: 0.9, sfxVolume: 1, audioEnabled: false })
+    runtime.play('inventoryOpen')
+
+    expect(await Effect.runPromise(recording.masterGains)).toEqual([0.4, 0])
+    expect((await Effect.runPromise(recording.played))[0]).toMatchObject({ gain: 0.125 })
+    expect(await Effect.runPromise(recording.played)).toHaveLength(1)
+  })
+
   it('announces placement only after the success outbox contains a result', async () => {
     const recording = await Effect.runPromise(makeRecordingBackend('ready'))
     const runtime = await Effect.runPromise(

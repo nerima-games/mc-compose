@@ -23,11 +23,18 @@ export type AudioRuntimeSnapshot = {
   readonly unlockPending: boolean
 }
 
+export type AudioRuntimeSettings = {
+  readonly masterVolume: number
+  readonly sfxVolume: number
+  readonly audioEnabled: boolean
+}
+
 export type AudioRuntime = {
   readonly play: (cueId: SoundCueId, options?: CuePlayOptions) => void
   readonly unlock: () => void
   readonly visible: (nowSecs: number) => ReadonlyArray<CaptionEvent>
   readonly snapshot: (nowSecs: number) => AudioRuntimeSnapshot
+  readonly configure: (settings: AudioRuntimeSettings) => void
   readonly close: () => void
 }
 
@@ -35,6 +42,7 @@ export const makeAudioRuntime = (input: {
   readonly backend: RuntimeBackend
   readonly nowSecs: Effect.Effect<number>
   readonly listener: () => Vec3
+  readonly settings?: AudioRuntimeSettings
 }): Effect.Effect<AudioRuntime> =>
   Effect.gen(function* () {
     const captionEvents = yield* Ref.make<ReadonlyArray<CaptionEvent>>([])
@@ -42,10 +50,19 @@ export const makeAudioRuntime = (input: {
       Layer.succeed(AudioBackendPort, input.backend),
       recordingCaptionLayer((event) => Ref.update(captionEvents, (events) => [...events, event])),
     )
+    let settings: AudioRuntimeSettings = input.settings ?? {
+      masterVolume: DEFAULT_VOLUME_SETTINGS.master,
+      sfxVolume: DEFAULT_VOLUME_SETTINGS.sfx,
+      audioEnabled: true,
+    }
     const service = yield* makeSoundCueService({
       context: Effect.map(input.backend.availability, (availability) => ({
-        settings: DEFAULT_VOLUME_SETTINGS,
-        enabled: true,
+        settings: {
+          master: settings.masterVolume,
+          sfx: settings.sfxVolume,
+          music: 0,
+        },
+        enabled: settings.audioEnabled,
         availability,
         listener: input.listener(),
       })),
@@ -88,6 +105,13 @@ export const makeAudioRuntime = (input: {
         closed,
         unlockPending: unlockPending !== undefined,
       }),
+      configure: (nextSettings) => {
+        if (closed) return
+        settings = nextSettings
+        Effect.runSyncExit(input.backend.setMasterGain(
+          nextSettings.audioEnabled ? nextSettings.masterVolume : 0,
+        ))
+      },
       close: () => {
         if (closed) return
         closed = true
