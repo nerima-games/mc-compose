@@ -13,8 +13,8 @@
 <!-- ------------------------------------------------------------------------- -->
 
 format: 1
-exported declarations: 88
-supporting declarations: 7
+exported declarations: 85
+supporting declarations: 0
 
 ## Exported
 
@@ -48,28 +48,10 @@ type DanglingEdge = {
 };
 ```
 
-### DeltaTimeSecs  `const`
-
-```ts
-const DeltaTimeSecs: Brand.Brand.Constructor<DeltaTimeSecs>;
-```
-
-### DeltaTimeSecs  `type`
-
-```ts
-type DeltaTimeSecs = number & Brand.Brand<'DeltaTimeSecs'>;
-```
-
 ### EMPTY_MODULE_LAYER  `const`
 
 ```ts
 const EMPTY_MODULE_LAYER: ModuleLayer;
-```
-
-### FrameServices  `type`
-
-```ts
-type FrameServices = ClockPort;
 ```
 
 ### GameModule  `type`
@@ -656,56 +638,4 @@ const stagePhase: (name: string, ...members: ReadonlyArray<string>) => StagePhas
 
 ```ts
 const transition: (state: SessionState, event: SessionEvent) => SessionState | undefined;
-```
-
-## Supporting declarations
-
-Not exported from the barrel, but named by the signatures above, so a
-consumer is exposed to them. `Context.Tag` service classes emit their real
-type onto one of these.
-
-### ClockPort  `class`
-
-```ts
-class ClockPort extends ClockPort_base {
-}
-```
-
-### ClockPort_base  `const`
-
-```ts
-const ClockPort_base: Context.TagClass<ClockPort, "@nerima-games/mc-kernel/ClockPort", ClockService>;
-```
-
-### ClockService  `type`
-
-```ts
-type ClockService = {
-    readonly monotonicSecs: Effect.Effect<MonotonicTimeSecs>;
-    readonly wallClockEpochMillis: Effect.Effect<EpochMillis>;
-};
-```
-
-### EpochMillis  `const`
-
-```ts
-const EpochMillis: Brand.Brand.Constructor<EpochMillis>;
-```
-
-### EpochMillis  `type`
-
-```ts
-type EpochMillis = number & Brand.Brand<'EpochMillis'>;
-```
-
-### MonotonicTimeSecs  `const`
-
-```ts
-const MonotonicTimeSecs: Brand.Brand.Constructor<MonotonicTimeSecs>;
-```
-
-### MonotonicTimeSecs  `type`
-
-```ts
-type MonotonicTimeSecs = number & Brand.Brand<'MonotonicTimeSecs'>;
 ```

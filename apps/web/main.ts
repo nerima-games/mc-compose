@@ -105,14 +105,14 @@ import {
   registerModule,
   type GameModule,
 } from '../../domain/composition'
-import { DeltaTimeSecs } from '../../domain/kernel-vocabulary'
+import { DeltaTimeSecs } from "@nerima-games/mc-kernel"
 import { buildQaRegistry, describeQaApiError, installQaApi } from '../../domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
  *
- * `domain/kernel-vocabulary.ts` is explicit that this is not part of the
+ * `@nerima-games/mc-kernel` is explicit that this is not part of the
  * `DeltaTimeSecs` brand and is not applied by mc-compose: "It is a simulation
  * invariant belonging to whoever produces the delta". The host produces it, so
  * the host clamps it — and without the clamp a backgrounded tab returns for its

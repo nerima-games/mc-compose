@@ -7,7 +7,7 @@ import {
   type GameModule,
   type StageRegistration,
 } from '../domain/composition'
-import { EpochMillis, FixedClockLayer, MonotonicTimeSecs } from '../domain/kernel-vocabulary'
+import { EpochMillis, FixedClockLayer, MonotonicTimeSecs } from "@nerima-games/mc-kernel"
 import {
   acceptMod,
   acceptMods,

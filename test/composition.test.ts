@@ -17,7 +17,7 @@ import {
   monotonicSecs,
   MonotonicTimeSecs,
   type FrameServices,
-} from '../domain/kernel-vocabulary'
+} from "@nerima-games/mc-kernel"
 import { StageId, type StageOrderError, type StagePhase } from '../domain/stage-order'
 import { STAGE_HUD_SYNC, STAGE_INPUT, STAGE_RENDER, STANDARD_STAGE_SKELETON } from '../domain/stage-skeleton'
 
