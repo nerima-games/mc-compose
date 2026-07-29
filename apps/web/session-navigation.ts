@@ -1,4 +1,6 @@
 const SESSION_ID_ATTEMPTS = 32
+const MAX_SESSION_ID_LENGTH = 128
+const SESSION_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
 
 const sessionNameSlug = (name: string): string => {
   const slug = name
@@ -10,10 +12,20 @@ const sessionNameSlug = (name: string): string => {
   return slug.length > 0 ? slug : 'world'
 }
 
-export const sessionIdFromSearch = (search: string): string | undefined => {
+export const readSessionId = (search: string): string | undefined => {
   const value = new URLSearchParams(search).get('session')
-  return value === null || value.length === 0 ? undefined : value
+  if (
+    value === null ||
+    value.length === 0 ||
+    value.length > MAX_SESSION_ID_LENGTH ||
+    !SESSION_ID_PATTERN.test(value)
+  ) {
+    return undefined
+  }
+  return value
 }
+
+export const sessionIdFromSearch = readSessionId
 
 export const sessionHref = (sessionId: string): string =>
   `/?session=${encodeURIComponent(sessionId)}`
