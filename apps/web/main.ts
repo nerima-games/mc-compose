@@ -196,12 +196,14 @@ import {
   snapshotResidentChunks,
   type DimensionChunk,
   type PersistedLeverState,
+  type SessionMetadata,
   type SessionState,
 } from './session-persistence'
 import {
+  createSessionHref,
   createUniqueSessionId,
+  readSessionRoute,
   sessionHref,
-  sessionIdFromSearch,
 } from './session-navigation'
 
 /**
@@ -322,9 +324,9 @@ const bootTitle = async (): Promise<void> => {
     ),
   )
   const sessions = await Effect.runPromise(Effect.provide(listSessions(), storageContext))
-  const savedWorlds: ReadonlyArray<SavedWorld> = sessions.map(({ sessionId }) => ({
+  const savedWorlds: ReadonlyArray<SavedWorld> = sessions.map(({ sessionId, metadata }) => ({
     sessionId,
-    name: sessionId,
+    name: metadata.name,
   }))
   const existingIds = savedWorlds.map(({ sessionId }) => sessionId)
   let menuState: MainMenuState = initialMainMenuState
@@ -339,7 +341,8 @@ const bootTitle = async (): Promise<void> => {
       return
     }
     titleStatus.textContent = ''
-    openSession(createUniqueSessionId(name, existingIds))
+    const sessionId = createUniqueSessionId(name, existingIds)
+    window.location.assign(createSessionHref(sessionId, { name, mode }))
   }
 
   menuView = createMainMenuView(document, menuParent, {
@@ -357,7 +360,10 @@ const bootTitle = async (): Promise<void> => {
   document.body.setAttribute('data-mc-compose-boot', 'running')
 }
 
-const bootGame = async (sessionId: string): Promise<void> => {
+const bootGame = async (
+  sessionId: string,
+  creationMetadata?: SessionMetadata,
+): Promise<void> => {
   const gameShell = requireElement('game-shell')
   const pauseOverlay = requireElement('pause-overlay')
   const resumeButton = requireElement('resume-button')
@@ -406,6 +412,9 @@ const bootGame = async (sessionId: string): Promise<void> => {
   const loadedSession = await runStorage(
     Effect.provide(loadSession(sessionId), storageContext),
   )
+  const sessionMetadata = Option.isSome(loadedSession)
+    ? loadedSession.value.metadata
+    : creationMetadata ?? { name: sessionId, mode: 'survival' }
 
   // POINTER LOCK IS THE HOST'S TO ASK FOR. mc-render's `InputService` treats a
   // click as a GAME action only while the pointer is locked, and as a UI click
@@ -671,6 +680,7 @@ const bootGame = async (sessionId: string): Promise<void> => {
           saveSession({
             sessionId,
             revision: crypto.randomUUID(),
+            metadata: sessionMetadata,
             state,
             chunks,
           }),
@@ -2022,8 +2032,9 @@ const bootGame = async (sessionId: string): Promise<void> => {
 }
 
 const boot = (): Promise<void> => {
-  const sessionId = sessionIdFromSearch(window.location.search)
-  return sessionId === undefined ? bootTitle() : bootGame(sessionId)
+  const route = readSessionRoute(window.location.search)
+  if (route === undefined) return bootTitle()
+  return bootGame(route.sessionId, route.kind === 'create' ? route.metadata : undefined)
 }
 
 boot().catch((error: unknown) => {

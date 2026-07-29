@@ -9,7 +9,7 @@ test('creates, saves, and reloads a session from the title screen', async ({ pag
   await page.locator('[data-mx-ui="menu-world-name"]').fill('E2E Lifecycle')
   await page.locator('[data-menu-action="confirm"]').click()
 
-  await expect(page).toHaveURL(/\?session=e2e-lifecycle-[^&]+$/u)
+  await expect(page).toHaveURL(/\?session=e2e-lifecycle-[^&]+&create=1&name=E2E\+Lifecycle&mode=survival$/u)
   const sessionId = new URL(page.url()).searchParams.get('session')
   expect(sessionId).not.toBeNull()
   await expect(page.getByTestId('game-shell')).toBeVisible()
@@ -27,6 +27,21 @@ test('creates, saves, and reloads a session from the title screen', async ({ pag
     has: page.locator(`[data-mx-ui="menu-world-session-id"]`, { hasText: sessionId ?? '' }),
   })
   await expect(savedSession).toHaveAttribute('data-session-id', sessionId ?? '')
+  await expect(savedSession).toContainText('E2E Lifecycle')
+
+  const conflictingCreate = new URLSearchParams({
+    session: sessionId ?? '',
+    create: '1',
+    name: 'Replacement Name',
+    mode: 'survival',
+  })
+  await page.goto(`/?${conflictingCreate.toString()}`)
+  await expect(page.getByTestId('game-shell')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByTestId('save-quit-button').click()
+  await page.locator('[data-menu-entry="load-world"]').click()
+  await expect(savedSession).toContainText('E2E Lifecycle')
+  await expect(savedSession).not.toContainText('Replacement Name')
   await savedSession.click()
 
   await expect(page).toHaveURL(`/?session=${encodeURIComponent(sessionId ?? '')}`)

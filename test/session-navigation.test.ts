@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  createSessionHref,
   createUniqueSessionId,
   readSessionId,
+  readSessionRoute,
   sessionHref,
   sessionIdFromSearch,
 } from '../apps/web/session-navigation'
@@ -38,6 +40,47 @@ describe('session navigation', () => {
 
   it('encodes session ids when constructing a game URL', () => {
     expect(sessionHref('World / One')).toBe('/?session=World%20%2F%20One')
+  })
+
+  it('round-trips Unicode and reserved characters in creation metadata', () => {
+    const href = createSessionHref('world-123', {
+      name: '鉱山 & Plains / 100%?',
+      mode: 'survival',
+    })
+
+    expect(readSessionRoute(new URL(href, 'https://example.test').search)).toEqual({
+      kind: 'create',
+      sessionId: 'world-123',
+      metadata: { name: '鉱山 & Plains / 100%?', mode: 'survival' },
+    })
+    expect(readSessionRoute('?session=world-123')).toEqual({
+      kind: 'load',
+      sessionId: 'world-123',
+    })
+  })
+
+  it('rejects incomplete or invalid creation routes', () => {
+    expect(readSessionRoute('?session=world-123&create=1&name=World')).toBeUndefined()
+    expect(readSessionRoute('?session=world-123&create=1&name=&mode=survival')).toBeUndefined()
+    expect(readSessionRoute('?session=world-123&create=1&name=World&mode=spectator')).toBeUndefined()
+    expect(readSessionRoute('?session=world-123&create=1&name=World&mode=creative')).toBeUndefined()
+    expect(readSessionRoute('?session=world-123&name=World&mode=survival')).toBeUndefined()
+  })
+
+  it('normalizes and bounds creation world names', () => {
+    expect(readSessionRoute('?session=world-123&create=1&name=%20World%20&mode=survival')).toEqual({
+      kind: 'create',
+      sessionId: 'world-123',
+      metadata: { name: 'World', mode: 'survival' },
+    })
+    expect(readSessionRoute('?session=world-123&create=1&name=%20%20&mode=survival')).toBeUndefined()
+
+    const name128 = 'w'.repeat(128)
+    const name129 = 'w'.repeat(129)
+    expect(readSessionRoute(`?session=world-123&create=1&name=${name128}&mode=survival`))
+      .toMatchObject({ metadata: { name: name128 } })
+    expect(readSessionRoute(`?session=world-123&create=1&name=${name129}&mode=survival`))
+      .toBeUndefined()
   })
 
   it('retries random ids that already exist', () => {

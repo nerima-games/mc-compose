@@ -154,9 +154,26 @@ export type DimensionChunk = {
   readonly chunk: Chunk
 }
 
+export type SessionMode = 'survival' | 'creative'
+
+export const MAX_WORLD_NAME_LENGTH = 128
+
+export const normalizeWorldName = (name: string): string | undefined => {
+  const normalized = name.trim()
+  return normalized.length > 0 && normalized.length <= MAX_WORLD_NAME_LENGTH
+    ? normalized
+    : undefined
+}
+
+export type SessionMetadata = {
+  readonly name: string
+  readonly mode: SessionMode
+}
+
 export type SessionHead = {
   readonly sessionId: string
   readonly revision: string
+  readonly metadata: SessionMetadata
   readonly state: SessionState
   readonly chunks: ReadonlyArray<SessionChunkManifestEntry>
 }
@@ -181,6 +198,14 @@ const ChunkManifestEntrySchema = Schema.Struct({
 const SessionHeadSchema: Schema.Schema<SessionHead, SessionHeadEncoded> = Schema.Struct({
   sessionId: Schema.String.pipe(Schema.minLength(1)),
   revision: Schema.String.pipe(Schema.minLength(1)),
+  metadata: Schema.Struct({
+    name: Schema.String.pipe(
+      Schema.filter((name) => normalizeWorldName(name) === name, {
+        message: () => `World name must be normalized and at most ${String(MAX_WORLD_NAME_LENGTH)} characters`,
+      }),
+    ),
+    mode: Schema.Literal('survival', 'creative'),
+  }),
   state: SessionStateSchema,
   chunks: Schema.Array(ChunkManifestEntrySchema),
 })
@@ -319,9 +344,27 @@ const migrateSessionV6ToV7: Migration = {
   },
 }
 
+const migrateSessionV7ToV8: Migration = {
+  from: 7,
+  describe: 'add the world name and game mode',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const sessionId = head?.['sessionId']
+    const name = typeof sessionId === 'string' ? normalizeWorldName(sessionId) : undefined
+    if (head === undefined || typeof sessionId !== 'string' || name === undefined) {
+      return Effect.fail('Session v7 payload must contain a valid session id for its world name')
+    }
+
+    return Effect.succeed({
+      ...head,
+      metadata: { name, mode: 'survival' },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 7,
+  version: 8,
   schema: SessionHeadSchema,
   migrations: [
     migrateSessionV1ToV2,
@@ -330,6 +373,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV4ToV5,
     migrateSessionV5ToV6,
     migrateSessionV6ToV7,
+    migrateSessionV7ToV8,
   ],
 })
 
@@ -420,6 +464,7 @@ export const deleteSession = (
 export type SaveSessionInput = {
   readonly sessionId: string
   readonly revision: string
+  readonly metadata: SessionMetadata
   readonly state: SessionState
   readonly chunks: ReadonlyArray<DimensionChunk>
 }
@@ -459,6 +504,7 @@ export const saveSession = (
     const nextHead: SessionHead = {
       sessionId: input.sessionId,
       revision: input.revision,
+      metadata: input.metadata,
       state: input.state,
       chunks: manifest,
     }

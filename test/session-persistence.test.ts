@@ -33,10 +33,12 @@ import {
   listSessions,
   loadSession,
   makeSessionChunkSource,
-  saveSession,
+  saveSession as persistSession,
   sessionChunkKey,
   sessionHeadKey,
   type DimensionChunk,
+  type SaveSessionInput,
+  type SessionMetadata,
   type SessionState,
 } from '../apps/web/session-persistence'
 
@@ -91,6 +93,11 @@ const dimensionChunk = (
   cz: number,
   marker: number,
 ): DimensionChunk => ({ dimension, chunk: chunk(cx, cz, marker) })
+
+const defaultMetadata: SessionMetadata = { name: 'Test World', mode: 'survival' }
+const saveSession = (
+  input: Omit<SaveSessionInput, 'metadata'> & { readonly metadata?: SessionMetadata },
+) => persistSession({ ...input, metadata: input.metadata ?? defaultMetadata })
 
 type ControlledStorage = {
   readonly layer: Layer.Layer<StoragePort>
@@ -179,12 +186,14 @@ describe('session persistence', () => {
       const saved = yield* saveSession({
         sessionId: 'primary world',
         revision: 'r1',
+        metadata: { name: 'Primary / 世界', mode: 'creative' },
         state: sessionState(42),
         chunks: [dimensionChunk('overworld', 0, 0, 3), dimensionChunk('overworld', -1, 2, 7)],
       })
       const loaded = yield* loadSession('primary world')
 
       expect(Option.getOrThrow(loaded)).toEqual(saved)
+      expect(saved.metadata).toEqual({ name: 'Primary / 世界', mode: 'creative' })
       expect(saved.state.vitals).toEqual(sessionState(42).vitals)
       expect(saved.state.time).toEqual(sessionState(42).time)
       expect(saved.state.weather).toEqual(sessionState(42).weather)
@@ -192,14 +201,46 @@ describe('session persistence', () => {
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 7,
+        version: 8,
       })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects v8 session metadata with a non-normalized world name', () => {
+    const storage = controlledStorage()
+    const invalidNames = ['', '   ', ' World ', 'w'.repeat(129)]
+
+    for (const [index, name] of invalidNames.entries()) {
+      const sessionId = `invalid-metadata-${String(index)}`
+      storage.setEnvelope(sessionHeadKey(sessionId), {
+        format: SESSION_FORMAT_NAME,
+        version: 8,
+        payload: {
+          sessionId,
+          revision: 'r1',
+          metadata: { name, mode: 'survival' },
+          state: sessionState(index),
+          chunks: [],
+        },
+      })
+    }
+
+    return Effect.gen(function* () {
+      for (const index of invalidNames.keys()) {
+        const error = yield* Effect.flip(loadSession(`invalid-metadata-${String(index)}`))
+        expect(error).toMatchObject({
+          _tag: 'SaveDecodeError',
+          format: SESSION_FORMAT_NAME,
+          version: 8,
+        })
+      }
     }).pipe(Effect.provide(storage.layer))
   })
 
   it.effect('lists only valid canonical session heads in lexical session id order', () => {
     const storage = controlledStorage()
     const specialSessionId = 'world / %?'
+    const oversizedLegacySessionId = 'w'.repeat(129)
 
     return Effect.gen(function* () {
       yield* saveSession({
@@ -211,13 +252,34 @@ describe('session persistence', () => {
       yield* saveSession({
         sessionId: 'alpha',
         revision: 'r2',
+        metadata: { name: 'Alpha Display', mode: 'creative' },
         state: sessionState(1),
         chunks: [],
+      })
+      storage.setEnvelope(sessionHeadKey('legacy-v7'), {
+        format: SESSION_FORMAT_NAME,
+        version: 7,
+        payload: {
+          sessionId: 'legacy-v7',
+          revision: 'legacy',
+          state: sessionState(7),
+          chunks: [],
+        },
       })
       storage.setEnvelope(sessionHeadKey('corrupted'), {
         format: SESSION_FORMAT_NAME,
         version: 7,
         payload: { invalid: true },
+      })
+      storage.setEnvelope(sessionHeadKey(oversizedLegacySessionId), {
+        format: SESSION_FORMAT_NAME,
+        version: 7,
+        payload: {
+          sessionId: oversizedLegacySessionId,
+          revision: 'legacy-oversized',
+          state: sessionState(8),
+          chunks: [],
+        },
       })
       storage.setEnvelope('unrelated/head', {
         format: SESSION_FORMAT_NAME,
@@ -234,8 +296,17 @@ describe('session persistence', () => {
 
       const sessions = yield* listSessions()
 
-      expect(sessions.map(({ sessionId }) => sessionId)).toEqual(['alpha', specialSessionId])
-      expect(sessions.map(({ revision }) => revision)).toEqual(['r2', 'r1'])
+      expect(sessions.map(({ sessionId }) => sessionId)).toEqual([
+        'alpha',
+        'legacy-v7',
+        specialSessionId,
+      ])
+      expect(sessions.map(({ revision }) => revision)).toEqual(['r2', 'legacy', 'r1'])
+      expect(sessions.map(({ metadata }) => metadata)).toEqual([
+        { name: 'Alpha Display', mode: 'creative' },
+        { name: 'legacy-v7', mode: 'survival' },
+        defaultMetadata,
+      ])
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -313,6 +384,7 @@ describe('session persistence', () => {
     return Effect.gen(function* () {
       const loaded = Option.getOrThrow(yield* loadSession('legacy-v6'))
       expect(loaded.state.redstone).toEqual({ levers: [] })
+      expect(loaded.metadata).toEqual({ name: 'legacy-v6', mode: 'survival' })
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -492,7 +564,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(7)
+      expect(storage.envelope(headKey)?.version).toBe(8)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )

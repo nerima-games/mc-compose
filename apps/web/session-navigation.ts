@@ -1,6 +1,15 @@
+import {
+  normalizeWorldName,
+  type SessionMetadata,
+} from './session-persistence'
+
 const SESSION_ID_ATTEMPTS = 32
 const MAX_SESSION_ID_LENGTH = 128
 const SESSION_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
+
+export type SessionRoute =
+  | { readonly kind: 'load'; readonly sessionId: string }
+  | { readonly kind: 'create'; readonly sessionId: string; readonly metadata: SessionMetadata }
 
 const sessionNameSlug = (name: string): string => {
   const slug = name
@@ -27,8 +36,40 @@ export const readSessionId = (search: string): string | undefined => {
 
 export const sessionIdFromSearch = readSessionId
 
+export const readSessionRoute = (search: string): SessionRoute | undefined => {
+  const parameters = new URLSearchParams(search)
+  const sessionId = readSessionId(search)
+  if (sessionId === undefined) return undefined
+
+  const create = parameters.get('create')
+  const name = parameters.get('name')
+  const mode = parameters.get('mode')
+  const normalizedName = name === null ? undefined : normalizeWorldName(name)
+  const hasCreationParameter = create !== null || name !== null || mode !== null
+  if (!hasCreationParameter) return { kind: 'load', sessionId }
+  if (
+    create !== '1'
+    || normalizedName === undefined
+    || mode !== 'survival'
+  ) {
+    return undefined
+  }
+
+  return { kind: 'create', sessionId, metadata: { name: normalizedName, mode } }
+}
+
 export const sessionHref = (sessionId: string): string =>
   `/?session=${encodeURIComponent(sessionId)}`
+
+export const createSessionHref = (sessionId: string, metadata: SessionMetadata): string => {
+  const parameters = new URLSearchParams({
+    session: sessionId,
+    create: '1',
+    name: metadata.name,
+    mode: metadata.mode,
+  })
+  return `/?${parameters.toString()}`
+}
 
 export const createUniqueSessionId = (
   worldName: string,
