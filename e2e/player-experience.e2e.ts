@@ -120,6 +120,90 @@ test.describe('player inventory experience', () => {
     await expect(output).toBeHidden()
   })
 
+  test('crafts a wooden pickaxe through natural player progression', async ({ page }) => {
+    await startGameSession(page)
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+    await callQa(page, 'gameplay.seedWoodenPickaxeProgression')
+
+    const canvas = page.locator('#game-canvas')
+    const inventory = page.locator('#inventory-root')
+    const craftingCells = inventory.locator(
+      '[data-region="crafting-grid"] [data-mx-ui="slot"]',
+    )
+    const output = inventory.locator('[data-mx-ui="crafting-output"]')
+    const inventoryItemSlot = (item: string): Locator =>
+      inventory.locator(
+        `[data-region="hotbar"] [data-mx-ui="slot"][aria-label*="${item}"], ` +
+        `[data-region="main"] [data-mx-ui="slot"][aria-label*="${item}"]`,
+      ).first()
+
+    await page.keyboard.press('KeyE')
+    await expect(inventory).toBeVisible()
+    await expect(inventoryItemSlot('oak_log')).toHaveAttribute('aria-label', /oak_log, 3/)
+
+    for (let craftIndex = 0; craftIndex < 3; craftIndex += 1) {
+      await inventoryItemSlot('oak_log').click()
+      await craftingCells.nth(0).click()
+      await expect(output).toHaveAttribute('aria-label', /oak_planks, 4/)
+      await output.click()
+    }
+    await expect(inventoryItemSlot('oak_planks')).toHaveAttribute('aria-label', /oak_planks, 12/)
+
+    for (const cellIndex of [0, 1, 2, 3]) {
+      await inventoryItemSlot('oak_planks').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    await expect(output).toHaveAttribute('aria-label', /crafting_table, 1/)
+    await output.click()
+
+    const craftingTableSlot = inventory.locator(
+      '[data-region="hotbar"] [data-mx-ui="slot"][aria-label*="crafting_table"]',
+    )
+    await expect(craftingTableSlot).toHaveAttribute('aria-label', /crafting_table, 1/)
+    const craftingTableSlotIndex = Number(
+      await craftingTableSlot.getAttribute('data-slot-index'),
+    )
+
+    await page.keyboard.press('KeyE')
+    await expect(inventory).toBeHidden()
+    await page.keyboard.press(`Digit${craftingTableSlotIndex + 1}`)
+    const heldTableSlot = page.locator(
+      `#hud-root [data-mx-ui="hotbar"] [data-slot-index="${craftingTableSlotIndex}"]`,
+    )
+    await expect(heldTableSlot).toContainText('crafting_table')
+
+    await grantPointerLock(page)
+    await canvas.click({ button: 'right' })
+    await expect(heldTableSlot).toHaveAttribute('data-empty', '')
+
+    await canvas.click({ button: 'right' })
+    await expect(inventory).toBeVisible()
+    await expect(inventory).toHaveAttribute('aria-label', 'Crafting Table')
+    await expect(craftingCells).toHaveCount(9)
+
+    for (const cellIndex of [0, 3]) {
+      await inventoryItemSlot('oak_planks').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    await expect(output).toHaveAttribute('aria-label', /stick, 4/)
+    await output.click()
+
+    for (const cellIndex of [0, 1, 2]) {
+      await inventoryItemSlot('oak_planks').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    for (const cellIndex of [4, 7]) {
+      await inventoryItemSlot('stick').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    await expect(output).toHaveAttribute('aria-label', /wooden_pickaxe, 1/)
+    await output.click()
+    await expect(inventoryItemSlot('wooden_pickaxe')).toHaveAttribute(
+      'aria-label',
+      /wooden_pickaxe, 1/,
+    )
+  })
+
   test('opens an empty 3x3 crafting table through targeted canvas use', async ({ page }) => {
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')

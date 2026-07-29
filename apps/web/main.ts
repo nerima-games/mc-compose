@@ -1738,6 +1738,26 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedWoodenPickaxeProgression = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('oak_log', 3))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 0))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, 2))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    pendingItemUses.clear()
+    lastObservedItemUse = undefined
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
   const seedCraftingTableEncounter = () => {
     respawnPlayer()
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
@@ -1816,6 +1836,7 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedCraftingTableEncounter,
+        seedWoodenPickaxeProgression,
         seedIronArmor: () => {
           Effect.runSync(world.inventory.reset)
           const equipment = [
