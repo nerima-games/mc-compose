@@ -24,6 +24,11 @@
         height: 100vh;
       }
 
+      #game-canvas:focus-visible {
+        outline: 2px solid rgba(255, 255, 255, 0.8);
+        outline-offset: -4px;
+      }
+
       /* The HUD and the crosshair are appended here by mx-ui. Positioned rather
          than laid out: mx-ui owns what goes inside, the host owns where it sits. */
       #hud-root {
@@ -80,6 +85,26 @@
       #boot-status:empty {
         display: none;
       }
+
+      #sound-captions {
+        position: fixed;
+        right: 18px;
+        bottom: 52px;
+        z-index: 25;
+        display: grid;
+        justify-items: end;
+        gap: 5px;
+        max-width: min(360px, calc(100vw - 36px));
+        pointer-events: none;
+      }
+
+      .sound-caption {
+        padding: 5px 9px;
+        border-right: 3px solid rgba(255, 255, 255, 0.75);
+        background: rgba(0, 0, 0, 0.68);
+        color: #f0f0f0;
+        text-shadow: 0 1px 1px #000;
+      }
     </style>
   </head>
   <body data-mc-compose-boot="starting">
@@ -88,9 +113,16 @@
          getContext, because a context created here would make
          docs/e2e-triage.md #1 pass without mc-render drawing anything. It is
          also the pointer-lock target and the element a click can land on. -->
-    <canvas id="game-canvas"></canvas>
+    <canvas id="game-canvas" tabindex="0"></canvas>
     <div id="hud-root"></div>
     <div id="inventory-root" hidden></div>
+    <div
+      id="sound-captions"
+      role="status"
+      aria-live="polite"
+      aria-atomic="false"
+      data-testid="sound-captions"
+    ></div>
     <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
     <div id="stage-order" data-stage-count="0"></div>
     <div id="boot-status" role="status" aria-live="polite"></div>

@@ -200,6 +200,7 @@ export const REPOSITORY_POLICY = {
     [
       '@nerima-games/mc-compose',
       new Set([
+        '@nerima-games/mc-audio',
         '@nerima-games/mx-gameplay',
         '@nerima-games/mx-redstone',
         '@nerima-games/mx-ui',
@@ -284,6 +285,7 @@ export const REPOSITORY_POLICY = {
    */
   devServerResolved: new Set<string>([
     // Resolved by `vite.config.ts`'s alias table, from a sibling checkout.
+    '@nerima-games/mc-audio',
     '@nerima-games/mc-render',
     '@nerima-games/mc-save',
     '@nerima-games/mc-worldgen',

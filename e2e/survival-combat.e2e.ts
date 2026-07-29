@@ -60,6 +60,14 @@ type PageFaults = {
   readonly pageErrors: ReadonlyArray<string>
 }
 
+type AudioSnapshot = {
+  readonly cueIds: ReadonlyArray<string>
+  readonly captions: ReadonlyArray<{
+    readonly cueId: string
+    readonly reason: string
+  }>
+}
+
 const watchForFaults = (page: Page): PageFaults => {
   const consoleErrors: Array<string> = []
   const pageErrors: Array<string> = []
@@ -93,6 +101,24 @@ const selectedSlotIndex = async (hotbar: Locator): Promise<number> =>
 
 const framesDrawn = async (page: Page): Promise<number> =>
   Number(await page.locator('body').getAttribute('data-frames'))
+
+test('shows a damage caption without requiring autoplay unlock', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await page.goto('/')
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await callQa<unknown>(page, 'gameplay.damage')
+
+  await expect(page.getByTestId('sound-caption')).toHaveAttribute('data-cue-id', 'playerHurt')
+  const audio = await callQa<AudioSnapshot>(page, 'audio.snapshot')
+  expect(audio.cueIds).toContain('playerHurt')
+  expect(audio.captions).toContainEqual(expect.objectContaining({
+    cueId: 'playerHurt',
+  }))
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
 
 const inventoryCount = (current: GameplaySnapshot, item: string): number =>
   current.inventory.slots.reduce(

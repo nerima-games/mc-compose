@@ -24,6 +24,7 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
+      "@nerima-games/mc-audio": ["../mc-audio/index.ts"],
       "@nerima-games/mc-render": ["../mc-render/index.ts"],
       "@nerima-games/mc-save": ["../mc-save/index.ts"],
       "@nerima-games/mc-sim": ["../mc-sim/index.ts"],

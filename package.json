@@ -61,6 +61,7 @@
     "verify": "pnpm typecheck && pnpm lint && pnpm check:deps && pnpm api:check && pnpm test"
   },
   "dependencies": {
+    "@nerima-games/mc-audio": "0.1.0",
     "@nerima-games/mc-render": "0.1.1",
     "@nerima-games/mc-save": "0.1.0",
     "@nerima-games/mc-sim": "0.1.6",

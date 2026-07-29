@@ -278,6 +278,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
     )
 
     expect(surface?.sort()).toEqual([
+      'audio.snapshot',
     'gameplay.breakTarget',
     'gameplay.damage',
     'gameplay.eat',

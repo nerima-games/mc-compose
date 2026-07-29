@@ -84,6 +84,11 @@
  */
 import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Ref, Scope } from 'effect'
+import {
+  DEFAULT_VOLUME_SETTINGS,
+  makeWebAudioBackend,
+  type Vec3,
+} from '@nerima-games/mc-audio'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   makeTimeService,
@@ -165,6 +170,12 @@ import {
 import { DeltaTimeSecs } from '../../domain/kernel-vocabulary'
 import { buildQaRegistry, describeQaApiError, installQaApi } from '../../domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
+import {
+  announceConfirmedPlacements,
+  announceInventoryTransition,
+  captionRenderSignature,
+  makeAudioRuntime,
+} from './audio-runtime'
 import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
@@ -284,6 +295,7 @@ const failBoot = (reason: string, detail?: unknown): void => {
 const boot = async (): Promise<void> => {
   const canvas = requireCanvas('game-canvas')
   const hudParent = requireElement('hud-root')
+  const captionsParent = requireElement('sound-captions')
   const inventoryParent = requireElement('inventory-root')
   const fpsValue = requireElement('fps-value')
   const stageList = requireElement('stage-order')
@@ -297,6 +309,16 @@ const boot = async (): Promise<void> => {
   // is `Layer.scoped` and removes its listeners when the scope closes; closing
   // it here would install the listeners and immediately take them away.
   const scope = Effect.runSync(Scope.make())
+  let readAudioListener = (): Vec3 => ({ x: 0, y: 0, z: 0 })
+  const audioBackend = Effect.runSync(makeWebAudioBackend({
+    global: globalThis,
+    initialMasterGain: DEFAULT_VOLUME_SETTINGS.master,
+  }))
+  const audio = Effect.runSync(makeAudioRuntime({
+    backend: audioBackend,
+    nowSecs: browserClock.monotonicSecs,
+    listener: () => readAudioListener(),
+  }))
 
   const storageContext = await Effect.runPromise(
     Effect.provideService(
@@ -331,7 +353,8 @@ const boot = async (): Promise<void> => {
   // report a failure it cannot do anything about. The game degrades exactly as
   // mc-render's `UNAVAILABLE_POINTER_LOCK` describes: keyboard still works,
   // clicks stay UI clicks, and `attack` does not fire.
-  canvas.addEventListener('click', () => {
+  canvas.addEventListener('click', (event) => {
+    if (event.isTrusted) audio.unlock()
     if (inventoryOpen || document.pointerLockElement === canvas) {
       return
     }
@@ -347,6 +370,9 @@ const boot = async (): Promise<void> => {
       // unread-field shape this project keeps finding; a test can see this.
       canvas.setAttribute('data-pointer-lock', 'refused')
     }
+  })
+  canvas.addEventListener('keydown', (event) => {
+    if (event.isTrusted) audio.unlock()
   })
 
   // Built ONCE, into a Context, and then provided as a Context rather than as a
@@ -798,6 +824,7 @@ const boot = async (): Promise<void> => {
   // mc-compose is allowed to import mx-gameplay. Nothing here reaches past it.
   //
   const playerApi = world.player
+  readAudioListener = () => Effect.runSync(playerApi.pose).feetPosition
   const inputApi = Context.get(inputContext, InputService)
   const isBlockSolid = solidityFromStore(currentChunkStore)
 
@@ -913,6 +940,15 @@ const boot = async (): Promise<void> => {
     onInventoryChanged: () => markSessionDirty(),
   })
   const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
+  const applyPlayerDamage = (
+    damage: Parameters<typeof world.vitals.damage>[0],
+  ): void => {
+    const healthBefore = Effect.runSync(world.vitals.view).healthPoints
+    Effect.runSync(world.vitals.damage(damage))
+    if (Effect.runSync(world.vitals.view).healthPoints < healthBefore) {
+      audio.play('playerHurt')
+    }
+  }
 
   const interactionStatus = (): string => {
     const status = inventoryInteraction.state().status
@@ -1039,7 +1075,10 @@ const boot = async (): Promise<void> => {
 
   const setInventoryOpen = (open: boolean): void => {
     if (open && playerIsDead()) return
+    const previousOpen = inventoryOpen
+    if (previousOpen === open) return
     inventoryOpen = open
+    announceInventoryTransition(audio, previousOpen, open)
     inventoryParent.hidden = !open
     inventoryParent.setAttribute('aria-hidden', String(!open))
     document.body.setAttribute('data-inventory-open', String(open))
@@ -1240,7 +1279,7 @@ const boot = async (): Promise<void> => {
           return gameplaySnapshot()
         },
         damage: () => {
-          Effect.runSync(world.vitals.damage({ amount: 4, cause: 'generic' }))
+          applyPlayerDamage({ amount: 4, cause: 'generic' })
           markSessionDirty()
           renderPlayerUi()
           return gameplaySnapshot()
@@ -1280,7 +1319,7 @@ const boot = async (): Promise<void> => {
         },
         seedLethalZombieEncounter: () => {
           respawnPlayer()
-          Effect.runSync(world.vitals.damage({ amount: 18, cause: 'generic' }))
+          applyPlayerDamage({ amount: 18, cause: 'generic' })
           const currentPose = Effect.runSync(playerApi.pose)
           Effect.runSync(requestMobSpawn(gameplayState, {
             kind: ZOMBIE_KIND,
@@ -1305,7 +1344,7 @@ const boot = async (): Promise<void> => {
           respawnPlayer()
           Effect.runSync(world.inventory.reset)
           Effect.runSync(world.inventory.add('potato', 2))
-          Effect.runSync(world.vitals.damage({ amount: 4, cause: 'generic' }))
+          applyPlayerDamage({ amount: 4, cause: 'generic' })
           Effect.runSync(world.vitals.addExhaustion(36))
           selectedHotbarIndex = 0
           inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
@@ -1378,6 +1417,12 @@ const boot = async (): Promise<void> => {
       namespace: 'persistence',
       commands: { flush: requestFlush },
     },
+    {
+      namespace: 'audio',
+      commands: {
+        snapshot: () => audio.snapshot(Effect.runSync(browserClock.monotonicSecs)),
+      },
+    },
   ])
   if (Either.isLeft(registry)) {
     failBoot('QA registry rejected', describeQaApiError(registry.left))
@@ -1391,7 +1436,14 @@ const boot = async (): Promise<void> => {
   })
   // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
   // Periodic publication persists advancing time and weather without gameplay mutations.
-  window.addEventListener('pagehide', requestBackgroundFlush)
+  window.addEventListener('pagehide', (event) => {
+    requestBackgroundFlush()
+    if (!event.persisted) audio.close()
+  })
+  const hot = (import.meta as ImportMeta & {
+    readonly hot?: { readonly dispose: (handler: () => void) => void }
+  }).hot
+  hot?.dispose(() => audio.close())
 
   // -------------------------------------------------------------------------
   // 6. The frame
@@ -1407,6 +1459,7 @@ const boot = async (): Promise<void> => {
   let framesThisWindow = 0
   let windowStartedAtSecs = readNow()
   let framesTotal = 0
+  let renderedCaptionSignature: string | undefined
 
   document.body.setAttribute('data-mc-compose-boot', 'running')
 
@@ -1648,6 +1701,7 @@ const boot = async (): Promise<void> => {
     const consumedPlacements = Effect.runSync(
       Ref.getAndSet(gameplayState.consumedItems, []),
     )
+    announceConfirmedPlacements(audio, consumedPlacements)
     if (consumedPlacements.some((item) => REDSTONE_PLACEMENT_ITEMS.has(item))) {
       redstoneDirty = true
     }
@@ -1742,7 +1796,7 @@ const boot = async (): Promise<void> => {
 
     const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
     for (const event of playerDamages) {
-      Effect.runSync(world.vitals.damage(event.damage))
+      applyPlayerDamage(event.damage)
     }
     if (playerDamages.length > 0) {
       markSessionDirty()
@@ -1764,6 +1818,19 @@ const boot = async (): Promise<void> => {
 
     Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
     renderPlayerUi()
+    const captions = audio.visible(nowSecs)
+    const nextCaptionSignature = captionRenderSignature(captions)
+    if (nextCaptionSignature !== renderedCaptionSignature) {
+      captionsParent.replaceChildren(...captions.map((caption) => {
+        const row = document.createElement('div')
+        row.className = 'sound-caption'
+        row.dataset['cueId'] = caption.cueId
+        row.setAttribute('data-testid', 'sound-caption')
+        row.textContent = caption.text
+        return row
+      }))
+      renderedCaptionSignature = nextCaptionSignature
+    }
 
     framesTotal += 1
     framesThisWindow += 1

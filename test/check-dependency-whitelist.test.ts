@@ -37,6 +37,7 @@ describe('mc-compose dependency policy', () => {
         // Explicit host-boundary edges cover rendering, persistence, the
         // standalone clock, and deterministic generation without taking rules
         // ownership.
+        '@nerima-games/mc-audio',
         '@nerima-games/mc-render',
         '@nerima-games/mc-save',
         '@nerima-games/mc-sim',
@@ -58,6 +59,7 @@ describe('mc-compose dependency policy', () => {
         (name) => !name.startsWith('@nerima-games/mx-'),
       )
       expect(belowTierThree).toStrictEqual([
+        '@nerima-games/mc-audio',
         '@nerima-games/mc-render',
         '@nerima-games/mc-save',
         '@nerima-games/mc-sim',
@@ -156,6 +158,7 @@ describe('the prime directive, mechanically enforced', () => {
 
   const declaredEverything: DeclaredDependencies = {
     dependencies: new Set([
+      '@nerima-games/mc-audio',
       '@nerima-games/mx-gameplay',
       '@nerima-games/mx-redstone',
       '@nerima-games/mx-ui',
@@ -179,13 +182,15 @@ describe('the prime directive, mechanically enforced', () => {
 
   it.effect('rejects every non-host foundation and library it can reach transitively', () =>
     Effect.sync(() => {
-      for (const reached of [
-        '@nerima-games/mc-physics',
-        '@nerima-games/mc-audio',
-        '@nerima-games/mc-noise',
-      ]) {
+      for (const reached of ['@nerima-games/mc-physics', '@nerima-games/mc-noise']) {
         expect(classifyImport(from(reached), declaredEverything)?.rule).toBe('transitive-import')
       }
+    }),
+  )
+
+  it.effect('allows the host to orchestrate the public audio service', () =>
+    Effect.sync(() => {
+      expect(classifyImport(from('@nerima-games/mc-audio'), declaredEverything)).toBeUndefined()
     }),
   )
 
