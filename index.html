@@ -53,6 +53,92 @@
         outline-offset: -4px;
       }
 
+      #touch-controls {
+        position: fixed;
+        inset: 0;
+        z-index: 35;
+        pointer-events: none;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      #touch-look-surface {
+        position: absolute;
+        inset: 12% 0 18% 42%;
+        pointer-events: auto;
+        touch-action: none;
+      }
+
+      #touch-controls[hidden] {
+        display: none;
+      }
+
+      .touch-control-group {
+        position: absolute;
+        z-index: 1;
+        display: grid;
+        gap: 8px;
+        pointer-events: none;
+      }
+
+      .touch-control {
+        width: 58px;
+        min-height: 54px;
+        border: 2px solid rgba(255, 255, 255, 0.72);
+        border-radius: 10px;
+        background: rgba(20, 24, 18, 0.66);
+        color: #fff;
+        font: 700 12px/1 monospace;
+        text-shadow: 0 1px 2px #000;
+        box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+        pointer-events: auto;
+        touch-action: none;
+      }
+
+      .touch-control:active {
+        background: rgba(180, 196, 146, 0.72);
+        color: #10140e;
+        text-shadow: none;
+      }
+
+      .touch-movement {
+        left: max(18px, env(safe-area-inset-left));
+        bottom: max(18px, env(safe-area-inset-bottom));
+        grid-template-columns: repeat(3, 58px);
+        grid-template-areas:
+          ". forward ."
+          "left backward right";
+      }
+
+      [data-touch-action="moveForward"] { grid-area: forward; }
+      [data-touch-action="moveBackward"] { grid-area: backward; }
+      [data-touch-action="moveLeft"] { grid-area: left; }
+      [data-touch-action="moveRight"] { grid-area: right; }
+
+      .touch-actions {
+        right: max(18px, env(safe-area-inset-right));
+        bottom: max(18px, env(safe-area-inset-bottom));
+        grid-template-columns: repeat(2, 64px);
+      }
+
+      .touch-actions .touch-control {
+        width: 64px;
+      }
+
+      .touch-menu-actions {
+        top: max(14px, env(safe-area-inset-top));
+        left: max(14px, env(safe-area-inset-left));
+        grid-template-columns: repeat(2, auto);
+      }
+
+      .touch-menu-actions .touch-control {
+        width: auto;
+        min-width: 68px;
+        min-height: 42px;
+        padding: 0 12px;
+      }
+
       /* The HUD and the crosshair are appended here by mx-ui. Positioned rather
          than laid out: mx-ui owns what goes inside, the host owns where it sits. */
       #hud-root {
@@ -282,6 +368,27 @@
       }
 
       @media (max-width: 700px) {
+        .touch-control-group {
+          gap: 6px;
+        }
+
+        .touch-movement {
+          grid-template-columns: repeat(3, 52px);
+        }
+
+        .touch-control {
+          width: 52px;
+          min-height: 50px;
+        }
+
+        .touch-actions {
+          grid-template-columns: repeat(2, 58px);
+        }
+
+        .touch-actions .touch-control {
+          width: 58px;
+        }
+
         #settings-root {
           padding: 0;
         }
@@ -309,6 +416,24 @@
            docs/e2e-triage.md #1 pass without mc-render drawing anything. It is
            also the pointer-lock target and the element a click can land on. -->
       <canvas id="game-canvas" tabindex="0" aria-label="Minecraft game world"></canvas>
+      <div id="touch-controls" data-testid="touch-controls" hidden inert>
+        <div id="touch-look-surface" data-testid="touch-look-surface" aria-hidden="true"></div>
+        <div class="touch-control-group touch-movement" aria-label="Movement controls">
+          <button class="touch-control" type="button" data-touch-action="moveForward" aria-label="Move forward">FWD</button>
+          <button class="touch-control" type="button" data-touch-action="moveLeft" aria-label="Move left">LEFT</button>
+          <button class="touch-control" type="button" data-touch-action="moveBackward" aria-label="Move backward">BACK</button>
+          <button class="touch-control" type="button" data-touch-action="moveRight" aria-label="Move right">RIGHT</button>
+        </div>
+        <div class="touch-control-group touch-actions" aria-label="Game actions">
+          <button class="touch-control" type="button" data-touch-action="jump">JUMP</button>
+          <button class="touch-control" type="button" data-touch-action="attack">ATTACK</button>
+          <button class="touch-control" type="button" data-touch-action="use">USE</button>
+          <button class="touch-control" type="button" data-touch-action="openInventory" aria-label="Open inventory">INV</button>
+        </div>
+        <div class="touch-control-group touch-menu-actions" aria-label="Session controls">
+          <button class="touch-control" type="button" data-touch-action="escape" aria-label="Pause game">PAUSE</button>
+        </div>
+      </div>
       <div id="hud-root"></div>
       <div id="inventory-root" hidden></div>
       <div

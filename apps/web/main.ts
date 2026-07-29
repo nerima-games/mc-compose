@@ -196,6 +196,16 @@ import {
 } from './settings'
 import { createSettingsView } from './settings-view'
 import {
+  advanceTouchLook,
+  consumeTouchLook,
+  createTouchControlRoster,
+  resetTouchLook,
+  TOUCH_CONTROL_ACTIONS,
+  TOUCH_LOOK_CONTROLLER_IDLE,
+  touchControlsPresentation,
+  type TouchControlAction,
+} from './touch-input'
+import {
   listSessions,
   loadSession,
   makeSessionChunkSource,
@@ -496,10 +506,56 @@ const bootGame = async (
   const hudParent = requireElement('hud-root')
   const captionsParent = requireElement('sound-captions')
   const inventoryParent = requireElement('inventory-root')
+  const touchControlsParent = requireElement('touch-controls')
+  const touchLookSurface = requireElement('touch-look-surface')
   const fpsValue = requireElement('fps-value')
   const stageList = requireElement('stage-order')
   let inventoryOpen = false
   let paused = false
+
+  const touchControlTargets = Object.fromEntries(TOUCH_CONTROL_ACTIONS.map((action) => {
+    const target = gameShell.querySelector<HTMLElement>(`[data-touch-action="${action}"]`)
+    if (target === null) throw new Error(`Missing touch control: ${action}`)
+    return [action, target]
+  })) as Record<TouchControlAction, HTMLElement>
+  const touchControls = createTouchControlRoster(touchControlTargets)
+  const touchAvailable = 'ontouchstart' in window || navigator.maxTouchPoints > 0
+  let touchLookState = TOUCH_LOOK_CONTROLLER_IDLE
+
+  const contactFrom = (touch: Touch) => ({
+    identifier: touch.identifier,
+    clientX: touch.clientX,
+    clientY: touch.clientY,
+  })
+  const matchingLookContact = (event: TouchEvent): Touch | undefined =>
+    Array.from(event.changedTouches).find(
+      (touch) => touch.identifier === touchLookState.activeIdentifier,
+    )
+
+  touchLookSurface.addEventListener('touchstart', (event) => {
+    const touch = event.changedTouches.item(0)
+    if (touch === null) return
+    event.preventDefault()
+    touchLookState = advanceTouchLook(touchLookState, 'start', contactFrom(touch))
+  }, { passive: false })
+  touchLookSurface.addEventListener('touchmove', (event) => {
+    const touch = matchingLookContact(event)
+    if (touch === undefined) return
+    event.preventDefault()
+    touchLookState = advanceTouchLook(touchLookState, 'move', contactFrom(touch))
+  }, { passive: false })
+  touchLookSurface.addEventListener('touchend', (event) => {
+    const touch = matchingLookContact(event)
+    if (touch === undefined) return
+    event.preventDefault()
+    touchLookState = advanceTouchLook(touchLookState, 'end', contactFrom(touch))
+  }, { passive: false })
+  touchLookSurface.addEventListener('touchcancel', (event) => {
+    const touch = matchingLookContact(event)
+    if (touch === undefined) return
+    event.preventDefault()
+    touchLookState = advanceTouchLook(touchLookState, 'cancel', contactFrom(touch))
+  }, { passive: false })
 
   // -------------------------------------------------------------------------
   // 1. Platform adapters
@@ -550,6 +606,7 @@ const bootGame = async (
     canvas,
     bindings: playerSettings.bindings,
     allowsPointerLock: () => !inventoryOpen && !paused,
+    touchControls,
   })
 
   // The gesture the browser requires: pointer lock can only be requested from a
@@ -1199,6 +1256,28 @@ const bootGame = async (
     onInventoryChanged: () => markSessionDirty(),
   })
   const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
+  let touchControlsVisible = false
+  const resetTouchInput = (
+    reason: Parameters<typeof resetTouchLook>[1],
+  ): void => {
+    touchLookState = resetTouchLook(touchLookState, reason)
+    Effect.runSync(inputApi.clearHeld)
+  }
+  const syncTouchControls = (): void => {
+    const presentation = touchControlsPresentation({
+      touchAvailable,
+      playing: true,
+      dead: playerIsDead(),
+      inventoryOpen,
+      paused,
+    })
+    const wasVisible = touchControlsVisible
+    touchControlsVisible = presentation.visible
+    touchControlsParent.hidden = !presentation.visible
+    touchControlsParent.inert = presentation.inert
+    touchControlsParent.setAttribute('aria-hidden', String(!presentation.visible))
+    if (wasVisible && !presentation.visible) resetTouchInput('state-transition')
+  }
   const applyPlayerDamage = (
     damage: Parameters<typeof world.vitals.damage>[0],
   ): void => {
@@ -1208,6 +1287,7 @@ const bootGame = async (
       audio.play('playerHurt')
     }
     if (playerIsDead()) resetSimState(false)
+    syncTouchControls()
   }
 
   const interactionStatus = (): string => {
@@ -1348,6 +1428,7 @@ const bootGame = async (
       Effect.runSync(inventoryInteraction.close())
     }
     renderPlayerUi()
+    syncTouchControls()
     if (open) window.requestAnimationFrame(focusRenderedTarget)
     if (open && document.pointerLockElement === canvas) {
       document.exitPointerLock()
@@ -1367,6 +1448,7 @@ const bootGame = async (
     alignActiveDimension(initialSpawnDimension)
     resetSimState(true)
     setInventoryOpen(false)
+    syncTouchControls()
     markSessionDirty()
   }
 
@@ -1378,6 +1460,7 @@ const bootGame = async (
   })
 
   renderPlayerUi()
+  syncTouchControls()
 
   // -------------------------------------------------------------------------
   // 4a. Durable session publication
@@ -1450,6 +1533,7 @@ const bootGame = async (
     gameShell.inert = next
     pauseOverlay.hidden = !next
     document.body.setAttribute('data-session-paused', String(next))
+    syncTouchControls()
     if (next) {
       if (document.pointerLockElement === canvas) document.exitPointerLock()
       resumeButton.focus()
@@ -1799,8 +1883,12 @@ const bootGame = async (
 
   window.setInterval(requestBackgroundFlush, AUTOSAVE_INTERVAL_MS)
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') requestBackgroundFlush()
+    if (document.visibilityState === 'hidden') {
+      resetTouchInput('visibility-hidden')
+      requestBackgroundFlush()
+    }
   })
+  window.addEventListener('blur', () => resetTouchInput('blur'))
   // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
   // Periodic publication persists advancing time and weather without gameplay mutations.
   window.addEventListener('pagehide', (event) => {
@@ -1839,6 +1927,8 @@ const bootGame = async (
   const tick = (): void => {
     const nowSecs = readNow()
     const frameInput = Effect.runSync(inputApi.snapshot)
+    const consumedTouchLook = consumeTouchLook(touchLookState)
+    touchLookState = consumedTouchLook.state
     if (frameInput.justPressed.has(ESCAPE_KEY_CODE)) {
       handlePauseRequest()
       Effect.runSync(inputApi.endFrame(frameInput))
@@ -1871,6 +1961,7 @@ const bootGame = async (
     if (foodOutcome.signal !== 'none') markSessionDirty()
 
     const dead = playerIsDead()
+    syncTouchControls()
     if (dead) {
       if (inventoryOpen) setInventoryOpen(false)
       if (document.pointerLockElement === canvas) document.exitPointerLock()
@@ -1896,12 +1987,15 @@ const bootGame = async (
       !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
     const useTriggered =
       !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))
-    const looked =
-      !dead && !inventoryOpen && (walk.pointerDelta.x !== 0 || walk.pointerDelta.y !== 0)
+    const lookDelta = {
+      x: walk.pointerDelta.x + consumedTouchLook.delta.x,
+      y: walk.pointerDelta.y + consumedTouchLook.delta.y,
+    }
+    const looked = !dead && !inventoryOpen && (lookDelta.x !== 0 || lookDelta.y !== 0)
     if (!dead && !inventoryOpen) {
       Effect.runSync(playerApi.look(
-        -walk.pointerDelta.x * LOOK_SENSITIVITY * playerSettings.sensitivity,
-        -walk.pointerDelta.y * LOOK_SENSITIVITY * playerSettings.sensitivity,
+        -lookDelta.x * LOOK_SENSITIVITY * playerSettings.sensitivity,
+        -lookDelta.y * LOOK_SENSITIVITY * playerSettings.sensitivity,
       ))
     }
     const poseBeforeFrame = Effect.runSync(playerApi.pose)
@@ -1941,6 +2035,7 @@ const bootGame = async (
       }
     }
     const deadAfterFrame = playerIsDead()
+    syncTouchControls()
 
     let postFramePose = Effect.runSync(playerApi.pose)
     let dimensionAfterFrame = Effect.runSync(playerApi.dimension)
