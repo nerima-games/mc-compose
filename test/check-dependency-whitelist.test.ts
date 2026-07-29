@@ -30,7 +30,7 @@ const graph = (entries: ReadonlyArray<readonly [string, ReadonlyArray<string>]>)
   new Map(entries.map(([node, targets]) => [node, new Set(targets)]))
 
 describe('mc-compose dependency policy', () => {
-  it.effect('depends on the four experience modules plus mc-render — and on no other foundation', () =>
+  it.effect('depends on the experience modules plus the explicit host-boundary packages', () =>
     Effect.sync(() => {
       expect(REPOSITORY_POLICY.thisPackage).toBe('@nerima-games/mc-compose')
       expect([...allowedDirectDependencies()].sort()).toStrictEqual([
@@ -39,6 +39,8 @@ describe('mc-compose dependency policy', () => {
         // post-fx stages and nothing else in the roster could reach it.
         // See docs/architecture.md §5.
         '@nerima-games/mc-render',
+        '@nerima-games/mc-save',
+        '@nerima-games/mc-worldgen',
         '@nerima-games/mx-gameplay',
         '@nerima-games/mx-multiplayer',
         '@nerima-games/mx-redstone',
@@ -47,16 +49,19 @@ describe('mc-compose dependency policy', () => {
     }),
   )
 
-  // REGRESSION: the mc-render edge must stay the ONLY tier-2 edge. It is the
-  // one exception the spike endorsed, and the argument for it — "registering
-  // another module's stages is wiring, not a rule" — does not generalise to
-  // mc-sim, mc-worldgen or anything else with state in it.
-  it.effect('adds mc-render and nothing else below tier 3', () =>
+  // REGRESSION: direct foundation access remains limited to renderer wiring
+  // and session persistence orchestration. It does not generalise to mc-sim or
+  // to the libraries behind these public APIs.
+  it.effect('limits foundation imports to the host-boundary packages', () =>
     Effect.sync(() => {
       const belowTierThree = [...allowedDirectDependencies()].filter(
         (name) => !name.startsWith('@nerima-games/mx-'),
       )
-      expect(belowTierThree).toStrictEqual(['@nerima-games/mc-render'])
+      expect(belowTierThree).toStrictEqual([
+        '@nerima-games/mc-render',
+        '@nerima-games/mc-save',
+        '@nerima-games/mc-worldgen',
+      ])
     }),
   )
 
@@ -157,6 +162,7 @@ describe('the prime directive, mechanically enforced', () => {
       '@nerima-games/mc-sim',
       '@nerima-games/mc-worldgen',
       '@nerima-games/mc-render',
+      '@nerima-games/mc-save',
     ]),
     devDependencies: new Set<string>(),
   }
@@ -175,17 +181,22 @@ describe('the prime directive, mechanically enforced', () => {
     }),
   )
 
-  it.effect('rejects every foundation and library it can reach transitively', () =>
+  it.effect('rejects every non-host foundation and library it can reach transitively', () =>
     Effect.sync(() => {
       for (const reached of [
-        '@nerima-games/mc-worldgen',
         '@nerima-games/mc-physics',
-        '@nerima-games/mc-save',
         '@nerima-games/mc-audio',
         '@nerima-games/mc-noise',
       ]) {
         expect(classifyImport(from(reached), declaredEverything)?.rule).toBe('transitive-import')
       }
+    }),
+  )
+
+  it.effect('allows the host to orchestrate save storage and deterministic regeneration', () =>
+    Effect.sync(() => {
+      expect(classifyImport(from('@nerima-games/mc-save'), declaredEverything)).toBeUndefined()
+      expect(classifyImport(from('@nerima-games/mc-worldgen'), declaredEverything)).toBeUndefined()
     }),
   )
 

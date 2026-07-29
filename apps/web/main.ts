@@ -84,6 +84,13 @@
  */
 import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Scope } from 'effect'
+import { indexedDbStorageLayer } from '@nerima-games/mc-save'
+import {
+  chunkCoord,
+  chunkSnapshotOf,
+  generatedChunkSource,
+  type Chunk,
+} from '@nerima-games/mc-worldgen'
 import {
   browserInputLayer,
   InputService,
@@ -130,6 +137,14 @@ import { DeltaTimeSecs } from '../../domain/kernel-vocabulary'
 import { buildQaRegistry, describeQaApiError, installQaApi } from '../../domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
+import { createSessionSaveCoordinator } from './session-save-coordinator'
+import {
+  loadSession,
+  makeSessionChunkSource,
+  saveSession,
+  snapshotResidentChunks,
+  type SessionState,
+} from './session-persistence'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -167,6 +182,16 @@ const WALK_SPEED_M_PER_S = 4.3
 const JUMP_SPEED_M_PER_S = 8.4
 const LOOK_SENSITIVITY = 0.0022
 const WORLD_SEED = 20260728
+const SESSION_ID = 'primary'
+const DATABASE_NAME = 'nerima-games-minecraft'
+const AUTOSAVE_INTERVAL_MS = 5_000
+const SAVE_DEBOUNCE_MS = 500
+const KNOWN_TARGET_BLOCK = { x: 8, y: 63, z: 8 } as const
+const QA_POSE = {
+  feetPosition: { x: 8.5, y: 64.5, z: 8.5 },
+  yawRadians: 0,
+  pitchRadians: -Math.PI / 2 + 0.01,
+} as const
 
 const requireElement = (id: string): HTMLElement => {
   const element = document.getElementById(id)
@@ -225,6 +250,19 @@ const boot = async (): Promise<void> => {
   // is `Layer.scoped` and removes its listeners when the scope closes; closing
   // it here would install the listeners and immediately take them away.
   const scope = Effect.runSync(Scope.make())
+
+  const storageContext = await Effect.runPromise(
+    Effect.provideService(
+      Layer.build(indexedDbStorageLayer({ factory: indexedDB, databaseName: DATABASE_NAME })),
+      Scope.Scope,
+      scope,
+    ),
+  )
+  const runStorage = <A, E>(effect: Effect.Effect<A, E, never>): Promise<A> =>
+    Effect.runPromise(effect)
+  const loadedSession = await runStorage(
+    Effect.provide(loadSession(SESSION_ID), storageContext),
+  )
 
   // POINTER LOCK IS THE HOST'S TO ASK FOR. mc-render's `InputService` treats a
   // click as a GAME action only while the pointer is locked, and as a UI click
@@ -318,14 +356,76 @@ const boot = async (): Promise<void> => {
   // ONE CONSTRUCTION. The gameplay adapter and the renderer-facing worldgen
   // store returned here wrap the same store instance, so a mined block cannot
   // disappear from collision while remaining visible (or vice versa).
-  const world = await Effect.runPromise(
-    makeGeneratedWorld<MobBehaviour>({ seed: WORLD_SEED }),
+  let activeSeed = WORLD_SEED
+  let initialKnownChunks: ReadonlyArray<Chunk> = []
+
+  const generatedSource = generatedChunkSource(
+    Option.isSome(loadedSession) ? loadedSession.value.state.seed : WORLD_SEED,
   )
+  const restored = Option.isSome(loadedSession)
+    ? await runStorage(
+        Effect.provide(
+          makeSessionChunkSource(loadedSession.value, generatedSource),
+          storageContext,
+        ),
+      )
+    : undefined
+  if (Option.isSome(loadedSession)) {
+    activeSeed = loadedSession.value.state.seed
+    initialKnownChunks = (restored?.chunks ?? []).map(chunkSnapshotOf)
+  }
+
+  const world = await Effect.runPromise(
+    makeGeneratedWorld<MobBehaviour>({
+      seed: activeSeed,
+      ...(restored === undefined ? {} : { chunkSource: restored.source }),
+      ...(Option.isSome(loadedSession)
+        ? {
+            dimension: loadedSession.value.state.dimension,
+            inventory: loadedSession.value.state.inventory.slots as never,
+          }
+        : {}),
+    }),
+  )
+  if (Option.isSome(loadedSession)) {
+    await Effect.runPromise(
+      world.player.restore(loadedSession.value.state.player, loadedSession.value.state.dimension),
+    )
+  }
+
+  const reportPersistenceFailure = (error: unknown): void => {
+    document.body.setAttribute('data-session-persistence', 'failed')
+    console.error('[mc-compose] session persistence failed', error)
+  }
+  const saveCoordinator = createSessionSaveCoordinator<SessionState>({
+    initialKnownChunks,
+    snapshotResidents: () => Effect.runPromise(snapshotResidentChunks(world.worldgenChunkStore)),
+    snapshotState: () => ({
+      seed: activeSeed,
+      dimension: Effect.runSync(world.player.dimension),
+      player: Effect.runSync(world.player.pose),
+      inventory: Effect.runSync(world.inventory.snapshot),
+    }),
+    publish: ({ state, chunks }) =>
+      runStorage(
+        Effect.provide(
+          saveSession({
+            sessionId: SESSION_ID,
+            revision: crypto.randomUUID(),
+            state,
+            chunks,
+          }),
+          storageContext,
+        ),
+      ).then(() => undefined),
+    onFailure: reportPersistenceFailure,
+  })
+  let markSessionDirty = (): void => {}
   const spawnPose = await Effect.runPromise(world.player.pose)
   const dirtyChunks = await Effect.runPromise(world.worldgenChunkStore.subscribeDirty)
   const meshChunkFromStore = makeChunkStoreMesher(world.worldgenChunkStore)
-  canvas.setAttribute('data-world-source', 'generated')
-  canvas.setAttribute('data-world-seed', String(WORLD_SEED))
+  canvas.setAttribute('data-world-source', restored === undefined ? 'generated' : 'persisted')
+  canvas.setAttribute('data-world-seed', String(activeSeed))
 
   // STREAMING, keyed to where the player is — not a one-shot load at boot.
   //
@@ -370,6 +470,11 @@ const boot = async (): Promise<void> => {
         streamLoaded.add(chunkKeyOf(chunk))
       }
       for (const chunk of removed) {
+        const snapshot = yield* world.worldgenChunkStore.snapshot(chunkCoord(chunk.cx, chunk.cz))
+        if (snapshot !== undefined) {
+          saveCoordinator.retainChunk(snapshot)
+          markSessionDirty()
+        }
         yield* world.chunkStore.unload(chunk)
         streamLoaded.delete(chunkKeyOf(chunk))
       }
@@ -597,20 +702,104 @@ const boot = async (): Promise<void> => {
   renderPlayerUi(initialInventory)
 
   // -------------------------------------------------------------------------
+  // 4a. Durable session publication
+  // -------------------------------------------------------------------------
+
+  let dirtyGeneration = 0
+  let savedGeneration = 0
+  let debounceTimer: number | undefined
+
+  const requestFlush = (): Promise<void> => {
+    const requestedGeneration = dirtyGeneration
+    return saveCoordinator.requestSave().then(() => {
+      savedGeneration = Math.max(savedGeneration, requestedGeneration)
+      if (savedGeneration === dirtyGeneration) {
+        document.body.setAttribute('data-session-persistence', 'saved')
+      }
+    })
+  }
+
+  const requestBackgroundFlush = (): void => {
+    void requestFlush().catch(() => {
+      // The coordinator already made the failure visible; background callers consume it.
+    })
+  }
+
+  const flushDirty = (): void => {
+    if (dirtyGeneration !== savedGeneration) requestBackgroundFlush()
+  }
+
+  markSessionDirty = () => {
+    dirtyGeneration += 1
+    document.body.setAttribute('data-session-persistence', 'dirty')
+    if (debounceTimer !== undefined) window.clearTimeout(debounceTimer)
+    debounceTimer = window.setTimeout(flushDirty, SAVE_DEBOUNCE_MS)
+  }
+
+  // -------------------------------------------------------------------------
   // 5. QA surface
   // -------------------------------------------------------------------------
 
-  // EMPTY, and that is the honest state. `domain/qa-api.ts`: "compose does not
-  // author commands" — a namespace belongs to the module that owns the state it
-  // exposes, and no composed module contributes one yet. Publishing the empty
-  // registry still proves the install path ran, which is a boot milestone the
-  // smoke tests can read.
-  const registry = buildQaRegistry([])
+  const gameplaySnapshot = () => {
+    const reading = Effect.runSync(world.chunkStore.getBlock(KNOWN_TARGET_BLOCK))
+    const inventory = Effect.runSync(world.inventory.snapshot)
+    return {
+      pose: Effect.runSync(playerApi.pose),
+      dimension: Effect.runSync(playerApi.dimension),
+      inventory: {
+        slots: inventory.slots.map((slot) => slot ?? null),
+      },
+      target: {
+        position: KNOWN_TARGET_BLOCK,
+        reading: reading._tag,
+        block: reading._tag === 'Block' ? reading.block : null,
+      },
+      persistence: {
+        knownChunks: saveCoordinator.knownChunkCount(),
+        retainedChunks: saveCoordinator.retainedChunkCount(),
+      },
+    }
+  }
+
+  const registry = buildQaRegistry([
+    {
+      namespace: 'gameplay',
+      commands: {
+        snapshot: gameplaySnapshot,
+        setPose: () => {
+          Effect.runSync(playerApi.restore(QA_POSE, Effect.runSync(playerApi.dimension)))
+          playerVelocityY = 0
+          grounded = false
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
+        breakTarget: () => {
+          const target = Effect.runSync(
+            requestTargetedBlockBreak(gameplayState, world.chunkStore, playerApi),
+          )
+          if (Option.isSome(target)) markSessionDirty()
+          return Option.isSome(target) ? target.value : null
+        },
+      },
+    },
+    {
+      namespace: 'persistence',
+      commands: { flush: requestFlush },
+    },
+  ])
   if (Either.isLeft(registry)) {
     failBoot('QA registry rejected', describeQaApiError(registry.left))
     return
   }
   installQaApi(globalThis as unknown as Record<string, unknown>, registry.right)
+
+  window.setInterval(flushDirty, AUTOSAVE_INTERVAL_MS)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') requestBackgroundFlush()
+  })
+  // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
+  // The debounced dirty path above is the primary durability mechanism.
+  window.addEventListener('pagehide', flushDirty)
 
   // -------------------------------------------------------------------------
   // 6. The frame
@@ -667,6 +856,8 @@ const boot = async (): Promise<void> => {
     const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
       !inventoryOpen && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
 
+    const looked =
+      !inventoryOpen && (walk.pointerDelta.x !== 0 || walk.pointerDelta.y !== 0)
     if (!inventoryOpen) {
       Effect.runSync(playerApi.look(-walk.pointerDelta.x * LOOK_SENSITIVITY, -walk.pointerDelta.y * LOOK_SENSITIVITY))
     }
@@ -703,7 +894,12 @@ const boot = async (): Promise<void> => {
       y: resolved.body.centre.y - PLAYER_HALF_HEIGHT,
       z: resolved.body.centre.z,
     }
+    const moved =
+      resolvedFeet.x !== pose.feetPosition.x ||
+      resolvedFeet.y !== pose.feetPosition.y ||
+      resolvedFeet.z !== pose.feetPosition.z
     Effect.runSync(playerApi.moveTo(resolvedFeet))
+    if (looked || moved) markSessionDirty()
 
     // The gameplay boundary owns both reach and DDA targeting. Compose only
     // translates the input action, preserving its dependency direction.
@@ -712,6 +908,7 @@ const boot = async (): Promise<void> => {
       if (Option.isSome(target)) {
         breaksRequested += 1
         canvas.setAttribute('data-breaks-requested', String(breaksRequested))
+        markSessionDirty()
       }
     }
 
@@ -733,6 +930,7 @@ const boot = async (): Promise<void> => {
           if (Option.isSome(target)) {
             placementsRequested += 1
             canvas.setAttribute('data-placements-requested', String(placementsRequested))
+            markSessionDirty()
           }
         },
       )

@@ -4,14 +4,12 @@
  * PRE-AUDIT FIRST CUT (叩き台).
  *
  * ---------------------------------------------------------------------------
- * How the unpublished siblings are resolved, and what it costs
+ * How sibling source checkouts are resolved, and what it costs
  * ---------------------------------------------------------------------------
  *
- * plan.md §6 Step 3 publishes bottom-up and NOTHING is published yet, so
- * `node_modules` holds no `@nerima-games/*` and never will until it is. The
- * entry point still has to import the real modules — composing four fakes and
- * calling the result an E2E suite is the "green lamp with nothing behind it"
- * that docs/testing.md §3.4 rejects by name.
+ * Published runtime packages are pinned in package.json. The browser app still
+ * resolves sibling source checkouts so local integration exercises the same
+ * working copies as the rest of the roster rather than stale installed builds.
  *
  * So the siblings are resolved from CHECKOUTS ON DISK, by alias, using the
  * SAME search order `pnpm check:roster` already uses (docs/testing.md §3.5):
@@ -24,18 +22,8 @@
  * two checkouts of the same repository do drift, and a failure that names only
  * line numbers is usually a stale checkout rather than a real defect.
  *
- * WHAT THIS DELIBERATELY DOES NOT DO: add `@nerima-games/*` to package.json.
- * `mc-dev-meta/scripts/check-repoint.ts` states the organisation-wide reason in
- * its own header — each of the sixteen repositories also builds standalone in
- * its own CI, where a `workspace:*` specifier does not resolve, so "no
- * downstream package.json on disk may ever gain a sibling before it is
- * published". A dependency declared here would break `pnpm install` in
- * mc-compose's own CI, which is a strictly worse failure than a dev server that
- * needs a sibling checkout.
- *
- * The cost of that choice is stated in docs/testing.md §3.7: `pnpm check:deps`
- * has no way to see an import it is not allowed to have declared. See that
- * section — the gate was NOT weakened to make this pass.
+ * The alias table does not replace package declarations: shipped imports remain
+ * subject to the dependency whitelist and manifest checks.
  */
 import { existsSync } from 'node:fs'
 import path from 'node:path'
@@ -56,12 +44,8 @@ const here = path.dirname(fileURLToPath(import.meta.url))
  * be an import that resolves in the browser and fails the gate, or the reverse.
  * So there is one list, it lives with the gate, and this derives from it.
  *
- * THREE, not six, and the omissions are the finding rather than an oversight:
- * `mx-gameplay` needs `ChunkStore | EntityManager | InventoryService` and
- * `mx-multiplayer` needs `TransportPort`, and the only implementations of any
- * of them in the organisation live in `mx-gameplay/test/support/` — test
- * doubles, not exported from any package's public API. docs/e2e-triage.md §4.3
- * reached the same wall from the other side.
+ * The set includes the host-boundary persistence packages because the browser
+ * session imports their public storage and regeneration APIs directly.
  */
 export const COMPOSED_SIBLINGS: ReadonlyArray<string> = [
   ...REPOSITORY_POLICY.devServerResolved,

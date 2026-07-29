@@ -265,7 +265,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
    * Asserting emptiness is what makes the first real namespace show up here as
    * a deliberate change rather than as drift.
    */
-  test('#4b the QA surface is installed, and is empty', async ({ page }) => {
+  test('#4b the QA surface publishes the host persistence contract', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
@@ -277,7 +277,12 @@ test.describe('smoke — the composed frame in a real browser', () => {
       QA_GLOBAL_KEY,
     )
 
-    expect(surface).toEqual([])
+    expect(surface?.sort()).toEqual([
+      'gameplay.breakTarget',
+      'gameplay.setPose',
+      'gameplay.snapshot',
+      'persistence.flush',
+    ])
   })
 
   /**

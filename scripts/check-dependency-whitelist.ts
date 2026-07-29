@@ -99,10 +99,10 @@ import { fileURLToPath } from 'node:url'
  * most here.
  *
  * compose may import the four experience modules (mx-gameplay, mx-redstone,
- * mx-ui, mx-multiplayer), plus mc-render, plus mc-kernel. It may NOT import
- * mc-sim, mc-worldgen, mc-physics, mc-save, mc-audio, mc-noise or mc-meshing,
- * even though it depends on all of them transitively and even though
- * `pnpm install` will physically place them in node_modules.
+ * mx-ui, mx-multiplayer), plus the host-boundary packages mc-render, mc-save
+ * and mc-worldgen, plus mc-kernel. It may NOT import mc-sim, mc-physics,
+ * mc-audio, mc-noise or mc-meshing, even though it depends on all of them
+ * transitively and even though `pnpm install` may place them in node_modules.
  *
  * This is the mechanical half of the repository's prime directive. The
  * reference implementation accumulated 20,737 production LOC in
@@ -131,9 +131,10 @@ import { fileURLToPath } from 'node:url'
  * ones — a different message, the same hard failure. `test/check-dependency-
  * whitelist.test.ts` pins exactly that: mc-render reachable, mc-meshing not.
  *
- * NOTE: none of the five are declared in package.json yet. Nothing in the
- * 16-repo roster has been published (bottom-up publish-then-pin, plan.md §6
- * Step 3), so this skeleton declares only `effect`.
+ * mc-save and mc-worldgen are narrow host-boundary exceptions: compose owns
+ * session persistence orchestration, while those packages continue to own the
+ * save format and deterministic terrain rules. The direct edges license only
+ * those public APIs; rule 3 still blocks their transitive dependencies.
  * ---------------------------------------------------------------------------
  */
 export const REPOSITORY_POLICY = {
@@ -209,6 +210,11 @@ export const REPOSITORY_POLICY = {
         // compose from reaching mc-meshing or mc-sim behind it.
         // See mc-compose/docs/architecture.md §5.
         '@nerima-games/mc-render',
+        // The host owns session persistence orchestration. mc-save owns the
+        // storage contract and mc-worldgen owns deterministic regeneration;
+        // importing those APIs here is wiring, not a game rule.
+        '@nerima-games/mc-save',
+        '@nerima-games/mc-worldgen',
       ]),
     ],
 
@@ -276,14 +282,16 @@ export const REPOSITORY_POLICY = {
   devServerResolved: new Set<string>([
     // Resolved by `vite.config.ts`'s alias table, from a sibling checkout.
     '@nerima-games/mc-render',
+    '@nerima-games/mc-save',
+    '@nerima-games/mc-worldgen',
     '@nerima-games/mx-ui',
     '@nerima-games/mx-redstone',
     // Added when mx-gameplay published complete in-memory implementations of
     // the four services `gameplayModule` requires. It is ALREADY a declared
     // edge above — one of the four experience modules compose may import — so
     // this changes nothing about rule 3, only about what the dev server can
-    // resolve before publish. Contrast mc-worldgen and mc-meshing, which rule 3
-    // forbids outright and which are deliberately still absent.
+    // resolve before publish. mc-meshing remains transitively reachable only
+    // and is deliberately absent.
     '@nerima-games/mx-gameplay',
   ]),
 } as const
