@@ -26,6 +26,7 @@
     "paths": {
       "@nerima-games/mc-render": ["../mc-render/index.ts"],
       "@nerima-games/mc-save": ["../mc-save/index.ts"],
+      "@nerima-games/mc-sim": ["../mc-sim/index.ts"],
       "@nerima-games/mc-worldgen": ["../mc-worldgen/index.ts"],
       "@nerima-games/mx-ui": ["../mx-ui/index.ts"],
       "@nerima-games/mx-redstone": ["../mx-redstone/index.ts"],

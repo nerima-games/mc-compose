@@ -127,6 +127,7 @@ import {
   isPlaceableItem,
   requestBowShot,
   requestMobSpawn,
+  resolveFoodUse,
   requestTargetedBlockBreak,
   requestTargetedBlockPlacement,
   requestTargetedPrimaryAttack,
@@ -1013,6 +1014,19 @@ const boot = async (): Promise<void> => {
           markSessionDirty()
           return gameplaySnapshot()
         },
+        seedFoodUseEncounter: () => {
+          respawnPlayer()
+          Effect.runSync(world.inventory.reset)
+          Effect.runSync(world.inventory.add('potato', 2))
+          Effect.runSync(world.vitals.damage({ amount: 4, cause: 'generic' }))
+          Effect.runSync(world.vitals.addExhaustion(36))
+          selectedHotbarIndex = 0
+          inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+          inventoryInteraction.reset()
+          markSessionDirty()
+          renderPlayerUi(Effect.runSync(world.inventory.snapshot))
+          return gameplaySnapshot()
+        },
         seedMeleeDropEncounter: () => {
           respawnPlayer()
           Effect.runSync(world.inventory.reset)
@@ -1224,26 +1238,50 @@ const boot = async (): Promise<void> => {
 
     if (!dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))) {
       const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
-      requestPlacementFromSelectedSlot(
-        inventoryBeforeUse.slots,
-        selectedHotbarIndex,
-        isPlaceableItem,
-        (heldItem) => {
-          const target = Effect.runSync(
-            requestTargetedBlockPlacement(
-              gameplayState,
-              world.chunkStore,
-              playerApi,
-              heldItem,
-            ),
+      const selected = inventoryBeforeUse.slots[selectedHotbarIndex]
+      let shouldAttemptPlacement = selected === undefined
+
+      if (selected !== undefined) {
+        const foodUse = resolveFoodUse({
+            held: selected.item,
+            vitals: Effect.runSync(world.vitals.snapshot),
+          })
+
+        if (foodUse._tag === 'consume') {
+          const removal = Effect.runSync(
+            world.inventory.removeAt(selectedHotbarIndex, selected.item, foodUse.count),
           )
-          if (Option.isSome(target)) {
-            placementsRequested += 1
-            canvas.setAttribute('data-placements-requested', String(placementsRequested))
+          if (removal._tag === 'Removed') {
+            Effect.runSync(world.vitals.eat(foodUse.foodPoints, foodUse.saturationModifier))
             markSessionDirty()
           }
-        },
-      )
+        } else if (foodUse._tag !== 'dead') {
+          shouldAttemptPlacement = true
+        }
+      }
+
+      if (shouldAttemptPlacement) {
+        requestPlacementFromSelectedSlot(
+          inventoryBeforeUse.slots,
+          selectedHotbarIndex,
+          isPlaceableItem,
+          (heldItem) => {
+            const target = Effect.runSync(
+              requestTargetedBlockPlacement(
+                gameplayState,
+                world.chunkStore,
+                playerApi,
+                heldItem,
+              ),
+            )
+            if (Option.isSome(target)) {
+              placementsRequested += 1
+              canvas.setAttribute('data-placements-requested', String(placementsRequested))
+              markSessionDirty()
+            }
+          },
+        )
+      }
     }
 
     // Stream from where the player ACTUALLY ended up, not from where they

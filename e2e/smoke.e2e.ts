@@ -284,6 +284,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.heal',
       'gameplay.respawn',
       'gameplay.seedCraftingLog',
+      'gameplay.seedFoodUseEncounter',
       'gameplay.seedLethalZombieEncounter',
       'gameplay.seedMeleeDropEncounter',
       'gameplay.setPose',

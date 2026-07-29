@@ -25,6 +25,8 @@ type GameplaySnapshot = {
   readonly vitals: {
     readonly healthPoints: number
     readonly maxHealthPoints: number
+    readonly hungerPoints: number
+    readonly maxHungerPoints: number
     readonly lastDamageCause?: string
   }
   readonly dead: boolean
@@ -176,6 +178,49 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
   await expect(deathOverlay).toBeHidden()
   await expect(respawn).toBeHidden()
   await expect.poll(() => framesDrawn(page)).toBeGreaterThan(framesAtDeath)
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('eats the selected potato through a right-click use action', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await page.goto('/')
+  const body = page.locator('body')
+  const canvas = page.locator('#game-canvas')
+  await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await canvas.hover()
+  const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedFoodUseEncounter')
+  expect(seeded.vitals.healthPoints).toBeLessThan(seeded.vitals.maxHealthPoints)
+  expect(seeded.vitals.hungerPoints).toBeLessThan(seeded.vitals.maxHungerPoints)
+  const potatoesBefore = inventoryCount(seeded, 'potato')
+  expect(potatoesBefore).toBe(2)
+
+  // Headless Chromium's SwiftShader backend cannot grant pointer lock. Model
+  // the granted state, then use a real canvas click for the use action itself.
+  await page.evaluate(() => {
+    const gameCanvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
+    if (gameCanvas === null) throw new Error('missing game canvas')
+    Object.defineProperty(document, 'pointerLockElement', {
+      configurable: true,
+      get: () => gameCanvas,
+    })
+    document.dispatchEvent(new Event('pointerlockchange'))
+  })
+  await canvas.click({ button: 'right' })
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return {
+      potatoes: inventoryCount(current, 'potato'),
+      hungerPoints: current.vitals.hungerPoints,
+    }
+  }).toEqual({
+    potatoes: potatoesBefore - 1,
+    hungerPoints: seeded.vitals.hungerPoints + 1,
+  })
+
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })
