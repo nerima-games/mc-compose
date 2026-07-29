@@ -15,6 +15,7 @@ import {
   type Chunk,
   type ChunkSource,
 } from '@nerima-games/mc-worldgen'
+import { SPAWN_PLAYER_VITALS } from '@nerima-games/mx-gameplay'
 
 import {
   SESSION_FORMAT_NAME,
@@ -35,6 +36,15 @@ const sessionState = (seed: number): SessionState => ({
     pitchRadians: -0.1,
   },
   inventory: { slots: [{ item: 'stone', count: 12 }, undefined] },
+  vitals: {
+    ...SPAWN_PLAYER_VITALS,
+    healthPoints: 13,
+    hungerPoints: 17,
+    saturation: 3,
+    exhaustion: 0.5,
+    totalExperience: 37,
+    lastDamageCause: 'fall',
+  },
 })
 
 const chunk = (cx: number, cz: number, marker: number): Chunk => ({
@@ -136,7 +146,148 @@ describe('session persistence', () => {
       const loaded = yield* loadSession('primary world')
 
       expect(Option.getOrThrow(loaded)).toEqual(saved)
+      expect(saved.state.vitals).toEqual(sessionState(42).vitals)
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
+      expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
+        format: SESSION_FORMAT_NAME,
+        version: 2,
+      })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a literal v1 session to spawn vitals', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v1')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 1,
+      payload: {
+        sessionId: 'legacy-v1',
+        revision: 'r1',
+        state: {
+          seed: 73,
+          dimension: 'overworld',
+          player: {
+            feetPosition: { x: 1.5, y: 64, z: -2.5 },
+            yawRadians: 0.25,
+            pitchRadians: -0.1,
+          },
+          inventory: { slots: [{ item: 'stone', count: 12 }, undefined] },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v1'))
+
+      expect(loaded.state.vitals).toEqual(SPAWN_PLAYER_VITALS)
+      expect(storage.envelope(key)?.version).toBe(1)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('does not repair an explicitly undefined v1 vitals property', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-invalid-vitals')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 1,
+      payload: {
+        sessionId: 'legacy-invalid-vitals',
+        revision: 'r1',
+        state: { ...sessionState(42), vitals: undefined },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession('legacy-invalid-vitals'))
+
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 1 })
+      expect(storage.envelope(key)?.version).toBe(1)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects a v2 session whose vitals property is missing', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('missing-vitals')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 2,
+      payload: {
+        sessionId: 'missing-vitals',
+        revision: 'r1',
+        state: {
+          seed: 42,
+          dimension: 'overworld',
+          player: {
+            feetPosition: { x: 1.5, y: 64, z: -2.5 },
+            yawRadians: 0.25,
+            pitchRadians: -0.1,
+          },
+          inventory: { slots: [] },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession('missing-vitals'))
+
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 2,
+      })
+      expect(storage.envelope(key)).toBeDefined()
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects non-finite persisted vitals', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('non-finite-vitals')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 2,
+      payload: {
+        sessionId: 'non-finite-vitals',
+        revision: 'r1',
+        state: {
+          ...sessionState(42),
+          vitals: { ...sessionState(42).vitals, healthPoints: Number.POSITIVE_INFINITY },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession('non-finite-vitals'))
+
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 2 })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects persisted vitals that violate gameplay invariants', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('invalid-vitals')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 2,
+      payload: {
+        sessionId: 'invalid-vitals',
+        revision: 'r1',
+        state: {
+          ...sessionState(42),
+          vitals: { ...sessionState(42).vitals, healthPoints: 21, maxHealthPoints: 20 },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession('invalid-vitals'))
+
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 2 })
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -145,7 +296,7 @@ describe('session persistence', () => {
     const key = sessionHeadKey('unknown-item')
     storage.setEnvelope(key, {
       format: SESSION_FORMAT_NAME,
-      version: 1,
+      version: 2,
       payload: {
         sessionId: 'unknown-item',
         revision: 'r1',
@@ -163,7 +314,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 1,
+        version: 2,
       })
       expect(storage.envelope(key)).toBeDefined()
     }).pipe(Effect.provide(storage.layer))

@@ -6,6 +6,7 @@ import {
   saveTo,
   StoragePort,
   defineFormat,
+  type Migration,
   type MigrationError,
   type SaveDecodeError,
   type StorageError,
@@ -20,7 +21,12 @@ import {
   type ChunkStoreApi,
   type Dimension,
 } from '@nerima-games/mc-worldgen'
-import type { isPlaceableItem } from '@nerima-games/mx-gameplay'
+import {
+  isValidPlayerVitals,
+  SPAWN_PLAYER_VITALS,
+  type isPlaceableItem,
+  type PlayerVitals,
+} from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
 
@@ -171,7 +177,26 @@ export type SessionState = {
   readonly inventory: {
     readonly slots: ReadonlyArray<SessionInventorySlot>
   }
+  readonly vitals: PlayerVitals
 }
+
+const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
+
+const PlayerVitalsSchema: Schema.Schema<PlayerVitals> = Schema.Struct({
+  healthPoints: FiniteNumberSchema,
+  maxHealthPoints: FiniteNumberSchema,
+  hungerPoints: FiniteNumberSchema,
+  maxHungerPoints: FiniteNumberSchema,
+  saturation: FiniteNumberSchema,
+  exhaustion: FiniteNumberSchema,
+  foodTimerSecs: FiniteNumberSchema,
+  totalExperience: FiniteNumberSchema,
+  lastDamageCause: Schema.UndefinedOr(Schema.String),
+}).pipe(
+  Schema.filter(isValidPlayerVitals, {
+    message: () => 'Player vitals violate gameplay invariants',
+  }),
+)
 
 const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   seed: Schema.Number,
@@ -182,6 +207,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
     pitchRadians: Schema.Number,
   }),
   inventory: Schema.Struct({ slots: Schema.Array(InventorySlotSchema) }),
+  vitals: PlayerVitalsSchema,
 })
 
 export type SessionChunkManifestEntry = {
@@ -218,10 +244,35 @@ const SessionHeadSchema: Schema.Schema<SessionHead, SessionHeadEncoded> = Schema
   chunks: Schema.Array(ChunkManifestEntrySchema),
 })
 
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  typeof value === 'object' && value !== null
+    ? value as Record<string, unknown>
+    : undefined
+
+const migrateSessionV1ToV2: Migration = {
+  from: 1,
+  describe: 'add player vitals to the session state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v1 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'vitals')
+        ? state
+        : { ...state, vitals: { ...SPAWN_PLAYER_VITALS } },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 1,
+  version: 2,
   schema: SessionHeadSchema,
+  migrations: [migrateSessionV1ToV2],
 })
 
 export class SessionManifestError extends Data.TaggedError('SessionManifestError')<{
