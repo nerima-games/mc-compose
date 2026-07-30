@@ -88,6 +88,7 @@ import {
   makeWebAudioBackend,
   type Vec3,
 } from '@nerima-games/mc-audio'
+import { blockIdOf, blockTypeOfId, propertyOfBlockId } from '@nerima-games/mc-kernel'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   advanceFurnace,
@@ -99,6 +100,7 @@ import {
   makeWeatherService,
   maxStackCountForItem,
   POTATO_MATURITY_SECS,
+  resetLandingImpact,
   simStages,
   STARTER_FUEL_RULES,
   STARTER_SMELTING_RECIPES,
@@ -168,6 +170,7 @@ import {
   DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
   gameplayStages,
+  INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
   makeGameplayFrameState,
   makeGeneratedWorld,
   isHoeItem,
@@ -187,6 +190,8 @@ import {
   requestTargetedBlockBreak,
   requestTargetedBlockUse,
   requestTargetedItemUse,
+  resolveEnvironmentalContactDamage,
+  resolveFallDamage,
   resolveTargetedPrimaryAttack,
   setPortalCandidates,
   solidityFromStore,
@@ -198,6 +203,7 @@ import {
   miningProgressFraction,
   ZOMBIE_KIND,
   type IgnitionItemType,
+  type EnvironmentalContact,
   type HoeItemType,
   type ItemUseResult,
   type MobBehaviour,
@@ -310,6 +316,32 @@ const QA_IGNITION_HIT_BLOCK = { x: 8, y: 66, z: 8 } as const
 const QA_IGNITION_CELL = { x: 8, y: 66, z: 9 } as const
 const QA_IGNITION_SUPPORT_BLOCK = { x: 8, y: 65, z: 9 } as const
 const QA_IGNITION_FLOOR_BLOCK = { x: 8, y: 64, z: 10 } as const
+const QA_ENVIRONMENT_OVERLAP_POSE = {
+  feetPosition: { x: 24.95, y: 65, z: 8.5 },
+  yawRadians: 0,
+  pitchRadians: 0,
+} as const
+const QA_CACTUS_APPROACH_POSE = {
+  feetPosition: { x: 24.2, y: 65, z: 8.5 },
+  yawRadians: 0,
+  pitchRadians: 0,
+} as const
+const QA_ENVIRONMENT_CONTACT_CELLS = [
+  { x: 24, y: 65, z: 8 },
+  { x: 25, y: 65, z: 8 },
+] as const
+const QA_ENVIRONMENT_FLOOR_CELLS = Array.from({ length: 4 }, (_, offset) => ({
+  x: 23 + offset,
+  y: 64,
+  z: 8,
+}))
+const QA_FALL_CENTER = { x: 28, z: 8 } as const
+const QA_FALL_FLOOR_Y = 64
+const QA_FALL_START_Y = {
+  safe: 67.5,
+  damaging: 72,
+  lethal: 88,
+} as const
 const OBSIDIAN_BLOCK_ID = 40
 const NETHER_PORTAL_BLOCK_ID = 118
 const QA_PORTAL_ANCHOR = { x: 120, y: 65, z: 8 } as const
@@ -1228,6 +1260,8 @@ const bootGame = async (
     }
   }
   const simState = await Effect.runPromise(makeSimFrameState)
+  let environmentalContactDamageState = INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE
+  let simulationElapsedSecs = 0
   const isGameplayBlockSolid = solidityFromStore(currentChunkStore)
   const simPhysicsConfig: SimPhysicsConfig = {
     resolve: {
@@ -1240,7 +1274,125 @@ const bootGame = async (
     walkSpeed: WALK_SPEED_M_PER_S,
     jumpSpeed: JUMP_SPEED_M_PER_S,
   }
+  type EnvironmentalContactCell = EnvironmentalContact & {
+    readonly position: { readonly x: number; readonly y: number; readonly z: number }
+  }
+  // Keep boundary contact behavior aligned with mc-physics collision tests.
+  const physicsContactEpsilon = 1e-9
+  const intervalOverlap = (
+    minA: number,
+    maxA: number,
+    minB: number,
+    maxB: number,
+  ): number => Math.min(maxA, maxB) - Math.max(minA, minB)
+  const intervalGap = (
+    minA: number,
+    maxA: number,
+    minB: number,
+    maxB: number,
+  ): number => Math.max(minB - maxA, minA - maxB, 0)
+  const overlapsUnitCell = (
+    minX: number,
+    maxX: number,
+    minY: number,
+    maxY: number,
+    minZ: number,
+    maxZ: number,
+    x: number,
+    y: number,
+    z: number,
+  ): boolean =>
+    intervalOverlap(minX, maxX, x, x + 1) > 0 &&
+    intervalOverlap(minY, maxY, y, y + 1) > 0 &&
+    intervalOverlap(minZ, maxZ, z, z + 1) > 0
+  const touchesCactusHorizontalSide = (
+    minX: number,
+    maxX: number,
+    minY: number,
+    maxY: number,
+    minZ: number,
+    maxZ: number,
+    x: number,
+    y: number,
+    z: number,
+  ): boolean => {
+    if (intervalOverlap(minY, maxY, y, y + 1) <= physicsContactEpsilon) {
+      return false
+    }
+    const overlapsX = intervalOverlap(minX, maxX, x, x + 1) > physicsContactEpsilon
+    const overlapsZ = intervalOverlap(minZ, maxZ, z, z + 1) > physicsContactEpsilon
+    return (
+      (intervalGap(minX, maxX, x, x + 1) <= physicsContactEpsilon && overlapsZ) ||
+      (intervalGap(minZ, maxZ, z, z + 1) <= physicsContactEpsilon && overlapsX)
+    )
+  }
+  const environmentalContactCellsForPose = (
+    pose: { readonly feetPosition: Vec3 },
+  ): ReadonlyArray<EnvironmentalContactCell> => {
+    const minX = pose.feetPosition.x - PLAYER_HALF_WIDTH
+    const maxX = pose.feetPosition.x + PLAYER_HALF_WIDTH
+    const minY = pose.feetPosition.y
+    const maxY = pose.feetPosition.y + PLAYER_HALF_HEIGHT * 2
+    const minZ = pose.feetPosition.z - PLAYER_HALF_WIDTH
+    const maxZ = pose.feetPosition.z + PLAYER_HALF_WIDTH
+    const contacts: Array<EnvironmentalContactCell> = []
+
+    for (
+      let x = Math.floor(minX - physicsContactEpsilon);
+      x < Math.ceil(maxX + physicsContactEpsilon);
+      x += 1
+    ) {
+      for (let y = Math.floor(minY); y < Math.ceil(maxY); y += 1) {
+        for (
+          let z = Math.floor(minZ - physicsContactEpsilon);
+          z < Math.ceil(maxZ + physicsContactEpsilon);
+          z += 1
+        ) {
+          const reading = Effect.runSync(currentChunkStore.getBlock({ x, y, z }))
+          if (reading._tag !== 'Block') continue
+          const block = blockTypeOfId(reading.block)
+          if (block !== 'lava' && block !== 'cactus') continue
+          const contactDamage = propertyOfBlockId(reading.block, 'contactDamage')
+          if (contactDamage === undefined) continue
+          if (
+            block === 'lava' &&
+            !overlapsUnitCell(minX, maxX, minY, maxY, minZ, maxZ, x, y, z)
+          ) {
+            continue
+          }
+          if (
+            block === 'cactus' &&
+            !touchesCactusHorizontalSide(
+              minX,
+              maxX,
+              minY,
+              maxY,
+              minZ,
+              maxZ,
+              x,
+              y,
+              z,
+            )
+          ) {
+            continue
+          }
+          contacts.push({ position: { x, y, z }, block, contactDamage })
+        }
+      }
+    }
+    return contacts
+  }
+  const environmentalContactsForPose = (
+    pose: { readonly feetPosition: Vec3 },
+  ): ReadonlyArray<EnvironmentalContact> => {
+    const contactsByBlock = new Map<EnvironmentalContact['block'], EnvironmentalContact>()
+    for (const { block, contactDamage } of environmentalContactCellsForPose(pose)) {
+      contactsByBlock.set(block, { block, contactDamage })
+    }
+    return [...contactsByBlock.values()]
+  }
   const resetSimState = (physicsEnabled: boolean): void => {
+    environmentalContactDamageState = INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE
     pendingMiningToolDamage.splice(0)
     pendingBlockBreakConfirmations.splice(0)
     Effect.runSync(Ref.set(simState.resolvedFeetPosition, Option.none()))
@@ -1248,6 +1400,7 @@ const bootGame = async (
     Effect.runSync(Ref.set(simState.jumpIntent, false))
     Effect.runSync(Ref.set(simState.velocity, { x: 0, y: 0, z: 0 }))
     Effect.runSync(Ref.set(simState.isGrounded, false))
+    Effect.runSync(resetLandingImpact(simState))
     Effect.runSync(
       Ref.set(
         simState.physicsConfig,
@@ -2040,6 +2193,15 @@ const bootGame = async (
       pose,
       dimension,
       activeChunkDimension: currentChunkContext.dimension,
+      environmentalContact: {
+        simulationElapsedSecs,
+        lastDamageElapsedSecs: environmentalContactDamageState.lastDamageElapsedSecs ?? null,
+        cells: environmentalContactCellsForPose(pose),
+      },
+      fall: {
+        grounded: Effect.runSync(Ref.get(simState.isGrounded)),
+        accumulatedDistance: Effect.runSync(Ref.get(simState.accumulatedFallDistance)),
+      },
       weather: Effect.runSync(weather.snapshot),
       vitals,
       dead: vitals.healthPoints <= 0,
@@ -2220,6 +2382,87 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedEnvironmentalContactEncounter = (
+    kind: 'cactus' | 'duplicateLava' | 'lethalMixed',
+  ) => {
+    respawnPlayer()
+    const dimension = Effect.runSync(playerApi.dimension)
+    const encounterPose =
+      kind === 'cactus' ? QA_CACTUS_APPROACH_POSE : QA_ENVIRONMENT_OVERLAP_POSE
+    Effect.runSync(playerApi.restore(encounterPose, dimension))
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        encounterPose.feetPosition.x,
+        encounterPose.feetPosition.z,
+      ),
+    )
+    const stone = blockIdOf('stone')
+    const air = blockIdOf('air')
+    for (const position of QA_ENVIRONMENT_FLOOR_CELLS) {
+      Effect.runSync(currentChunkStore.setBlock(position, stone))
+    }
+    for (const position of QA_ENVIRONMENT_CONTACT_CELLS) {
+      Effect.runSync(currentChunkStore.setBlock(position, air))
+      Effect.runSync(currentChunkStore.setBlock({ ...position, y: position.y + 1 }, air))
+    }
+
+    if (kind === 'cactus') {
+      Effect.runSync(
+        currentChunkStore.setBlock(QA_ENVIRONMENT_CONTACT_CELLS[1], blockIdOf('cactus')),
+      )
+    } else if (kind === 'duplicateLava') {
+      for (const position of QA_ENVIRONMENT_CONTACT_CELLS) {
+        Effect.runSync(currentChunkStore.setBlock(position, blockIdOf('lava')))
+      }
+    } else {
+      Effect.runSync(
+        currentChunkStore.setBlock(QA_ENVIRONMENT_CONTACT_CELLS[0], blockIdOf('lava')),
+      )
+      Effect.runSync(
+        currentChunkStore.setBlock(QA_ENVIRONMENT_CONTACT_CELLS[1], blockIdOf('cactus')),
+      )
+      applyPlayerDamage({ amount: 16, cause: 'generic' })
+    }
+
+    resetSimState(true)
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedFallEncounter = (kind: keyof typeof QA_FALL_START_Y) => {
+    respawnPlayer()
+    const dimension = Effect.runSync(playerApi.dimension)
+    Effect.runSync(
+      streamAround(currentChunkContext, QA_FALL_CENTER.x + 0.5, QA_FALL_CENTER.z + 0.5),
+    )
+    const stone = blockIdOf('stone')
+    const air = blockIdOf('air')
+    for (let xOffset = -1; xOffset <= 1; xOffset += 1) {
+      for (let zOffset = -1; zOffset <= 1; zOffset += 1) {
+        const x = QA_FALL_CENTER.x + xOffset
+        const z = QA_FALL_CENTER.z + zOffset
+        Effect.runSync(currentChunkStore.setBlock({ x, y: QA_FALL_FLOOR_Y, z }, stone))
+        for (let y = QA_FALL_FLOOR_Y + 1; y <= QA_FALL_START_Y.lethal + 2; y += 1) {
+          Effect.runSync(currentChunkStore.setBlock({ x, y, z }, air))
+        }
+      }
+    }
+    Effect.runSync(playerApi.restore({
+      feetPosition: {
+        x: QA_FALL_CENTER.x + 0.5,
+        y: QA_FALL_START_Y[kind],
+        z: QA_FALL_CENTER.z + 0.5,
+      },
+      yawRadians: 0,
+      pitchRadians: 0,
+    }, dimension))
+    resetSimState(true)
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
   const seedPortalEncounter = () => {
     respawnPlayer()
     Effect.runSync(playerApi.restore(QA_PORTAL_POSE, 'overworld'))
@@ -2299,6 +2542,12 @@ const bootGame = async (
         seedCraftingTableEncounter,
         seedFarmingEncounter,
         harvestFarmingCrop,
+        seedCactusApproach: () => seedEnvironmentalContactEncounter('cactus'),
+        seedDuplicateLavaContact: () => seedEnvironmentalContactEncounter('duplicateLava'),
+        seedLethalMixedContact: () => seedEnvironmentalContactEncounter('lethalMixed'),
+        seedSafeFall: () => seedFallEncounter('safe'),
+        seedDamagingFall: () => seedFallEncounter('damaging'),
+        seedLethalFall: () => seedFallEncounter('lethal'),
         preparePotatoEating: () => {
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
@@ -2567,6 +2816,7 @@ const bootGame = async (
     const walk = frameInput
     const foodOutcome = Effect.runSync(world.vitals.advanceFoodTimer(deltaSecs))
     if (foodOutcome.signal !== 'none') markSessionDirty()
+    simulationElapsedSecs += deltaSecs
 
     const dead = playerIsDead()
     syncTouchControls()
@@ -2709,8 +2959,7 @@ const bootGame = async (
         if (document.pointerLockElement === canvas) document.exitPointerLock()
       }
     }
-    const deadAfterFrame = playerIsDead()
-    syncTouchControls()
+    let deadAfterFrame = playerIsDead()
 
     let postFramePose = Effect.runSync(playerApi.pose)
     let dimensionAfterFrame = Effect.runSync(playerApi.dimension)
@@ -2735,6 +2984,42 @@ const bootGame = async (
       resetSimState(!deadAfterFrame)
       markSessionDirty()
     }
+
+    const landingImpact = Effect.runSync(Ref.get(simState.landingImpact))
+    if (!deadAfterFrame && !dimensionChanged && Option.isSome(landingImpact)) {
+      const fallDamage = resolveFallDamage(landingImpact.value.fallDistance)
+      if (fallDamage !== undefined) {
+        applyPlayerDamage(fallDamage)
+        markSessionDirty()
+        if (playerIsDead()) {
+          setInventoryOpen(false)
+          if (document.pointerLockElement === canvas) document.exitPointerLock()
+        }
+      }
+    }
+    deadAfterFrame = playerIsDead()
+
+    // Landing damage resolves before block contact in the same frame.
+    if (!deadAfterFrame && !dimensionChanged) {
+      const environmentalDamage = resolveEnvironmentalContactDamage(
+        environmentalContactDamageState,
+        environmentalContactsForPose(postFramePose),
+        simulationElapsedSecs,
+      )
+      environmentalContactDamageState = environmentalDamage.state
+      for (const damage of environmentalDamage.damages) applyPlayerDamage(damage)
+      if (environmentalDamage.damages.length > 0) {
+        markSessionDirty()
+        if (playerIsDead()) {
+          setInventoryOpen(false)
+          if (document.pointerLockElement === canvas) document.exitPointerLock()
+        }
+      }
+    } else if (deadAfterFrame) {
+      environmentalContactDamageState = INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE
+    }
+    deadAfterFrame = playerIsDead()
+    syncTouchControls()
 
     const groundedAfterFrame = Effect.runSync(Ref.get(simState.isGrounded))
     const moved =
