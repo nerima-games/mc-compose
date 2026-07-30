@@ -13,6 +13,7 @@ import {
   INITIAL_TIME_STATE,
   INITIAL_WEATHER_STATE,
   INVENTORY_SLOT_COUNT,
+  emptyFurnaceState,
   equipFromInventory,
   storageFromInventory,
   type Inventory,
@@ -78,6 +79,7 @@ const sessionState = (seed: number): SessionState => {
         active: true,
       }],
     },
+    furnaces: [],
   }
 }
 
@@ -201,7 +203,160 @@ describe('session persistence', () => {
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 8,
+        version: 9,
+      })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a v8 session with an absent furnace registry', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v8')
+    const { furnaces: _furnaces, ...v8State } = sessionState(42)
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 8,
+      payload: {
+        sessionId: 'legacy-v8',
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: v8State,
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v8'))
+
+      expect(loaded.state.furnaces).toEqual([])
+      expect(storage.envelope(key)?.version).toBe(8)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects invalid persisted furnace states', () => {
+    const storage = controlledStorage()
+    const invalidStates = [
+      {
+        input: { item: 'raw_iron', count: 0 },
+        fuel: null,
+        output: null,
+        cookElapsedSecs: 0,
+        burnRemainingSecs: 0,
+      },
+      {
+        input: { item: 'item_from_an_unknown_build', count: 1 },
+        fuel: null,
+        output: null,
+        cookElapsedSecs: 0,
+        burnRemainingSecs: 0,
+      },
+      {
+        input: null,
+        fuel: null,
+        output: null,
+        cookElapsedSecs: Number.POSITIVE_INFINITY,
+        burnRemainingSecs: 0,
+      },
+      {
+        input: null,
+        fuel: null,
+        output: null,
+        cookElapsedSecs: 0,
+        burnRemainingSecs: -1,
+      },
+    ]
+
+    for (const [index, state] of invalidStates.entries()) {
+      const sessionId = `invalid-furnace-${String(index)}`
+      storage.setEnvelope(sessionHeadKey(sessionId), {
+        format: SESSION_FORMAT_NAME,
+        version: 9,
+        payload: {
+          sessionId,
+          revision: 'r1',
+          metadata: defaultMetadata,
+          state: {
+            ...sessionState(index),
+            furnaces: [{
+              dimension: 'overworld',
+              position: { x: 1, y: 64, z: 2 },
+              state,
+            }],
+          },
+          chunks: [],
+        },
+      })
+    }
+
+    return Effect.gen(function* () {
+      for (const index of invalidStates.keys()) {
+        const error = yield* Effect.flip(loadSession(`invalid-furnace-${String(index)}`))
+        expect(error).toMatchObject({
+          _tag: 'SaveDecodeError',
+          format: SESSION_FORMAT_NAME,
+          version: 9,
+        })
+      }
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects fractional persisted furnace coordinates', () => {
+    const storage = controlledStorage()
+    const sessionId = 'fractional-furnace-coordinate'
+    storage.setEnvelope(sessionHeadKey(sessionId), {
+      format: SESSION_FORMAT_NAME,
+      version: 9,
+      payload: {
+        sessionId,
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: {
+          ...sessionState(42),
+          furnaces: [{
+            dimension: 'overworld',
+            position: { x: 1.5, y: 64, z: 2 },
+            state: emptyFurnaceState(),
+          }],
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession(sessionId))
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 9,
+      })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects duplicate persisted furnace positions within a dimension', () => {
+    const storage = controlledStorage()
+    const sessionId = 'duplicate-furnace-position'
+    const furnace = {
+      dimension: 'overworld' as const,
+      position: { x: 1, y: 64, z: 2 },
+      state: emptyFurnaceState(),
+    }
+    storage.setEnvelope(sessionHeadKey(sessionId), {
+      format: SESSION_FORMAT_NAME,
+      version: 9,
+      payload: {
+        sessionId,
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: { ...sessionState(42), furnaces: [furnace, furnace] },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession(sessionId))
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 9,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -564,7 +719,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(8)
+      expect(storage.envelope(headKey)?.version).toBe(9)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )

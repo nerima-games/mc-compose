@@ -12,14 +12,18 @@ import {
   type StorageError,
 } from '@nerima-games/mc-save'
 import {
+  advanceFurnace,
   INVENTORY_SLOT_COUNT,
   INITIAL_TIME_STATE,
   INITIAL_WEATHER_STATE,
   isValidTimeState,
   isValidWeatherState,
+  maxStackCountForItem,
   storageFromInventory,
   validatePlayerStorageSnapshot,
   type Inventory,
+  type FurnaceState,
+  type ItemStack,
   type PlayerStorage,
   type TimeState,
   type WeatherState,
@@ -54,10 +58,27 @@ export type PersistedLeverState = {
   readonly active: boolean
 }
 
+export type PersistedFurnaceState = {
+  readonly dimension: Dimension
+  readonly position: SessionPosition
+  readonly state: FurnaceState
+}
+
 const PositionSchema: Schema.Schema<SessionPosition> = Schema.Struct({
   x: Schema.Number,
   y: Schema.Number,
   z: Schema.Number,
+})
+
+const BlockCoordinateSchema = Schema.Number.pipe(
+  Schema.finite(),
+  Schema.filter(Number.isInteger, { message: () => 'Block coordinate must be an integer' }),
+)
+
+const BlockPositionSchema: Schema.Schema<SessionPosition> = Schema.Struct({
+  x: BlockCoordinateSchema,
+  y: BlockCoordinateSchema,
+  z: BlockCoordinateSchema,
 })
 
 export type SessionState = {
@@ -75,6 +96,7 @@ export type SessionState = {
   readonly redstone: {
     readonly levers: ReadonlyArray<PersistedLeverState>
   }
+  readonly furnaces: ReadonlyArray<PersistedFurnaceState>
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -122,6 +144,76 @@ const PlayerStorageSchema = Schema.Unknown.pipe(
   ),
 ) as unknown as Schema.Schema<PlayerStorage>
 
+const FurnaceStackCountSchema = FiniteNumberSchema.pipe(
+  Schema.filter(Number.isInteger, { message: () => 'Furnace stack count must be an integer' }),
+  Schema.filter((count) => count > 0, { message: () => 'Furnace stack count must be positive' }),
+)
+
+const FurnaceItemStackSchema = Schema.Struct({
+  item: Schema.String,
+  count: FurnaceStackCountSchema,
+}).pipe(
+  Schema.filter((stack): stack is ItemStack => {
+    try {
+      const candidate = stack as ItemStack
+      advanceFurnace({
+        input: candidate,
+        fuel: null,
+        output: null,
+        cookElapsedSecs: 0,
+        burnRemainingSecs: 0,
+      }, Number.MIN_VALUE)
+      return stack.count <= maxStackCountForItem(candidate.item)
+    } catch {
+      return false
+    }
+  }, { message: () => 'Furnace slot violates item stack invariants' }),
+) as unknown as Schema.Schema<ItemStack>
+
+const FurnaceElapsedSchema = FiniteNumberSchema.pipe(
+  Schema.filter((seconds) => seconds >= 0, {
+    message: () => 'Furnace elapsed time must be non-negative',
+  }),
+)
+
+const FurnaceStateSchema = Schema.Struct({
+  input: Schema.NullOr(FurnaceItemStackSchema),
+  fuel: Schema.NullOr(FurnaceItemStackSchema),
+  output: Schema.NullOr(FurnaceItemStackSchema),
+  cookElapsedSecs: FurnaceElapsedSchema,
+  burnRemainingSecs: FurnaceElapsedSchema,
+}).pipe(
+  Schema.filter((value) => {
+    try {
+      advanceFurnace(value, Number.MIN_VALUE)
+      return true
+    } catch {
+      return false
+    }
+  }, { message: () => 'Furnace state violates simulation invariants' }),
+) as unknown as Schema.Schema<FurnaceState>
+
+const PersistedFurnacesSchema = Schema.Array(Schema.Struct({
+  dimension: DimensionSchema,
+  position: BlockPositionSchema,
+  state: FurnaceStateSchema,
+})).pipe(
+  Schema.filter((furnaces) => {
+    const keys = new Set<string>()
+    for (const furnace of furnaces) {
+      const key = JSON.stringify([
+        furnace.dimension,
+        furnace.position.x,
+        furnace.position.y,
+        furnace.position.z,
+      ])
+      if (keys.has(key)) return false
+      keys.add(key)
+    }
+    return true
+  }, { message: () => 'Furnace positions must be unique within each dimension' }),
+)
+
 const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   seed: Schema.Number,
   dimension: DimensionSchema,
@@ -141,6 +233,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
       active: Schema.Boolean,
     })),
   }),
+  furnaces: PersistedFurnacesSchema,
 })
 
 export type SessionChunkManifestEntry = {
@@ -362,9 +455,28 @@ const migrateSessionV7ToV8: Migration = {
   },
 }
 
+const migrateSessionV8ToV9: Migration = {
+  from: 8,
+  describe: 'add host-owned furnace state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v8 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'furnaces')
+        ? state
+        : { ...state, furnaces: [] },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 8,
+  version: 9,
   schema: SessionHeadSchema,
   migrations: [
     migrateSessionV1ToV2,
@@ -374,6 +486,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV5ToV6,
     migrateSessionV6ToV7,
     migrateSessionV7ToV8,
+    migrateSessionV8ToV9,
   ],
 })
 

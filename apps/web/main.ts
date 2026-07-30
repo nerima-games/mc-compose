@@ -90,10 +90,16 @@ import {
 } from '@nerima-games/mc-audio'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
+  advanceFurnace,
+  emptyFurnaceState,
   makeSimFrameState,
   makeTimeService,
   makeWeatherService,
+  maxStackCountForItem,
   simStages,
+  STARTER_FUEL_RULES,
+  STARTER_SMELTING_RECIPES,
+  type FurnaceState,
   type ItemStack,
   type SimPhysicsConfig,
   type WeatherState,
@@ -120,9 +126,11 @@ import {
 import {
   createMainMenuView,
   createCrosshairView,
+  createFurnaceView,
   createHudView,
   createInventoryView,
   crosshairViewModel,
+  furnaceViewModel,
   hudViewModel,
   initialMainMenuState,
   inventoryViewModel,
@@ -130,6 +138,8 @@ import {
   slotSnapshotOf,
   uiModule,
   type CreateWorldRequest,
+  type FurnaceSlotId,
+  type FurnaceSnapshot,
   type InventoryInteractionTarget,
   type MainMenuState,
   type SavedWorld,
@@ -170,6 +180,7 @@ import {
   requestTargetedItemUse,
   resolveTargetedPrimaryAttack,
   solidityFromStore,
+  spawnDroppedItems,
   spawnMobDrops,
   targetedRightClickRoute,
   weatherLightScale,
@@ -226,6 +237,7 @@ import {
   saveSession,
   snapshotResidentChunks,
   type DimensionChunk,
+  type PersistedFurnaceState,
   type PersistedLeverState,
   type SessionMetadata,
   type SessionState,
@@ -306,15 +318,13 @@ const isGameplayUseItemType = (item: ItemStack['item']): item is GameplayUseItem
 const isPlaceableGameplayItem = (item: ItemStack['item']): item is PlaceableItemType =>
   isGameplayUseItemType(item) && isPlaceableItem(item)
 
-type InventoryMode = 'player' | 'craftingTable'
+type InventoryMode = 'player' | 'craftingTable' | 'furnace'
 
 const INVENTORY_PRESENTATIONS = {
   player: { label: 'Inventory', width: 2, height: 2 },
   craftingTable: { label: 'Crafting Table', width: 3, height: 3 },
-} as const satisfies Record<
-  InventoryMode,
-  { readonly label: string; readonly width: number; readonly height: number }
->
+  furnace: { label: 'Furnace', width: 0, height: 0 },
+} as const
 
 type SettingsWriteQueue = {
   tail: Promise<void>
@@ -848,6 +858,19 @@ const bootGame = async (
     (Option.isSome(loadedSession) ? loadedSession.value.state.redstone.levers : [])
       .map((lever) => [leverKeyOf(lever), lever]),
   )
+  const furnaceKeyOf = (
+    furnace: Pick<PersistedFurnaceState, 'dimension' | 'position'>,
+  ): string => JSON.stringify([
+    furnace.dimension,
+    furnace.position.x,
+    furnace.position.y,
+    furnace.position.z,
+  ])
+  const furnaceStates = new Map<string, PersistedFurnaceState>(
+    (Option.isSome(loadedSession) ? loadedSession.value.state.furnaces : [])
+      .map((furnace) => [furnaceKeyOf(furnace), furnace]),
+  )
+  let activeFurnaceKey: string | undefined
   let redstoneDirty = true
 
   const getOrCreateDimensionChunkContext = (
@@ -898,6 +921,7 @@ const bootGame = async (
       time: Effect.runSync(time.snapshot),
       weather: Effect.runSync(weather.snapshot),
       redstone: { levers: [...leverStates.values()] },
+      furnaces: [...furnaceStates.values()],
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -1160,6 +1184,7 @@ const bootGame = async (
   }
   const resetSimState = (physicsEnabled: boolean): void => {
     pendingMiningToolDamage.splice(0)
+    pendingBlockBreakConfirmations.splice(0)
     Effect.runSync(Ref.set(simState.resolvedFeetPosition, Option.none()))
     Effect.runSync(Ref.set(simState.movementIntent, { forward: 0, strafe: 0 }))
     Effect.runSync(Ref.set(simState.jumpIntent, false))
@@ -1213,6 +1238,11 @@ const bootGame = async (
     readonly blockId: number
     readonly slotIndex: number
     readonly item: 'wooden_pickaxe' | 'stone_pickaxe'
+  }> = []
+  const pendingBlockBreakConfirmations: Array<{
+    readonly dimension: Dimension
+    readonly position: { readonly x: number; readonly y: number; readonly z: number }
+    readonly blockId: number
   }> = []
 
   const registeredSim = await Effect.runPromise(
@@ -1289,6 +1319,7 @@ const bootGame = async (
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduced' : 'full'
   const hud = createHudView(document, hudParent, motion)
   const inventoryView = createInventoryView(document, inventoryParent)
+  const furnaceView = createFurnaceView(document, inventoryParent)
   const crosshair = createCrosshairView(document, hudParent, motion)
 
   inventoryParent.setAttribute('role', 'dialog')
@@ -1318,6 +1349,8 @@ const bootGame = async (
     region: 'hotbar',
     index: selectedHotbarIndex,
   }
+  let furnaceFocus: FurnaceSlotId = 'input'
+  let furnaceStatus = ''
   const inventoryInteraction = createInventoryInteraction(world.inventory, {
     onCrafted: () => markSessionDirty(),
     onInventoryChanged: () => markSessionDirty(),
@@ -1408,6 +1441,38 @@ const bootGame = async (
         .map((slot, slotIndex) => slotSnapshotOf(slot, durabilityBySlot.get(slotIndex))),
       selectedHotbarIndex,
     }))
+    inventoryView.root.style.setProperty('display', inventoryMode === 'furnace' ? 'none' : '')
+    furnaceView.root.style.setProperty('display', inventoryMode === 'furnace' ? '' : 'none')
+    if (inventoryMode === 'furnace') {
+      const furnace = activeFurnaceKey === undefined
+        ? undefined
+        : furnaceStates.get(activeFurnaceKey)
+      const state = furnace?.state ?? emptyFurnaceState()
+      const recipe = STARTER_SMELTING_RECIPES.find(
+        (candidate) => candidate.input === state.input?.item,
+      )
+      const fuelRule = STARTER_FUEL_RULES.find(
+        (candidate) => candidate.item === state.fuel?.item,
+      ) ?? STARTER_FUEL_RULES[0]
+      const canCook = recipe !== undefined && (
+        state.burnRemainingSecs > 0
+        || STARTER_FUEL_RULES.some((candidate) => candidate.item === state.fuel?.item)
+      )
+      const slot = (stack: ItemStack | null): FurnaceSnapshot['input'] =>
+        stack === null ? undefined : { itemId: stack.item, count: stack.count }
+      furnaceView.render(furnaceViewModel({
+        input: slot(state.input),
+        fuel: slot(state.fuel),
+        output: slot(state.output),
+        cookProgress: canCook && recipe !== undefined
+          ? state.cookElapsedSecs / recipe.cookDurationSecs
+          : 0,
+        burnProgress: state.burnRemainingSecs > 0 && fuelRule !== undefined
+          ? state.burnRemainingSecs / fuelRule.burnDurationSecs
+          : 0,
+      }), { focusedSlot: furnaceFocus, status: furnaceStatus })
+      return
+    }
     inventoryView.render(inventoryViewModel({
       inventory: storage.inventory,
       selectedHotbarIndex,
@@ -1432,6 +1497,76 @@ const bootGame = async (
     })
   }
 
+  const furnaceTargetOf = (source: EventTarget | null): FurnaceSlotId | undefined => {
+    if (!(source instanceof Element)) return undefined
+    const interactive = source.closest<HTMLElement>(
+      '[data-interaction-target="furnace-slot"]',
+    )
+    if (interactive === null || !inventoryParent.contains(interactive)) return undefined
+    const slot = interactive.dataset['interactionSlot']
+    return slot === 'input' || slot === 'fuel' || slot === 'output' ? slot : undefined
+  }
+
+  const updateActiveFurnace = (state: FurnaceState): void => {
+    if (activeFurnaceKey === undefined) return
+    const current = furnaceStates.get(activeFurnaceKey)
+    if (current === undefined) return
+    furnaceStates.set(activeFurnaceKey, { ...current, state })
+    markSessionDirty()
+  }
+
+  const activateFurnaceSlot = (slot: FurnaceSlotId): void => {
+    if (playerIsDead() || activeFurnaceKey === undefined) return
+    furnaceFocus = slot
+    furnaceStatus = ''
+    const furnace = furnaceStates.get(activeFurnaceKey)
+    if (furnace === undefined) return
+    if (slot === 'output') {
+      const output = furnace.state.output
+      if (output !== null) {
+        const leftover = Effect.runSync(world.inventory.add(output.item, output.count))
+        const accepted = output.count - leftover
+        if (accepted > 0) {
+          updateActiveFurnace({
+            ...furnace.state,
+            output: accepted === output.count
+              ? null
+              : { ...output, count: output.count - accepted },
+          })
+        } else {
+          furnaceStatus = 'Inventory is full'
+        }
+      }
+      renderPlayerUi()
+      return
+    }
+
+    const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
+    const expected = slot === 'input' ? 'raw_iron' : 'coal'
+    const current = furnace.state[slot]
+    if (selected?.item !== expected) {
+      furnaceStatus = slot === 'input' ? 'Requires raw iron' : 'Requires coal'
+      renderPlayerUi()
+      return
+    }
+    if (current !== null && (current.item !== selected.item
+      || current.count >= maxStackCountForItem(current.item))) {
+      furnaceStatus = 'Furnace slot is full'
+      renderPlayerUi()
+      return
+    }
+    const removal = Effect.runSync(
+      world.inventory.removeAt(selectedHotbarIndex, selected.item, 1),
+    )
+    if (removal._tag === 'Removed' && removal.removed > 0) {
+      updateActiveFurnace({
+        ...furnace.state,
+        [slot]: { item: selected.item, count: (current?.count ?? 0) + removal.removed },
+      })
+    }
+    renderPlayerUi()
+  }
+
   const targetOf = (source: EventTarget | null): InventoryInteractionTarget | undefined => {
     if (!(source instanceof Element)) return undefined
     const interactive = source.closest<HTMLElement>('[role="button"]')
@@ -1452,7 +1587,8 @@ const bootGame = async (
   }
 
   const focusRenderedTarget = (): void => {
-    inventoryParent.querySelector<HTMLElement>('[role="button"][tabindex="0"]')?.focus()
+    const activeRoot = inventoryMode === 'furnace' ? furnaceView.root : inventoryView.root
+    activeRoot.querySelector<HTMLElement>('[role="button"][tabindex="0"]')?.focus()
   }
 
   const activateInventoryTarget = (
@@ -1476,11 +1612,17 @@ const bootGame = async (
 
   inventoryParent.addEventListener('click', (event) => {
     if (playerIsDead()) return
+    if (inventoryMode === 'furnace') {
+      const furnaceTarget = furnaceTargetOf(event.target)
+      if (furnaceTarget !== undefined) activateFurnaceSlot(furnaceTarget)
+      return
+    }
     const target = targetOf(event.target)
     if (target !== undefined) activateInventoryTarget(target)
   })
   inventoryParent.addEventListener('contextmenu', (event) => {
     if (playerIsDead()) return
+    if (inventoryMode === 'furnace') return
     const target = targetOf(event.target)
     if (target === undefined) return
     event.preventDefault()
@@ -1490,6 +1632,14 @@ const bootGame = async (
   inventoryParent.addEventListener('keydown', (event) => {
     if (playerIsDead()) return
     if (event.key !== 'Enter' && event.key !== ' ') return
+    if (inventoryMode === 'furnace') {
+      const furnaceTarget = furnaceTargetOf(event.target)
+      if (furnaceTarget === undefined) return
+      event.preventDefault()
+      activateFurnaceSlot(furnaceTarget)
+      focusRenderedTarget()
+      return
+    }
     const target = targetOf(event.target)
     if (target === undefined) return
     event.preventDefault()
@@ -1504,7 +1654,7 @@ const bootGame = async (
     if (previousOpen === open && !switchingMode) return
     resetPrimaryAttackGesture()
 
-    if (previousOpen && (!open || switchingMode)) {
+    if (previousOpen && inventoryMode !== 'furnace' && (!open || switchingMode)) {
       Effect.runSync(inventoryInteraction.close())
     }
 
@@ -1516,9 +1666,16 @@ const bootGame = async (
     if (open) {
       inventoryMode = mode
       const presentation = INVENTORY_PRESENTATIONS[mode]
-      inventoryInteraction.configureGrid(presentation.width, presentation.height)
+      if (mode !== 'furnace') {
+        inventoryInteraction.configureGrid(presentation.width, presentation.height)
+      }
       inventoryParent.setAttribute('aria-label', presentation.label)
-      inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+      if (mode === 'furnace') {
+        furnaceFocus = 'input'
+        furnaceStatus = ''
+      } else {
+        inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+      }
     }
     renderPlayerUi()
     renderCrosshair()
@@ -2205,9 +2362,52 @@ const bootGame = async (
       return
     }
 
+    let furnaceStateChanged = false
+    for (const [key, furnace] of furnaceStates) {
+      const next = advanceFurnace(furnace.state, deltaSecs).state
+      if (JSON.stringify(next) !== JSON.stringify(furnace.state)) {
+        furnaceStates.set(key, { ...furnace, state: next })
+        furnaceStateChanged = true
+      }
+    }
+    if (furnaceStateChanged) {
+      markSessionDirty()
+      if (inventoryOpen && inventoryMode === 'furnace') renderPlayerUi()
+    }
+
+    for (const pending of pendingBlockBreakConfirmations.splice(0)) {
+      const context = dimensionContexts.get(pending.dimension)
+      if (context === undefined) continue
+      const reading = Effect.runSync(context.chunkStore.getBlock(pending.position))
+      if (reading._tag !== 'Block' || reading.block === pending.blockId) continue
+      if (pending.blockId !== 104) continue
+      const key = furnaceKeyOf(pending)
+      const furnace = furnaceStates.get(key)
+      if (furnace !== undefined) {
+        const at = {
+          x: pending.position.x + 0.5,
+          y: pending.position.y + 0.5,
+          z: pending.position.z + 0.5,
+        }
+        const contents = [furnace.state.input, furnace.state.fuel, furnace.state.output]
+          .filter((stack): stack is ItemStack => stack !== null)
+          .map((stack) => ({ ...stack, at }))
+        if (contents.length > 0) {
+          Effect.runSync(spawnDroppedItems(world.entities, contents))
+        }
+        furnaceStates.delete(key)
+        markSessionDirty()
+      }
+      if (activeFurnaceKey === key && inventoryOpen && inventoryMode === 'furnace') {
+        activeFurnaceKey = undefined
+        setInventoryOpen(false)
+      }
+    }
+
     for (const pending of pendingMiningToolDamage.splice(0)) {
-      if (pending.dimension !== Effect.runSync(playerApi.dimension)) continue
-      const reading = Effect.runSync(currentChunkStore.getBlock(pending.position))
+      const context = dimensionContexts.get(pending.dimension)
+      if (context === undefined) continue
+      const reading = Effect.runSync(context.chunkStore.getBlock(pending.position))
       if (reading._tag !== 'Block' || reading.block === pending.blockId) continue
 
       const selected = Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]
@@ -2329,6 +2529,11 @@ const bootGame = async (
                 miningLootContextForItem(selectedItem),
               ),
             )
+            pendingBlockBreakConfirmations.push({
+              dimension: Effect.runSync(playerApi.dimension),
+              position: target.position,
+              blockId: target.blockId,
+            })
             if (selectedItem === 'wooden_pickaxe' || selectedItem === 'stone_pickaxe') {
               pendingMiningToolDamage.push({
                 dimension: Effect.runSync(playerApi.dimension),
@@ -2356,6 +2561,20 @@ const bootGame = async (
       )
       if (route?.kind === 'craftingTable') {
         setInventoryOpen(true, 'craftingTable')
+      } else if (route?.kind === 'furnace') {
+        const dimension = Effect.runSync(playerApi.dimension)
+        const position = {
+          x: Math.floor(route.at.x),
+          y: Math.floor(route.at.y),
+          z: Math.floor(route.at.z),
+        }
+        const key = furnaceKeyOf({ dimension, position })
+        if (!furnaceStates.has(key)) {
+          furnaceStates.set(key, { dimension, position, state: emptyFurnaceState() })
+          markSessionDirty()
+        }
+        activeFurnaceKey = key
+        setInventoryOpen(true, 'furnace')
       } else {
         const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
         const selected = inventoryBeforeUse.slots[selectedHotbarIndex]
