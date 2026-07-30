@@ -163,6 +163,7 @@ import {
   armorDurabilityWearFromPreMitigationDamage,
   CREEPER_KIND,
   drainBlockUseResults,
+  drainBowShotResults,
   drainItemUseResults,
   drainMobDrops,
   drainPortalTravels,
@@ -211,6 +212,13 @@ import {
   type MiningProgressState,
   type PlaceableItemType,
 } from '@nerima-games/mx-gameplay'
+import {
+  advanceBowUse,
+  IDLE_BOW_USE,
+  takeBowSettlement,
+  type BowUseState,
+  type PendingBowShot,
+} from './bow-use'
 import {
   composeGame,
   EMPTY_MODULE_LAYER,
@@ -378,14 +386,18 @@ const EQUIPMENT_ONLY_ITEM_TYPES = [
 
 type EquipmentOnlyItemType = (typeof EQUIPMENT_ONLY_ITEM_TYPES)[number]
 type GameplayUseItemType = Exclude<ItemStack['item'], EquipmentOnlyItemType>
+type LegacyGameplayItemType = Exclude<ItemStack['item'], 'arrow' | 'bow'>
 
 const EQUIPMENT_ONLY_ITEM_NAMES: ReadonlySet<string> = new Set(EQUIPMENT_ONLY_ITEM_TYPES)
 
 const isGameplayUseItemType = (item: ItemStack['item']): item is GameplayUseItemType =>
   !EQUIPMENT_ONLY_ITEM_NAMES.has(item)
 
+const isLegacyGameplayItemType = (item: ItemStack['item']): item is LegacyGameplayItemType =>
+  item !== 'arrow' && item !== 'bow'
+
 const isPlaceableGameplayItem = (item: ItemStack['item']): item is PlaceableItemType =>
-  isGameplayUseItemType(item) && isPlaceableItem(item)
+  isGameplayUseItemType(item) && isLegacyGameplayItemType(item) && isPlaceableItem(item)
 
 type InventoryMode = 'player' | 'craftingTable' | 'furnace'
 
@@ -1392,6 +1404,7 @@ const bootGame = async (
     return [...contactsByBlock.values()]
   }
   const resetSimState = (physicsEnabled: boolean): void => {
+    resetBowUse()
     environmentalContactDamageState = INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE
     pendingMiningToolDamage.splice(0)
     pendingBlockBreakConfirmations.splice(0)
@@ -1420,6 +1433,7 @@ const bootGame = async (
   let placementsRequested = 0
   let nextItemUseRequestId = 0
   let nextBlockUseRequestId = 0
+  let nextBowShotRequestId = 0
 
   // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
   // whole reason breaking works. `gameplayStages` takes the state as an
@@ -1517,6 +1531,32 @@ const bootGame = async (
       }
     | { readonly kind: 'eat'; readonly slotIndex: number }
   const pendingItemUses = new Map<string, PendingItemUse>()
+  let bowUseState: BowUseState = IDLE_BOW_USE
+  let pendingBowShots: ReadonlyMap<string, PendingBowShot> = new Map()
+  const bowInteractionLocked = (): boolean =>
+    bowUseState._tag === 'Drawing' || pendingBowShots.size > 0
+  const resetBowUse = (): void => {
+    bowUseState = IDLE_BOW_USE
+    pendingBowShots = new Map()
+    Effect.runSync(Ref.set(gameplayState.pendingBowShots, []))
+    Effect.runSync(Ref.set(gameplayState.bowShotResults, []))
+  }
+  const settleBowShotResults = (): void => {
+    for (const result of Effect.runSync(drainBowShotResults(gameplayState))) {
+      const settlement = takeBowSettlement(pendingBowShots, result)
+      pendingBowShots = settlement.pending
+      if (settlement.fired === null) continue
+      Effect.runSync(world.inventory.consumeAndDamageAt({
+        consume: { item: 'arrow', count: 1 },
+        damage: {
+          location: { _tag: 'Inventory', slotIndex: settlement.fired.bowSlotIndex },
+          expectedItem: 'bow',
+          amount: 1,
+        },
+      }))
+      markSessionDirty()
+    }
+  }
   const pendingBlockUses = new Map<
     string,
     { readonly dimension: Dimension; readonly position: { readonly x: number; readonly y: number; readonly z: number } }
@@ -1805,7 +1845,7 @@ const bootGame = async (
   }
 
   const activateFurnaceSlot = (slot: FurnaceSlotId): void => {
-    if (playerIsDead() || activeFurnaceKey === undefined) return
+    if (playerIsDead() || bowInteractionLocked() || activeFurnaceKey === undefined) return
     furnaceFocus = slot
     furnaceStatus = ''
     const furnace = furnaceStates.get(activeFurnaceKey)
@@ -1886,7 +1926,7 @@ const bootGame = async (
     target: InventoryInteractionTarget,
     button: 'left' | 'right' = 'left',
   ): void => {
-    if (playerIsDead()) return
+    if (playerIsDead() || bowInteractionLocked()) return
     inventoryFocus = target
     if (target.kind === 'crafting-output') {
       Effect.runSync(inventoryInteraction.craftOnce())
@@ -1940,6 +1980,7 @@ const bootGame = async (
 
   const setInventoryOpen = (open: boolean, mode: InventoryMode = 'player'): void => {
     if (open && playerIsDead()) return
+    if (open && bowInteractionLocked()) return
     const previousOpen = inventoryOpen
     const switchingMode = open && previousOpen && inventoryMode !== mode
     if (previousOpen === open && !switchingMode) return
@@ -1979,11 +2020,11 @@ const bootGame = async (
 
   const respawnPlayer = (): void => {
     resetPrimaryAttackGesture()
+    resetBowUse()
     Effect.runSync(world.vitals.respawn)
     Effect.runSync(world.entities.reset)
     Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
     Effect.runSync(Ref.set(gameplayState.playerDamages, []))
-    Effect.runSync(Ref.set(gameplayState.pendingBowShots, []))
     Effect.runSync(Ref.set(gameplayState.spawnAttempts, []))
     Effect.runSync(Ref.set(gameplayState.mobDrops, []))
     observedMobDrops.splice(0)
@@ -2074,6 +2115,7 @@ const bootGame = async (
 
   const setPaused = (next: boolean): void => {
     resetPrimaryAttackGesture()
+    if (next) resetBowUse()
     paused = next
     gameShell.inert = next
     pauseOverlay.hidden = !next
@@ -2825,7 +2867,11 @@ const bootGame = async (
       if (document.pointerLockElement === canvas) document.exitPointerLock()
     }
 
-    if (!dead && Effect.runSync(inputApi.wasActionJustTriggered('openInventory'))) {
+    if (
+      !dead &&
+      !bowInteractionLocked() &&
+      Effect.runSync(inputApi.wasActionJustTriggered('openInventory'))
+    ) {
       setInventoryOpen(!inventoryOpen, 'player')
     }
 
@@ -2847,6 +2893,7 @@ const bootGame = async (
     if (!attackHeld) resetPrimaryAttackGesture()
     const useTriggered =
       !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))
+    const useHeld = held('use') > 0
     const lookDelta = {
       x: walk.pointerDelta.x + consumedTouchLook.delta.x,
       y: walk.pointerDelta.y + consumedTouchLook.delta.y,
@@ -2916,7 +2963,10 @@ const bootGame = async (
           z: pending.position.z + 0.5,
         }
         const contents = [furnace.state.input, furnace.state.fuel, furnace.state.output]
-          .filter((stack): stack is ItemStack => stack !== null)
+          .filter(
+            (stack): stack is ItemStack & { readonly item: LegacyGameplayItemType } =>
+              stack !== null && isLegacyGameplayItemType(stack.item),
+          )
           .map((stack) => ({ ...stack, at }))
         if (contents.length > 0) {
           Effect.runSync(spawnDroppedItems(world.entities, contents))
@@ -2961,6 +3011,10 @@ const bootGame = async (
     }
     let deadAfterFrame = playerIsDead()
 
+    // A portal may change dimension in the same frame that gameplay confirms a
+    // shot. Settle that confirmation before dimension reset clears the outbox.
+    settleBowShotResults()
+
     let postFramePose = Effect.runSync(playerApi.pose)
     let dimensionAfterFrame = Effect.runSync(playerApi.dimension)
     if (
@@ -2980,6 +3034,7 @@ const bootGame = async (
       dimensionAfterFrame !== currentChunkContext.dimension
     if (dimensionChanged) {
       resetPrimaryAttackGesture()
+      resetBowUse()
       alignActiveDimension(dimensionAfterFrame)
       resetSimState(!deadAfterFrame)
       markSessionDirty()
@@ -3020,6 +3075,42 @@ const bootGame = async (
     }
     deadAfterFrame = playerIsDead()
     syncTouchControls()
+
+    const bowInventory = Effect.runSync(world.inventory.snapshot)
+    const selectedBowItem = bowInventory.slots[selectedHotbarIndex]?.item ?? null
+    const bowAdvance = advanceBowUse({
+      state: bowUseState,
+      useTriggered,
+      useHeld,
+      cancelled: deadAfterFrame || dimensionChanged || inventoryOpen || pendingBowShots.size > 0,
+      selectedItem: selectedBowItem,
+      selectedSlotIndex: selectedHotbarIndex,
+      arrowCount: bowInventory.slots.reduce(
+        (count, slot) => count + (slot?.item === 'arrow' ? slot.count : 0),
+        0,
+      ),
+      deltaSecs,
+    })
+    bowUseState = bowAdvance.state
+    if (bowAdvance.release !== null) {
+      nextBowShotRequestId += 1
+      const requestId = `bow-shot-${String(nextBowShotRequestId)}`
+      pendingBowShots = new Map(pendingBowShots).set(requestId, {
+        bowSlotIndex: bowAdvance.release.bowSlotIndex,
+      })
+      const horizontal = Math.cos(postFramePose.pitchRadians)
+      Effect.runSync(requestBowShot(gameplayState, requestId, {
+        origin: {
+          x: postFramePose.feetPosition.x,
+          y: postFramePose.feetPosition.y + EYE_LEVEL_OFFSET,
+          z: postFramePose.feetPosition.z,
+        },
+        dirX: -Math.sin(postFramePose.yawRadians) * horizontal,
+        dirY: Math.sin(postFramePose.pitchRadians),
+        dirZ: -Math.cos(postFramePose.yawRadians) * horizontal,
+        chargeSecs: bowAdvance.release.chargeSecs,
+      }))
+    }
 
     const groundedAfterFrame = Effect.runSync(Ref.get(simState.isGrounded))
     const moved =
@@ -3062,6 +3153,9 @@ const bootGame = async (
         } else {
           const inventorySnapshot = Effect.runSync(world.inventory.snapshot)
           const selectedItem = inventorySnapshot.slots[selectedHotbarIndex]?.item ?? null
+          const miningItem = selectedItem !== null && isLegacyGameplayItemType(selectedItem)
+            ? selectedItem
+            : null
           let target: Parameters<typeof advanceMiningProgress>[0]['target'] = null
           if (resolution._tag === 'Block') {
             const reading = Effect.runSync(currentChunkStore.getBlock(resolution.target.position))
@@ -3078,7 +3172,7 @@ const bootGame = async (
             current: miningProgress,
             target,
             isMining: true,
-            selectedItem,
+            selectedItem: miningItem,
             deltaSecs,
           })
           miningProgress = advancement.nextProgress
@@ -3104,7 +3198,7 @@ const bootGame = async (
                 requestBlockBreak(
                   gameplayState,
                   target.position,
-                  miningLootContextForItem(selectedItem),
+                  miningLootContextForItem(miningItem),
                 ),
               )
               pendingBlockBreakConfirmations.push({
@@ -3139,7 +3233,7 @@ const bootGame = async (
       resetPrimaryAttackGesture()
     }
 
-    if (!deadAfterFrame && useTriggered) {
+    if (!deadAfterFrame && useTriggered && !bowAdvance.capturedUse && pendingBowShots.size === 0) {
       const route = Effect.runSync(
         targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH),
       )
@@ -3192,7 +3286,7 @@ const bootGame = async (
               )
               pendingItemUses.set(requestId, { kind: 'eat', slotIndex: selectedHotbarIndex })
             }
-          } else if (isHoeItem(selected.item)) {
+          } else if (isLegacyGameplayItemType(selected.item) && isHoeItem(selected.item)) {
             const target = Effect.runSync(
               requestTargetedSoilTill(
                 gameplayState,
@@ -3209,7 +3303,7 @@ const bootGame = async (
                 heldItem: selected.item,
               })
             }
-          } else if (isIgnitionItem(selected.item)) {
+          } else if (isLegacyGameplayItemType(selected.item) && isIgnitionItem(selected.item)) {
             const target = Effect.runSync(
               requestTargetedItemUse(
                 gameplayState,
@@ -3380,7 +3474,7 @@ const bootGame = async (
               }
               const leftovers = result.outcome.drops.flatMap((drop) => {
                 const leftover = Effect.runSync(world.inventory.add(drop.item, drop.count))
-                return leftover > 0 ? [itemStack(drop.item, leftover)] : []
+                return leftover > 0 ? [{ item: drop.item, count: leftover }] : []
               })
               if (leftovers.length > 0) {
                 Effect.runSync(spawnDroppedItems(world.entities, leftovers.map((stack) => ({ ...stack, at }))))
