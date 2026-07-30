@@ -92,6 +92,7 @@ import { blockIdOf, blockTypeOfId, propertyOfBlockId } from '@nerima-games/mc-ke
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   advanceFurnace,
+  containerIdAt,
   emptyFurnaceState,
   itemStack,
   makeCropService,
@@ -130,6 +131,10 @@ import {
   type RenderEntity,
 } from '@nerima-games/mc-render'
 import {
+  chestStorageCloseIntent,
+  chestStorageSlotClickIntent,
+  chestStorageViewModel,
+  createChestStorageView,
   createMainMenuView,
   createCrosshairView,
   createFurnaceView,
@@ -144,6 +149,7 @@ import {
   slotSnapshotOf,
   uiModule,
   type CreateWorldRequest,
+  type ChestStorageSlotTarget,
   type FurnaceSlotId,
   type FurnaceSnapshot,
   type InventoryInteractionTarget,
@@ -174,6 +180,7 @@ import {
   INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
   makeGameplayFrameState,
   makeGeneratedWorld,
+  isDroppedItemBehaviour,
   isHoeItem,
   isIgnitionItem,
   isPlaceableItem,
@@ -399,12 +406,13 @@ const isLegacyGameplayItemType = (item: ItemStack['item']): item is LegacyGamepl
 const isPlaceableGameplayItem = (item: ItemStack['item']): item is PlaceableItemType =>
   isGameplayUseItemType(item) && isLegacyGameplayItemType(item) && isPlaceableItem(item)
 
-type InventoryMode = 'player' | 'craftingTable' | 'furnace'
+type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest'
 
 const INVENTORY_PRESENTATIONS = {
   player: { label: 'Inventory', width: 2, height: 2 },
   craftingTable: { label: 'Crafting Table', width: 3, height: 3 },
   furnace: { label: 'Furnace', width: 0, height: 0 },
+  chest: { label: 'Chest', width: 0, height: 0 },
 } as const
 
 type SettingsWriteQueue = {
@@ -893,6 +901,9 @@ const bootGame = async (
   if (Option.isSome(loadedSession)) {
     await Effect.runPromise(world.inventory.restoreStorage(loadedSession.value.state.storage))
     await Effect.runPromise(
+      world.inventory.restoreContainerStorage(loadedSession.value.state.containerStorage),
+    )
+    await Effect.runPromise(
       world.player.restore(loadedSession.value.state.player, loadedSession.value.state.dimension),
     )
     await Effect.runPromise(world.vitals.restore(loadedSession.value.state.vitals))
@@ -971,6 +982,7 @@ const bootGame = async (
       .map((portal) => [portalKeyOf(portal), portal]),
   )
   let activeFurnaceKey: string | undefined
+  let activeChestId: string | undefined
   let redstoneDirty = true
 
   const getOrCreateDimensionChunkContext = (
@@ -1017,6 +1029,7 @@ const bootGame = async (
       dimension: Effect.runSync(world.player.dimension),
       player: Effect.runSync(world.player.pose),
       storage: Effect.runSync(world.inventory.storageSnapshot),
+      containerStorage: Effect.runSync(world.inventory.containerStorageSnapshot),
       vitals: Effect.runSync(world.vitals.snapshot),
       time: Effect.runSync(time.snapshot),
       weather: Effect.runSync(weather.snapshot),
@@ -1649,6 +1662,7 @@ const bootGame = async (
   const hud = createHudView(document, hudParent, motion)
   const inventoryView = createInventoryView(document, inventoryParent)
   const furnaceView = createFurnaceView(document, inventoryParent)
+  const chestView = createChestStorageView(document, inventoryParent)
   const crosshair = createCrosshairView(document, hudParent, motion)
 
   inventoryParent.setAttribute('role', 'dialog')
@@ -1680,6 +1694,9 @@ const bootGame = async (
   }
   let furnaceFocus: FurnaceSlotId = 'input'
   let furnaceStatus = ''
+  let chestFocus: ChestStorageSlotTarget = { region: 'chest', slot: 0 }
+  let chestSelected: ChestStorageSlotTarget | undefined
+  let chestStatus = ''
   const inventoryInteraction = createInventoryInteraction(world.inventory, {
     onCrafted: () => markSessionDirty(),
     onInventoryChanged: () => markSessionDirty(),
@@ -1770,8 +1787,42 @@ const bootGame = async (
         .map((slot, slotIndex) => slotSnapshotOf(slot, durabilityBySlot.get(slotIndex))),
       selectedHotbarIndex,
     }))
-    inventoryView.root.style.setProperty('display', inventoryMode === 'furnace' ? 'none' : '')
+    inventoryView.root.style.setProperty(
+      'display', inventoryMode === 'furnace' || inventoryMode === 'chest' ? 'none' : '',
+    )
     furnaceView.root.style.setProperty('display', inventoryMode === 'furnace' ? '' : 'none')
+    chestView.root.style.setProperty('display', inventoryMode === 'chest' ? '' : 'none')
+    if (inventoryMode === 'chest') {
+      const container = activeChestId === undefined
+        ? null
+        : Effect.runSync(world.inventory.containerSnapshot(activeChestId))
+      const slotSnapshot = (
+        stack: ItemStack | null | undefined,
+        durability: { readonly current: number; readonly max: number } | null | undefined,
+      ) => stack == null
+        ? undefined
+        : {
+            item: stack.item,
+            count: stack.count,
+            durability: durability == null ? undefined : durability.current / durability.max,
+          }
+      const chestSlots = container?.slots.map((slot) =>
+        slotSnapshot(slot, slot?.durability)) ?? Array.from({ length: 27 }, () => undefined)
+      const playerSlots = storage.inventory.slots.map((slot, index) =>
+        slotSnapshot(slot, storage.inventoryDurability[index]))
+      const selectedStack = chestSelected === undefined
+        ? undefined
+        : chestSelected.region === 'chest'
+          ? chestSlots[chestSelected.slot]
+          : playerSlots[chestSelected.slot]
+      chestView.render(chestStorageViewModel({
+        chest: chestSlots,
+        playerInventory: playerSlots,
+        cursor: selectedStack,
+        selectedSlot: chestSelected,
+      }), { focusedSlot: chestFocus, status: chestStatus })
+      return
+    }
     if (inventoryMode === 'furnace') {
       const furnace = activeFurnaceKey === undefined
         ? undefined
@@ -1834,6 +1885,89 @@ const bootGame = async (
     if (interactive === null || !inventoryParent.contains(interactive)) return undefined
     const slot = interactive.dataset['interactionSlot']
     return slot === 'input' || slot === 'fuel' || slot === 'output' ? slot : undefined
+  }
+
+  const chestTargetOf = (source: EventTarget | null): ChestStorageSlotTarget | undefined => {
+    if (!(source instanceof Element)) return undefined
+    const interactive = source.closest<HTMLElement>(
+      '[data-interaction-target="chest-storage-slot"]',
+    )
+    if (interactive === null || !inventoryParent.contains(interactive)) return undefined
+    const region = interactive.dataset['interactionRegion']
+    const slot = Number(interactive.dataset['interactionSlot'])
+    if ((region !== 'chest' && region !== 'player') || !Number.isInteger(slot)) return undefined
+    const intent = chestStorageSlotClickIntent({ region, slot })
+    return intent?._tag === 'SlotClicked' ? intent.target : undefined
+  }
+
+  const sameChestTarget = (
+    left: ChestStorageSlotTarget,
+    right: ChestStorageSlotTarget,
+  ): boolean => left.region === right.region && left.slot === right.slot
+
+  const activateChestSlot = (target: ChestStorageSlotTarget): void => {
+    if (playerIsDead() || bowInteractionLocked() || activeChestId === undefined) return
+    chestFocus = target
+    if (chestSelected === undefined) {
+      const container = Effect.runSync(world.inventory.containerSnapshot(activeChestId))
+      const stack = target.region === 'chest'
+        ? container?.slots[target.slot]
+        : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[target.slot]
+      if (stack == null) {
+        chestStatus = 'Slot is empty'
+      } else {
+        chestSelected = target
+        chestStatus = `Selected ${stack.item}`
+      }
+      renderPlayerUi()
+      return
+    }
+    if (sameChestTarget(chestSelected, target)) {
+      chestSelected = undefined
+      chestStatus = 'Selection cleared'
+      renderPlayerUi()
+      return
+    }
+    if (chestSelected.region === target.region) {
+      chestStatus = 'Choose a slot in the other inventory'
+      renderPlayerUi()
+      return
+    }
+    const source = chestSelected
+    const container = Effect.runSync(world.inventory.containerSnapshot(activeChestId))
+    const sourceStack = source.region === 'chest'
+      ? container?.slots[source.slot]
+      : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[source.slot]
+    if (sourceStack == null) {
+      chestSelected = undefined
+      chestStatus = 'Source slot is empty'
+      renderPlayerUi()
+      return
+    }
+    const result = Effect.runSync(world.inventory.transferContainerItem({
+      direction: source.region === 'chest' ? 'ContainerToPlayer' : 'PlayerToContainer',
+      containerId: activeChestId,
+      playerSlot: source.region === 'player' ? source.slot : target.slot,
+      containerSlot: source.region === 'chest' ? source.slot : target.slot,
+      count: sourceStack.count,
+    }))
+    if (result._tag === 'Transferred') {
+      chestSelected = undefined
+      chestStatus = `Moved ${String(result.count)} ${result.item}`
+      markSessionDirty()
+    } else if (result._tag === 'ContainerNotFound') {
+      activeChestId = undefined
+      chestSelected = undefined
+      setInventoryOpen(false)
+      return
+    } else {
+      chestStatus = result._tag === 'DestinationFull'
+        ? 'Destination slot is full'
+        : result._tag === 'DestinationMismatch'
+          ? 'Destination contains another item'
+          : 'Transfer unavailable'
+    }
+    renderPlayerUi()
   }
 
   const updateActiveFurnace = (state: FurnaceState): void => {
@@ -1916,7 +2050,11 @@ const bootGame = async (
   }
 
   const focusRenderedTarget = (): void => {
-    const activeScreen = inventoryMode === 'furnace' ? 'furnace' : 'inventory'
+    const activeScreen = inventoryMode === 'furnace'
+      ? 'furnace'
+      : inventoryMode === 'chest'
+        ? 'chest-storage'
+        : 'inventory'
     inventoryParent.querySelector<HTMLElement>(
       `[data-mx-ui="${activeScreen}"] [role="button"][tabindex="0"]`,
     )?.focus()
@@ -1943,6 +2081,17 @@ const bootGame = async (
 
   inventoryParent.addEventListener('click', (event) => {
     if (playerIsDead()) return
+    if (inventoryMode === 'chest') {
+      if (event.target instanceof Element && event.target.closest(
+        '[data-interaction-target="chest-storage-close"]',
+      ) !== null) {
+        if (chestStorageCloseIntent()._tag === 'CloseRequested') setInventoryOpen(false)
+        return
+      }
+      const chestTarget = chestTargetOf(event.target)
+      if (chestTarget !== undefined) activateChestSlot(chestTarget)
+      return
+    }
     if (inventoryMode === 'furnace') {
       const furnaceTarget = furnaceTargetOf(event.target)
       if (furnaceTarget !== undefined) activateFurnaceSlot(furnaceTarget)
@@ -1953,7 +2102,7 @@ const bootGame = async (
   })
   inventoryParent.addEventListener('contextmenu', (event) => {
     if (playerIsDead()) return
-    if (inventoryMode === 'furnace') return
+    if (inventoryMode === 'furnace' || inventoryMode === 'chest') return
     const target = targetOf(event.target)
     if (target === undefined) return
     event.preventDefault()
@@ -1963,6 +2112,21 @@ const bootGame = async (
   inventoryParent.addEventListener('keydown', (event) => {
     if (playerIsDead()) return
     if (event.key !== 'Enter' && event.key !== ' ') return
+    if (inventoryMode === 'chest') {
+      if (event.target instanceof Element && event.target.closest(
+        '[data-interaction-target="chest-storage-close"]',
+      ) !== null) {
+        event.preventDefault()
+        if (chestStorageCloseIntent()._tag === 'CloseRequested') setInventoryOpen(false)
+        return
+      }
+      const chestTarget = chestTargetOf(event.target)
+      if (chestTarget === undefined) return
+      event.preventDefault()
+      activateChestSlot(chestTarget)
+      focusRenderedTarget()
+      return
+    }
     if (inventoryMode === 'furnace') {
       const furnaceTarget = furnaceTargetOf(event.target)
       if (furnaceTarget === undefined) return
@@ -1986,7 +2150,11 @@ const bootGame = async (
     if (previousOpen === open && !switchingMode) return
     resetPrimaryAttackGesture()
 
-    if (previousOpen && inventoryMode !== 'furnace' && (!open || switchingMode)) {
+    if (
+      previousOpen
+      && (inventoryMode === 'player' || inventoryMode === 'craftingTable')
+      && (!open || switchingMode)
+    ) {
       Effect.runSync(inventoryInteraction.close())
     }
 
@@ -1998,16 +2166,25 @@ const bootGame = async (
     if (open) {
       inventoryMode = mode
       const presentation = INVENTORY_PRESENTATIONS[mode]
-      if (mode !== 'furnace') {
+      if (mode === 'player' || mode === 'craftingTable') {
         inventoryInteraction.configureGrid(presentation.width, presentation.height)
       }
       inventoryParent.setAttribute('aria-label', presentation.label)
       if (mode === 'furnace') {
         furnaceFocus = 'input'
         furnaceStatus = ''
+      } else if (mode === 'chest') {
+        chestFocus = { region: 'chest', slot: 0 }
+        chestSelected = undefined
+        chestStatus = ''
       } else {
         inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
       }
+    }
+    if (!open && inventoryMode === 'chest') {
+      activeChestId = undefined
+      chestSelected = undefined
+      chestStatus = ''
     }
     renderPlayerUi()
     renderCrosshair()
@@ -2212,6 +2389,7 @@ const bootGame = async (
     const farmCropReading = Effect.runSync(currentChunkStore.getBlock(QA_FARM_CROP_BLOCK))
     const cropSnapshot = Effect.runSync(crops.snapshot)
     const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const containerStorage = Effect.runSync(world.inventory.containerStorageSnapshot)
     const inventory = storage.inventory
     const vitals = Effect.runSync(world.vitals.snapshot)
     const entities = Effect.runSync(world.entities.snapshot).entities
@@ -2252,16 +2430,32 @@ const bootGame = async (
         durability: storage.inventoryDurability,
         equipment: storage.equipment.slots,
       },
+      containerStorage,
+      chestUi: {
+        open: inventoryOpen && inventoryMode === 'chest',
+        activeChestId: activeChestId ?? null,
+        selectedSlot: chestSelected ?? null,
+        focusedSlot: chestFocus,
+        status: chestStatus,
+      },
       entityCount: entities.length,
       renderedEntities: entityRenderProjection(),
       mobDrops: observedMobDrops.map(({ renderId: _, ...drop }) => drop),
       itemUse: lastObservedItemUse ?? null,
-      entities: entities.map((entity) => ({
-        id: entity.id,
-        kind: entity.kind,
-        feetPosition: entity.feetPosition,
-        healthPoints: entity.healthPoints,
-      })),
+      entities: entities.map((entity) => {
+        const dropped = isDroppedItemBehaviour(entity.behaviour) ? entity.behaviour : undefined
+        return {
+          id: entity.id,
+          kind: entity.kind,
+          feetPosition: entity.feetPosition,
+          healthPoints: entity.healthPoints,
+          ...(dropped === undefined ? {} : {
+            item: dropped.item,
+            count: dropped.count,
+            durability: dropped.durability,
+          }),
+        }
+      }),
       target: {
         position: KNOWN_TARGET_BLOCK,
         reading: reading._tag,
@@ -2953,6 +3147,29 @@ const bootGame = async (
       if (context === undefined) continue
       const reading = Effect.runSync(context.chunkStore.getBlock(pending.position))
       if (reading._tag !== 'Block' || reading.block === pending.blockId) continue
+      if (pending.blockId === blockIdOf('chest')) {
+        const id = containerIdAt(pending.dimension, pending.position)
+        const drained = Effect.runSync(world.inventory.drainContainer(id))
+        if (drained._tag === 'Drained') {
+          const at = {
+            x: pending.position.x + 0.5,
+            y: pending.position.y + 0.5,
+            z: pending.position.z + 0.5,
+          }
+          if (drained.items.length > 0) {
+            Effect.runSync(spawnDroppedItems(
+              world.entities,
+              drained.items.map((stack) => ({ ...stack, at })),
+            ))
+          }
+          markSessionDirty()
+        }
+        if (activeChestId === id && inventoryOpen && inventoryMode === 'chest') {
+          activeChestId = undefined
+          setInventoryOpen(false)
+        }
+        continue
+      }
       if (pending.blockId !== 104) continue
       const key = furnaceKeyOf(pending)
       const furnace = furnaceStates.get(key)
@@ -3253,6 +3470,20 @@ const bootGame = async (
         }
         activeFurnaceKey = key
         setInventoryOpen(true, 'furnace')
+      } else if (route?.kind === 'storage') {
+        const dimension = Effect.runSync(playerApi.dimension)
+        const position = {
+          x: Math.floor(route.at.x),
+          y: Math.floor(route.at.y),
+          z: Math.floor(route.at.z),
+        }
+        const id = containerIdAt(dimension, position)
+        const created = Effect.runSync(world.inventory.createContainer(id))
+        if (created._tag === 'Created') markSessionDirty()
+        if (created._tag !== 'InvalidContainerId') {
+          activeChestId = id
+          setInventoryOpen(true, 'chest')
+        }
       } else {
         const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
         const selected = inventoryBeforeUse.slots[selectedHotbarIndex]

@@ -20,8 +20,10 @@ import {
   isValidWeatherState,
   maxStackCountForItem,
   storageFromInventory,
+  validateContainerStorageSnapshot,
   validatePlayerStorageSnapshot,
   validateCropSnapshot,
+  type ContainerStorageSnapshot,
   type CropSnapshot,
   type Inventory,
   type FurnaceState,
@@ -47,7 +49,7 @@ import {
 } from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
-export const SESSION_FORMAT_VERSION = 11
+export const SESSION_FORMAT_VERSION = 12
 
 export type SessionPosition = {
   readonly x: number
@@ -98,6 +100,7 @@ export type SessionState = {
     readonly pitchRadians: number
   }
   readonly storage: PlayerStorage
+  readonly containerStorage: ContainerStorageSnapshot
   readonly vitals: PlayerVitals
   readonly time: TimeState
   readonly weather: WeatherState
@@ -153,6 +156,14 @@ const PlayerStorageSchema = Schema.Unknown.pipe(
     { message: () => 'Player storage violates persistence invariants' },
   ),
 ) as unknown as Schema.Schema<PlayerStorage>
+
+const ContainerStorageSchema = Schema.Unknown.pipe(
+  Schema.filter(
+    (value): value is ContainerStorageSnapshot =>
+      validateContainerStorageSnapshot(value)._tag === 'Valid',
+    { message: () => 'Container storage violates persistence invariants' },
+  ),
+) as unknown as Schema.Schema<ContainerStorageSnapshot>
 
 const CropSnapshotSchema = Schema.Unknown.pipe(
   Schema.filter(
@@ -247,6 +258,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
     pitchRadians: Schema.Number,
   }),
   storage: PlayerStorageSchema,
+  containerStorage: ContainerStorageSchema,
   vitals: PlayerVitalsSchema,
   time: TimeStateSchema,
   weather: WeatherStateSchema,
@@ -538,6 +550,25 @@ const migrateSessionV10ToV11: Migration = {
   },
 }
 
+const migrateSessionV11ToV12: Migration = {
+  from: 11,
+  describe: 'add container storage state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v11 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'containerStorage')
+        ? state
+        : { ...state, containerStorage: { version: 1, containers: [] } },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
   version: SESSION_FORMAT_VERSION,
@@ -553,6 +584,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV8ToV9,
     migrateSessionV9ToV10,
     migrateSessionV10ToV11,
+    migrateSessionV11ToV12,
   ],
 })
 

@@ -15,6 +15,7 @@ import {
   INVENTORY_SLOT_COUNT,
   emptyFurnaceState,
   equipFromInventory,
+  itemStack,
   storageFromInventory,
   type CropLocation,
   type Inventory,
@@ -73,6 +74,18 @@ const sessionState = (seed: number): SessionState => {
     storage: storageFromInventory({
       slots: Array.from({ length: INVENTORY_SLOT_COUNT }, (_, index) => inventory.slots[index]),
     } as Inventory),
+    containerStorage: {
+      version: 1,
+      containers: [{
+        id: 'overworld:4,65,-2',
+        slots: Array.from(
+          { length: 27 },
+          (_, index) => index === 0
+          ? { ...itemStack('stone', 12), durability: null }
+            : null,
+        ),
+      }],
+    },
     redstone: {
       levers: [{
         dimension: 'nether',
@@ -213,12 +226,13 @@ describe('session persistence', () => {
       expect(saved.state.time).toEqual(sessionState(42).time)
       expect(saved.state.weather).toEqual(sessionState(42).weather)
       expect(saved.state.redstone).toEqual(sessionState(42).redstone)
+      expect(saved.state.containerStorage).toEqual(sessionState(42).containerStorage)
       expect(saved.state.portals).toEqual(sessionState(42).portals)
       expect(saved.state.crops).toEqual(sessionState(42).crops)
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 11,
+        version: 12,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -292,6 +306,86 @@ describe('session persistence', () => {
 
       expect(loaded.state.crops).toEqual({ crops: [] })
       expect(storage.envelope(key)?.version).toBe(10)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a v11 session with absent container storage', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v11')
+    const { containerStorage: _containerStorage, ...v11State } = sessionState(42)
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 11,
+      payload: {
+        sessionId: 'legacy-v11',
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: v11State,
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v11'))
+
+      expect(loaded.state.containerStorage).toEqual({ version: 1, containers: [] })
+      expect(storage.envelope(key)?.version).toBe(11)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects v11 container storage explicitly set to undefined', () => {
+    const storage = controlledStorage()
+    const sessionId = 'undefined-v11-container-storage'
+    storage.setEnvelope(sessionHeadKey(sessionId), {
+      format: SESSION_FORMAT_NAME,
+      version: 11,
+      payload: {
+        sessionId,
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: { ...sessionState(42), containerStorage: undefined },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession(sessionId))
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 11,
+      })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects invalid persisted container storage', () => {
+    const storage = controlledStorage()
+    const sessionId = 'invalid-container-storage'
+    storage.setEnvelope(sessionHeadKey(sessionId), {
+      format: SESSION_FORMAT_NAME,
+      version: 11,
+      payload: {
+        sessionId,
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: {
+          ...sessionState(42),
+          containerStorage: {
+            version: 1,
+            containers: [{ id: '', slots: [] }],
+          },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession(sessionId))
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 11,
+      })
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -410,7 +504,7 @@ describe('session persistence', () => {
     const sessionId = 'future-version'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 12,
+      version: 13,
       payload: {
         sessionId,
         revision: 'r1',
@@ -425,7 +519,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 12,
+        version: 13,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -917,7 +1011,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(11)
+      expect(storage.envelope(headKey)?.version).toBe(12)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )
