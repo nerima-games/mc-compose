@@ -93,14 +93,17 @@ import {
   advanceFurnace,
   emptyFurnaceState,
   itemStack,
+  makeCropService,
   makeSimFrameState,
   makeTimeService,
   makeWeatherService,
   maxStackCountForItem,
+  POTATO_MATURITY_SECS,
   simStages,
   STARTER_FUEL_RULES,
   STARTER_SMELTING_RECIPES,
   type FurnaceState,
+  type CropLocation,
   type ItemStack,
   type SimPhysicsConfig,
   type WeatherState,
@@ -167,6 +170,7 @@ import {
   gameplayStages,
   makeGameplayFrameState,
   makeGeneratedWorld,
+  isHoeItem,
   isIgnitionItem,
   isPlaceableItem,
   PLAYER_HALF_HEIGHT,
@@ -176,7 +180,10 @@ import {
   requestItemUse,
   requestMeleeAttack,
   requestMobSpawn,
-  resolveFoodUse,
+  requestPotatoFoodUse,
+  requestPotatoHarvest,
+  requestTargetedPotatoPlanting,
+  requestTargetedSoilTill,
   requestTargetedBlockBreak,
   requestTargetedBlockUse,
   requestTargetedItemUse,
@@ -191,6 +198,7 @@ import {
   miningProgressFraction,
   ZOMBIE_KIND,
   type IgnitionItemType,
+  type HoeItemType,
   type ItemUseResult,
   type MobBehaviour,
   type MobDropEvent,
@@ -238,6 +246,7 @@ import {
   loadSession,
   makeSessionChunkSource,
   saveSession,
+  SESSION_FORMAT_VERSION,
   snapshotResidentChunks,
   type DimensionChunk,
   type PersistedFurnaceState,
@@ -290,10 +299,13 @@ const WALK_EXHAUSTION_PER_METRE = 0.01
 const JUMP_SPEED_M_PER_S = 8.4
 const LOOK_SENSITIVITY = 0.0022
 const WORLD_SEED = 20260728
+const FARMLAND_BLOCK_ID = 49
+const POTATO_CROP_BLOCK_ID = 72
 const DATABASE_NAME = 'nerima-games-minecraft'
 const AUTOSAVE_INTERVAL_MS = 5_000
 const SAVE_DEBOUNCE_MS = 500
 const KNOWN_TARGET_BLOCK = { x: 8, y: 63, z: 8 } as const
+const QA_FARM_CROP_BLOCK = { x: 8, y: 64, z: 8 } as const
 const QA_IGNITION_HIT_BLOCK = { x: 8, y: 66, z: 8 } as const
 const QA_IGNITION_CELL = { x: 8, y: 66, z: 9 } as const
 const QA_IGNITION_SUPPORT_BLOCK = { x: 8, y: 65, z: 9 } as const
@@ -386,6 +398,11 @@ const drainSettingsWrites = async (queue: SettingsWriteQueue): Promise<void> => 
 
 const QA_POSE = {
   feetPosition: { x: 8.5, y: 64.5, z: 8.5 },
+  yawRadians: 0,
+  pitchRadians: -Math.PI / 2 + 0.01,
+} as const
+const QA_FARM_POSE = {
+  feetPosition: { x: 8.5, y: 65.5, z: 8.5 },
   yawRadians: 0,
   pitchRadians: -Math.PI / 2 + 0.01,
 } as const
@@ -842,9 +859,11 @@ const bootGame = async (
   }
   const time = await Effect.runPromise(makeTimeService())
   const weather = await Effect.runPromise(makeWeatherService())
+  const crops = await Effect.runPromise(makeCropService())
   if (Option.isSome(loadedSession)) {
     await Effect.runPromise(time.restore(loadedSession.value.state.time))
     await Effect.runPromise(weather.restore(loadedSession.value.state.weather))
+    await Effect.runPromise(crops.restore(loadedSession.value.state.crops))
   }
 
   const presentWeather = (state: WeatherState): void => {
@@ -960,6 +979,7 @@ const bootGame = async (
       redstone: { levers: [...leverStates.values()] },
       furnaces: [...furnaceStates.values()],
       portals: [...portalStates.values()],
+      crops: Effect.runSync(crops.snapshot),
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -1333,10 +1353,17 @@ const bootGame = async (
   const observedMobDrops: Array<MobDropEvent & { readonly renderId: string }> = []
   let nextMobDropId = 0
   let lastObservedItemUse: ItemUseResult | undefined
-  const pendingItemUses = new Map<
-    string,
-    { readonly slotIndex: number; readonly heldItem: IgnitionItemType }
-  >()
+  type PendingItemUse =
+    | { readonly kind: 'ignition'; readonly slotIndex: number; readonly heldItem: IgnitionItemType }
+    | { readonly kind: 'till'; readonly slotIndex: number; readonly heldItem: HoeItemType }
+    | { readonly kind: 'plant'; readonly slotIndex: number; readonly dimension: Dimension }
+    | {
+        readonly kind: 'harvest'
+        readonly dimension: Dimension
+        readonly position: { readonly x: number; readonly y: number; readonly z: number }
+      }
+    | { readonly kind: 'eat'; readonly slotIndex: number }
+  const pendingItemUses = new Map<string, PendingItemUse>()
   const pendingBlockUses = new Map<
     string,
     { readonly dimension: Dimension; readonly position: { readonly x: number; readonly y: number; readonly z: number } }
@@ -1358,7 +1385,7 @@ const bootGame = async (
     registerModule({
       name: '@nerima-games/mc-sim',
       layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed(simStages(simState, time, playerApi)),
+      frameStages: Effect.succeed(simStages(simState, time, playerApi, crops)),
     }),
   )
 
@@ -1986,6 +2013,9 @@ const bootGame = async (
     const dimension = Effect.runSync(playerApi.dimension)
     const reading = Effect.runSync(currentChunkStore.getBlock(KNOWN_TARGET_BLOCK))
     const ignitionReading = Effect.runSync(currentChunkStore.getBlock(QA_IGNITION_CELL))
+    const farmSoilReading = Effect.runSync(currentChunkStore.getBlock(KNOWN_TARGET_BLOCK))
+    const farmCropReading = Effect.runSync(currentChunkStore.getBlock(QA_FARM_CROP_BLOCK))
+    const cropSnapshot = Effect.runSync(crops.snapshot)
     const storage = Effect.runSync(world.inventory.storageSnapshot)
     const inventory = storage.inventory
     const vitals = Effect.runSync(world.vitals.snapshot)
@@ -2038,6 +2068,18 @@ const bootGame = async (
         reading: ignitionReading._tag,
         block: ignitionReading._tag === 'Block' ? ignitionReading.block : null,
       },
+      farming: {
+        soilBlock: farmSoilReading._tag === 'Block' ? farmSoilReading.block : null,
+        cropBlock: farmCropReading._tag === 'Block' ? farmCropReading.block : null,
+        crops: cropSnapshot.crops,
+        cropStage: cropSnapshot.crops.some(
+          (crop) => crop.dimension === dimension
+            && crop.position.x === QA_FARM_CROP_BLOCK.x
+            && crop.position.y === QA_FARM_CROP_BLOCK.y
+            && crop.position.z === QA_FARM_CROP_BLOCK.z
+            && crop.growthSecs >= POTATO_MATURITY_SECS,
+        ) ? 'mature' : cropSnapshot.crops.length > 0 ? 'growing' : 'empty',
+      },
       portals: [...portalStates.values()],
       activePortal: activePortal === undefined
         || activePortalReading === undefined
@@ -2055,6 +2097,7 @@ const bootGame = async (
               : null,
           },
       persistence: {
+        formatVersion: SESSION_FORMAT_VERSION,
         knownChunks: saveCoordinator.knownChunkCount(),
         retainedChunks: saveCoordinator.retainedChunkCount(),
       },
@@ -2126,6 +2169,54 @@ const bootGame = async (
     )
     markSessionDirty()
     renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedFarmingEncounter = () => {
+    respawnPlayer()
+    const dimension = Effect.runSync(playerApi.dimension)
+    Effect.runSync(playerApi.restore(QA_FARM_POSE, dimension))
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('potato', 1))
+    Effect.runSync(currentChunkStore.setBlock(KNOWN_TARGET_BLOCK, FARMLAND_BLOCK_ID))
+    Effect.runSync(currentChunkStore.setBlock(QA_FARM_CROP_BLOCK, POTATO_CROP_BLOCK_ID))
+    Effect.runSync(crops.restore({
+      crops: [{
+        dimension,
+        position: QA_FARM_CROP_BLOCK,
+        crop: 'potato_crop',
+        growthSecs: POTATO_MATURITY_SECS - 0.1,
+      }],
+    }))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    pendingItemUses.clear()
+    lastObservedItemUse = undefined
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const harvestFarmingCrop = () => {
+    const dimension = Effect.runSync(playerApi.dimension)
+    const location = { dimension, position: QA_FARM_CROP_BLOCK } as CropLocation
+    const ripe = Effect.runSync(crops.matureYieldAt(location)) !== null
+    if (!ripe) return gameplaySnapshot()
+    Effect.runSync(currentChunkStore.setBlock(QA_FARM_CROP_BLOCK, 0))
+    Effect.runSync(crops.remove(location))
+    nextItemUseRequestId += 1
+    const requestId = `item-use-${String(nextItemUseRequestId)}`
+    Effect.runSync(
+      requestPotatoHarvest(gameplayState, requestId, QA_FARM_CROP_BLOCK, true, Math.random()),
+    )
+    pendingItemUses.set(requestId, {
+      kind: 'harvest',
+      dimension,
+      position: QA_FARM_CROP_BLOCK,
+    })
+    markSessionDirty()
     return gameplaySnapshot()
   }
 
@@ -2206,6 +2297,21 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedCraftingTableEncounter,
+        seedFarmingEncounter,
+        harvestFarmingCrop,
+        preparePotatoEating: () => {
+          Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
+          Effect.runSync(world.vitals.addExhaustion(36))
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
+        returnToFarmingPlot: () => {
+          Effect.runSync(playerApi.restore(QA_FARM_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
         seedPortalEncounter,
         seedWoodenPickaxeProgression,
         seedIronArmor: () => {
@@ -2314,6 +2420,7 @@ const bootGame = async (
             requestItemUse(gameplayState, requestId, QA_IGNITION_CELL, 'fire_charge'),
           )
           pendingItemUses.set(requestId, {
+            kind: 'ignition',
             slotIndex: selectedHotbarIndex,
             heldItem: 'fire_charge',
           })
@@ -2691,31 +2798,49 @@ const bootGame = async (
           })
           miningProgress = advancement.nextProgress
           if (advancement.shouldBreak && target !== null) {
-            Effect.runSync(
-              requestBlockBreak(
-                gameplayState,
-                target.position,
-                miningLootContextForItem(selectedItem),
-              ),
-            )
-            pendingBlockBreakConfirmations.push({
-              dimension: Effect.runSync(playerApi.dimension),
-              position: target.position,
-              blockId: target.blockId,
-            })
-            if (
-              selectedItem === 'wooden_pickaxe' ||
-              selectedItem === 'stone_pickaxe' ||
-              selectedItem === 'iron_pickaxe' ||
-              selectedItem === 'diamond_pickaxe'
-            ) {
-              pendingMiningToolDamage.push({
-                dimension: Effect.runSync(playerApi.dimension),
+            const dimension = Effect.runSync(playerApi.dimension)
+            if (target.blockId === POTATO_CROP_BLOCK_ID) {
+              const location = { dimension, position: target.position }
+              const ripe = Effect.runSync(crops.matureYieldAt(location)) !== null
+              Effect.runSync(currentChunkStore.setBlock(target.position, 0))
+              Effect.runSync(crops.remove(location))
+              nextItemUseRequestId += 1
+              const requestId = `item-use-${String(nextItemUseRequestId)}`
+              Effect.runSync(
+                requestPotatoHarvest(gameplayState, requestId, target.position, ripe, Math.random()),
+              )
+              pendingItemUses.set(requestId, {
+                kind: 'harvest',
+                dimension,
+                position: target.position,
+              })
+            } else {
+              Effect.runSync(
+                requestBlockBreak(
+                  gameplayState,
+                  target.position,
+                  miningLootContextForItem(selectedItem),
+                ),
+              )
+              pendingBlockBreakConfirmations.push({
+                dimension,
                 position: target.position,
                 blockId: target.blockId,
-                slotIndex: selectedHotbarIndex,
-                item: selectedItem,
               })
+              if (
+                selectedItem === 'wooden_pickaxe' ||
+                selectedItem === 'stone_pickaxe' ||
+                selectedItem === 'iron_pickaxe' ||
+                selectedItem === 'diamond_pickaxe'
+              ) {
+                pendingMiningToolDamage.push({
+                  dimension,
+                  position: target.position,
+                  blockId: target.blockId,
+                  slotIndex: selectedHotbarIndex,
+                  item: selectedItem,
+                })
+              }
             }
             breaksRequested += 1
             canvas.setAttribute('data-breaks-requested', String(breaksRequested))
@@ -2755,41 +2880,69 @@ const bootGame = async (
         let shouldAttemptPlacement = selected === undefined
 
         if (selected !== undefined && isGameplayUseItemType(selected.item)) {
-          const foodUse = resolveFoodUse({
-            held: selected.item,
-            vitals: Effect.runSync(world.vitals.snapshot),
-          })
-
-          if (foodUse._tag === 'consume') {
-            const removal = Effect.runSync(
-              world.inventory.removeAt(selectedHotbarIndex, selected.item, foodUse.count),
+          nextItemUseRequestId += 1
+          const requestId = `item-use-${String(nextItemUseRequestId)}`
+          if (selected.item === 'potato') {
+            const target = Effect.runSync(
+              requestTargetedPotatoPlanting(
+                gameplayState,
+                currentChunkStore,
+                playerApi,
+                requestId,
+              ),
             )
-            if (removal._tag === 'Removed') {
-              Effect.runSync(world.vitals.eat(foodUse.foodPoints, foodUse.saturationModifier))
-              markSessionDirty()
-            }
-          } else if (foodUse._tag !== 'dead') {
-            if (isIgnitionItem(selected.item)) {
-              nextItemUseRequestId += 1
-              const requestId = `item-use-${String(nextItemUseRequestId)}`
-              const target = Effect.runSync(
-                requestTargetedItemUse(
+            if (Option.isSome(target)) {
+              pendingItemUses.set(requestId, {
+                kind: 'plant',
+                slotIndex: selectedHotbarIndex,
+                dimension: Effect.runSync(playerApi.dimension),
+              })
+            } else {
+              Effect.runSync(
+                requestPotatoFoodUse(
                   gameplayState,
-                  currentChunkStore,
-                  playerApi,
                   requestId,
-                  selected.item,
+                  Effect.runSync(world.vitals.snapshot),
                 ),
               )
-              if (Option.isSome(target)) {
-                pendingItemUses.set(requestId, {
-                  slotIndex: selectedHotbarIndex,
-                  heldItem: selected.item,
-                })
-              }
-            } else {
-              shouldAttemptPlacement = true
+              pendingItemUses.set(requestId, { kind: 'eat', slotIndex: selectedHotbarIndex })
             }
+          } else if (isHoeItem(selected.item)) {
+            const target = Effect.runSync(
+              requestTargetedSoilTill(
+                gameplayState,
+                currentChunkStore,
+                playerApi,
+                requestId,
+                selected.item,
+              ),
+            )
+            if (Option.isSome(target)) {
+              pendingItemUses.set(requestId, {
+                kind: 'till',
+                slotIndex: selectedHotbarIndex,
+                heldItem: selected.item,
+              })
+            }
+          } else if (isIgnitionItem(selected.item)) {
+            const target = Effect.runSync(
+              requestTargetedItemUse(
+                gameplayState,
+                currentChunkStore,
+                playerApi,
+                requestId,
+                selected.item,
+              ),
+            )
+            if (Option.isSome(target)) {
+              pendingItemUses.set(requestId, {
+                kind: 'ignition',
+                slotIndex: selectedHotbarIndex,
+                heldItem: selected.item,
+              })
+            }
+          } else {
+            shouldAttemptPlacement = true
           }
         }
 
@@ -2896,19 +3049,77 @@ const bootGame = async (
       lastObservedItemUse = result
       const pending = pendingItemUses.get(result.requestId)
       pendingItemUses.delete(result.requestId)
-      if (result.success && pending?.heldItem === result.heldItem) {
+      if (pending === undefined || !result.success) continue
+
+      if (!('action' in result) && pending.kind === 'ignition' && pending.heldItem === result.heldItem) {
         if (result.heldItem === 'fire_charge') {
           Effect.runSync(world.inventory.removeAt(pending.slotIndex, pending.heldItem, 1))
-        } else if (
-          Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]?.item
-          === 'flint_and_steel'
-        ) {
-          Effect.runSync(
-            world.inventory.damageAt({ _tag: 'Inventory', slotIndex: pending.slotIndex }, 1),
-          )
+        } else if (Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]?.item === 'flint_and_steel') {
+          Effect.runSync(world.inventory.damageAt({ _tag: 'Inventory', slotIndex: pending.slotIndex }, 1))
+        }
+      } else if ('action' in result) {
+        switch (result.action) {
+          case 'TillSoil':
+            if (
+              pending.kind === 'till'
+              && pending.heldItem === result.heldItem
+              && Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]?.item === result.heldItem
+            ) {
+              Effect.runSync(
+                world.inventory.damageAt(
+                  { _tag: 'Inventory', slotIndex: pending.slotIndex },
+                  result.durabilityDamage,
+                ),
+              )
+            }
+            break
+          case 'PlantPotato':
+            if (pending.kind === 'plant' && result.outcome._tag === 'planted') {
+              const planted = Effect.runSync(crops.plant({
+                dimension: pending.dimension,
+                position: result.outcome.at as CropLocation['position'],
+              }))
+              if (planted) {
+                Effect.runSync(
+                  world.inventory.removeAt(pending.slotIndex, 'potato', result.consumedCount),
+                )
+              }
+            }
+            break
+          case 'HarvestPotato':
+            if (pending.kind === 'harvest' && result.outcome._tag === 'drops') {
+              const at = {
+                x: pending.position.x + 0.5,
+                y: pending.position.y + 0.5,
+                z: pending.position.z + 0.5,
+              }
+              const leftovers = result.outcome.drops.flatMap((drop) => {
+                const leftover = Effect.runSync(world.inventory.add(drop.item, drop.count))
+                return leftover > 0 ? [itemStack(drop.item, leftover)] : []
+              })
+              if (leftovers.length > 0) {
+                Effect.runSync(spawnDroppedItems(world.entities, leftovers.map((stack) => ({ ...stack, at }))))
+              }
+            }
+            break
+          case 'EatPotato':
+            if (pending.kind === 'eat' && result.outcome._tag === 'consume') {
+              const removal = Effect.runSync(
+                world.inventory.removeAt(pending.slotIndex, 'potato', result.consumedCount),
+              )
+              if (removal._tag === 'Removed') {
+                Effect.runSync(
+                  world.vitals.eat(
+                    result.outcome.foodPoints,
+                    result.outcome.saturationModifier,
+                  ),
+                )
+              }
+            }
+            break
         }
       }
-      if (result.success) markSessionDirty()
+      markSessionDirty()
     }
 
     const mobDrops = Effect.runSync(drainMobDrops(gameplayState))

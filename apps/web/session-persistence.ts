@@ -21,6 +21,8 @@ import {
   maxStackCountForItem,
   storageFromInventory,
   validatePlayerStorageSnapshot,
+  validateCropSnapshot,
+  type CropSnapshot,
   type Inventory,
   type FurnaceState,
   type ItemStack,
@@ -45,6 +47,7 @@ import {
 } from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
+export const SESSION_FORMAT_VERSION = 11
 
 export type SessionPosition = {
   readonly x: number
@@ -103,6 +106,7 @@ export type SessionState = {
   }
   readonly furnaces: ReadonlyArray<PersistedFurnaceState>
   readonly portals: ReadonlyArray<PersistedPortalState>
+  readonly crops: CropSnapshot
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -149,6 +153,13 @@ const PlayerStorageSchema = Schema.Unknown.pipe(
     { message: () => 'Player storage violates persistence invariants' },
   ),
 ) as unknown as Schema.Schema<PlayerStorage>
+
+const CropSnapshotSchema = Schema.Unknown.pipe(
+  Schema.filter(
+    (value): value is CropSnapshot => validateCropSnapshot(value)._tag === 'Valid',
+    { message: () => 'Crop snapshot violates persistence invariants' },
+  ),
+) as unknown as Schema.Schema<CropSnapshot>
 
 const FurnaceStackCountSchema = FiniteNumberSchema.pipe(
   Schema.filter(Number.isInteger, { message: () => 'Furnace stack count must be an integer' }),
@@ -248,6 +259,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   }),
   furnaces: PersistedFurnacesSchema,
   portals: PersistedPortalsSchema,
+  crops: CropSnapshotSchema,
 })
 
 export type SessionChunkManifestEntry = {
@@ -507,9 +519,28 @@ const migrateSessionV9ToV10: Migration = {
   },
 }
 
+const migrateSessionV10ToV11: Migration = {
+  from: 10,
+  describe: 'add crop simulation state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v10 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'crops')
+        ? state
+        : { ...state, crops: { crops: [] } },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 10,
+  version: SESSION_FORMAT_VERSION,
   schema: SessionHeadSchema,
   migrations: [
     migrateSessionV1ToV2,
@@ -521,6 +552,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV7ToV8,
     migrateSessionV8ToV9,
     migrateSessionV9ToV10,
+    migrateSessionV10ToV11,
   ],
 })
 

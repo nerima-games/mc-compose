@@ -16,6 +16,7 @@ import {
   emptyFurnaceState,
   equipFromInventory,
   storageFromInventory,
+  type CropLocation,
   type Inventory,
 } from '@nerima-games/mc-sim'
 import {
@@ -84,6 +85,14 @@ const sessionState = (seed: number): SessionState => {
       dimension: 'overworld',
       position: { x: 10, y: 64, z: -7 },
     }],
+    crops: {
+      crops: [{
+        dimension: 'overworld',
+        position: { x: 4, y: 65, z: -2 } as CropLocation['position'],
+        crop: 'potato_crop',
+        growthSecs: 123,
+      }],
+    },
   }
 }
 
@@ -205,10 +214,11 @@ describe('session persistence', () => {
       expect(saved.state.weather).toEqual(sessionState(42).weather)
       expect(saved.state.redstone).toEqual(sessionState(42).redstone)
       expect(saved.state.portals).toEqual(sessionState(42).portals)
+      expect(saved.state.crops).toEqual(sessionState(42).crops)
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 10,
+        version: 11,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -258,6 +268,30 @@ describe('session persistence', () => {
 
       expect(loaded.state.portals).toEqual([])
       expect(storage.envelope(key)?.version).toBe(9)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a v10 session with an absent crop registry', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v10')
+    const { crops: _crops, ...v10State } = sessionState(42)
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 10,
+      payload: {
+        sessionId: 'legacy-v10',
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: v10State,
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v10'))
+
+      expect(loaded.state.crops).toEqual({ crops: [] })
+      expect(storage.envelope(key)?.version).toBe(10)
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -321,12 +355,62 @@ describe('session persistence', () => {
     }).pipe(Effect.provide(storage.layer))
   })
 
+  it.effect('rejects invalid persisted crop snapshots', () => {
+    const storage = controlledStorage()
+    const invalidCrops = [
+      [{
+        dimension: 'moon',
+        position: { x: 1, y: 64, z: 2 },
+        crop: 'potato_crop',
+        growthSecs: 1,
+      }],
+      [{
+        dimension: 'overworld',
+        position: { x: 1.5, y: 64, z: 2 },
+        crop: 'potato_crop',
+        growthSecs: 1,
+      }],
+      [{
+        dimension: 'overworld',
+        position: { x: 1, y: 64, z: 2 },
+        crop: 'potato_crop',
+        growthSecs: -1,
+      }],
+    ]
+
+    for (const [index, crops] of invalidCrops.entries()) {
+      const sessionId = `invalid-crops-${String(index)}`
+      storage.setEnvelope(sessionHeadKey(sessionId), {
+        format: SESSION_FORMAT_NAME,
+        version: 11,
+        payload: {
+          sessionId,
+          revision: 'r1',
+          metadata: defaultMetadata,
+          state: { ...sessionState(index), crops: { crops } },
+          chunks: [],
+        },
+      })
+    }
+
+    return Effect.gen(function* () {
+      for (const index of invalidCrops.keys()) {
+        const error = yield* Effect.flip(loadSession(`invalid-crops-${String(index)}`))
+        expect(error).toMatchObject({
+          _tag: 'SaveDecodeError',
+          format: SESSION_FORMAT_NAME,
+          version: 11,
+        })
+      }
+    }).pipe(Effect.provide(storage.layer))
+  })
+
   it.effect('rejects session envelopes from a future format version', () => {
     const storage = controlledStorage()
     const sessionId = 'future-version'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 11,
+      version: 12,
       payload: {
         sessionId,
         revision: 'r1',
@@ -341,7 +425,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 11,
+        version: 12,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -833,7 +917,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(10)
+      expect(storage.envelope(headKey)?.version).toBe(11)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )
