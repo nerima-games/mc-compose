@@ -36,7 +36,7 @@ const callQa = async <Result>(
 ): Promise<Result> =>
   page.evaluate(
     ({ command: commandName, arguments: commandArguments }) => {
-      const qa = (globalThis as unknown as Record<string, unknown>).__NERIMA_GAMES_QA__ as
+      const qa = (globalThis as unknown as Record<string, unknown>)['__NERIMA_GAMES_QA__'] as
         | Record<string, (...values: unknown[]) => unknown>
         | undefined
       const operation = qa?.[commandName]

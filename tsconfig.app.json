@@ -31,7 +31,8 @@
       "@nerima-games/mc-worldgen": ["../mc-worldgen/index.ts"],
       "@nerima-games/mx-ui": ["../mx-ui/index.ts"],
       "@nerima-games/mx-redstone": ["../mx-redstone/index.ts"],
-      "@nerima-games/mx-gameplay": ["../mx-gameplay/index.ts"]
+      "@nerima-games/mx-gameplay": ["../mx-gameplay/index.ts"],
+      "@nerima-games/mx-multiplayer": ["../mx-multiplayer/index.ts"]
     }
   },
   "include": ["apps/**/*.ts", "e2e/**/*.ts", "vite.config.ts", "playwright.config.ts"],

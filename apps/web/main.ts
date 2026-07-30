@@ -198,6 +198,7 @@ import {
   requestTargetedPotatoPlanting,
   requestTargetedSoilTill,
   requestTargetedBlockBreak,
+  requestTargetedBlockPlacement,
   requestTargetedBlockUse,
   requestTargetedItemUse,
   resolveEnvironmentalContactDamage,
@@ -222,6 +223,16 @@ import {
   type PlaceableItemType,
 } from '@nerima-games/mx-gameplay'
 import {
+  encodeFrame,
+  makeMultiplayerHost,
+  PlayerId,
+  PlayerName,
+  TransportPort,
+  WorldId,
+  type MultiplayerHost,
+  type NetworkMessage,
+} from '@nerima-games/mx-multiplayer'
+import {
   advanceBowUse,
   IDLE_BOW_USE,
   takeBowSettlement,
@@ -237,6 +248,10 @@ import {
 import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../domain/kernel-vocabulary'
 import { buildQaRegistry, describeQaApiError, installQaApi } from '../../domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
+import {
+  makeBrowserWebSocketTransport,
+  type BrowserWebSocketTransport,
+} from './multiplayer-websocket'
 import {
   announceConfirmedPlacements,
   announceInventoryTransition,
@@ -647,6 +662,43 @@ const bootTitle = async (): Promise<void> => {
     settingsView.dispose()
   })
   document.body.setAttribute('data-mc-compose-boot', 'running')
+}
+
+type MultiplayerQuery = {
+  readonly url: string
+  readonly player: PlayerId
+  readonly name: PlayerName
+}
+
+const readMultiplayerQuery = (search: string): MultiplayerQuery | undefined => {
+  const query = new URLSearchParams(search)
+  const url = query.get('multiplayer')
+  const player = query.get('player')
+  const name = query.get('name')
+  if (url === null || player === null || name === null || player.length === 0 || name.length === 0) {
+    return undefined
+  }
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') return undefined
+  } catch {
+    return undefined
+  }
+  return { url, player: PlayerId.make(player), name: PlayerName.make(name) }
+}
+
+type RemotePlayer = {
+  readonly name: PlayerName
+  readonly world: WorldId
+  readonly at: { readonly x: number; readonly y: number; readonly z: number }
+  readonly facing: { readonly yawRadians: number; readonly pitchRadians: number }
+}
+
+type MultiplayerRuntime = {
+  readonly query: MultiplayerQuery
+  readonly host: MultiplayerHost
+  readonly transport: BrowserWebSocketTransport
+  readonly players: Map<PlayerId, RemotePlayer>
 }
 
 const bootGame = async (
@@ -1631,6 +1683,112 @@ const bootGame = async (
     readonly blockId: number
   }> = []
 
+  const multiplayerQuery = readMultiplayerQuery(window.location.search)
+  const multiplayer = multiplayerQuery === undefined
+    ? undefined
+    : await Effect.runPromise(
+        Effect.gen(function* () {
+          const transport = yield* makeBrowserWebSocketTransport({ url: multiplayerQuery.url })
+          const host = yield* makeMultiplayerHost.pipe(
+            Effect.provideService(TransportPort, transport),
+          )
+          yield* host.transitionConnection({ _tag: 'ConnectRequested' })
+          return {
+            query: multiplayerQuery,
+            host,
+            transport,
+            players: new Map<PlayerId, RemotePlayer>(),
+          } satisfies MultiplayerRuntime
+        }),
+      )
+  let multiplayerRevision = 0
+  let multiplayerRejection = ''
+  let multiplayerHandshakeComplete = false
+  let multiplayerClosed = false
+  let lastPlayerMoveSentAt = Number.NEGATIVE_INFINITY
+  const multiplayerStatus = document.createElement('output')
+  multiplayerStatus.className = 'multiplayer-status'
+  multiplayerStatus.hidden = true
+  canvas.insertAdjacentElement('afterend', multiplayerStatus)
+  canvas.setAttribute('data-multiplayer-connection', multiplayer === undefined ? 'disabled' : 'connecting')
+  canvas.setAttribute('data-multiplayer-player-count', '0')
+  canvas.setAttribute('data-multiplayer-revision', '0')
+  canvas.setAttribute('data-multiplayer-rejection', '')
+
+  const dimensionFromWorld = (worldId: WorldId): Dimension | undefined =>
+    worldId === 'overworld' || worldId === 'nether' || worldId === 'end'
+      ? (worldId as Dimension)
+      : undefined
+  const applyNetworkBlock = (
+    worldId: WorldId,
+    at: { readonly x: number; readonly y: number; readonly z: number },
+    block: string | null,
+  ): void => {
+    const dimension = dimensionFromWorld(worldId)
+    if (dimension === undefined) return
+    const context = getOrCreateDimensionChunkContext(dimension)
+    Effect.runSync(context.chunkStore.setBlock(at, block === null ? 0 : blockIdOf(block as Parameters<typeof blockIdOf>[0])))
+    if (dimension === currentChunkContext.dimension) redstoneDirty = true
+  }
+
+  const applyNetworkMessage = (message: NetworkMessage): void => {
+    if (multiplayer === undefined) return
+    switch (message._tag) {
+      case 'WorldSnapshot':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        multiplayer.players.clear()
+        for (const player of message.players) {
+          if (player.player !== multiplayer.query.player) multiplayer.players.set(player.player, player)
+        }
+        for (const block of message.blocks) applyNetworkBlock(block.world, block.at, block.block)
+        break
+      case 'PlayerJoin':
+        if (message.player !== multiplayer.query.player) {
+          multiplayer.players.set(message.player, {
+            name: message.name,
+            world: WorldId.make(currentChunkContext.dimension),
+            at: message.at,
+            facing: { yawRadians: 0, pitchRadians: 0 },
+          })
+        }
+        break
+      case 'PlayerMove': {
+        if (message.player === multiplayer.query.player) break
+        const previous = multiplayer.players.get(message.player)
+        multiplayer.players.set(message.player, {
+          name: previous?.name ?? PlayerName.make(String(message.player)),
+          world: message.world ?? previous?.world ?? WorldId.make(currentChunkContext.dimension),
+          at: message.at,
+          facing: message.facing,
+        })
+        break
+      }
+      case 'PlayerLeave':
+        multiplayer.players.delete(message.player)
+        break
+      case 'BlockPlace':
+        applyNetworkBlock(message.world ?? WorldId.make(currentChunkContext.dimension), message.at, message.block)
+        multiplayerRevision += 1
+        break
+      case 'BlockBreak':
+        applyNetworkBlock(message.world ?? WorldId.make(currentChunkContext.dimension), message.at, null)
+        multiplayerRevision += 1
+        break
+      case 'BlockMutationRejected':
+        multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+        multiplayerRejection = `${message.operation}: ${message.reason}`
+        multiplayerStatus.textContent = multiplayerRejection
+        multiplayerStatus.hidden = false
+        break
+      default:
+        break
+    }
+    canvas.setAttribute('data-multiplayer-player-count', String(multiplayer.players.size + 1))
+    canvas.setAttribute('data-multiplayer-revision', String(multiplayerRevision))
+    canvas.setAttribute('data-multiplayer-rejection', multiplayerRejection)
+  }
+
   const registeredSim = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mc-sim',
@@ -1662,6 +1820,13 @@ const bootGame = async (
     registeredRedstone,
     registeredSim,
     registeredGameplay,
+    ...(multiplayer === undefined
+      ? []
+      : [{
+          name: 'mx-multiplayer',
+          layers: EMPTY_MODULE_LAYER,
+          frameStages: multiplayer.host.stages,
+        }]),
   ]
 
   // -------------------------------------------------------------------------
@@ -2417,13 +2582,21 @@ const bootGame = async (
   // 5. QA surface
   // -------------------------------------------------------------------------
 
-  const entityRenderProjection = (): ReadonlyArray<RenderEntity> =>
-    Effect.runSync(world.entities.snapshot).entities.map((entity) => ({
+  const entityRenderProjection = (): ReadonlyArray<RenderEntity> => [
+    ...Effect.runSync(world.entities.snapshot).entities.map((entity) => ({
       id: entity.id,
       kind: entity.kind,
       feetPosition: entity.feetPosition,
       category: entity.kind === 'dropped_item' ? 'item' : 'hostile',
-    }))
+    } satisfies RenderEntity)),
+    ...[...(multiplayer?.players.entries() ?? [])]
+      .filter(([, player]) => player.world === currentChunkContext.dimension)
+      .map(([playerId, player]) => ({
+        id: `multiplayer:${String(playerId)}`,
+        kind: 'remote_player',
+        feetPosition: player.at,
+      } satisfies RenderEntity)),
+  ]
 
   const gameplaySnapshot = () => {
     const pose = Effect.runSync(playerApi.pose)
@@ -3083,10 +3256,27 @@ const bootGame = async (
     }
   })
   window.addEventListener('blur', () => resetTouchInput('blur'))
+  let multiplayerDisposeStarted = false
+  const disposeMultiplayer = (): void => {
+    if (multiplayer === undefined || multiplayerDisposeStarted) return
+    multiplayerDisposeStarted = true
+    const leave = encodeFrame({
+      _tag: 'PlayerLeave',
+      player: multiplayer.query.player,
+    })
+    const close = multiplayer.transport.state() === 'open' && Either.isRight(leave)
+      ? multiplayer.transport.send(leave.right).pipe(
+          Effect.catchAll(() => Effect.void),
+          Effect.zipRight(multiplayer.transport.close),
+        )
+      : multiplayer.transport.close
+    void Effect.runPromise(close)
+  }
   // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
   // Periodic publication persists advancing time and weather without gameplay mutations.
   window.addEventListener('pagehide', (event) => {
     requestBackgroundFlush()
+    disposeMultiplayer()
     if (!event.persisted) {
       settingsView.dispose()
       audio.close()
@@ -3096,6 +3286,7 @@ const bootGame = async (
     readonly hot?: { readonly dispose: (handler: () => void) => void }
   }).hot
   hot?.dispose(() => {
+    disposeMultiplayer()
     settingsView.dispose()
     audio.close()
   })
@@ -3220,6 +3411,33 @@ const bootGame = async (
     Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
     Effect.runSync(syncPortalCandidateSnapshots())
 
+    if (multiplayer !== undefined && !multiplayerHandshakeComplete && multiplayer.transport.state() === 'open') {
+      const pose = Effect.runSync(playerApi.pose)
+      const worldId = WorldId.make(Effect.runSync(playerApi.dimension))
+      Effect.runSync(multiplayer.host.transitionConnection({
+        _tag: 'HandshakeSucceeded',
+        player: multiplayer.query.player,
+        world: worldId,
+      }))
+      Effect.runSync(multiplayer.host.enqueueOutbound({
+        _tag: 'PlayerJoin',
+        player: multiplayer.query.player,
+        name: multiplayer.query.name,
+        at: pose.feetPosition,
+      }))
+      multiplayerHandshakeComplete = true
+      canvas.setAttribute('data-multiplayer-connection', 'connected')
+      canvas.setAttribute('data-multiplayer-player-count', String(multiplayer.players.size + 1))
+    } else if (
+      multiplayer !== undefined &&
+      !multiplayerClosed &&
+      multiplayer.transport.state() === 'closed'
+    ) {
+      Effect.runSync(multiplayer.host.transitionConnection({ _tag: 'PeerClosed' }))
+      multiplayerClosed = true
+      canvas.setAttribute('data-multiplayer-connection', 'closed')
+    }
+
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
 
     if (Exit.isFailure(outcome)) {
@@ -3228,6 +3446,23 @@ const bootGame = async (
       // second buries its own first occurrence in the console.
       failBoot('a frame stage defected', outcome.cause)
       return
+    }
+
+    if (multiplayer !== undefined) {
+      for (const message of Effect.runSync(multiplayer.host.drainInbound)) {
+        applyNetworkMessage(message)
+      }
+      if (multiplayerHandshakeComplete && nowSecs - lastPlayerMoveSentAt >= 0.1) {
+        const pose = Effect.runSync(playerApi.pose)
+        Effect.runSync(multiplayer.host.enqueueOutbound({
+          _tag: 'PlayerMove',
+          player: multiplayer.query.player,
+          world: WorldId.make(Effect.runSync(playerApi.dimension)),
+          at: pose.feetPosition,
+          facing: { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians },
+        }))
+        lastPlayerMoveSentAt = nowSecs
+      }
     }
 
     // Portal travel has already updated the player. Make its destination world
@@ -3517,7 +3752,14 @@ const bootGame = async (
           const shouldBreak = isCreativeMode ? attackTriggered : advancement.shouldBreak
           if (shouldBreak && target !== null) {
             const dimension = Effect.runSync(playerApi.dimension)
-            if (target.blockId === POTATO_CROP_BLOCK_ID) {
+            if (multiplayer !== undefined) {
+              Effect.runSync(multiplayer.host.enqueueOutbound({
+                _tag: 'BlockBreak',
+                player: multiplayer.query.player,
+                world: WorldId.make(dimension),
+                at: target.position,
+              }))
+            } else if (target.blockId === POTATO_CROP_BLOCK_ID) {
               const location = { dimension, position: target.position }
               const ripe = Effect.runSync(crops.matureYieldAt(location)) !== null
               Effect.runSync(currentChunkStore.setBlock(target.position, 0))
@@ -3565,8 +3807,10 @@ const bootGame = async (
             breaksRequested += 1
             canvas.setAttribute('data-breaks-requested', String(breaksRequested))
             primaryAttackGestureConsumed = true
-            redstoneDirty = true
-            markSessionDirty()
+            if (multiplayer === undefined) {
+              redstoneDirty = true
+              markSessionDirty()
+            }
           }
         }
       }
@@ -3686,6 +3930,29 @@ const bootGame = async (
             selectedHotbarIndex,
             isPlaceableGameplayItem,
             (heldItem) => {
+              if (multiplayer !== undefined) {
+                const target = Effect.runSync(
+                  requestTargetedBlockPlacement(
+                    gameplayState,
+                    currentChunkStore,
+                    playerApi,
+                    heldItem,
+                  ),
+                )
+                Effect.runSync(Ref.set(gameplayState.pendingPlacements, []))
+                if (Option.isSome(target)) {
+                  Effect.runSync(multiplayer.host.enqueueOutbound({
+                    _tag: 'BlockPlace',
+                    player: multiplayer.query.player,
+                    world: WorldId.make(Effect.runSync(playerApi.dimension)),
+                    at: target.value.adjacentPosition,
+                    block: heldItem,
+                  }))
+                  placementsRequested += 1
+                  canvas.setAttribute('data-placements-requested', String(placementsRequested))
+                }
+                return
+              }
               nextBlockUseRequestId += 1
               const requestId = `block-use-${String(nextBlockUseRequestId)}`
               const target = Effect.runSync(

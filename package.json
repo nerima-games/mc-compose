@@ -73,6 +73,7 @@
     "@nerima-games/mc-sim": "0.1.23",
     "@nerima-games/mc-worldgen": "0.1.1",
     "@nerima-games/mx-gameplay": "0.1.35",
+    "@nerima-games/mx-multiplayer": "0.1.1",
     "@nerima-games/mx-redstone": "0.1.2",
     "@nerima-games/mx-ui": "0.2.6",
     "effect": "^3.20.0"
@@ -82,12 +83,14 @@
     "@playwright/test": "^1.50",
     "@types/node": "^22.19.11",
     "@types/three": "^0.170.0",
+    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^3.2.4",
     "oxlint": "^0.12.0",
     "three": "^0.170.0",
     "tsx": "^4.19.2",
     "typescript": "^5.9.3",
     "vite": "^7",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "ws": "^8.21.1"
   }
 }
