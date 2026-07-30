@@ -59,11 +59,23 @@ describe('session navigation', () => {
     })
   })
 
+  it('accepts Creative creation routes', () => {
+    const href = createSessionHref('creative-world', {
+      name: 'Creative World',
+      mode: 'creative',
+    })
+
+    expect(readSessionRoute(new URL(href, 'https://example.test').search)).toEqual({
+      kind: 'create',
+      sessionId: 'creative-world',
+      metadata: { name: 'Creative World', mode: 'creative' },
+    })
+  })
+
   it('rejects incomplete or invalid creation routes', () => {
     expect(readSessionRoute('?session=world-123&create=1&name=World')).toBeUndefined()
     expect(readSessionRoute('?session=world-123&create=1&name=&mode=survival')).toBeUndefined()
     expect(readSessionRoute('?session=world-123&create=1&name=World&mode=spectator')).toBeUndefined()
-    expect(readSessionRoute('?session=world-123&create=1&name=World&mode=creative')).toBeUndefined()
     expect(readSessionRoute('?session=world-123&name=World&mode=survival')).toBeUndefined()
   })
 

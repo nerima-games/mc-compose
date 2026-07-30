@@ -50,7 +50,7 @@ export const readSessionRoute = (search: string): SessionRoute | undefined => {
   if (
     create !== '1'
     || normalizedName === undefined
-    || mode !== 'survival'
+    || (mode !== 'survival' && mode !== 'creative')
   ) {
     return undefined
   }

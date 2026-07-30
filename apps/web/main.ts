@@ -609,10 +609,6 @@ const bootTitle = async (): Promise<void> => {
     await navigateAfterSettingsSaved(sessionHref(sessionId))
   }
   const createWorld = async ({ name, mode }: CreateWorldRequest): Promise<void> => {
-    if (mode === 'creative') {
-      titleStatus.textContent = 'Creative is not available yet.'
-      return
-    }
     titleStatus.textContent = ''
     const sessionId = createUniqueSessionId(name, existingIds)
     await navigateAfterSettingsSaved(createSessionHref(sessionId, { name, mode }))
@@ -761,6 +757,7 @@ const bootGame = async (
   const sessionMetadata = Option.isSome(loadedSession)
     ? loadedSession.value.metadata
     : creationMetadata ?? { name: sessionId, mode: 'survival' }
+  const isCreativeMode = sessionMetadata.mode === 'creative'
 
   // POINTER LOCK IS THE HOST'S TO ASK FOR. mc-render's `InputService` treats a
   // click as a GAME action only while the pointer is locked, and as a UI click
@@ -1775,6 +1772,7 @@ const bootGame = async (
   const applyPlayerDamage = (
     damage: Parameters<typeof world.vitals.damage>[0],
   ): void => {
+    if (isCreativeMode) return
     const equipment = Effect.runSync(world.inventory.equipmentSnapshot)
     const reducedDamage = applyArmorToDamage(damage, armorPointsForEquipment(equipment))
     const healthBefore = Effect.runSync(world.vitals.view).healthPoints
@@ -2457,6 +2455,7 @@ const bootGame = async (
       ? undefined
       : Effect.runSync(currentChunkStore.getBlock(activePortalFramePosition))
     return {
+      mode: sessionMetadata.mode,
       pose,
       dimension,
       activeChunkDimension: currentChunkContext.dimension,
@@ -2797,6 +2796,34 @@ const bootGame = async (
           markSessionDirty()
           return gameplaySnapshot()
         },
+        seedCreativeBreakEncounter: () => {
+          Effect.runSync(playerApi.restore(QA_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
+          Effect.runSync(world.inventory.reset)
+          Effect.runSync(world.inventory.add('stone', 2))
+          Effect.runSync(currentChunkStore.setBlock(KNOWN_TARGET_BLOCK, 2))
+          selectedHotbarIndex = 0
+          inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+          inventoryInteraction.reset()
+          markSessionDirty()
+          renderPlayerUi()
+          return gameplaySnapshot()
+        },
+        seedCreativePlacementEncounter: () => {
+          Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
+          Effect.runSync(world.inventory.reset)
+          Effect.runSync(world.inventory.add('stone', 2))
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 0))
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
+          selectedHotbarIndex = 0
+          inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+          inventoryInteraction.reset()
+          markSessionDirty()
+          renderPlayerUi()
+          return gameplaySnapshot()
+        },
         returnToCraftingTable: () => {
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
@@ -3126,7 +3153,9 @@ const bootGame = async (
     // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, which keeps a
     // backgrounded tab from returning with a multi-second physics step.
     const walk = frameInput
-    const foodOutcome = Effect.runSync(world.vitals.advanceFoodTimer(deltaSecs))
+    const foodOutcome = isCreativeMode
+      ? { signal: 'none' as const }
+      : Effect.runSync(world.vitals.advanceFoodTimer(deltaSecs))
     if (foodOutcome.signal !== 'none') markSessionDirty()
     simulationElapsedSecs += deltaSecs
 
@@ -3417,7 +3446,7 @@ const bootGame = async (
         postFramePose.feetPosition.x - poseBeforeFrame.feetPosition.x,
         postFramePose.feetPosition.z - poseBeforeFrame.feetPosition.z,
       )
-      if (horizontalDistance > 0) {
+      if (!isCreativeMode && horizontalDistance > 0) {
         Effect.runSync(world.vitals.addExhaustion(horizontalDistance * WALK_EXHAUSTION_PER_METRE))
       }
     }
@@ -3484,8 +3513,9 @@ const bootGame = async (
             selectedItem: miningItem,
             deltaSecs,
           })
-          miningProgress = advancement.nextProgress
-          if (advancement.shouldBreak && target !== null) {
+          miningProgress = isCreativeMode ? null : advancement.nextProgress
+          const shouldBreak = isCreativeMode ? attackTriggered : advancement.shouldBreak
+          if (shouldBreak && target !== null) {
             const dimension = Effect.runSync(playerApi.dimension)
             if (target.blockId === POTATO_CROP_BLOCK_ID) {
               const location = { dimension, position: target.position }
@@ -3516,10 +3546,12 @@ const bootGame = async (
                 blockId: target.blockId,
               })
               if (
-                selectedItem === 'wooden_pickaxe' ||
-                selectedItem === 'stone_pickaxe' ||
-                selectedItem === 'iron_pickaxe' ||
-                selectedItem === 'diamond_pickaxe'
+                !isCreativeMode && (
+                  selectedItem === 'wooden_pickaxe' ||
+                  selectedItem === 'stone_pickaxe' ||
+                  selectedItem === 'iron_pickaxe' ||
+                  selectedItem === 'diamond_pickaxe'
+                )
               ) {
                 pendingMiningToolDamage.push({
                   dimension,
@@ -3689,6 +3721,16 @@ const bootGame = async (
     const consumedPlacements = Effect.runSync(
       Ref.getAndSet(gameplayState.consumedItems, []),
     )
+    for (const item of consumedPlacements) {
+      if (isCreativeMode) {
+        Effect.runSync(world.inventory.add(item, 1))
+      } else {
+        const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
+        if (selected?.item === item) {
+          Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, item, 1))
+        }
+      }
+    }
     announceConfirmedPlacements(audio, consumedPlacements)
     if (consumedPlacements.some((item) => REDSTONE_PLACEMENT_ITEMS.has(item))) {
       redstoneDirty = true
