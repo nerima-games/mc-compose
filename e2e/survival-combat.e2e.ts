@@ -505,7 +505,16 @@ test('kills a hostile with a left click and collects its dropped item', async ({
     const current = await snapshot(page)
     return current.entities.map(({ kind, healthPoints }) => ({ kind, healthPoints }))
   }).toEqual([{ kind: 'creeper', healthPoints: 1 }])
-  const gunpowderBefore = inventoryCount(await snapshot(page), 'gunpowder')
+  const seededSnapshot = await snapshot(page)
+  expect(seededSnapshot.inventory.slots[0]).toEqual({
+    item: 'wooden_sword',
+    count: 1,
+  })
+  expect(seededSnapshot.inventory.durability[0]).toEqual({
+    current: 59,
+    max: 59,
+  })
+  const gunpowderBefore = inventoryCount(seededSnapshot, 'gunpowder')
 
   // Headless Chromium's SwiftShader backend cannot grant pointer lock. Model
   // the granted state, then use a real canvas click for the attack itself.
@@ -536,6 +545,12 @@ test('kills a hostile with a left click and collects its dropped item', async ({
     hostileKinds: [],
     droppedKinds: ['dropped_item'],
   })
+  await expect
+    .poll(
+      async () =>
+        (await snapshot(page)).inventory.durability[0]?.current ?? null,
+    )
+    .toBe(58)
 
   await page.keyboard.down('KeyW')
   try {

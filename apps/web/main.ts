@@ -171,6 +171,7 @@ import {
   drainBlockUseResults,
   drainBowShotResults,
   drainItemUseResults,
+  drainMeleeAttackResults,
   drainMobDrops,
   drainPortalTravels,
   drainPlayerDamages,
@@ -180,6 +181,7 @@ import {
   INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
   makeGameplayFrameState,
   makeGeneratedWorld,
+  meleeDamageForItem,
   isDroppedItemBehaviour,
   isHoeItem,
   isIgnitionItem,
@@ -392,6 +394,23 @@ const EQUIPMENT_ONLY_ITEM_TYPES = [
 ] as const satisfies ReadonlyArray<ItemStack['item']>
 
 type EquipmentOnlyItemType = (typeof EQUIPMENT_ONLY_ITEM_TYPES)[number]
+
+type SwordItem =
+  | 'wooden_sword'
+  | 'stone_sword'
+  | 'iron_sword'
+  | 'diamond_sword'
+
+const SWORD_ITEM_NAMES: ReadonlySet<string> = new Set<SwordItem>([
+  'wooden_sword',
+  'stone_sword',
+  'iron_sword',
+  'diamond_sword',
+])
+
+const isSwordItem = (item: ItemStack['item']): item is SwordItem =>
+  SWORD_ITEM_NAMES.has(item)
+
 type GameplayUseItemType = Exclude<ItemStack['item'], EquipmentOnlyItemType>
 type LegacyGameplayItemType = Exclude<ItemStack['item'], 'arrow' | 'bow'>
 
@@ -1447,6 +1466,7 @@ const bootGame = async (
   let nextItemUseRequestId = 0
   let nextBlockUseRequestId = 0
   let nextBowShotRequestId = 0
+  let nextMeleeAttackRequestId = 0
 
   // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
   // whole reason breaking works. `gameplayStages` takes the state as an
@@ -1546,6 +1566,10 @@ const bootGame = async (
   const pendingItemUses = new Map<string, PendingItemUse>()
   let bowUseState: BowUseState = IDLE_BOW_USE
   let pendingBowShots: ReadonlyMap<string, PendingBowShot> = new Map()
+  const pendingMeleeAttacks = new Map<
+    string,
+    { readonly slotIndex: number; readonly item: SwordItem }
+  >()
   const bowInteractionLocked = (): boolean =>
     bowUseState._tag === 'Drawing' || pendingBowShots.size > 0
   const resetBowUse = (): void => {
@@ -1568,6 +1592,29 @@ const bootGame = async (
         },
       }))
       markSessionDirty()
+    }
+  }
+  const settleMeleeAttackResults = (): void => {
+    for (const result of Effect.runSync(drainMeleeAttackResults(gameplayState))) {
+      const pending = pendingMeleeAttacks.get(result.requestId)
+      if (pending === undefined) continue
+
+      pendingMeleeAttacks.delete(result.requestId)
+      if (!result.success) continue
+
+      const currentItem = Effect.runSync(world.inventory.snapshot)
+        .slots[pending.slotIndex]?.item ?? null
+      if (currentItem !== pending.item) continue
+
+      const damageResult = Effect.runSync(
+        world.inventory.damageAt(
+          { _tag: 'Inventory', slotIndex: pending.slotIndex },
+          1,
+        ),
+      )
+      if (damageResult._tag === 'Damaged' || damageResult._tag === 'Broken') {
+        markSessionDirty()
+      }
     }
   }
   const pendingBlockUses = new Map<
@@ -2915,7 +2962,14 @@ const bootGame = async (
         seedMeleeDropEncounter: () => {
           respawnPlayer()
           Effect.runSync(world.inventory.reset)
+          Effect.runSync(world.inventory.add('wooden_sword', 1))
           inventoryInteraction.reset()
+          selectedHotbarIndex = 0
+          inventoryFocus = {
+            kind: 'slot',
+            region: 'hotbar',
+            index: selectedHotbarIndex,
+          }
           const spawnPose = Effect.runSync(playerApi.pose)
           Effect.runSync(playerApi.look(-spawnPose.yawRadians, -spawnPose.pitchRadians))
           const currentPose = Effect.runSync(playerApi.pose)
@@ -3229,8 +3283,9 @@ const bootGame = async (
     let deadAfterFrame = playerIsDead()
 
     // A portal may change dimension in the same frame that gameplay confirms a
-    // shot. Settle that confirmation before dimension reset clears the outbox.
+    // attack. Settle confirmations before dimension reset clears the outboxes.
     settleBowShotResults()
+    settleMeleeAttackResults()
 
     let postFramePose = Effect.runSync(playerApi.pose)
     let dimensionAfterFrame = Effect.runSync(playerApi.dimension)
@@ -3353,23 +3408,38 @@ const bootGame = async (
       if (primaryAttackGestureConsumed) {
         miningProgress = null
       } else {
+        const inventorySnapshot = Effect.runSync(world.inventory.snapshot)
+        const selectedSlotIndex = selectedHotbarIndex
+        const selectedItem = inventorySnapshot.slots[selectedSlotIndex]?.item ?? null
         const resolution = Effect.runSync(
           resolveTargetedPrimaryAttack(
             currentChunkStore,
             world.entities,
             playerApi,
+            { meleeDamage: meleeDamageForItem(selectedItem) },
           ),
         )
         if (resolution._tag === 'Melee') {
           miningProgress = null
           if (attackTriggered) {
-            Effect.runSync(requestMeleeAttack(gameplayState, resolution.request))
+            nextMeleeAttackRequestId += 1
+            const requestId = `melee-attack-${String(nextMeleeAttackRequestId)}`
+            Effect.runSync(
+              requestMeleeAttack(gameplayState, {
+                ...resolution.request,
+                requestId,
+              }),
+            )
+            if (selectedItem !== null && isSwordItem(selectedItem)) {
+              pendingMeleeAttacks.set(requestId, {
+                slotIndex: selectedSlotIndex,
+                item: selectedItem,
+              })
+            }
             primaryAttackGestureConsumed = true
             markSessionDirty()
           }
         } else {
-          const inventorySnapshot = Effect.runSync(world.inventory.snapshot)
-          const selectedItem = inventorySnapshot.slots[selectedHotbarIndex]?.item ?? null
           const miningItem = selectedItem !== null && isLegacyGameplayItemType(selectedItem)
             ? selectedItem
             : null
