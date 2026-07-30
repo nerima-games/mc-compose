@@ -2905,6 +2905,28 @@ const bootGame = async (
           }))
           return gameplaySnapshot()
         },
+        seedZombiePursuitEncounter: () => {
+          respawnPlayer()
+          const currentPose = Effect.runSync(playerApi.pose)
+          Effect.runSync(requestMobSpawn(gameplayState, {
+            kind: ZOMBIE_KIND,
+            feetPosition: {
+              x: currentPose.feetPosition.x + 4,
+              y: currentPose.feetPosition.y,
+              z: currentPose.feetPosition.z,
+            },
+            candidate: {
+              groundBlock: 2,
+              footBlock: 0,
+              headBlock: 0,
+              blockLight: 0,
+              timeOfDay: 0,
+              distanceToPlayerBlocksXZ: 16,
+            },
+          }))
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
         seedLethalZombieEncounter: () => {
           respawnPlayer()
           applyPlayerDamage({ amount: 18, cause: 'generic' })

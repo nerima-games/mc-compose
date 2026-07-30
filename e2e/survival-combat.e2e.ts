@@ -205,6 +205,59 @@ const grantPointerLock = async (page: Page): Promise<void> => {
   })
 }
 
+test('renders a zombie pursuing the player and persists contact damage', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await startGameSession(page)
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await callQa<unknown>(page, 'gameplay.seedZombiePursuitEncounter')
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    const zombie = current.entities[0]
+    const renderedZombie = current.renderedEntities[0]
+    return current.entities.length === 1
+      && current.renderedEntities.length === 1
+      && zombie?.kind === 'zombie'
+      && renderedZombie?.kind === 'zombie'
+      && renderedZombie.category === 'hostile'
+      && zombie.id === renderedZombie.id
+  }).toBe(true)
+
+  const pursuitStart = await snapshot(page)
+  const zombieId = pursuitStart.entities[0]?.id
+  expect(zombieId).toBeDefined()
+  const initialZombie = pursuitStart.entities.find((entity) => entity.id === zombieId)
+  expect(initialZombie).toBeDefined()
+  const initialDistance = Math.hypot(
+    initialZombie!.feetPosition.x - pursuitStart.pose.feetPosition.x,
+    initialZombie!.feetPosition.z - pursuitStart.pose.feetPosition.z,
+  )
+  expect(initialDistance).toBeGreaterThan(2)
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    const zombie = current.entities.find((entity) => entity.id === zombieId)
+    if (zombie === undefined) return initialDistance
+    return Math.hypot(
+      zombie.feetPosition.x - current.pose.feetPosition.x,
+      zombie.feetPosition.z - current.pose.feetPosition.z,
+    )
+  }, { timeout: 10_000 }).toBeLessThan(initialDistance - 0.5)
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return current.vitals.healthPoints
+  }, { timeout: 10_000 }).toBeLessThan(pursuitStart.vitals.healthPoints)
+
+  const damaged = await snapshot(page)
+  expect(damaged.entities.map((entity) => entity.id)).toContain(zombieId)
+  expect(damaged.renderedEntities.map((entity) => entity.id)).toContain(zombieId)
+  expect(damaged.vitals.healthPoints).toBeLessThan(damaged.vitals.maxHealthPoints)
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
 test('renders a lethal zombie encounter and recovers through the Respawn control', async ({
   page,
 }) => {
