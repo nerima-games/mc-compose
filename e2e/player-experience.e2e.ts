@@ -4,11 +4,25 @@ import { startGameSession } from './helpers/session'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
-const callQa = async (page: Page, key: string): Promise<unknown> =>
-  page.evaluate(({ globalKey, commandKey }) => {
-    const commands = (globalThis as unknown as Record<string, Record<string, () => unknown>>)[globalKey]
-    return commands?.[commandKey]?.()
-  }, { globalKey: QA_GLOBAL_KEY, commandKey: key })
+type GameplaySnapshot = {
+  readonly inventory: {
+    readonly slots: ReadonlyArray<{ readonly item: string; readonly count: number } | null>
+    readonly durability: ReadonlyArray<{ readonly current: number; readonly max: number } | null>
+  }
+}
+
+const callQa = <A>(page: Page, command: string, ...arguments_: ReadonlyArray<unknown>): Promise<A> =>
+  page.evaluate(
+    async ({ key, commandName, commandArguments }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, (...arguments_: ReadonlyArray<unknown>) => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      return await operation(...commandArguments)
+    },
+    { key: QA_GLOBAL_KEY, commandName: command, commandArguments: arguments_ },
+  ) as Promise<A>
 
 const selectedSlotIndex = async (hotbar: Locator): Promise<number> =>
   hotbar.locator('[data-mx-ui="slot"]').evaluateAll((slots) =>
@@ -202,6 +216,78 @@ test.describe('player inventory experience', () => {
       'aria-label',
       /wooden_pickaxe, 1/,
     )
+
+    const selectHotbarItem = async (item: string): Promise<number> => {
+      const slot = inventory.locator(
+        `[data-region="hotbar"] [data-mx-ui="slot"][aria-label*="${item}"]`,
+      )
+      await expect(slot).toHaveCount(1)
+      const slotIndex = Number(await slot.getAttribute('data-slot-index'))
+      await page.keyboard.press(`Digit${slotIndex + 1}`)
+      return slotIndex
+    }
+    const itemCount = async (item: string): Promise<number> => {
+      const snapshot = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+      return snapshot.inventory.slots.reduce(
+        (count, slot) => count + (slot?.item === item ? slot.count : 0),
+        0,
+      )
+    }
+    const mineCurrentTarget = async (): Promise<void> => {
+      const before = Number(await canvas.getAttribute('data-breaks-requested') ?? '0')
+      await canvas.hover()
+      await grantPointerLock(page)
+      await page.mouse.down({ button: 'left' })
+      try {
+        await expect(canvas).toHaveAttribute('data-breaks-requested', String(before + 1), {
+          timeout: 10_000,
+        })
+      } finally {
+        await page.mouse.up({ button: 'left' })
+      }
+    }
+
+    await page.keyboard.press('KeyE')
+    await expect(inventory).toBeHidden()
+    const woodenPickaxeSlotIndex = await selectHotbarItem('wooden_pickaxe')
+
+    for (let mined = 1; mined <= 3; mined += 1) {
+      await callQa<unknown>(page, 'gameplay.setPose', 2)
+      await mineCurrentTarget()
+      await expect.poll(() => itemCount('cobblestone')).toBe(mined)
+    }
+    const afterStone = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+    expect(afterStone.inventory.durability[woodenPickaxeSlotIndex]?.current).toBe(56)
+
+    await callQa<unknown>(page, 'gameplay.returnToCraftingTable')
+    await canvas.click({ button: 'right' })
+    await expect(inventory).toBeVisible()
+    await expect(inventory).toHaveAttribute('aria-label', 'Crafting Table')
+
+    for (const cellIndex of [0, 1, 2]) {
+      await inventoryItemSlot('cobblestone').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    for (const cellIndex of [4, 7]) {
+      await inventoryItemSlot('stick').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    await expect(output).toHaveAttribute('aria-label', /stone_pickaxe, 1/)
+    await output.click()
+    await expect(inventoryItemSlot('stone_pickaxe')).toHaveAttribute(
+      'aria-label',
+      /stone_pickaxe, 1/,
+    )
+
+    await page.keyboard.press('KeyE')
+    await expect(inventory).toBeHidden()
+    const stonePickaxeSlotIndex = await selectHotbarItem('stone_pickaxe')
+    await callQa<unknown>(page, 'gameplay.setPose', 51)
+    await mineCurrentTarget()
+    await expect.poll(() => itemCount('raw_iron')).toBe(1)
+
+    const afterIron = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+    expect(afterIron.inventory.durability[stonePickaxeSlotIndex]?.current).toBe(130)
   })
 
   test('opens an empty 3x3 crafting table through targeted canvas use', async ({ page }) => {

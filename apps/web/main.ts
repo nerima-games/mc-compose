@@ -189,7 +189,7 @@ import {
   registerModule,
   type GameModule,
 } from '../../domain/composition'
-import { DeltaTimeSecs } from '../../domain/kernel-vocabulary'
+import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../domain/kernel-vocabulary'
 import { buildQaRegistry, describeQaApiError, installQaApi } from '../../domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
 import {
@@ -1159,6 +1159,7 @@ const bootGame = async (
     jumpSpeed: JUMP_SPEED_M_PER_S,
   }
   const resetSimState = (physicsEnabled: boolean): void => {
+    pendingMiningToolDamage.splice(0)
     Effect.runSync(Ref.set(simState.resolvedFeetPosition, Option.none()))
     Effect.runSync(Ref.set(simState.movementIntent, { forward: 0, strafe: 0 }))
     Effect.runSync(Ref.set(simState.jumpIntent, false))
@@ -1206,6 +1207,13 @@ const bootGame = async (
     string,
     { readonly dimension: Dimension; readonly position: { readonly x: number; readonly y: number; readonly z: number } }
   >()
+  const pendingMiningToolDamage: Array<{
+    readonly dimension: Dimension
+    readonly position: { readonly x: number; readonly y: number; readonly z: number }
+    readonly blockId: number
+    readonly slotIndex: number
+    readonly item: 'wooden_pickaxe' | 'stone_pickaxe'
+  }> = []
 
   const registeredSim = await Effect.runPromise(
     registerModule({
@@ -1852,6 +1860,12 @@ const bootGame = async (
           markSessionDirty()
           return gameplaySnapshot()
         },
+        returnToCraftingTable: () => {
+          Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
         enterNether: () => enterQaDimension('nether'),
         enterOverworld: () => enterQaDimension('overworld'),
         breakTarget: () => {
@@ -2078,9 +2092,9 @@ const bootGame = async (
 
   // Time is read through the Port, not from `performance`. `apps/web/clock.ts`
   // is the only file allowed the raw reading and `pnpm check:deps` enforces it.
-  const readNow = (): number => Effect.runSync(browserClock.monotonicSecs)
+  const readNow = (): MonotonicTimeSecs => Effect.runSync(browserClock.monotonicSecs)
 
-  let previousSecs: number | undefined
+  let previousSecs: MonotonicTimeSecs | undefined
   let framesThisWindow = 0
   let windowStartedAtSecs = readNow()
   let framesTotal = 0
@@ -2191,6 +2205,23 @@ const bootGame = async (
       return
     }
 
+    for (const pending of pendingMiningToolDamage.splice(0)) {
+      if (pending.dimension !== Effect.runSync(playerApi.dimension)) continue
+      const reading = Effect.runSync(currentChunkStore.getBlock(pending.position))
+      if (reading._tag !== 'Block' || reading.block === pending.blockId) continue
+
+      const selected = Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]
+      if (selected?.item !== pending.item) continue
+
+      Effect.runSync(
+        world.inventory.damageAt(
+          { _tag: 'Inventory', slotIndex: pending.slotIndex },
+          1,
+        ),
+      )
+      markSessionDirty()
+    }
+
     const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
     for (const event of playerDamages) {
       applyPlayerDamage(event.damage)
@@ -2274,7 +2305,12 @@ const bootGame = async (
           if (resolution._tag === 'Block') {
             const reading = Effect.runSync(currentChunkStore.getBlock(resolution.target.position))
             if (reading._tag === 'Block') {
-              target = { position: resolution.target.position, blockId: reading.block }
+              const position = {
+                x: Math.floor(resolution.target.position.x),
+                y: Math.floor(resolution.target.position.y),
+                z: Math.floor(resolution.target.position.z),
+              } as NonNullable<Parameters<typeof advanceMiningProgress>[0]['target']>['position']
+              target = { position, blockId: reading.block }
             }
           }
           const advancement = advanceMiningProgress({
@@ -2293,6 +2329,15 @@ const bootGame = async (
                 miningLootContextForItem(selectedItem),
               ),
             )
+            if (selectedItem === 'wooden_pickaxe' || selectedItem === 'stone_pickaxe') {
+              pendingMiningToolDamage.push({
+                dimension: Effect.runSync(playerApi.dimension),
+                position: target.position,
+                blockId: target.blockId,
+                slotIndex: selectedHotbarIndex,
+                item: selectedItem,
+              })
+            }
             breaksRequested += 1
             canvas.setAttribute('data-breaks-requested', String(breaksRequested))
             primaryAttackGestureConsumed = true
