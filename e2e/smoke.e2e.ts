@@ -298,6 +298,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.seedIronArmor',
       'gameplay.seedLethalZombieEncounter',
       'gameplay.seedMeleeDropEncounter',
+      'gameplay.seedPortalEncounter',
       'gameplay.seedRefusedFireChargeIgnition',
       'gameplay.seedWoodenPickaxeProgression',
       'gameplay.setPose',

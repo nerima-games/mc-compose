@@ -5,6 +5,8 @@ import { startGameSession } from './helpers/session'
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const DATABASE_NAME = 'nerima-games-minecraft'
 const AIR_BLOCK_ID = 0
+const OBSIDIAN_BLOCK_ID = 40
+const NETHER_PORTAL_BLOCK_ID = 118
 
 type Position = { readonly x: number; readonly y: number; readonly z: number }
 type Pose = {
@@ -30,6 +32,16 @@ type GameplaySnapshot = {
     readonly position: Position
     readonly reading: string
     readonly block: number | null
+  }
+  readonly portals: ReadonlyArray<{
+    readonly dimension: string
+    readonly position: Position
+  }>
+  readonly activePortal: null | {
+    readonly anchor: Position
+    readonly interiorBlock: number | null
+    readonly framePosition: Position
+    readonly frameBlock: number | null
   }
 }
 
@@ -190,6 +202,64 @@ test('isolates and restores edits while travelling overworld to nether and back'
   const overworld = await snapshot(page)
   expect(overworld.dimension).toBe('overworld')
   expect(overworld.target.block).toBe(AIR_BLOCK_ID)
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('materializes, persists, and reuses a portal round trip without duplicates', async ({ page }) => {
+  const faults = watchForFaults(page)
+  await deleteSessionDatabase(page)
+
+  await startGameSession(page)
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedPortalEncounter')
+  expect(seeded.dimension).toBe('overworld')
+  expect(seeded.portals).toEqual([
+    { dimension: 'overworld', position: { x: 120, y: 65, z: 8 } },
+  ])
+  expect(seeded.activePortal?.interiorBlock).toBe(NETHER_PORTAL_BLOCK_ID)
+  expect(seeded.activePortal?.frameBlock).toBe(OBSIDIAN_BLOCK_ID)
+
+  await expect.poll(
+    async () => (await snapshot(page)).dimension,
+    { timeout: 10_000 },
+  ).toBe('nether')
+  const generated = await snapshot(page)
+  expect(generated.activeChunkDimension).toBe('nether')
+  expect(generated.portals).toEqual([
+    { dimension: 'overworld', position: { x: 120, y: 65, z: 8 } },
+    { dimension: 'nether', position: { x: 15, y: 65, z: 1 } },
+  ])
+  expect(generated.activePortal?.anchor).toEqual({ x: 15, y: 65, z: 1 })
+  expect(generated.activePortal?.interiorBlock).toBe(NETHER_PORTAL_BLOCK_ID)
+  expect(generated.activePortal?.frameBlock).toBe(OBSIDIAN_BLOCK_ID)
+
+  await callQa(page, 'persistence.flush')
+  await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+  await page.reload()
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'persisted')
+
+  const restored = await snapshot(page)
+  expect(restored.dimension).toBe('nether')
+  expect(restored.activeChunkDimension).toBe('nether')
+  expect(restored.portals).toEqual(generated.portals)
+  expect(restored.activePortal?.interiorBlock).toBe(NETHER_PORTAL_BLOCK_ID)
+  expect(restored.activePortal?.frameBlock).toBe(OBSIDIAN_BLOCK_ID)
+
+  await expect.poll(
+    async () => (await snapshot(page)).dimension,
+    { timeout: 10_000 },
+  ).toBe('overworld')
+  const returned = await snapshot(page)
+  expect(returned.activeChunkDimension).toBe('overworld')
+  expect(returned.portals).toEqual(generated.portals)
+  expect(returned.portals.filter(({ dimension }) => dimension === 'overworld')).toHaveLength(1)
+  expect(returned.portals.filter(({ dimension }) => dimension === 'nether')).toHaveLength(1)
+  expect(returned.activePortal?.anchor).toEqual({ x: 120, y: 65, z: 8 })
+  expect(returned.activePortal?.interiorBlock).toBe(NETHER_PORTAL_BLOCK_ID)
+  expect(returned.activePortal?.frameBlock).toBe(OBSIDIAN_BLOCK_ID)
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })

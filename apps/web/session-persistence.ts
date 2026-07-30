@@ -64,6 +64,11 @@ export type PersistedFurnaceState = {
   readonly state: FurnaceState
 }
 
+export type PersistedPortalState = {
+  readonly dimension: Dimension
+  readonly position: SessionPosition
+}
+
 const PositionSchema: Schema.Schema<SessionPosition> = Schema.Struct({
   x: Schema.Number,
   y: Schema.Number,
@@ -97,6 +102,7 @@ export type SessionState = {
     readonly levers: ReadonlyArray<PersistedLeverState>
   }
   readonly furnaces: ReadonlyArray<PersistedFurnaceState>
+  readonly portals: ReadonlyArray<PersistedPortalState>
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -214,6 +220,13 @@ const PersistedFurnacesSchema = Schema.Array(Schema.Struct({
   }, { message: () => 'Furnace positions must be unique within each dimension' }),
 )
 
+const PersistedPortalsSchema: Schema.Schema<ReadonlyArray<PersistedPortalState>> = Schema.Array(
+  Schema.Struct({
+    dimension: DimensionSchema,
+    position: BlockPositionSchema,
+  }),
+)
+
 const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   seed: Schema.Number,
   dimension: DimensionSchema,
@@ -234,6 +247,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
     })),
   }),
   furnaces: PersistedFurnacesSchema,
+  portals: PersistedPortalsSchema,
 })
 
 export type SessionChunkManifestEntry = {
@@ -474,9 +488,28 @@ const migrateSessionV8ToV9: Migration = {
   },
 }
 
+const migrateSessionV9ToV10: Migration = {
+  from: 9,
+  describe: 'add the portal registry',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v9 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'portals')
+        ? state
+        : { ...state, portals: [] },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
-  version: 9,
+  version: 10,
   schema: SessionHeadSchema,
   migrations: [
     migrateSessionV1ToV2,
@@ -487,6 +520,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV6ToV7,
     migrateSessionV7ToV8,
     migrateSessionV8ToV9,
+    migrateSessionV9ToV10,
   ],
 })
 

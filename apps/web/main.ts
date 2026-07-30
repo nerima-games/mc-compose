@@ -160,6 +160,7 @@ import {
   drainBlockUseResults,
   drainItemUseResults,
   drainMobDrops,
+  drainPortalTravels,
   drainPlayerDamages,
   DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
@@ -180,6 +181,7 @@ import {
   requestTargetedBlockUse,
   requestTargetedItemUse,
   resolveTargetedPrimaryAttack,
+  setPortalCandidates,
   solidityFromStore,
   spawnDroppedItems,
   spawnMobDrops,
@@ -240,6 +242,7 @@ import {
   type DimensionChunk,
   type PersistedFurnaceState,
   type PersistedLeverState,
+  type PersistedPortalState,
   type SessionMetadata,
   type SessionState,
 } from './session-persistence'
@@ -295,6 +298,27 @@ const QA_IGNITION_HIT_BLOCK = { x: 8, y: 66, z: 8 } as const
 const QA_IGNITION_CELL = { x: 8, y: 66, z: 9 } as const
 const QA_IGNITION_SUPPORT_BLOCK = { x: 8, y: 65, z: 9 } as const
 const QA_IGNITION_FLOOR_BLOCK = { x: 8, y: 64, z: 10 } as const
+const OBSIDIAN_BLOCK_ID = 40
+const NETHER_PORTAL_BLOCK_ID = 118
+const QA_PORTAL_ANCHOR = { x: 120, y: 65, z: 8 } as const
+const QA_PORTAL_POSE = {
+  feetPosition: { x: 120.5, y: 65, z: 8.5 },
+  yawRadians: 0,
+  pitchRadians: 0,
+} as const
+const QA_PORTAL_LAYOUT = {
+  frame: [
+    ...Array.from({ length: 4 }, (_, offset) => ({ x: 119 + offset, y: 64, z: 8 })),
+    ...Array.from({ length: 4 }, (_, offset) => ({ x: 119 + offset, y: 68, z: 8 })),
+    ...Array.from({ length: 3 }, (_, offset) => ({ x: 119, y: 65 + offset, z: 8 })),
+    ...Array.from({ length: 3 }, (_, offset) => ({ x: 122, y: 65 + offset, z: 8 })),
+  ],
+  interior: Array.from({ length: 6 }, (_, index) => ({
+    x: 120 + (index % 2),
+    y: 65 + Math.floor(index / 2),
+    z: 8,
+  })),
+} as const
 const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'redstone_dust',
   'lever',
@@ -871,6 +895,18 @@ const bootGame = async (
     (Option.isSome(loadedSession) ? loadedSession.value.state.furnaces : [])
       .map((furnace) => [furnaceKeyOf(furnace), furnace]),
   )
+  const portalKeyOf = (
+    portal: Pick<PersistedPortalState, 'dimension' | 'position'>,
+  ): string => JSON.stringify([
+    portal.dimension,
+    portal.position.x,
+    portal.position.y,
+    portal.position.z,
+  ])
+  const portalStates = new Map<string, PersistedPortalState>(
+    (Option.isSome(loadedSession) ? loadedSession.value.state.portals : [])
+      .map((portal) => [portalKeyOf(portal), portal]),
+  )
   let activeFurnaceKey: string | undefined
   let redstoneDirty = true
 
@@ -923,6 +959,7 @@ const bootGame = async (
       weather: Effect.runSync(weather.snapshot),
       redstone: { levers: [...leverStates.values()] },
       furnaces: [...furnaceStates.values()],
+      portals: [...portalStates.values()],
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -1222,6 +1259,77 @@ const bootGame = async (
   // inbox nobody can reach, which is the 「callable but unreachable」 state that
   // repository has had to correct more than once.
   const gameplayState = await Effect.runPromise(makeGameplayFrameState)
+  const portalDimensions = ['overworld', 'nether', 'end'] as const satisfies ReadonlyArray<Dimension>
+  const syncPortalCandidatesFor = (dimension: Dimension): Effect.Effect<void> =>
+    setPortalCandidates(
+      gameplayState,
+      dimension,
+      [...portalStates.values()]
+        .filter((portal) => portal.dimension === dimension)
+        .map((portal) => portal.position),
+    )
+  const syncPortalCandidateSnapshots = (): Effect.Effect<void> =>
+    Effect.asVoid(Effect.all(portalDimensions.map(syncPortalCandidatesFor)))
+  const registerPortal = (portal: PersistedPortalState): boolean => {
+    const key = portalKeyOf(portal)
+    if (portalStates.has(key)) return false
+    portalStates.set(key, portal)
+    Effect.runSync(syncPortalCandidatesFor(portal.dimension))
+    markSessionDirty()
+    return true
+  }
+  const materializePortal = (
+    dimension: Dimension,
+    layout: {
+      readonly frame: ReadonlyArray<PersistedPortalState['position']>
+      readonly interior: ReadonlyArray<PersistedPortalState['position']>
+    },
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const context = getOrCreateDimensionChunkContext(dimension)
+      const chunkRefs = new Map<string, ChunkRef>()
+      for (const position of [...layout.frame, ...layout.interior]) {
+        const chunk = {
+          cx: Math.floor(position.x / 16),
+          cz: Math.floor(position.z / 16),
+        }
+        chunkRefs.set(chunkKeyOf(chunk), chunk)
+      }
+      for (const [key, chunk] of chunkRefs) {
+        if (context.streamLoaded.has(key)) continue
+        yield* context.chunkStore.load(chunk)
+        context.streamLoaded.add(key)
+        chunksStreamedIn += 1
+      }
+      for (const position of layout.frame) {
+        yield* context.chunkStore.setBlock(position, OBSIDIAN_BLOCK_ID)
+      }
+      for (const position of layout.interior) {
+        yield* context.chunkStore.setBlock(position, NETHER_PORTAL_BLOCK_ID)
+      }
+      markSessionDirty()
+    })
+  const applyPortalTravels = (): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const travels = yield* drainPortalTravels(gameplayState)
+      for (const travel of travels) {
+        registerPortal({
+          dimension: travel.sourceDimension,
+          position: travel.sourcePosition,
+        })
+        const destinationAdded = registerPortal({
+          dimension: travel.plan.toDimension,
+          position: travel.plan.destination,
+        })
+        if (destinationAdded && Option.isSome(travel.plan.portalToCreate)) {
+          yield* materializePortal(
+            travel.plan.toDimension,
+            travel.plan.portalToCreate.value,
+          )
+        }
+      }
+    })
+  Effect.runSync(syncPortalCandidateSnapshots())
   const observedMobDrops: Array<MobDropEvent & { readonly renderId: string }> = []
   let nextMobDropId = 0
   let lastObservedItemUse: ItemUseResult | undefined
@@ -1874,15 +1982,33 @@ const bootGame = async (
     }))
 
   const gameplaySnapshot = () => {
+    const pose = Effect.runSync(playerApi.pose)
+    const dimension = Effect.runSync(playerApi.dimension)
     const reading = Effect.runSync(currentChunkStore.getBlock(KNOWN_TARGET_BLOCK))
     const ignitionReading = Effect.runSync(currentChunkStore.getBlock(QA_IGNITION_CELL))
     const storage = Effect.runSync(world.inventory.storageSnapshot)
     const inventory = storage.inventory
     const vitals = Effect.runSync(world.vitals.snapshot)
     const entities = Effect.runSync(world.entities.snapshot).entities
+    const activePortal = [...portalStates.values()].find(
+      (portal) => portal.dimension === dimension,
+    )
+    const activePortalReading = activePortal === undefined
+      ? undefined
+      : Effect.runSync(currentChunkStore.getBlock(activePortal.position))
+    const activePortalFramePosition = activePortal === undefined
+      ? undefined
+      : {
+          x: activePortal.position.x - 1,
+          y: activePortal.position.y - 1,
+          z: activePortal.position.z,
+        }
+    const activePortalFrameReading = activePortalFramePosition === undefined
+      ? undefined
+      : Effect.runSync(currentChunkStore.getBlock(activePortalFramePosition))
     return {
-      pose: Effect.runSync(playerApi.pose),
-      dimension: Effect.runSync(playerApi.dimension),
+      pose,
+      dimension,
       activeChunkDimension: currentChunkContext.dimension,
       weather: Effect.runSync(weather.snapshot),
       vitals,
@@ -1912,6 +2038,22 @@ const bootGame = async (
         reading: ignitionReading._tag,
         block: ignitionReading._tag === 'Block' ? ignitionReading.block : null,
       },
+      portals: [...portalStates.values()],
+      activePortal: activePortal === undefined
+        || activePortalReading === undefined
+        || activePortalFramePosition === undefined
+        || activePortalFrameReading === undefined
+        ? null
+        : {
+            anchor: activePortal.position,
+            interiorBlock: activePortalReading._tag === 'Block'
+              ? activePortalReading.block
+              : null,
+            framePosition: activePortalFramePosition,
+            frameBlock: activePortalFrameReading._tag === 'Block'
+              ? activePortalFrameReading.block
+              : null,
+          },
       persistence: {
         knownChunks: saveCoordinator.knownChunkCount(),
         retainedChunks: saveCoordinator.retainedChunkCount(),
@@ -1987,6 +2129,24 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedPortalEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_PORTAL_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(materializePortal('overworld', QA_PORTAL_LAYOUT))
+    registerPortal({ dimension: 'overworld', position: QA_PORTAL_ANCHOR })
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_PORTAL_POSE.feetPosition.x,
+        QA_PORTAL_POSE.feetPosition.z,
+      ),
+    )
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
   const enterQaDimension = (dimension: Dimension) => {
     const pose = Effect.runSync(playerApi.pose)
     Effect.runSync(playerApi.restore(pose, dimension))
@@ -2046,6 +2206,7 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedCraftingTableEncounter,
+        seedPortalEncounter,
         seedWoodenPickaxeProgression,
         seedIronArmor: () => {
           Effect.runSync(world.inventory.reset)
@@ -2354,6 +2515,7 @@ const bootGame = async (
     const weatherBeforeFrame = Effect.runSync(weather.snapshot)
     Effect.runSync(Ref.set(gameplayState.weather, weatherBeforeFrame))
     Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
+    Effect.runSync(syncPortalCandidateSnapshots())
 
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
 
@@ -2364,6 +2526,10 @@ const bootGame = async (
       failBoot('a frame stage defected', outcome.cause)
       return
     }
+
+    // Portal travel has already updated the player. Make its destination world
+    // concrete before dimension alignment streams or renders that world.
+    Effect.runSync(applyPortalTravels())
 
     let furnaceStateChanged = false
     for (const [key, furnace] of furnaceStates) {

@@ -80,6 +80,10 @@ const sessionState = (seed: number): SessionState => {
       }],
     },
     furnaces: [],
+    portals: [{
+      dimension: 'overworld',
+      position: { x: 10, y: 64, z: -7 },
+    }],
   }
 }
 
@@ -200,10 +204,11 @@ describe('session persistence', () => {
       expect(saved.state.time).toEqual(sessionState(42).time)
       expect(saved.state.weather).toEqual(sessionState(42).weather)
       expect(saved.state.redstone).toEqual(sessionState(42).redstone)
+      expect(saved.state.portals).toEqual(sessionState(42).portals)
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 9,
+        version: 10,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -229,6 +234,115 @@ describe('session persistence', () => {
 
       expect(loaded.state.furnaces).toEqual([])
       expect(storage.envelope(key)?.version).toBe(8)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a v9 session with an absent portal registry', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v9')
+    const { portals: _portals, ...v9State } = sessionState(42)
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 9,
+      payload: {
+        sessionId: 'legacy-v9',
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: v9State,
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v9'))
+
+      expect(loaded.state.portals).toEqual([])
+      expect(storage.envelope(key)?.version).toBe(9)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects a v9 portal registry explicitly set to undefined', () => {
+    const storage = controlledStorage()
+    const sessionId = 'undefined-v9-portals'
+    storage.setEnvelope(sessionHeadKey(sessionId), {
+      format: SESSION_FORMAT_NAME,
+      version: 9,
+      payload: {
+        sessionId,
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: { ...sessionState(42), portals: undefined },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession(sessionId))
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 9,
+      })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects invalid persisted portal dimensions and coordinates', () => {
+    const storage = controlledStorage()
+    const invalidPortals = [
+      { dimension: 'moon', position: { x: 1, y: 64, z: 2 } },
+      { dimension: 'overworld', position: { x: 1.5, y: 64, z: 2 } },
+      { dimension: 'overworld', position: { x: 1, y: Number.POSITIVE_INFINITY, z: 2 } },
+    ]
+
+    for (const [index, portal] of invalidPortals.entries()) {
+      const sessionId = `invalid-portal-${String(index)}`
+      storage.setEnvelope(sessionHeadKey(sessionId), {
+        format: SESSION_FORMAT_NAME,
+        version: 10,
+        payload: {
+          sessionId,
+          revision: 'r1',
+          metadata: defaultMetadata,
+          state: { ...sessionState(index), portals: [portal] },
+          chunks: [],
+        },
+      })
+    }
+
+    return Effect.gen(function* () {
+      for (const index of invalidPortals.keys()) {
+        const error = yield* Effect.flip(loadSession(`invalid-portal-${String(index)}`))
+        expect(error).toMatchObject({
+          _tag: 'SaveDecodeError',
+          format: SESSION_FORMAT_NAME,
+          version: 10,
+        })
+      }
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('rejects session envelopes from a future format version', () => {
+    const storage = controlledStorage()
+    const sessionId = 'future-version'
+    storage.setEnvelope(sessionHeadKey(sessionId), {
+      format: SESSION_FORMAT_NAME,
+      version: 11,
+      payload: {
+        sessionId,
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: sessionState(42),
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession(sessionId))
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 11,
+      })
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -719,7 +833,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(9)
+      expect(storage.envelope(headKey)?.version).toBe(10)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )
