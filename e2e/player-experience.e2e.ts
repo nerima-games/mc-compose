@@ -137,7 +137,7 @@ test.describe('player inventory experience', () => {
     await expect(output).toBeHidden()
   })
 
-  test('smelts iron through natural player progression', async ({ page }) => {
+  test('progresses from wood through diamond and mines obsidian', async ({ page }) => {
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
     await callQa(page, 'gameplay.seedWoodenPickaxeProgression')
@@ -425,6 +425,46 @@ test.describe('player inventory experience', () => {
     await expect.poll(() => itemCount('raw_gold')).toBe(1)
     const afterGold = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
     expect(afterGold.inventory.durability[ironPickaxeSlotIndex]?.current).toBe(249)
+
+    for (let mined = 1; mined <= 3; mined += 1) {
+      await callQa<unknown>(page, 'gameplay.setPose', 53)
+      await mineCurrentTarget()
+      await expect.poll(() => itemCount('diamond')).toBe(mined)
+    }
+    const afterDiamond = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+    expect(afterDiamond.inventory.durability[ironPickaxeSlotIndex]?.current).toBe(246)
+
+    await callQa<unknown>(page, 'gameplay.returnToCraftingTable')
+    await canvas.click({ button: 'right' })
+    await expect(inventory).toBeVisible()
+    await expect(inventory).toHaveAttribute('aria-label', 'Crafting Table')
+
+    for (const cellIndex of [0, 1, 2]) {
+      await inventoryItemSlot('diamond').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    for (const cellIndex of [4, 7]) {
+      await inventoryItemSlot('stick').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    await expect(output).toHaveAttribute('aria-label', /diamond_pickaxe, 1/)
+    await output.click()
+    await expect(inventoryItemSlot('diamond_pickaxe')).toHaveAttribute(
+      'aria-label',
+      /diamond_pickaxe, 1/,
+    )
+
+    await page.keyboard.press('KeyE')
+    await expect(inventory).toBeHidden()
+    const diamondPickaxeSlotIndex = await selectHotbarItem('diamond_pickaxe')
+    const beforeObsidian = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+    expect(beforeObsidian.inventory.durability[diamondPickaxeSlotIndex]?.current).toBe(1561)
+
+    await callQa<unknown>(page, 'gameplay.setPose', 40)
+    await mineCurrentTarget()
+    await expect.poll(() => itemCount('obsidian')).toBe(1)
+    const afterObsidian = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+    expect(afterObsidian.inventory.durability[diamondPickaxeSlotIndex]?.current).toBe(1560)
   })
 
   test('opens an empty 3x3 crafting table through targeted canvas use', async ({ page }) => {

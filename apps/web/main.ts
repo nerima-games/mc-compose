@@ -1238,7 +1238,7 @@ const bootGame = async (
     readonly position: { readonly x: number; readonly y: number; readonly z: number }
     readonly blockId: number
     readonly slotIndex: number
-    readonly item: 'wooden_pickaxe' | 'stone_pickaxe' | 'iron_pickaxe'
+    readonly item: 'wooden_pickaxe' | 'stone_pickaxe' | 'iron_pickaxe' | 'diamond_pickaxe'
   }> = []
   const pendingBlockBreakConfirmations: Array<{
     readonly dimension: Dimension
@@ -2540,7 +2540,8 @@ const bootGame = async (
             if (
               selectedItem === 'wooden_pickaxe' ||
               selectedItem === 'stone_pickaxe' ||
-              selectedItem === 'iron_pickaxe'
+              selectedItem === 'iron_pickaxe' ||
+              selectedItem === 'diamond_pickaxe'
             ) {
               pendingMiningToolDamage.push({
                 dimension: Effect.runSync(playerApi.dimension),

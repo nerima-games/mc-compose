@@ -18,14 +18,14 @@ importers:
         specifier: 0.1.0
         version: 0.1.0
       '@nerima-games/mc-sim':
-        specifier: 0.1.13
-        version: 0.1.13
+        specifier: 0.1.15
+        version: 0.1.15
       '@nerima-games/mc-worldgen':
         specifier: 0.1.1
         version: 0.1.1
       '@nerima-games/mx-gameplay':
-        specifier: 0.1.26
-        version: 0.1.26
+        specifier: 0.1.27
+        version: 0.1.27
       '@nerima-games/mx-redstone':
         specifier: 0.1.2
         version: 0.1.2
@@ -288,8 +288,8 @@ packages:
     resolution: {integrity: sha512-aNO7SZP8mfrxRo0XsDNfg2P+BSmriCvVa4rqMzQPZfbqa7orx5qfuPRdmHjxVhFRmTpvsswv/4yuy9Z1HOGrqQ==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-kernel/0.2.0/e78e32d4c2fed78a30b275ec5f2ee3e0ee16e030}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
-  '@nerima-games/mc-kernel@0.2.2':
-    resolution: {integrity: sha512-+X+7puwb/vgx4WuS31b369wF/wGa/vgh8FZy3rBbQFI2T7pfcb87gGp5Qtryrnar0VfKUm5O84eJ9OEJFEnVLw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-kernel/0.2.2/0b4cdc3e42bf89f60c9eacf5453056b4db1af322}
+  '@nerima-games/mc-kernel@0.2.3':
+    resolution: {integrity: sha512-ey6CLG2vUWdhDUOPqlc5LTRD3/yxH85CqAW+VpC3NwxZT6Wqud6XcJrzC60rRsF4XfhZNohCs9CIGyN6uWAA7g==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-kernel/0.2.3/5fa86b71c6da0901091c6c6fe2732f8335b8656b}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
   '@nerima-games/mc-meshing@0.1.0':
@@ -308,8 +308,8 @@ packages:
     resolution: {integrity: sha512-Ll2BXTiLXSJ7XadRLzeHUsuS95O5memtxQcOi0b3vg4rCl7NRklyQLBNmu85FXjPPdRG9z8O/L06FMf1U001/A==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-save/0.1.0/13c4c084ede3cc667049e3fdbc11e71ee8972113}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
-  '@nerima-games/mc-sim@0.1.13':
-    resolution: {integrity: sha512-p5Mq+Hs6PLV8EoTeFpKAcB9EkiBiHOn55nPuA9tNLyYPyfcHeGXEC8hHJAGViqlwaWDcBSpd7DoCGWBvRmPMCA==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-sim/0.1.13/5eb6973c8d46b9a21735181d35d5badf01b7ec83}
+  '@nerima-games/mc-sim@0.1.15':
+    resolution: {integrity: sha512-oRr0TMgD4zszH/WZ8SEX2r4jpn5Wv1kLpebij1TMXbuEJIZKXvFRxGvgHkdpPanb+hP51DPZRVJAcA15Sk4G9Q==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-sim/0.1.15/c5c37d0168b054e3da6808552e428ad08aff3b99}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
   '@nerima-games/mc-worldgen@0.1.0':
@@ -320,8 +320,8 @@ packages:
     resolution: {integrity: sha512-VI+LZIQV1f07+aAmvm/qN5spDsbJB2kbpEkzIjbdG4sNpgxqmXkJWULfP3axaCv40tNTAS54RVR6DpBBb6N6lw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-worldgen/0.1.1/0eae0d1c46e81807c0b440f19b5f9c4e7f4d91bf}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
-  '@nerima-games/mx-gameplay@0.1.26':
-    resolution: {integrity: sha512-ERKUx6w9x5Ez+ycYw6T2VtPj4P21Al/Kmhu+I6AA9Ci98Yl/+QgKevQRJoEapanRAyYSlbB9Wvkdo2nmW71x7g==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-gameplay/0.1.26/fabeed07cd0cceea74400c3b56c909b103138458}
+  '@nerima-games/mx-gameplay@0.1.27':
+    resolution: {integrity: sha512-PrPy4pnTWRGM4SlRzA4u5MLynIwcWKx8CZiDMCKoETAUcqWtccU/bJ63jOwxmEzu2JOr+GN7hfeR6VsL96KKYw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-gameplay/0.1.27/e32bee1dd74ae475f6a131782f76e5d464dcb4e1}
     engines: {node: '>=22.0.0', pnpm: '>=8.15.0'}
 
   '@nerima-games/mx-redstone@0.1.2':
@@ -1163,7 +1163,7 @@ snapshots:
     dependencies:
       effect: 3.22.0
 
-  '@nerima-games/mc-kernel@0.2.2':
+  '@nerima-games/mc-kernel@0.2.3':
     dependencies:
       effect: 3.22.0
 
@@ -1186,7 +1186,7 @@ snapshots:
     dependencies:
       effect: 3.22.0
 
-  '@nerima-games/mc-sim@0.1.13':
+  '@nerima-games/mc-sim@0.1.15':
     dependencies:
       '@nerima-games/mc-physics': 0.1.0
       effect: 3.22.0
@@ -1199,10 +1199,10 @@ snapshots:
     dependencies:
       effect: 3.22.0
 
-  '@nerima-games/mx-gameplay@0.1.26':
+  '@nerima-games/mx-gameplay@0.1.27':
     dependencies:
-      '@nerima-games/mc-kernel': 0.2.2
-      '@nerima-games/mc-sim': 0.1.13
+      '@nerima-games/mc-kernel': 0.2.3
+      '@nerima-games/mc-sim': 0.1.15
       '@nerima-games/mc-worldgen': 0.1.0
       effect: 3.22.0
 
