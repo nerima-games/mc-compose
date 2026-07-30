@@ -287,16 +287,18 @@ test.describe('player inventory experience', () => {
     await page.keyboard.press('KeyE')
     await expect(inventory).toBeHidden()
     const stonePickaxeSlotIndex = await selectHotbarItem('stone_pickaxe')
-    await callQa<unknown>(page, 'gameplay.setPose', 51)
-    await mineCurrentTarget()
-    await expect.poll(() => itemCount('raw_iron')).toBe(1)
+    for (let mined = 1; mined <= 3; mined += 1) {
+      await callQa<unknown>(page, 'gameplay.setPose', 51)
+      await mineCurrentTarget()
+      await expect.poll(() => itemCount('raw_iron')).toBe(mined)
+    }
 
     await callQa<unknown>(page, 'gameplay.setPose', 50)
     await mineCurrentTarget()
     await expect.poll(() => itemCount('coal')).toBe(1)
 
     const afterIron = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
-    expect(afterIron.inventory.durability[stonePickaxeSlotIndex]?.current).toBe(129)
+    expect(afterIron.inventory.durability[stonePickaxeSlotIndex]?.current).toBe(127)
 
     for (let mined = 1; mined <= 8; mined += 1) {
       await callQa<unknown>(page, 'gameplay.setPose', 2)
@@ -304,7 +306,7 @@ test.describe('player inventory experience', () => {
       await expect.poll(() => itemCount('cobblestone')).toBe(mined)
     }
     const afterFurnaceStone = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
-    expect(afterFurnaceStone.inventory.durability[stonePickaxeSlotIndex]?.current).toBe(121)
+    expect(afterFurnaceStone.inventory.durability[stonePickaxeSlotIndex]?.current).toBe(119)
 
     await callQa<unknown>(page, 'gameplay.returnToCraftingTable')
     await canvas.click({ button: 'right' })
@@ -351,8 +353,13 @@ test.describe('player inventory experience', () => {
     const furnaceOutput = inventory.locator('[data-furnace-slot="output"]')
     const cookProgress = inventory.locator('[data-mx-ui="furnace-cook-progress"]')
     await expect(furnaceInput).toBeFocused()
-    await furnaceInput.click()
-    await expect(furnaceInput).toHaveAttribute('aria-label', /raw_iron, 1/)
+    for (let inputCount = 1; inputCount <= 3; inputCount += 1) {
+      await furnaceInput.click()
+      await expect(furnaceInput).toHaveAttribute(
+        'aria-label',
+        new RegExp(`raw_iron, ${inputCount}`),
+      )
+    }
 
     await page.keyboard.press('KeyE')
     await expect(inventory).toBeHidden()
@@ -363,12 +370,61 @@ test.describe('player inventory experience', () => {
     await furnaceFuel.click()
     await expect(furnaceFuel).toHaveAttribute('aria-label', /coal, 1/)
     await expect(cookProgress).not.toHaveAttribute('aria-valuenow', '0')
-    await expect(furnaceOutput).toHaveAttribute('aria-label', /iron_ingot, 1/, {
-      timeout: 15_000,
+    await expect(furnaceOutput).toHaveAttribute('aria-label', /iron_ingot, 3/, {
+      timeout: 35_000,
     })
 
     await furnaceOutput.click()
-    await expect.poll(() => itemCount('iron_ingot')).toBe(1)
+    await expect.poll(() => itemCount('iron_ingot')).toBe(3)
+
+    await page.keyboard.press('KeyE')
+    await expect(inventory).toBeHidden()
+    await selectHotbarItem('stone_pickaxe')
+    await mineCurrentTarget()
+    await expect.poll(() => itemCount('furnace')).toBe(1)
+
+    await callQa<unknown>(page, 'gameplay.returnToCraftingTable')
+    await selectHotbarItem('crafting_table')
+    await grantPointerLock(page)
+    await canvas.click({ button: 'right' })
+    await expect.poll(() => itemCount('crafting_table')).toBe(0)
+    await canvas.click({ button: 'right' })
+    await expect(inventory).toBeVisible()
+    await expect(inventory).toHaveAttribute('aria-label', 'Crafting Table')
+
+    for (const cellIndex of [0, 3]) {
+      await inventoryItemSlot('oak_planks').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    await expect(output).toHaveAttribute('aria-label', /stick, 4/)
+    await output.click()
+
+    for (const cellIndex of [0, 1, 2]) {
+      await inventoryItemSlot('iron_ingot').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    for (const cellIndex of [4, 7]) {
+      await inventoryItemSlot('stick').click()
+      await craftingCells.nth(cellIndex).click()
+    }
+    await expect(output).toHaveAttribute('aria-label', /iron_pickaxe, 1/)
+    await output.click()
+    await expect(inventoryItemSlot('iron_pickaxe')).toHaveAttribute(
+      'aria-label',
+      /iron_pickaxe, 1/,
+    )
+
+    await page.keyboard.press('KeyE')
+    await expect(inventory).toBeHidden()
+    const ironPickaxeSlotIndex = await selectHotbarItem('iron_pickaxe')
+    const beforeGold = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+    expect(beforeGold.inventory.durability[ironPickaxeSlotIndex]?.current).toBe(250)
+
+    await callQa<unknown>(page, 'gameplay.setPose', 52)
+    await mineCurrentTarget()
+    await expect.poll(() => itemCount('raw_gold')).toBe(1)
+    const afterGold = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+    expect(afterGold.inventory.durability[ironPickaxeSlotIndex]?.current).toBe(249)
   })
 
   test('opens an empty 3x3 crafting table through targeted canvas use', async ({ page }) => {

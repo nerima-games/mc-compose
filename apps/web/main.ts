@@ -92,6 +92,7 @@ import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   advanceFurnace,
   emptyFurnaceState,
+  itemStack,
   makeSimFrameState,
   makeTimeService,
   makeWeatherService,
@@ -1237,7 +1238,7 @@ const bootGame = async (
     readonly position: { readonly x: number; readonly y: number; readonly z: number }
     readonly blockId: number
     readonly slotIndex: number
-    readonly item: 'wooden_pickaxe' | 'stone_pickaxe'
+    readonly item: 'wooden_pickaxe' | 'stone_pickaxe' | 'iron_pickaxe'
   }> = []
   const pendingBlockBreakConfirmations: Array<{
     readonly dimension: Dimension
@@ -1531,7 +1532,7 @@ const bootGame = async (
             ...furnace.state,
             output: accepted === output.count
               ? null
-              : { ...output, count: output.count - accepted },
+              : itemStack(output.item, output.count - accepted),
           })
         } else {
           furnaceStatus = 'Inventory is full'
@@ -1587,8 +1588,10 @@ const bootGame = async (
   }
 
   const focusRenderedTarget = (): void => {
-    const activeRoot = inventoryMode === 'furnace' ? furnaceView.root : inventoryView.root
-    activeRoot.querySelector<HTMLElement>('[role="button"][tabindex="0"]')?.focus()
+    const activeScreen = inventoryMode === 'furnace' ? 'furnace' : 'inventory'
+    inventoryParent.querySelector<HTMLElement>(
+      `[data-mx-ui="${activeScreen}"] [role="button"][tabindex="0"]`,
+    )?.focus()
   }
 
   const activateInventoryTarget = (
@@ -2534,7 +2537,11 @@ const bootGame = async (
               position: target.position,
               blockId: target.blockId,
             })
-            if (selectedItem === 'wooden_pickaxe' || selectedItem === 'stone_pickaxe') {
+            if (
+              selectedItem === 'wooden_pickaxe' ||
+              selectedItem === 'stone_pickaxe' ||
+              selectedItem === 'iron_pickaxe'
+            ) {
               pendingMiningToolDamage.push({
                 dimension: Effect.runSync(playerApi.dimension),
                 position: target.position,
