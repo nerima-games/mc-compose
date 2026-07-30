@@ -70,6 +70,10 @@ type GameplaySnapshot = {
     readonly reading: string
     readonly block: number | null
   }
+  readonly target: {
+    readonly reading: string
+    readonly block: number | null
+  }
 }
 
 type PageFaults = {
@@ -95,17 +99,17 @@ const watchForFaults = (page: Page): PageFaults => {
   return { consoleErrors, pageErrors }
 }
 
-const callQa = <A>(page: Page, command: string): Promise<A> =>
+const callQa = <A>(page: Page, command: string, ...arguments_: ReadonlyArray<unknown>): Promise<A> =>
   page.evaluate(
-    async ({ key, commandName }) => {
+    async ({ key, commandName, commandArguments }) => {
       const surface = (globalThis as unknown as Record<string, unknown>)[key] as
         | Record<string, (...arguments_: ReadonlyArray<unknown>) => unknown>
         | undefined
       const operation = surface?.[commandName]
       if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
-      return await operation()
+      return await operation(...commandArguments)
     },
-    { key: QA_GLOBAL_KEY, commandName: command },
+    { key: QA_GLOBAL_KEY, commandName: command, commandArguments: arguments_ },
   ) as Promise<A>
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
@@ -434,6 +438,59 @@ test('damages flint and steel after successful ignition', async ({ page }) => {
   expect(faults.consoleErrors).toEqual([])
 })
 
+test('mines only after continuous hold and exposes progress at the crosshair', async ({
+  page,
+}) => {
+  const faults = watchForFaults(page)
+
+  await startGameSession(page)
+  const body = page.locator('body')
+  const canvas = page.locator('#game-canvas')
+  const progress = page.locator('[data-mx-ui="crosshair-progress"]')
+  await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await callQa<unknown>(page, 'gameplay.setPose')
+  const targetBefore = (await snapshot(page)).target.block
+  expect(targetBefore).not.toBeNull()
+  const breaksBefore = Number(await canvas.getAttribute('data-breaks-requested'))
+  await callQa<unknown>(page, 'gameplay.setPose', 40)
+  await canvas.hover()
+  await grantPointerLock(page)
+
+  await page.mouse.down({ button: 'left' })
+  await expect(progress).toBeVisible()
+  const firstProgress = Number(await progress.getAttribute('aria-valuenow'))
+  expect(firstProgress).toBeGreaterThan(0)
+  expect(firstProgress).toBeLessThan(100)
+  await expect.poll(async () => Number(await progress.getAttribute('aria-valuenow')))
+    .toBeGreaterThan(firstProgress)
+  await page.mouse.up({ button: 'left' })
+
+  await expect(progress).toBeHidden()
+  await page.waitForTimeout(100)
+  expect((await snapshot(page)).target.block).toBe(40)
+  await expect.poll(async () => Number(await canvas.getAttribute('data-breaks-requested')))
+    .toBe(breaksBefore)
+
+  await callQa<unknown>(page, 'gameplay.setPose', targetBefore)
+  await page.mouse.down({ button: 'left' })
+  try {
+    await expect(canvas).toHaveAttribute(
+      'data-breaks-requested',
+      String(breaksBefore + 1),
+      { timeout: 10_000 },
+    )
+    await page.waitForTimeout(250)
+    await expect(canvas).toHaveAttribute('data-breaks-requested', String(breaksBefore + 1))
+  } finally {
+    await page.mouse.up({ button: 'left' })
+  }
+  await expect(progress).toBeHidden()
+
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
 test('kills a hostile with a left click and collects its dropped item', async ({ page }) => {
   const faults = watchForFaults(page)
 
@@ -461,7 +518,9 @@ test('kills a hostile with a left click and collects its dropped item', async ({
     })
     document.dispatchEvent(new Event('pointerlockchange'))
   })
-  await canvas.click({ button: 'left' })
+  await page.mouse.down({ button: 'left' })
+  await page.waitForTimeout(250)
+  await page.mouse.up({ button: 'left' })
 
   await expect.poll(async () => {
     const current = await snapshot(page)

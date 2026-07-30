@@ -122,6 +122,7 @@ import {
   createCrosshairView,
   createHudView,
   createInventoryView,
+  crosshairViewModel,
   hudViewModel,
   initialMainMenuState,
   inventoryViewModel,
@@ -140,6 +141,7 @@ import {
   type RedstoneComponentSnapshot,
 } from '@nerima-games/mx-redstone'
 import {
+  advanceMiningProgress,
   applyArmorToDamage,
   armorPointsForEquipment,
   armorDurabilityWearFromPreMitigationDamage,
@@ -158,22 +160,27 @@ import {
   PLAYER_HALF_HEIGHT,
   PLAYER_HALF_WIDTH,
   requestBowShot,
+  requestBlockBreak,
   requestItemUse,
+  requestMeleeAttack,
   requestMobSpawn,
   resolveFoodUse,
   requestTargetedBlockBreak,
   requestTargetedBlockUse,
   requestTargetedItemUse,
-  requestTargetedPrimaryAttack,
+  resolveTargetedPrimaryAttack,
   solidityFromStore,
   spawnMobDrops,
   targetedRightClickRoute,
   weatherLightScale,
+  miningLootContextForItem,
+  miningProgressFraction,
   ZOMBIE_KIND,
   type IgnitionItemType,
   type ItemUseResult,
   type MobBehaviour,
   type MobDropEvent,
+  type MiningProgressState,
   type PlaceableItemType,
 } from '@nerima-games/mx-gameplay'
 import {
@@ -1274,7 +1281,7 @@ const bootGame = async (
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduced' : 'full'
   const hud = createHudView(document, hudParent, motion)
   const inventoryView = createInventoryView(document, inventoryParent)
-  createCrosshairView(document, hudParent, motion)
+  const crosshair = createCrosshairView(document, hudParent, motion)
 
   inventoryParent.setAttribute('role', 'dialog')
   inventoryParent.setAttribute('aria-label', 'Inventory')
@@ -1282,6 +1289,22 @@ const bootGame = async (
   document.body.setAttribute('data-inventory-open', 'false')
 
   let selectedHotbarIndex = 0
+  let miningProgress: MiningProgressState | null = null
+  let primaryAttackGestureConsumed = false
+  const resetPrimaryAttackGesture = (): void => {
+    miningProgress = null
+    primaryAttackGestureConsumed = false
+  }
+  const renderCrosshair = (
+    nowSecs = Effect.runSync(browserClock.monotonicSecs),
+  ): void => {
+    crosshair.render(crosshairViewModel({
+      modals: paused ? ['pause'] : inventoryOpen ? ['inventory'] : [],
+      lastHitAtSecs: undefined,
+      breakProgress:
+        miningProgress === null ? undefined : miningProgressFraction(miningProgress),
+    }, nowSecs))
+  }
   let inventoryFocus: InventoryInteractionTarget = {
     kind: 'slot',
     region: 'hotbar',
@@ -1296,6 +1319,7 @@ const bootGame = async (
   const resetTouchInput = (
     reason: Parameters<typeof resetTouchLook>[1],
   ): void => {
+    resetPrimaryAttackGesture()
     touchLookState = resetTouchLook(touchLookState, reason)
     Effect.runSync(inputApi.clearHeld)
   }
@@ -1335,7 +1359,10 @@ const bootGame = async (
       }
       audio.play('playerHurt')
     }
-    if (playerIsDead()) resetSimState(false)
+    if (playerIsDead()) {
+      resetPrimaryAttackGesture()
+      resetSimState(false)
+    }
     syncTouchControls()
   }
 
@@ -1467,6 +1494,7 @@ const bootGame = async (
     const previousOpen = inventoryOpen
     const switchingMode = open && previousOpen && inventoryMode !== mode
     if (previousOpen === open && !switchingMode) return
+    resetPrimaryAttackGesture()
 
     if (previousOpen && (!open || switchingMode)) {
       Effect.runSync(inventoryInteraction.close())
@@ -1485,6 +1513,7 @@ const bootGame = async (
       inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
     }
     renderPlayerUi()
+    renderCrosshair()
     syncTouchControls()
     if (open) window.requestAnimationFrame(focusRenderedTarget)
     if (open && document.pointerLockElement === canvas) {
@@ -1493,6 +1522,7 @@ const bootGame = async (
   }
 
   const respawnPlayer = (): void => {
+    resetPrimaryAttackGesture()
     Effect.runSync(world.vitals.respawn)
     Effect.runSync(world.entities.reset)
     Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
@@ -1517,6 +1547,7 @@ const bootGame = async (
   })
 
   renderPlayerUi()
+  renderCrosshair()
   syncTouchControls()
 
   // -------------------------------------------------------------------------
@@ -1586,10 +1617,12 @@ const bootGame = async (
   })
 
   const setPaused = (next: boolean): void => {
+    resetPrimaryAttackGesture()
     paused = next
     gameShell.inert = next
     pauseOverlay.hidden = !next
     document.body.setAttribute('data-session-paused', String(next))
+    renderCrosshair()
     syncTouchControls()
     if (next) {
       if (document.pointerLockElement === canvas) document.exitPointerLock()
@@ -1810,8 +1843,11 @@ const bootGame = async (
           markSessionDirty()
           return gameplaySnapshot()
         },
-        setPose: () => {
+        setPose: (targetBlock?: number) => {
           Effect.runSync(playerApi.restore(QA_POSE, Effect.runSync(playerApi.dimension)))
+          if (targetBlock !== undefined) {
+            Effect.runSync(currentChunkStore.setBlock(KNOWN_TARGET_BLOCK, targetBlock))
+          }
           resetSimState(true)
           markSessionDirty()
           return gameplaySnapshot()
@@ -2059,12 +2095,14 @@ const bootGame = async (
     touchLookState = consumedTouchLook.state
     if (frameInput.justPressed.has(ESCAPE_KEY_CODE)) {
       handlePauseRequest()
+      renderCrosshair(nowSecs)
       Effect.runSync(inputApi.endFrame(frameInput))
       previousSecs = nowSecs
       requestAnimationFrame(tick)
       return
     }
     if (paused) {
+      renderCrosshair(nowSecs)
       Effect.runSync(inputApi.endFrame(frameInput))
       previousSecs = nowSecs
       requestAnimationFrame(tick)
@@ -2113,6 +2151,8 @@ const bootGame = async (
 
     const attackTriggered =
       !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
+    const attackHeld = held('attack') > 0
+    if (!attackHeld) resetPrimaryAttackGesture()
     const useTriggered =
       !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))
     const lookDelta = {
@@ -2183,6 +2223,7 @@ const bootGame = async (
       dimensionAfterFrame !== dimensionBeforeFrame ||
       dimensionAfterFrame !== currentChunkContext.dimension
     if (dimensionChanged) {
+      resetPrimaryAttackGesture()
       alignActiveDimension(dimensionAfterFrame)
       resetSimState(!deadAfterFrame)
       markSessionDirty()
@@ -2208,23 +2249,60 @@ const bootGame = async (
 
     // Resolve click rays from the authoritative post-simulation pose. Requests
     // enter gameplay's inbox and are consumed by the next frame.
-    if (!deadAfterFrame && attackTriggered) {
-      const result = Effect.runSync(
-        requestTargetedPrimaryAttack(
-          gameplayState,
-          currentChunkStore,
-          world.entities,
-          playerApi,
-        ),
-      )
-      if (result._tag === 'Block') {
-        breaksRequested += 1
-        canvas.setAttribute('data-breaks-requested', String(breaksRequested))
-        redstoneDirty = true
-        markSessionDirty()
-      } else if (result._tag === 'Melee') {
-        markSessionDirty()
+    if (!deadAfterFrame && !dimensionChanged && attackHeld) {
+      if (primaryAttackGestureConsumed) {
+        miningProgress = null
+      } else {
+        const resolution = Effect.runSync(
+          resolveTargetedPrimaryAttack(
+            currentChunkStore,
+            world.entities,
+            playerApi,
+          ),
+        )
+        if (resolution._tag === 'Melee') {
+          miningProgress = null
+          if (attackTriggered) {
+            Effect.runSync(requestMeleeAttack(gameplayState, resolution.request))
+            primaryAttackGestureConsumed = true
+            markSessionDirty()
+          }
+        } else {
+          const inventorySnapshot = Effect.runSync(world.inventory.snapshot)
+          const selectedItem = inventorySnapshot.slots[selectedHotbarIndex]?.item ?? null
+          let target: Parameters<typeof advanceMiningProgress>[0]['target'] = null
+          if (resolution._tag === 'Block') {
+            const reading = Effect.runSync(currentChunkStore.getBlock(resolution.target.position))
+            if (reading._tag === 'Block') {
+              target = { position: resolution.target.position, blockId: reading.block }
+            }
+          }
+          const advancement = advanceMiningProgress({
+            current: miningProgress,
+            target,
+            isMining: true,
+            selectedItem,
+            deltaSecs,
+          })
+          miningProgress = advancement.nextProgress
+          if (advancement.shouldBreak && target !== null) {
+            Effect.runSync(
+              requestBlockBreak(
+                gameplayState,
+                target.position,
+                miningLootContextForItem(selectedItem),
+              ),
+            )
+            breaksRequested += 1
+            canvas.setAttribute('data-breaks-requested', String(breaksRequested))
+            primaryAttackGestureConsumed = true
+            redstoneDirty = true
+            markSessionDirty()
+          }
+        }
       }
+    } else if (deadAfterFrame || dimensionChanged) {
+      resetPrimaryAttackGesture()
     }
 
     if (!deadAfterFrame && useTriggered) {
@@ -2407,6 +2485,7 @@ const bootGame = async (
 
     Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
     renderPlayerUi()
+    renderCrosshair(nowSecs)
     const captions = playerSettings.captionsEnabled ? audio.visible(nowSecs) : []
     const nextCaptionSignature = captionRenderSignature(captions)
     if (nextCaptionSignature !== renderedCaptionSignature) {
