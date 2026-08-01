@@ -100,6 +100,7 @@ import {
   advanceFurnace,
   containerIdAt,
   emptyFurnaceState,
+  equipmentDefinitionFor,
   itemStack,
   makeCropService,
   makeSimFrameState,
@@ -170,6 +171,7 @@ import {
   hudViewModel,
   initialMainMenuState,
   inventoryViewModel,
+  inventoryActionTarget,
   mainMenuViewModel,
   makeUiFrameState,
   slotSnapshotOf,
@@ -179,6 +181,10 @@ import {
   type FurnaceSlotId,
   type FurnaceSnapshot,
   type InventoryInteractionTarget,
+  type InventoryAction,
+  type InventoryActionTarget,
+  type InventoryDragTarget,
+  type EquipmentSlotId,
   type MainMenuState,
   type SavedWorld,
 } from '@nerima-games/mx-ui'
@@ -2652,6 +2658,8 @@ const bootGame = async (
     region: 'hotbar',
     index: selectedHotbarIndex,
   }
+  let equipmentActionStatus = ''
+  let inventoryDragSource: InventoryDragTarget | undefined
   let furnaceFocus: FurnaceSlotId = 'input'
   let furnaceStatus = ''
   let chestFocus: ChestStorageSlotTarget = { region: 'chest', slot: 0 }
@@ -2858,6 +2866,7 @@ const bootGame = async (
   }
 
   const interactionStatus = (): string => {
+    if (equipmentActionStatus !== '') return equipmentActionStatus
     const status = inventoryInteraction.state().status
     if (status === undefined) return ''
     switch (status._tag) {
@@ -2882,7 +2891,13 @@ const bootGame = async (
     })
     const equipment = storage.equipment.slots
     const equipmentSlot = (slot: typeof equipment.head) =>
-      slot === null ? undefined : { item: slot.item, count: slot.count }
+      slot === null ? undefined : {
+        item: slot.item,
+        count: slot.count,
+        durability: slot.durability === null
+          ? undefined
+          : slot.durability.current / slot.durability.max,
+      }
     const draft = inventoryInteraction.state()
     hud.render(hudViewModel({
       ...Effect.runSync(world.vitals.view),
@@ -3040,7 +3055,7 @@ const bootGame = async (
         equipmentSlot(equipment.legs),
         equipmentSlot(equipment.feet),
       ],
-      offhand: equipmentSlot(equipment.offhand),
+      offhand: equipmentSlot(equipment.offhand) ?? null,
       crafting: {
         gridWidth: draft.grid.width,
         grid: draft.grid.cells,
@@ -3051,6 +3066,8 @@ const bootGame = async (
       focused: inventoryFocus,
       status: interactionStatus(),
     })
+    inventoryView.root.querySelectorAll<HTMLElement>('[data-mx-ui="slot"][role="button"]')
+      .forEach((slot) => slot.setAttribute('draggable', 'true'))
   }
 
   const furnaceTargetOf = (source: EventTarget | null): FurnaceSlotId | undefined => {
@@ -3218,7 +3235,8 @@ const bootGame = async (
     const index = Number(interactive.dataset['slotIndex'])
     if (
       !Number.isInteger(index) ||
-      (region !== 'hotbar' && region !== 'main' && region !== 'crafting-grid')
+      (region !== 'hotbar' && region !== 'main' && region !== 'crafting-grid'
+        && region !== 'armour' && region !== 'offhand')
     ) {
       return undefined
     }
@@ -3253,6 +3271,97 @@ const bootGame = async (
       Effect.runSync(inventoryInteraction.clickInventoryItem(9 + target.index, button))
     }
     renderPlayerUi()
+  }
+
+  const inventorySlotOf = (target: InventoryActionTarget): number | undefined => {
+    if (target.kind !== 'slot') return undefined
+    if (target.region === 'hotbar') return target.index
+    if (target.region === 'main') return 9 + target.index
+    return undefined
+  }
+
+  const rejectInventoryAction = (action: InventoryAction, reason: string): void => {
+    equipmentActionStatus = reason
+    document.body.setAttribute('data-equipment-action', `rejected:${reason}`)
+    renderPlayerUi()
+  }
+
+  const completeInventoryAction = (): void => {
+    equipmentActionStatus = ''
+    document.body.setAttribute('data-equipment-action', 'accepted')
+    inventoryInteraction.reset()
+    markSessionDirty()
+    renderPlayerUi()
+  }
+
+  const unequip = (
+    action: InventoryAction,
+    slot: EquipmentSlotId,
+    inventorySlot?: number,
+  ): void => {
+    const result = Effect.runSync(world.inventory.unequipToInventory(slot, inventorySlot))
+    if (result._tag === 'Unequipped') completeInventoryAction()
+    else rejectInventoryAction(action, result._tag === 'Empty'
+      ? 'Equipment slot is empty'
+      : result._tag === 'OccupiedInventorySlot'
+        ? 'Inventory slot is occupied'
+        : result._tag === 'InventoryFull'
+          ? 'Inventory is full'
+          : 'Invalid equipment action')
+  }
+
+  const equip = (
+    action: InventoryAction,
+    inventorySlot: number,
+    equipmentSlot: EquipmentSlotId,
+  ): void => {
+    const result = Effect.runSync(world.inventory.equipFromInventory(inventorySlot, equipmentSlot))
+    if (result._tag === 'Equipped') completeInventoryAction()
+    else rejectInventoryAction(action, result._tag === 'Empty'
+      ? 'Inventory slot is empty'
+      : result._tag === 'Occupied'
+        ? 'Equipment slot is occupied'
+        : result._tag === 'Incompatible'
+          ? `Item cannot be equipped in ${equipmentSlot}`
+          : 'Invalid equipment action')
+  }
+
+  const dispatchInventoryAction = (action: InventoryAction): void => {
+    if (action.kind === 'drag') {
+      if (action.source.kind === 'slot' && action.target.kind === 'equipment-slot') {
+        const sourceSlot = inventorySlotOf(action.source)
+        if (sourceSlot !== undefined) equip(action, sourceSlot, action.target.slot)
+        else rejectInventoryAction(action, 'Crafting slots cannot equip items')
+        return
+      }
+      if (action.source.kind === 'equipment-slot' && action.target.kind === 'slot') {
+        const targetSlot = inventorySlotOf(action.target)
+        if (targetSlot !== undefined) unequip(action, action.source.slot, targetSlot)
+        else rejectInventoryAction(action, 'Equipment cannot move to crafting slots')
+        return
+      }
+      rejectInventoryAction(action, 'Drag between these slots is not supported')
+      return
+    }
+    if (action.target.kind === 'equipment-slot') {
+      unequip(action, action.target.slot)
+      return
+    }
+    if (action.kind === 'shift-click') {
+      const inventorySlot = inventorySlotOf(action.target)
+      const stack = inventorySlot === undefined
+        ? undefined
+        : Effect.runSync(world.inventory.snapshot).slots[inventorySlot]
+      const equipmentSlot = stack === undefined ? undefined : equipmentDefinitionFor(stack.item)?.slot
+      if (inventorySlot === undefined || equipmentSlot === undefined) {
+        rejectInventoryAction(action, 'Item cannot be equipped')
+      } else {
+        equip(action, inventorySlot, equipmentSlot)
+      }
+      return
+    }
+    equipmentActionStatus = ''
+    activateInventoryTarget(action.target)
   }
 
   const removeInventoryItem = (item: ItemStack['item'], count: number): boolean => {
@@ -3367,7 +3476,13 @@ const bootGame = async (
       return
     }
     const target = targetOf(event.target)
-    if (target !== undefined) activateInventoryTarget(target)
+    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
+    if (actionTarget !== null) {
+      dispatchInventoryAction({
+        kind: event.shiftKey ? 'shift-click' : 'click',
+        target: actionTarget,
+      })
+    }
   })
   inventoryParent.addEventListener('contextmenu', (event) => {
     if (playerIsDead()) return
@@ -3376,7 +3491,41 @@ const bootGame = async (
     if (target === undefined) return
     event.preventDefault()
     if (target.kind !== 'slot' || target.region === 'crafting-grid') return
-    activateInventoryTarget(target, 'right')
+    if (target.region === 'armour' || target.region === 'offhand') {
+      const actionTarget = inventoryActionTarget(target)
+      if (actionTarget !== null) dispatchInventoryAction({ kind: 'click', target: actionTarget })
+    } else {
+      activateInventoryTarget(target, 'right')
+    }
+  })
+  inventoryParent.addEventListener('dragstart', (event) => {
+    if (inventoryMode !== 'player' && inventoryMode !== 'craftingTable') return
+    const target = targetOf(event.target)
+    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
+    if (actionTarget === null || actionTarget.kind === 'crafting-output') return
+    inventoryDragSource = actionTarget
+    event.dataTransfer?.setData('text/plain', 'inventory-action')
+    if (event.dataTransfer !== null) event.dataTransfer.effectAllowed = 'move'
+  })
+  inventoryParent.addEventListener('dragover', (event) => {
+    if (inventoryDragSource === undefined) return
+    const target = targetOf(event.target)
+    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
+    if (actionTarget === null || actionTarget.kind === 'crafting-output') return
+    event.preventDefault()
+    if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'move'
+  })
+  inventoryParent.addEventListener('drop', (event) => {
+    const source = inventoryDragSource
+    inventoryDragSource = undefined
+    const target = targetOf(event.target)
+    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
+    if (source === undefined || actionTarget === null || actionTarget.kind === 'crafting-output') return
+    event.preventDefault()
+    dispatchInventoryAction({ kind: 'drag', source, target: actionTarget })
+  })
+  inventoryParent.addEventListener('dragend', () => {
+    inventoryDragSource = undefined
   })
   inventoryParent.addEventListener('keydown', (event) => {
     if (playerIsDead()) return
@@ -4496,6 +4645,7 @@ const bootGame = async (
               throw new Error(`failed to equip ${slot}: ${result._tag}`)
             }
           })
+          Effect.runSync(world.inventory.add('iron_sword', 1))
           inventoryInteraction.reset()
           markSessionDirty()
           renderPlayerUi()
