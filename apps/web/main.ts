@@ -232,6 +232,7 @@ import {
   type MultiplayerHost,
   type NetworkMessage,
 } from '@nerima-games/mx-multiplayer'
+import { makeBrowserPreview } from '@nerima-games/mc-playground-kit'
 import {
   advanceBowUse,
   IDLE_BOW_USE,
@@ -246,7 +247,12 @@ import {
   type GameModule,
 } from '../../src/domain/composition'
 import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../src/domain/kernel-vocabulary'
-import { buildQaRegistry, describeQaApiError, installQaApi } from '../../src/domain/qa-api'
+import {
+  buildQaRegistry,
+  describeQaApiError,
+  installQaApi,
+  QA_GLOBAL_KEY,
+} from '../../src/domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
 import {
   makeBrowserWebSocketTransport,
@@ -2948,6 +2954,7 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  let stopBrowserPreview: (() => Promise<void>) | undefined
   const registry = buildQaRegistry([
     {
       namespace: 'gameplay',
@@ -3241,6 +3248,12 @@ const bootGame = async (
         snapshot: () => audio.snapshot(Effect.runSync(browserClock.monotonicSecs)),
       },
     },
+    {
+      namespace: 'lifecycle',
+      commands: {
+        stop: () => stopBrowserPreview?.(),
+      },
+    },
   ])
   if (Either.isLeft(registry)) {
     failBoot('QA registry rejected', describeQaApiError(registry.left))
@@ -3276,6 +3289,7 @@ const bootGame = async (
   // Periodic publication persists advancing time and weather without gameplay mutations.
   window.addEventListener('pagehide', (event) => {
     requestBackgroundFlush()
+    void stopBrowserPreview?.()
     disposeMultiplayer()
     if (!event.persisted) {
       settingsView.dispose()
@@ -3286,6 +3300,7 @@ const bootGame = async (
     readonly hot?: { readonly dispose: (handler: () => void) => void }
   }).hot
   hot?.dispose(() => {
+    void stopBrowserPreview?.()
     disposeMultiplayer()
     settingsView.dispose()
     audio.close()
@@ -3319,14 +3334,12 @@ const bootGame = async (
       renderCrosshair(nowSecs)
       Effect.runSync(inputApi.endFrame(frameInput))
       previousSecs = nowSecs
-      requestAnimationFrame(tick)
       return
     }
     if (paused) {
       renderCrosshair(nowSecs)
       Effect.runSync(inputApi.endFrame(frameInput))
       previousSecs = nowSecs
-      requestAnimationFrame(tick)
       return
     }
     const raw = previousSecs === undefined ? FIRST_FRAME_SECS : nowSecs - previousSecs
@@ -4174,10 +4187,29 @@ const bootGame = async (
     // that the loop is running, and docs/e2e-triage.md #4 is exactly that claim.
     document.body.setAttribute('data-frames', String(framesTotal))
 
-    requestAnimationFrame(tick)
   }
 
-  requestAnimationFrame(tick)
+  const preview = Effect.runSync(makeBrowserPreview({
+    container: gameShell,
+    canvas,
+    startRuntime: (surface) => Effect.sync(() => {
+      surface.onCleanup(() => {
+        Reflect.deleteProperty(globalThis, QA_GLOBAL_KEY)
+        document.body.setAttribute('data-mc-compose-boot', 'stopped')
+      })
+      return {
+        frame: () => Effect.sync(tick),
+        stop: Effect.sync(() => {
+          requestBackgroundFlush()
+          disposeMultiplayer()
+          settingsView.dispose()
+          audio.close()
+        }),
+      }
+    }),
+  }))
+  const previewHandle = await Effect.runPromise(preview.start)
+  stopBrowserPreview = () => Effect.runPromise(previewHandle.stop)
 }
 
 const boot = (): Promise<void> => {

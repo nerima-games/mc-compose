@@ -13,12 +13,8 @@
  * ids compose into one total order.
  *
  * `pnpm e2e:browser` is this. It needs Chromium, a dev server, and — critically
- * — SIBLING CHECKOUTS ON DISK, because nothing is published (see
- * `vite.config.ts`). It therefore CANNOT be in `pnpm verify`, for exactly the
- * reason docs/testing.md §3.5 keeps `pnpm check:roster` out: mc-compose's CI
- * clones mc-compose and nothing else, and a gate that cannot run in CI, placed
- * in the command CI runs, stops `pnpm verify` from meaning "this is green".
- * `check:mirrors` and `check:repoint` set the same precedent in mc-dev-meta.
+ * — published runtime packages from node_modules. It stays outside
+ * `pnpm verify` because Chromium is an explicit, heavier final gate.
  *
  * ---------------------------------------------------------------------------
  * Carried over from the reference implementation's `playwright.config.ts`
@@ -90,10 +86,8 @@ export default defineConfig({
     {
       command: `pnpm dev --port ${String(E2E_PORT)} --strictPort`,
       url: E2E_BASE_URL,
-      // Never reuse. The dev server prints which roster root it resolved, and a
-      // server left over from another checkout would serve a different game than
-      // the one under test — the drift docs/testing.md §3.5 warns about, with the
-      // evidence scrolled off the top of somebody else's terminal.
+      // Never reuse: the final gate must serve the current checkout and its
+      // lockfile-resolved public packages, not a stale process.
       reuseExistingServer: false,
       timeout: 60_000,
       stdout: 'pipe',

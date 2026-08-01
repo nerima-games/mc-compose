@@ -24,7 +24,7 @@ plan.md §3.15:
 | セッションライフサイクル(タイトル ⇄ ゲーム) | `src/domain/session.ts` |
 | QA / デバッグ API | `src/domain/qa-api.ts` |
 | Modding 入口 | `src/domain/modding.ts` |
-| **E2E**(最終ゲート) | 未実装 |
+| **E2E**(最終ゲート) | `e2e/`。公開パッケージ群を実ブラウザで合成し、起動・RAF・QA観測・teardownまで検証 |
 
 **ゲームルールは 1 行も持たない。**
 
@@ -73,7 +73,7 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 | [docs/public-api.md](./docs/public-api.md) | 公開 API と契約 |
 | [docs/design-notes.md](./docs/design-notes.md) | 参照実装の実測知見(回帰テスト名付き)。**必読** |
 | [docs/porting.md](./docs/porting.md) | 移植計画。LOC は実測値 |
-| [docs/testing.md](./docs/testing.md) | テスト戦略。E2E が**今日どちらの半分を検証していて、どちらをしていないか** |
+| [docs/testing.md](./docs/testing.md) | テスト戦略。公開package境界の実ブラウザ最終ゲートを含む |
 | [docs/e2e-triage.md](./docs/e2e-triage.md) | **参照実装 E2E 70 本の 1 本ずつの判定。** compose に 25 本 / 降ろす 43 本 / 消える 2 本 |
 | [docs/versioning.md](./docs/versioning.md) | 0.x → 1.0.0、GitHub Packages、modding API バージョン |
 
@@ -135,7 +135,8 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
 | `pnpm test:coverage` | カバレッジ計測 + 4 指標 99% ゲート。`verify` には含まれない別ゲート(TEST_STANDARD.md §1/§3) |
 | `pnpm e2e` | E2E だけを走らせる(`vitest run test/e2e`)。純粋なので `pnpm test` も `pnpm verify` も既に拾っている |
 | `pnpm check:roster` | `test/e2e/roster.ts` の転記が兄弟リポジトリの実ソースと一致するかを照合。**`verify` に入っていない** — 兄弟のチェックアウトが要り、CI には無いため([docs/testing.md](./docs/testing.md) §3.5) |
-| `pnpm typecheck:preview` | `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`)。**`verify` に入っていない** — 同上、兄弟のチェックアウトが要る |
+| `pnpm typecheck:preview` | 公開済みパッケージ境界で `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) |
+| `pnpm e2e:browser` | Chromiumで公開パッケージ群の起動、フレーム、QA、停止と既存の採掘・inventory経路を検証 |
 | `pnpm changeset` | ユーザー向け変更に `.changeset/*.md` を追加する(RELEASE_STANDARD.md §1) |
 | `pnpm verify` | `typecheck && lint && test`。CI と同じ内容 |
 
@@ -175,9 +176,8 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
 - **4 つの体験モジュールの実合成**(全モジュール未公開)
 - **mc-kernel の契約型への切り替え**。現在 `StageId` / `DeltaTimeSecs` / `GameModule` /
   `StageRegistration` / `WorldId` はローカル宣言のミラーである
-- **E2E の振る舞い側**(「採掘 → インベントリ」)。合成できる中身がまだ無い。
-  フレーム側は済んでいる — 半分ずつの区別は [docs/testing.md](./docs/testing.md) §3.4
-- **ブラウザエントリポイント**
+- ブラウザE2Eで未採用の振る舞い経路。現在は起動、RAF、QA観測、teardownに加え、
+  採掘からinventory更新までを公開package境界で検証する
 - `ModuleLayer` の精密な型(現在 `Layer<any, any, any>`)
 - **mc-sim の `GameModule` を誰がホストに渡すのか**。mc-sim は `sim:physics` を登録したが、
   mc-compose は mc-sim を import できない(rule 3)。stage を登録することと import 可能で

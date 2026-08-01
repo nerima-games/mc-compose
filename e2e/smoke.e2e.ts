@@ -296,6 +296,8 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.seedCactusApproach',
       'gameplay.seedCraftingLog',
       'gameplay.seedCraftingTableEncounter',
+      'gameplay.seedCreativeBreakEncounter',
+      'gameplay.seedCreativePlacementEncounter',
       'gameplay.seedDamagingFall',
       'gameplay.seedDuplicateLavaContact',
       'gameplay.seedFarmingEncounter',
@@ -311,10 +313,12 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.seedRefusedFireChargeIgnition',
       'gameplay.seedSafeFall',
       'gameplay.seedWoodenPickaxeProgression',
+      'gameplay.seedZombiePursuitEncounter',
       'gameplay.setPose',
       'gameplay.setWeather',
       'gameplay.shoot',
       'gameplay.snapshot',
+      'lifecycle.stop',
       'persistence.flush',
     ])
   })
@@ -371,6 +375,24 @@ test.describe('smoke — the composed frame in a real browser', () => {
     await expect(page.locator('[data-mx-ui="vitals"] [data-icon="heart"]')).toHaveCount(10)
     await expect(page.locator('[data-mx-ui="vitals"] [data-icon="shank"]')).toHaveCount(10)
   })
+})
+
+test('published browser lifecycle owns RAF and tears the QA surface down', async ({ page }) => {
+  await startGameSession(page)
+  await expect.poll(() => framesDrawn(page)).toBeGreaterThan(1)
+
+  await page.evaluate(async (key) => {
+    const qa = (globalThis as Record<string, unknown>)[key] as {
+      'lifecycle.stop': () => Promise<void>
+    }
+    await qa['lifecycle.stop']()
+  }, QA_GLOBAL_KEY)
+
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'stopped')
+  const stoppedAt = await framesDrawn(page)
+  await page.waitForTimeout(250)
+  expect(await framesDrawn(page)).toBe(stoppedAt)
+  expect(await page.evaluate((key) => key in globalThis, QA_GLOBAL_KEY)).toBe(false)
 })
 
 test.describe('the composed game has a world in it', () => {
