@@ -110,6 +110,8 @@ import {
   totalExperienceAtLevel,
   POTATO_MATURITY_SECS,
   resetLandingImpact,
+  changed,
+  UNCHANGED,
   simStages,
   STARTER_FUEL_RULES,
   STARTER_SMELTING_RECIPES,
@@ -212,6 +214,9 @@ import {
   advanceFishing,
   advanceMiningProgress,
   boardVehicle,
+  bowCharge,
+  bowDamage,
+  canFireBow,
   cancelFishing,
   castFishing,
   applyEnchantmentOffer,
@@ -220,7 +225,6 @@ import {
   armorDurabilityWearFromPreMitigationDamage,
   CREEPER_KIND,
   drainBlockUseResults,
-  drainBowShotResults,
   drainItemUseResults,
   drainMeleeAttackResults,
   drainMobDrops,
@@ -253,7 +257,6 @@ import {
   isPlaceableItem,
   PLAYER_HALF_HEIGHT,
   PLAYER_HALF_WIDTH,
-  requestBowShot,
   requestBlockBreak,
   requestItemUse,
   requestMeleeAttack,
@@ -270,6 +273,7 @@ import {
   reelFishing,
   resolveBedSleep,
   resolveEnvironmentalContactDamage,
+  resolveBowHits,
   resolveFallDamage,
   resolveTargetedPrimaryAttack,
   restoreVillagerTrades,
@@ -321,10 +325,16 @@ import { makeBrowserPreview } from '@nerima-games/mc-playground-kit'
 import {
   advanceBowUse,
   IDLE_BOW_USE,
-  takeBowSettlement,
   type BowUseState,
-  type PendingBowShot,
 } from './bow-use'
+import {
+  advanceProjectileRuntime,
+  initialProjectileRuntimeState,
+  launchRuntimeProjectile,
+  projectileRenderDescriptors,
+  projectileRuntimeSnapshot,
+  recoverProjectile,
+} from './projectile-runtime'
 import {
   composeGame,
   EMPTY_MODULE_LAYER,
@@ -2108,7 +2118,6 @@ const bootGame = async (
   let placementsRequested = 0
   let nextItemUseRequestId = 0
   let nextBlockUseRequestId = 0
-  let nextBowShotRequestId = 0
   let nextMeleeAttackRequestId = 0
 
   // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
@@ -2207,34 +2216,17 @@ const bootGame = async (
     | { readonly kind: 'eat'; readonly slotIndex: number }
   const pendingItemUses = new Map<string, PendingItemUse>()
   let bowUseState: BowUseState = IDLE_BOW_USE
-  let pendingBowShots: ReadonlyMap<string, PendingBowShot> = new Map()
+  let projectileRuntimeState = initialProjectileRuntimeState()
   const pendingMeleeAttacks = new Map<
     string,
     { readonly slotIndex: number; readonly item: SwordItem }
   >()
   const bowInteractionLocked = (): boolean =>
-    bowUseState._tag === 'Drawing' || pendingBowShots.size > 0
+    bowUseState._tag === 'Drawing'
   const resetBowUse = (): void => {
     bowUseState = IDLE_BOW_USE
-    pendingBowShots = new Map()
     Effect.runSync(Ref.set(gameplayState.pendingBowShots, []))
     Effect.runSync(Ref.set(gameplayState.bowShotResults, []))
-  }
-  const settleBowShotResults = (): void => {
-    for (const result of Effect.runSync(drainBowShotResults(gameplayState))) {
-      const settlement = takeBowSettlement(pendingBowShots, result)
-      pendingBowShots = settlement.pending
-      if (settlement.fired === null) continue
-      Effect.runSync(world.inventory.consumeAndDamageAt({
-        consume: { item: 'arrow', count: 1 },
-        damage: {
-          location: { _tag: 'Inventory', slotIndex: settlement.fired.bowSlotIndex },
-          expectedItem: 'bow',
-          amount: 1,
-        },
-      }))
-      markSessionDirty()
-    }
   }
   const settleMeleeAttackResults = (): void => {
     for (const result of Effect.runSync(drainMeleeAttackResults(gameplayState))) {
@@ -2523,6 +2515,10 @@ const bootGame = async (
   swimmingHud.dataset['testid'] = 'swimming'
   swimmingHud.hidden = true
   hudParent.append(swimmingHud)
+  const projectileHud = document.createElement('div')
+  projectileHud.id = 'projectile-hud'
+  projectileHud.dataset['testid'] = 'projectiles'
+  hudParent.append(projectileHud)
 
   inventoryParent.setAttribute('role', 'dialog')
   inventoryParent.setAttribute('aria-label', 'Inventory')
@@ -3829,6 +3825,7 @@ const bootGame = async (
   const respawnPlayer = (): void => {
     resetPrimaryAttackGesture()
     resetBowUse()
+    projectileRuntimeState = initialProjectileRuntimeState()
     if (mountedVehicleId !== undefined) {
       const vehicle = vehicles.get(mountedVehicleId)
       if (vehicle !== undefined) vehicles.set(mountedVehicleId, exitVehicle(vehicle).vehicle)
@@ -4033,6 +4030,7 @@ const bootGame = async (
       feetPosition: entity.feetPosition,
       category: entity.kind === 'dropped_item' ? 'item' : 'hostile',
     } satisfies RenderEntity)),
+    ...projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
     ...[...(multiplayer?.players.entries() ?? [])]
       .filter(([, player]) => player.world === currentChunkContext.dimension)
       .map(([playerId, player]) => ({
@@ -4137,6 +4135,7 @@ const bootGame = async (
         accumulatedDistance: Effect.runSync(Ref.get(simState.accumulatedFallDistance)),
       },
       swimming: swimmingState,
+      projectiles: projectileRuntimeSnapshot(projectileRuntimeState),
       weather: Effect.runSync(weather.snapshot),
       vitals,
       dead: vitals.healthPoints <= 0,
@@ -5699,7 +5698,6 @@ const bootGame = async (
 
     // A portal may change dimension in the same frame that gameplay confirms a
     // attack. Settle confirmations before dimension reset clears the outboxes.
-    settleBowShotResults()
     settleMeleeAttackResults()
 
     let postFramePose = Effect.runSync(playerApi.pose)
@@ -5722,6 +5720,7 @@ const bootGame = async (
     if (dimensionChanged) {
       resetPrimaryAttackGesture()
       resetBowUse()
+      projectileRuntimeState = initialProjectileRuntimeState()
       alignActiveDimension(dimensionAfterFrame)
       resetSimState(!deadAfterFrame)
       markSessionDirty()
@@ -5763,13 +5762,128 @@ const bootGame = async (
     deadAfterFrame = playerIsDead()
     syncTouchControls()
 
+    if (deadAfterFrame) {
+      projectileRuntimeState = initialProjectileRuntimeState()
+    } else if (!dimensionChanged) {
+      const projectileEntities = Effect.runSync(world.entities.entities)
+      const projectileWorld = {
+        blockBounds: (
+          start: Readonly<{ x: number; y: number; z: number }>,
+          end: Readonly<{ x: number; y: number; z: number }>,
+        ) => {
+          const bounds = []
+          for (let x = Math.floor(Math.min(start.x, end.x)); x <= Math.floor(Math.max(start.x, end.x)); x += 1) {
+            for (let y = Math.floor(Math.min(start.y, end.y)); y <= Math.floor(Math.max(start.y, end.y)); y += 1) {
+              for (let z = Math.floor(Math.min(start.z, end.z)); z <= Math.floor(Math.max(start.z, end.z)); z += 1) {
+                if (isGameplayBlockSolid({ x, y, z })) {
+                  bounds.push({ minX: x, minY: y, minZ: z, maxX: x + 1, maxY: y + 1, maxZ: z + 1 })
+                }
+              }
+            }
+          }
+          return bounds
+        },
+        entities: [
+          ...projectileEntities
+            .filter(({ kind }) => kind !== 'dropped_item')
+            .map((entity) => ({
+              id: String(entity.id),
+              bounds: {
+                minX: entity.feetPosition.x - 0.3,
+                minY: entity.feetPosition.y,
+                minZ: entity.feetPosition.z - 0.3,
+                maxX: entity.feetPosition.x + 0.3,
+                maxY: entity.feetPosition.y + 1.8,
+                maxZ: entity.feetPosition.z + 0.3,
+              },
+            })),
+          {
+            id: 'player',
+            bounds: {
+              minX: postFramePose.feetPosition.x - PLAYER_HALF_WIDTH,
+              minY: postFramePose.feetPosition.y,
+              minZ: postFramePose.feetPosition.z - PLAYER_HALF_WIDTH,
+              maxX: postFramePose.feetPosition.x + PLAYER_HALF_WIDTH,
+              maxY: postFramePose.feetPosition.y + PLAYER_HEIGHT,
+              maxZ: postFramePose.feetPosition.z + PLAYER_HALF_WIDTH,
+            },
+          },
+        ],
+        isInWater: (position: Readonly<{ x: number; y: number; z: number }>) => {
+          const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
+            Math.floor(position.x),
+            Math.floor(position.y),
+            Math.floor(position.z),
+          )))
+          return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'water'
+        },
+        bounds: {
+          minX: -30_000_000,
+          minY: -64,
+          minZ: -30_000_000,
+          maxX: 30_000_000,
+          maxY: 320,
+          maxZ: 30_000_000,
+        },
+      }
+      const advancedProjectiles = advanceProjectileRuntime(
+        projectileRuntimeState,
+        projectileWorld,
+        dimensionAfterFrame,
+        Math.min(deltaSecs, 0.1),
+      )
+      projectileRuntimeState = advancedProjectiles.state
+      for (const impact of advancedProjectiles.impacts) {
+        if (impact.hit.kind !== 'entity' || impact.hit.entityId === 'player') continue
+        const target = projectileEntities.find(({ id }) => String(id) === impact.hit.entityId)
+        if (target === undefined) continue
+        Effect.runSync(resolveBowHits(world.entities, [{ id: target.id, damage: impact.damage }]))
+        const horizontalSpeed = Math.hypot(impact.velocity.x, impact.velocity.z)
+        if (horizontalSpeed > 0 && impact.knockback > 0) {
+          Effect.runSync(world.entities.sweep((entity) => ({
+            transition: entity.id === target.id
+              ? changed({
+                feetPosition: {
+                  x: entity.feetPosition.x + impact.velocity.x / horizontalSpeed * impact.knockback,
+                  y: entity.feetPosition.y,
+                  z: entity.feetPosition.z + impact.velocity.z / horizontalSpeed * impact.knockback,
+                },
+                healthPoints: entity.healthPoints,
+                behaviour: entity.behaviour,
+              })
+              : UNCHANGED,
+            emit: undefined,
+          })))
+        }
+        markSessionDirty()
+      }
+      const recovery = recoverProjectile(
+        projectileRuntimeState,
+        dimensionAfterFrame,
+        postFramePose.feetPosition,
+        1.5,
+      )
+      if (recovery.recovered !== null) {
+        const leftover = Effect.runSync(world.inventory.add('arrow', 1))
+        if (leftover === 0) {
+          projectileRuntimeState = recovery.state
+          markSessionDirty()
+        }
+      }
+    }
+    const activeProjectileCount = projectileRuntimeState.projectiles
+      .filter(({ dimension }) => dimension === dimensionAfterFrame)
+      .length
+    projectileHud.textContent = `Arrows ${String(activeProjectileCount)}`
+    projectileHud.hidden = activeProjectileCount === 0
+
     const bowInventory = Effect.runSync(world.inventory.snapshot)
     const selectedBowItem = bowInventory.slots[selectedHotbarIndex]?.item ?? null
     const bowAdvance = advanceBowUse({
       state: bowUseState,
       useTriggered,
       useHeld,
-      cancelled: deadAfterFrame || dimensionChanged || inventoryOpen || pendingBowShots.size > 0,
+      cancelled: deadAfterFrame || dimensionChanged || inventoryOpen,
       selectedItem: selectedBowItem,
       selectedSlotIndex: selectedHotbarIndex,
       arrowCount: bowInventory.slots.reduce(
@@ -5779,24 +5893,33 @@ const bootGame = async (
       deltaSecs,
     })
     bowUseState = bowAdvance.state
-    if (bowAdvance.release !== null) {
-      nextBowShotRequestId += 1
-      const requestId = `bow-shot-${String(nextBowShotRequestId)}`
-      pendingBowShots = new Map(pendingBowShots).set(requestId, {
-        bowSlotIndex: bowAdvance.release.bowSlotIndex,
-      })
-      const horizontal = Math.cos(postFramePose.pitchRadians)
-      Effect.runSync(requestBowShot(gameplayState, requestId, {
-        origin: {
-          x: postFramePose.feetPosition.x,
-          y: postFramePose.feetPosition.y + EYE_LEVEL_OFFSET,
-          z: postFramePose.feetPosition.z,
+    if (bowAdvance.release !== null && canFireBow(bowAdvance.release.chargeSecs)) {
+      const settlement = Effect.runSync(world.inventory.consumeAndDamageAt({
+        consume: { item: 'arrow', count: 1 },
+        damage: {
+          location: { _tag: 'Inventory', slotIndex: bowAdvance.release.bowSlotIndex },
+          expectedItem: 'bow',
+          amount: 1,
         },
-        dirX: -Math.sin(postFramePose.yawRadians) * horizontal,
-        dirY: Math.sin(postFramePose.pitchRadians),
-        dirZ: -Math.cos(postFramePose.yawRadians) * horizontal,
-        chargeSecs: bowAdvance.release.chargeSecs,
       }))
+      if (settlement._tag === 'Applied') {
+        const charge = bowCharge(bowAdvance.release.chargeSecs)
+        projectileRuntimeState = launchRuntimeProjectile(projectileRuntimeState, {
+          dimension: dimensionAfterFrame,
+          position: {
+            x: postFramePose.feetPosition.x,
+            y: postFramePose.feetPosition.y + EYE_LEVEL_OFFSET,
+            z: postFramePose.feetPosition.z,
+          },
+          yawRadians: postFramePose.yawRadians,
+          pitchRadians: -postFramePose.pitchRadians,
+          speed: 8 + 24 * charge,
+          damage: bowDamage(charge),
+          knockback: 0.35 + 0.65 * charge,
+          shooterId: 'player',
+        })
+        markSessionDirty()
+      }
     }
 
     const groundedAfterFrame = Effect.runSync(Ref.get(simState.isGrounded))

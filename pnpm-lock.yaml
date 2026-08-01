@@ -18,6 +18,9 @@ importers:
       '@nerima-games/mc-kernel':
         specifier: 0.2.15
         version: 0.2.15
+      '@nerima-games/mc-physics':
+        specifier: 0.1.6
+        version: 0.1.6
       '@nerima-games/mc-render':
         specifier: 0.2.4
         version: 0.2.4
@@ -31,8 +34,8 @@ importers:
         specifier: 0.1.9
         version: 0.1.9
       '@nerima-games/mx-gameplay':
-        specifier: 0.1.60
-        version: 0.1.60
+        specifier: 0.1.61
+        version: 0.1.61
       '@nerima-games/mx-multiplayer':
         specifier: 0.1.7
         version: 0.1.7
@@ -405,6 +408,10 @@ packages:
     resolution: {integrity: sha512-5RFYGtej8TvBFGetTbitEicGyohv2ZQrstL3R151Do1bVheqjIBJUH7R2SbtjDgOKVcTMSZgT8HogfZJ8Na7Kw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-physics/0.1.0/83c9b8fbef29cda6f5aa9db047cfa8b3b7708fd7}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
+  '@nerima-games/mc-physics@0.1.6':
+    resolution: {integrity: sha512-oBBxpOaYbD4IvX5/++JGF1Cs86WJsW8PtNGESnI+FVpj2AV05Og77SW6PJ1trmliHfguuezXUbLUVEWlXTfgkQ==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-physics/0.1.6/4f0657d5933f13fb6774ab75a000bcbc4e7b0e65}
+    engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
+
   '@nerima-games/mc-playground-kit@0.1.1':
     resolution: {integrity: sha512-Apit7JnfY2p3P3GJ/x6fWxB2p6tt1PMMvCSf82Jiz9vFxKRHmC2LImmy4w7ftAr1Osr9w9nMykRcY9DOAAJYrA==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-playground-kit/0.1.1/d49d65656b0b7fccfbb3a46d78adf36ba8526e34}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
@@ -441,8 +448,8 @@ packages:
     resolution: {integrity: sha512-2mMvkof2tpcuZ0NR6C8EkJsVZdbLOA5dy9C8QalpO7L1NVNRJxvmOFf7Tub5BUke5pNDzGf2O1vV8xtlr7xspw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-worldgen/0.1.9/9f0a504775e7520b90d27e3e103bda5ea186e70a}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
-  '@nerima-games/mx-gameplay@0.1.60':
-    resolution: {integrity: sha512-3GPSakD0Gl4lCP3u4SC/YPtQHsz7OiNDmtp3s/sdGaQnhmAATbf9CSiT6nMqVyMpoI8Sgf0DczzAbEHHJXcEZw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-gameplay/0.1.60/390cfc45c5fb1961a294e9245b1352580e655a96}
+  '@nerima-games/mx-gameplay@0.1.61':
+    resolution: {integrity: sha512-i2jIyHmojQSzcS/jet/BVwCJFWaH+N3y50T47Jn2zdI4An9L+94KS5xq38qRkMeYUxkoA21FG5I9coAAzKmjZQ==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-gameplay/0.1.61/9840f77e66f48429947d2974585fe932b55db238}
     engines: {node: '>=22.0.0', pnpm: '>=8.15.0'}
 
   '@nerima-games/mx-multiplayer@0.1.7':
@@ -1776,6 +1783,11 @@ snapshots:
     dependencies:
       effect: 3.22.0
 
+  '@nerima-games/mc-physics@0.1.6':
+    dependencies:
+      '@nerima-games/mc-kernel': 0.2.15
+      effect: 3.22.0
+
   '@nerima-games/mc-playground-kit@0.1.1':
     dependencies:
       '@nerima-games/mc-render': 0.1.1
@@ -1830,7 +1842,7 @@ snapshots:
       '@nerima-games/mc-save': 0.1.0
       effect: 3.22.0
 
-  '@nerima-games/mx-gameplay@0.1.60':
+  '@nerima-games/mx-gameplay@0.1.61':
     dependencies:
       '@nerima-games/mc-audio': 0.1.0
       '@nerima-games/mc-kernel': 0.2.15
