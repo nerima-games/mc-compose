@@ -116,6 +116,7 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     containers: state['containers'] ?? [],
     furnaces: state['furnaces'] ?? [],
     villagerTrades: state['villagerTrades'] ?? [],
+    entities: state['entities'] ?? [],
   })
   if (Either.isLeft(decoded)) return undefined
   const snapshot = decoded.right
@@ -128,6 +129,7 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     containers: snapshot.containers,
     furnaces: snapshot.furnaces,
     villagerTrades: snapshot.villagerTrades,
+    entities: snapshot.entities ?? [],
     ...(state['wither'] === undefined ? {} : { wither: state['wither'] as NonNullable<MultiplayerServerState['wither']> }),
     ...(Number.isInteger(state['witherRevision']) ? { witherRevision: state['witherRevision'] as number } : {}),
   }

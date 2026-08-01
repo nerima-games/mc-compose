@@ -5,6 +5,7 @@ import {
   type AuthoritativeCommand,
   type AuthoritativeCommandResult,
   type AuthoritativeDelta,
+  type AuthoritativeEntityState,
   type AuthoritativeSnapshot,
   type BlockMutationRejected,
   type BlockPos,
@@ -67,6 +68,7 @@ export interface MultiplayerServerState {
   readonly containers: AuthoritativeSnapshot['containers']
   readonly furnaces: AuthoritativeSnapshot['furnaces']
   readonly villagerTrades: AuthoritativeSnapshot['villagerTrades']
+  readonly entities?: ReadonlyArray<AuthoritativeEntityState>
   readonly wither?: WitherRuntimeSnapshot
   readonly witherRevision?: number
 }
@@ -170,7 +172,10 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'WorldTimeWeatherCommand' ||
   message._tag === 'ContainerCommand' ||
   message._tag === 'FurnaceCommand' ||
-  message._tag === 'VillagerTradeCommand'
+  message._tag === 'VillagerTradeCommand' ||
+  message._tag === 'EntityAttackCommand' ||
+  message._tag === 'EntityPickupCommand' ||
+  message._tag === 'VehicleCommand'
 
 const moveStack = (
   sourceSlots: Array<ItemStack | null>,
@@ -198,6 +203,7 @@ export interface MultiplayerServerCore {
   readonly disconnect: (clientId: ClientId) => void
   readonly snapshot: () => WorldSnapshot
   readonly tick: (elapsedMs: number) => void
+  readonly spawnEntity: (entity: AuthoritativeEntityState) => boolean
 }
 
 export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): MultiplayerServerCore => {
@@ -208,6 +214,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const playerClients = new Map<PlayerId, ClientId>()
   const blocks = new Map<string, Readonly<{ at: BlockPos; block: string | null }>>(
     (options.initialState?.blocks ?? []).map((mutation) => [positionKey(mutation.at), mutation]),
+  )
+  const entities = new Map<string, AuthoritativeEntityState>(
+    (options.initialState?.entities ?? []).map((entity) => [entity.entityId, entity]),
   )
   const inventories = new Map<PlayerId, MutableInventoryState>(
     (options.initialState?.inventories ?? []).map(({ player, state }) => [player, cloneInventory(state)]),
@@ -318,6 +327,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     containers: [...containers.values()].map(containerSnapshot),
     furnaces: [...furnaces.values()].map(furnaceSnapshot),
     villagerTrades,
+    entities: [...entities.values()],
   })
 
   const isInBounds = ({ x, y, z }: BlockPos): boolean =>
@@ -339,6 +349,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     containers: [...containers.values()].map(containerSnapshot),
     furnaces: [...furnaces.values()].map(furnaceSnapshot),
     villagerTrades,
+    entities: [...entities.values()],
   })
 
   const notifyStateChanged = (): void => options.onStateChanged?.(persistentState())
@@ -426,6 +437,76 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (inventory === undefined) return { accepted: false, reason: 'resource-not-found' }
 
     switch (message._tag) {
+      case 'EntityAttackCommand': {
+        const entity = entities.get(message.entityId)
+        if (entity === undefined) return { accepted: false, reason: 'resource-not-found' }
+        if (entity._tag !== 'living') return { accepted: false, reason: 'invalid-command' }
+        const actor = players.get(message.player)
+        if (actor === undefined || (actor.at.x - entity.at.x) ** 2 + (actor.at.y - entity.at.y) ** 2 + (actor.at.z - entity.at.z) ** 2 > 25) {
+          return { accepted: false, reason: 'out-of-range' }
+        }
+        const health = entity.health - 4
+        if (health > 0) {
+          const updated = { ...entity, health }
+          entities.set(entity.entityId, updated)
+          return { accepted: true, deltas: (nextRevision) => [{ _tag: 'EntityUpdateDelta', world: worldId, revision: nextRevision, entity: updated }] }
+        }
+        entities.delete(entity.entityId)
+        const drop: AuthoritativeEntityState = {
+          _tag: 'item-drop',
+          entityId: `${entity.entityId}:drop:${String(revision + 1)}` as AuthoritativeEntityState['entityId'],
+          at: entity.at,
+          stack: { item: entity.entityType, count: 1 },
+        }
+        entities.set(drop.entityId, drop)
+        return { accepted: true, deltas: (nextRevision) => [
+          { _tag: 'EntityDespawnDelta', world: worldId, revision: nextRevision, entityId: entity.entityId },
+          { _tag: 'EntitySpawnDelta', world: worldId, revision: nextRevision, entity: drop },
+        ] }
+      }
+      case 'EntityPickupCommand': {
+        const entity = entities.get(message.entityId)
+        if (entity === undefined) return { accepted: false, reason: 'resource-not-found' }
+        if (entity._tag !== 'item-drop') return { accepted: false, reason: 'invalid-command' }
+        const actor = players.get(message.player)
+        if (actor === undefined || (actor.at.x - entity.at.x) ** 2 + (actor.at.y - entity.at.y) ** 2 + (actor.at.z - entity.at.z) ** 2 > 25) {
+          return { accepted: false, reason: 'out-of-range' }
+        }
+        const slot = inventory.slots.findIndex((stack) => stack === null || stack.item === entity.stack.item)
+        if (slot < 0) return { accepted: false, reason: 'invalid-command' }
+        const current = inventory.slots[slot]
+        inventory.slots[slot] = current === null || current === undefined
+          ? { ...entity.stack }
+          : { ...current, count: current.count + entity.stack.count }
+        entities.delete(entity.entityId)
+        return { accepted: true, deltas: (nextRevision) => [
+          { _tag: 'EntityDespawnDelta', world: worldId, revision: nextRevision, entityId: entity.entityId },
+          { _tag: 'PlayerInventoryDelta', world: worldId, revision: nextRevision, player: message.player, state: inventorySnapshot(inventory) },
+        ] }
+      }
+      case 'VehicleCommand': {
+        const entity = entities.get(message.entityId)
+        if (entity === undefined) return { accepted: false, reason: 'resource-not-found' }
+        if (entity._tag !== 'vehicle') return { accepted: false, reason: 'invalid-command' }
+        const actor = players.get(message.player)
+        if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+        let updated: AuthoritativeEntityState
+        if (message.action === 'mount') {
+          if ((actor.at.x - entity.at.x) ** 2 + (actor.at.y - entity.at.y) ** 2 + (actor.at.z - entity.at.z) ** 2 > 25) return { accepted: false, reason: 'out-of-range' }
+          if (entity.occupant !== null) return { accepted: false, reason: 'vehicle-occupied' }
+          updated = { ...entity, occupant: message.player }
+        } else if (message.action === 'dismount') {
+          if (entity.occupant !== message.player) return { accepted: false, reason: 'not-mounted' }
+          updated = { ...entity, occupant: null }
+        } else {
+          if (entity.occupant !== message.player) return { accepted: false, reason: 'not-mounted' }
+          if ((message.action.at.x - entity.at.x) ** 2 + (message.action.at.y - entity.at.y) ** 2 + (message.action.at.z - entity.at.z) ** 2 > 64) return { accepted: false, reason: 'out-of-range' }
+          updated = { ...entity, at: message.action.at }
+          actor.at = message.action.at
+        }
+        entities.set(entity.entityId, updated)
+        return { accepted: true, deltas: (nextRevision) => [{ _tag: 'EntityUpdateDelta', world: worldId, revision: nextRevision, entity: updated }] }
+      }
       case 'PlayerInventoryCommand': {
         if (message.action._tag === 'select-slot') {
           if (message.action.slot >= inventory.slots.length) return { accepted: false, reason: 'invalid-command' }
@@ -822,6 +903,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       case 'ContainerDelta':
       case 'FurnaceDelta':
       case 'VillagerTradeDelta':
+      case 'EntitySpawnDelta':
+      case 'EntityUpdateDelta':
+      case 'EntityDespawnDelta':
       case 'AuthoritativeCommandAccepted':
       case 'AuthoritativeCommandRejected':
         return { accepted: false, reason: 'identity-spoof' }
@@ -855,5 +939,14 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     for (const player of changed) broadcast({ _tag: 'PlayerVitalsDelta', world: worldId, revision, player, state: vitalsSnapshot(vitals.get(player) as MutableVitalsState) })
   }
 
-  return { connect, receive, disconnect, snapshot, tick }
+  const spawnEntity = (entity: AuthoritativeEntityState): boolean => {
+    if (entities.has(entity.entityId)) return false
+    entities.set(entity.entityId, entity)
+    revision += 1
+    notifyStateChanged()
+    broadcast({ _tag: 'EntitySpawnDelta', world: worldId, revision, entity })
+    return true
+  }
+
+  return { connect, receive, disconnect, snapshot, tick, spawnEntity }
 }

@@ -2,6 +2,7 @@ import {
   decodeFrame,
   encodeFrame,
   type CommandId,
+  type EntityId,
   type NetworkMessage,
   type PlayerId,
   type PlayerName,
@@ -23,6 +24,7 @@ const playerId = (value: string): PlayerId => value as PlayerId
 const playerName = (value: string): PlayerName => value as PlayerName
 const worldId = (value: string): WorldId => value as WorldId
 const commandId = (value: string): CommandId => value as CommandId
+const entityId = (value: string): EntityId => value as EntityId
 
 const frame = (message: NetworkMessage): WireText => {
   const encoded = encodeFrame(message)
@@ -359,5 +361,92 @@ describe('multiplayer server authoritative state', () => {
       }),
     ])
     expect(fixture.persisted).toEqual([])
+  })
+
+  it('synchronizes entities and restores their canonical state on reconnect', () => {
+    const fixture = makeFixture({ ...initialState(), entities: [
+      { _tag: 'living', entityId: entityId('zombie-1'), entityType: 'zombie', at: { x: 1, y: 64, z: 0 }, health: 8, maxHealth: 20 },
+      { _tag: 'vehicle', entityId: entityId('boat-1'), vehicleType: 'boat', at: { x: 1, y: 64, z: 1 }, occupant: null },
+    ] })
+    const observer: Array<WireText> = []
+    expect(fixture.server.connect('socket-b', (wire) => observer.push(wire))).toBe(true)
+    expect(fixture.server.receive('socket-b', frame({ _tag: 'PlayerJoin', player: playerId('bob'), name: playerName('Bob'), at: { x: 0, y: 64, z: 0 } })).accepted).toBe(true)
+    const send = (message: NetworkMessage): void => { expect(fixture.receive(message).accepted).toBe(true) }
+    send({ _tag: 'EntityAttackCommand', commandId: commandId('attack-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 4, entityId: entityId('zombie-1') })
+    send({ _tag: 'EntityAttackCommand', commandId: commandId('attack-2'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 5, entityId: entityId('zombie-1') })
+    const drop = messages(observer).find((message) => message._tag === 'EntitySpawnDelta')
+    expect(drop).toMatchObject({ _tag: 'EntitySpawnDelta', entity: { _tag: 'item-drop', stack: { item: 'zombie', count: 1 } } })
+    if (drop?._tag !== 'EntitySpawnDelta') throw new Error('missing item drop')
+    send({ _tag: 'EntityPickupCommand', commandId: commandId('pickup-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 6, entityId: drop.entity.entityId })
+    send({ _tag: 'VehicleCommand', commandId: commandId('mount-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 7, entityId: entityId('boat-1'), action: 'mount' })
+    send({ _tag: 'VehicleCommand', commandId: commandId('move-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 8, entityId: entityId('boat-1'), action: { _tag: 'move', at: { x: 3, y: 64, z: 1 } } })
+    send({ _tag: 'VehicleCommand', commandId: commandId('dismount-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 9, entityId: entityId('boat-1'), action: 'dismount' })
+    expect(messages(observer)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'EntityUpdateDelta', entity: expect.objectContaining({ entityId: 'zombie-1', health: 4 }) }),
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'zombie-1' }),
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: drop.entity.entityId }),
+      expect.objectContaining({ _tag: 'EntityUpdateDelta', entity: expect.objectContaining({ entityId: 'boat-1', at: { x: 3, y: 64, z: 1 }, occupant: null }) }),
+    ]))
+    fixture.server.disconnect('socket-a')
+    const reconnect: Array<WireText> = []
+    fixture.server.connect('socket-a2', (wire) => reconnect.push(wire))
+    fixture.server.receive('socket-a2', frame({ _tag: 'PlayerJoin', player: playerId('alice'), name: playerName('Alice'), at: { x: 3, y: 64, z: 1 } }))
+    expect(messages(reconnect)[1]).toMatchObject({ _tag: 'AuthoritativeSnapshot', revision: 10, entities: [{ entityId: 'boat-1', at: { x: 3, y: 64, z: 1 }, occupant: null }] })
+  })
+
+  it('rejects invalid entity authority requests and deduplicates accepted commands', () => {
+    const fixture = makeFixture({ ...initialState(), entities: [
+      { _tag: 'living', entityId: entityId('far-zombie'), entityType: 'zombie', at: { x: 20, y: 64, z: 0 }, health: 20, maxHealth: 20 },
+      { _tag: 'vehicle', entityId: entityId('boat-1'), vehicleType: 'boat', at: { x: 1, y: 64, z: 0 }, occupant: null },
+    ] })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'EntityAttackCommand',
+      commandId: commandId('far-attack'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      entityId: entityId('far-zombie'),
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(fixture.receive({
+      _tag: 'VehicleCommand',
+      commandId: commandId('unmounted-move'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      entityId: entityId('boat-1'),
+      action: { _tag: 'move', at: { x: 2, y: 64, z: 0 } },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(fixture.receive({
+      _tag: 'VehicleCommand',
+      commandId: commandId('stale-mount'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 3,
+      entityId: entityId('boat-1'),
+      action: 'mount',
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+
+    const mount = {
+      _tag: 'VehicleCommand' as const,
+      commandId: commandId('mount-once'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      entityId: entityId('boat-1'),
+      action: 'mount' as const,
+    }
+    expect(fixture.receive(mount).accepted).toBe(true)
+    expect(fixture.receive(mount).accepted).toBe(true)
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      revision: 5,
+      entities: [{ entityId: 'far-zombie', health: 20 }, { entityId: 'boat-1', occupant: 'alice' }],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', reason: 'out-of-range', revision: 4 }),
+      expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', reason: 'not-mounted', revision: 4 }),
+      expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', reason: 'stale-revision', revision: 4, resyncRequired: true }),
+    ]))
   })
 })

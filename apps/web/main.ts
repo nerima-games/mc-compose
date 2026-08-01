@@ -315,6 +315,7 @@ import {
 import {
   encodeFrame,
   CommandId,
+  EntityId,
   makeMultiplayerHost,
   PlayerId,
   PlayerName,
@@ -322,6 +323,7 @@ import {
   WorldId,
   type MultiplayerHost,
   type NetworkMessage,
+  type AuthoritativeEntityState,
 } from '@nerima-games/mx-multiplayer'
 import { makeBrowserPreview } from '@nerima-games/mc-playground-kit'
 import {
@@ -2347,7 +2349,9 @@ const bootGame = async (
     (stage) => stage.id === 'multiplayer:inbound',
   )
   let multiplayerRevision = 0
+  const multiplayerEntities = new Map<string, AuthoritativeEntityState>()
   let nextVitalsCommand = 0
+  let nextEntityCommand = 0
   let pendingVitalsCommand: CommandId | null = null
   let networkSleepState: SleepClientState = initialSleepClientState()
   let nextSleepRequest = 1
@@ -2424,6 +2428,32 @@ const bootGame = async (
     }))
   }
 
+  const sendEntityCommand = (
+    command: Omit<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'VehicleCommand' }>, 'commandId' | 'player' | 'world' | 'expectedRevision'>,
+  ): void => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete) return
+    nextEntityCommand += 1
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      ...command,
+      commandId: CommandId.make(`entity-${String(nextEntityCommand)}`),
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+    } as NetworkMessage))
+  }
+  document.addEventListener('mc-entity-command', (event) => {
+    const detail = (event as CustomEvent<{ readonly entityId: string; readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'; readonly at?: { readonly x: number; readonly y: number; readonly z: number } }>).detail
+    if (detail === undefined) return
+    const entityId = EntityId.make(detail.entityId)
+    if (detail.action === 'attack') sendEntityCommand({ _tag: 'EntityAttackCommand', entityId })
+    else if (detail.action === 'pickup') sendEntityCommand({ _tag: 'EntityPickupCommand', entityId })
+    else sendEntityCommand({
+      _tag: 'VehicleCommand',
+      entityId,
+      action: detail.action === 'move' && detail.at !== undefined ? { _tag: 'move', at: detail.at } : detail.action as 'mount' | 'dismount',
+    })
+  })
+
   const applyNetworkVitals = (state: { readonly health: number; readonly hunger: number; readonly experience: number }): void => {
     const current = Effect.runSync(world.vitals.snapshot)
     Effect.runSync(world.vitals.restore({
@@ -2463,8 +2493,21 @@ const bootGame = async (
         if (local !== undefined) applyNetworkVitals(local.state)
         const localInventory = message.inventories.find(({ player }) => player === multiplayer.query.player)
         if (localInventory !== undefined) applyNetworkInventory(localInventory.state)
+        multiplayerEntities.clear()
+        for (const entity of message.entities ?? []) multiplayerEntities.set(entity.entityId, entity)
         break
       }
+      case 'EntitySpawnDelta':
+      case 'EntityUpdateDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        multiplayerEntities.set(message.entity.entityId, message.entity)
+        break
+      case 'EntityDespawnDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        multiplayerEntities.delete(message.entityId)
+        break
       case 'PlayerInventoryDelta':
         if (message.revision < multiplayerRevision) return
         multiplayerRevision = message.revision
@@ -4195,6 +4238,16 @@ const bootGame = async (
       kind: entity.kind,
       feetPosition: entity.feetPosition,
       category: entity.kind === 'dropped_item' ? 'item' : 'hostile',
+    } satisfies RenderEntity)),
+    ...[...multiplayerEntities.values()].map((entity) => ({
+      id: `authoritative:${String(entity.entityId)}`,
+      kind: entity._tag === 'living'
+        ? entity.entityType
+        : entity._tag === 'vehicle'
+          ? entity.vehicleType
+          : 'dropped_item',
+      feetPosition: entity.at,
+      category: entity._tag === 'item-drop' ? 'item' as const : 'hostile' as const,
     } satisfies RenderEntity)),
     ...projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
     ...witherRenderDescriptors(witherRuntimeState, currentChunkContext.dimension),
