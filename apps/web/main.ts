@@ -156,6 +156,11 @@ import {
 } from '@nerima-games/mc-render'
 import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
 import {
+  advancePlayerSwimmingRuntime,
+  initialPlayerSwimmingRuntimeState,
+  MAX_SWIMMING_OXYGEN_SECS,
+} from './player-swimming-runtime'
+import {
   chestStorageCloseIntent,
   chestStorageSlotClickIntent,
   chestStorageViewModel,
@@ -1425,6 +1430,7 @@ const bootGame = async (
   let fishingWater: { readonly dimension: Dimension; readonly position: SessionPosition } | undefined
   let fishingResult = 'idle'
   let nextFishingRoll = 1
+  let swimmingState = initialPlayerSwimmingRuntimeState()
   const furnaceKeyOf = (
     furnace: Pick<PersistedFurnaceState, 'dimension' | 'position'>,
   ): string => JSON.stringify([
@@ -2512,6 +2518,11 @@ const bootGame = async (
   statusEffectsHud.id = 'status-effects-hud'
   statusEffectsHud.dataset['testid'] = 'status-effects'
   hudParent.append(statusEffectsHud)
+  const swimmingHud = document.createElement('div')
+  swimmingHud.id = 'swimming-hud'
+  swimmingHud.dataset['testid'] = 'swimming'
+  swimmingHud.hidden = true
+  hudParent.append(swimmingHud)
 
   inventoryParent.setAttribute('role', 'dialog')
   inventoryParent.setAttribute('aria-label', 'Inventory')
@@ -3010,6 +3021,16 @@ const bootGame = async (
     touchControlsParent.setAttribute('aria-hidden', String(!presentation.visible))
     if (wasVisible && !presentation.visible) resetTouchInput('state-transition')
   }
+  const presentSwimmingState = (): void => {
+    const oxygen = Math.max(0, Math.ceil(swimmingState.oxygenSecs))
+    swimmingHud.hidden = !swimmingState.fullySubmerged
+    swimmingHud.textContent = `Oxygen ${String(oxygen)}/${String(MAX_SWIMMING_OXYGEN_SECS)}`
+    document.body.setAttribute('data-swimming', String(swimmingState.active))
+    document.body.setAttribute('data-swimming-pose', swimmingState.active ? 'swimming' : 'standing')
+    document.body.setAttribute('data-fully-submerged', String(swimmingState.fullySubmerged))
+    document.body.setAttribute('data-oxygen-seconds', String(swimmingState.oxygenSecs))
+  }
+
   const applyPlayerDamage = (
     damage: Parameters<typeof world.vitals.damage>[0],
     minimumHealthPoints = 0,
@@ -3041,6 +3062,8 @@ const bootGame = async (
       audio.play('playerHurt')
     }
     if (playerIsDead()) {
+      swimmingState = initialPlayerSwimmingRuntimeState()
+      presentSwimmingState()
       resetPrimaryAttackGesture()
       resetSimState(false)
     }
@@ -3815,6 +3838,8 @@ const bootGame = async (
     fishingSession = undefined
     fishingWater = undefined
     setFishingResult('idle')
+    swimmingState = initialPlayerSwimmingRuntimeState()
+    presentSwimmingState()
     Effect.runSync(world.vitals.respawn)
     Effect.runSync(world.entities.reset)
     Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
@@ -4111,6 +4136,7 @@ const bootGame = async (
         grounded: Effect.runSync(Ref.get(simState.isGrounded)),
         accumulatedDistance: Effect.runSync(Ref.get(simState.accumulatedFallDistance)),
       },
+      swimming: swimmingState,
       weather: Effect.runSync(weather.snapshot),
       vitals,
       dead: vitals.healthPoints <= 0,
@@ -5311,13 +5337,52 @@ const bootGame = async (
     const poseBeforeFrame = Effect.runSync(playerApi.pose)
     const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
     const mountedVehicle = mountedVehicleId === undefined ? undefined : vehicles.get(mountedVehicleId)
+    const movementForward = mountedVehicle === undefined
+      ? held('moveForward') - held('moveBackward')
+      : 0
+    const movementStrafe = mountedVehicle === undefined
+      ? held('moveRight') - held('moveLeft')
+      : 0
+    const feetReading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
+      Math.floor(poseBeforeFrame.feetPosition.x),
+      Math.floor(poseBeforeFrame.feetPosition.y + 0.1),
+      Math.floor(poseBeforeFrame.feetPosition.z),
+    )))
+    const eyesReading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
+      Math.floor(poseBeforeFrame.feetPosition.x),
+      Math.floor(poseBeforeFrame.feetPosition.y + EYE_LEVEL_OFFSET),
+      Math.floor(poseBeforeFrame.feetPosition.z),
+    )))
+    const canSwim = mountedVehicle === undefined && !dead
+    const feetInWater = canSwim
+      && feetReading._tag === 'Block'
+      && blockTypeOfId(feetReading.block) === 'water'
+    const eyesInWater = canSwim
+      && eyesReading._tag === 'Block'
+      && blockTypeOfId(eyesReading.block) === 'water'
+    const sinYaw = Math.sin(poseBeforeFrame.yawRadians)
+    const cosYaw = Math.cos(poseBeforeFrame.yawRadians)
+    const wasSwimming = swimmingState.active
+    const swimmingTick = advancePlayerSwimmingRuntime(swimmingState, {
+      feetInWater,
+      eyesInWater,
+      dead,
+      horizontalInput: {
+        x: -sinYaw * movementForward + cosYaw * movementStrafe,
+        z: -cosYaw * movementForward - sinYaw * movementStrafe,
+      },
+      verticalInput: held('jump') - held('sneak'),
+      deltaSecs,
+    })
+    swimmingState = swimmingTick.state
+    presentSwimmingState()
     Effect.runSync(Ref.set(simState.movementIntent, {
-      forward: mountedVehicle === undefined ? held('moveForward') - held('moveBackward') : 0,
-      strafe: mountedVehicle === undefined ? held('moveRight') - held('moveLeft') : 0,
+      forward: swimmingState.active ? 0 : movementForward,
+      strafe: swimmingState.active ? 0 : movementStrafe,
     }))
     Effect.runSync(Ref.set(simState.jumpIntent, mountedVehicle === undefined && held('jump') > 0))
     Effect.runSync(
-      Ref.set(simState.physicsConfig, dead || mountedVehicle !== undefined
+      Ref.set(simState.physicsConfig, dead || mountedVehicle !== undefined || swimmingState.active
         ? Option.none()
         : Option.some({
             ...simPhysicsConfig,
@@ -5394,6 +5459,20 @@ const bootGame = async (
     }
 
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
+    if (swimmingState.active && mountedVehicle === undefined) {
+      Effect.runSync(Ref.set(simState.velocity, swimmingState.velocity))
+      Effect.runSync(playerApi.moveTo({
+        x: poseBeforeFrame.feetPosition.x + swimmingState.velocity.x * deltaSecs,
+        y: poseBeforeFrame.feetPosition.y + swimmingState.velocity.y * deltaSecs,
+        z: poseBeforeFrame.feetPosition.z + swimmingState.velocity.z * deltaSecs,
+      }))
+    } else if (wasSwimming) {
+      Effect.runSync(Ref.set(simState.velocity, { x: 0, y: 0, z: 0 }))
+    }
+    if (swimmingTick.drowningDamagePoints > 0) {
+      applyPlayerDamage({ amount: swimmingTick.drowningDamagePoints, cause: 'generic' })
+      markSessionDirty()
+    }
     if (mountedVehicle !== undefined) {
       const throttle = held('moveForward') - held('moveBackward')
       const steering = held('moveRight') - held('moveLeft')
