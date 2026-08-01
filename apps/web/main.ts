@@ -91,6 +91,7 @@ import {
 import { blockIdOf, blockTypeOfId, capabilityOfBlockId, propertyOfBlockId } from '@nerima-games/mc-kernel'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
+  addExperience as addVitalsExperience,
   advanceFurnace,
   containerIdAt,
   emptyFurnaceState,
@@ -105,6 +106,7 @@ import {
   simStages,
   STARTER_FUEL_RULES,
   STARTER_SMELTING_RECIPES,
+  targetBlockFromPlayerPose,
   type FurnaceState,
   type CropLocation,
   type ItemStack,
@@ -186,12 +188,20 @@ import {
   drainItemUseResults,
   drainMeleeAttackResults,
   drainMobDrops,
+  drainMobExperience,
   drainPortalTravels,
   drainPlayerDamages,
+  drainPlayerHeals,
   drainVillagerTradeResults,
   DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
+  emptyBrewingStandState,
+  emptyStatusEffectState,
   gameplayStages,
+  getPlayerMovementSpeedMultiplier,
+  insertBrewingBottle,
+  insertBrewingFuel,
+  insertBrewingIngredient,
   INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
   makeGameplayFrameState,
   makeVillager,
@@ -221,12 +231,18 @@ import {
   resolveFallDamage,
   resolveTargetedPrimaryAttack,
   restoreVillagerTrades,
+  restoreBrewingStand,
+  restoreStatusEffects,
   setPortalCandidates,
   solidityFromStore,
   spawnDroppedItems,
   spawnMobDrops,
   snapshotVillagerTrades,
+  snapshotBrewingStand,
+  snapshotStatusEffects,
+  collectBrewingPotion,
   targetedRightClickRoute,
+  useBrewingPotion,
   weatherLightScale,
   miningLootContextForItem,
   miningProgressFraction,
@@ -240,6 +256,8 @@ import {
   type MiningProgressState,
   type PlaceableItemType,
   type VillagerTradeResult,
+  type BrewingBottle,
+  type BrewingIngredient,
 } from '@nerima-games/mx-gameplay'
 import {
   encodeFrame,
@@ -817,6 +835,7 @@ const bootGame = async (
   const captionsParent = requireElement('sound-captions')
   const inventoryParent = requireElement('inventory-root')
   const tradeParent = requireElement('trade-root')
+  const brewingParent = requireElement('brewing-root')
   const touchControlsParent = requireElement('touch-controls')
   const touchLookSurface = requireElement('touch-look-surface')
   const fpsValue = requireElement('fps-value')
@@ -836,6 +855,8 @@ const bootGame = async (
   const stageList = requireElement('stage-order')
   let inventoryOpen = false
   let tradeOpen = false
+  let brewingOpen = false
+  let brewingStatus = ''
   let activeVillagerId: string | undefined
   let tradeStatus = ''
   let nextVillagerTradeRequestId = 0
@@ -938,7 +959,7 @@ const bootGame = async (
     targets: { window, document },
     canvas,
     bindings: playerSettings.bindings,
-    allowsPointerLock: () => !inventoryOpen && !tradeOpen && !paused,
+    allowsPointerLock: () => !inventoryOpen && !tradeOpen && !brewingOpen && !paused,
     touchControls,
   })
 
@@ -953,7 +974,7 @@ const bootGame = async (
   // clicks stay UI clicks, and `attack` does not fire.
   canvas.addEventListener('click', (event) => {
     if (event.isTrusted) audio.unlock()
-    if (inventoryOpen || tradeOpen || document.pointerLockElement === canvas) {
+    if (inventoryOpen || tradeOpen || brewingOpen || document.pointerLockElement === canvas) {
       return
     }
     try {
@@ -1122,6 +1143,8 @@ const bootGame = async (
       gameplayState,
       loadedSession.value.state.villagers.trades,
     ))
+    await Effect.runPromise(restoreBrewingStand(gameplayState, loadedSession.value.state.brewing))
+    await Effect.runPromise(restoreStatusEffects(gameplayState, loadedSession.value.state.statusEffects))
   }
 
   const presentWeather = (state: WeatherState): void => {
@@ -1257,6 +1280,8 @@ const bootGame = async (
         residents: [...villagerResidents.values()],
         trades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
       },
+      brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
+      statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -2166,6 +2191,10 @@ const bootGame = async (
   const furnaceView = createFurnaceView(document, inventoryParent)
   const chestView = createChestStorageView(document, inventoryParent)
   const crosshair = createCrosshairView(document, hudParent, motion)
+  const statusEffectsHud = document.createElement('div')
+  statusEffectsHud.id = 'status-effects-hud'
+  statusEffectsHud.dataset['testid'] = 'status-effects'
+  hudParent.append(statusEffectsHud)
 
   inventoryParent.setAttribute('role', 'dialog')
   inventoryParent.setAttribute('aria-label', 'Inventory')
@@ -2175,6 +2204,10 @@ const bootGame = async (
   tradeParent.setAttribute('aria-label', 'Villager trading')
   tradeParent.setAttribute('aria-hidden', 'true')
   document.body.setAttribute('data-trade-open', 'false')
+  brewingParent.setAttribute('role', 'dialog')
+  brewingParent.setAttribute('aria-label', 'Brewing stand')
+  brewingParent.setAttribute('aria-hidden', 'true')
+  document.body.setAttribute('data-brewing-open', 'false')
 
   const renderTradeUi = (): void => {
     const trades = Effect.runSync(snapshotVillagerTrades(gameplayState))
@@ -2218,6 +2251,7 @@ const bootGame = async (
 
   const setTradeOpen = (open: boolean, villagerId?: string): void => {
     if (open && (playerIsDead() || villagerId === undefined)) return
+    if (open && brewingOpen) setBrewingOpen(false)
     tradeOpen = open
     activeVillagerId = open ? villagerId : undefined
     tradeStatus = ''
@@ -2249,6 +2283,162 @@ const bootGame = async (
     renderTradeUi()
   })
 
+  const brewingBottleFromItem = (item: string): BrewingBottle | undefined => {
+    if (item === 'water_bottle') return item
+    if (item === 'awkward_potion') return { potion: 'awkward' }
+    if (item === 'potion_of_swiftness') return { potion: 'speed' }
+    if (item === 'potion_of_poison') return { potion: 'poison' }
+    if (item === 'potion_of_regeneration') return { potion: 'regeneration' }
+    return undefined
+  }
+
+  const brewingBottleLabel = (bottle: BrewingBottle | undefined): string => {
+    if (bottle === undefined) return 'Empty'
+    if (bottle === 'water_bottle') return 'Water bottle'
+    return bottle.potion === 'speed' ? 'Potion of swiftness' : `${bottle.potion} potion`
+  }
+
+  const renderBrewingUi = (): void => {
+    if (!brewingOpen) {
+      brewingParent.replaceChildren()
+      return
+    }
+    const state = Effect.runSync(snapshotBrewingStand(gameplayState))
+    let summary = brewingParent.querySelector<HTMLElement>('[data-testid="brewing-state"]')
+    let progress = brewingParent.querySelector<HTMLElement>('[data-testid="brewing-progress"]')
+    let status = brewingParent.querySelector<HTMLElement>('.brewing-status')
+    if (summary === null || progress === null || status === null) {
+      const title = document.createElement('h2')
+      title.textContent = 'Brewing Stand'
+      summary = document.createElement('p')
+      summary.dataset['testid'] = 'brewing-state'
+      progress = document.createElement('p')
+      progress.dataset['testid'] = 'brewing-progress'
+      const insert = document.createElement('button')
+      insert.type = 'button'
+      insert.dataset['brewingAction'] = 'insert'
+      insert.textContent = 'Insert selected item'
+      const collect = document.createElement('button')
+      collect.type = 'button'
+      collect.dataset['brewingAction'] = 'collect'
+      collect.textContent = 'Collect bottle'
+      const drink = document.createElement('button')
+      drink.type = 'button'
+      drink.dataset['brewingAction'] = 'drink'
+      drink.textContent = 'Drink potion'
+      const close = document.createElement('button')
+      close.type = 'button'
+      close.dataset['brewingAction'] = 'close'
+      close.textContent = 'Close'
+      status = document.createElement('p')
+      status.className = 'brewing-status'
+      status.setAttribute('role', 'status')
+      brewingParent.replaceChildren(title, summary, progress, insert, collect, drink, close, status)
+    }
+    summary.textContent = `Fuel: ${String(state.fuelUnits)} | Bottle: ${brewingBottleLabel(state.bottle)} | Ingredient: ${state.ingredient ?? 'Empty'}`
+    progress.textContent = state.brewing === undefined
+      ? 'Idle'
+      : `Brewing ${state.brewing.output}: ${state.brewing.remainingSecs.toFixed(1)}s`
+    status.textContent = brewingStatus
+  }
+
+  const setBrewingOpen = (open: boolean): void => {
+    if (open && playerIsDead()) return
+    if (open && tradeOpen) setTradeOpen(false)
+    if (open && inventoryOpen) setInventoryOpen(false)
+    brewingOpen = open
+    brewingStatus = ''
+    brewingParent.hidden = !open
+    brewingParent.setAttribute('aria-hidden', String(!open))
+    document.body.setAttribute('data-brewing-open', String(open))
+    renderBrewingUi()
+    renderCrosshair()
+    syncTouchControls()
+    if (open && document.pointerLockElement === canvas) document.exitPointerLock()
+  }
+
+  brewingParent.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return
+    const action = event.target.closest<HTMLElement>('[data-brewing-action]')
+      ?.dataset['brewingAction']
+    if (action === undefined) return
+    if (action === 'close') {
+      setBrewingOpen(false)
+      return
+    }
+    if (action === 'insert') {
+      const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
+      if (selected === undefined) {
+        brewingStatus = 'Select brewing fuel, a bottle, or an ingredient'
+        renderBrewingUi()
+        return
+      }
+      const bottle = brewingBottleFromItem(selected.item)
+      const ingredients: ReadonlySet<string> = new Set([
+        'nether_wart', 'sugar', 'spider_eye', 'ghast_tear',
+      ])
+      if (selected.item !== 'blaze_powder' && bottle === undefined && !ingredients.has(selected.item)) {
+        brewingStatus = 'That item cannot be used for brewing'
+        renderBrewingUi()
+        return
+      }
+      const removal = Effect.runSync(
+        world.inventory.removeAt(selectedHotbarIndex, selected.item, 1),
+      )
+      if (removal._tag !== 'Removed' || removal.removed !== 1) {
+        brewingStatus = 'The selected item is no longer available'
+        renderBrewingUi()
+        return
+      }
+      const result = selected.item === 'blaze_powder'
+        ? Effect.runSync(insertBrewingFuel(gameplayState))
+        : bottle !== undefined
+          ? Effect.runSync(insertBrewingBottle(gameplayState, bottle))
+          : Effect.runSync(insertBrewingIngredient(gameplayState, selected.item as BrewingIngredient))
+      if (result._tag === 'Rejected') {
+        const leftover = Effect.runSync(world.inventory.add(selected.item, 1))
+        if (leftover !== 0) throw new Error('Failed to restore rejected brewing item')
+        brewingStatus = `Cannot insert item: ${result.reason}`
+      } else {
+        brewingStatus = `Inserted ${selected.item}`
+        markSessionDirty()
+      }
+      renderBrewingUi()
+      renderPlayerUi()
+      return
+    }
+    if (action === 'collect') {
+      const result = Effect.runSync(collectBrewingPotion(gameplayState))
+      if (result._tag === 'Rejected') {
+        brewingStatus = `Cannot collect bottle: ${result.reason}`
+      } else {
+        const leftover = Effect.runSync(world.inventory.add(result.returned.item, 1))
+        if (leftover === 0) {
+          brewingStatus = `Collected ${result.returned.item}`
+          markSessionDirty()
+        } else {
+          const bottle = brewingBottleFromItem(result.returned.item)
+          if (bottle === undefined) throw new Error('Collected an invalid brewing bottle')
+          const restored = Effect.runSync(insertBrewingBottle(gameplayState, bottle))
+          if (restored._tag !== 'Accepted') throw new Error('Failed to restore uncollected potion')
+          brewingStatus = 'Inventory is full'
+        }
+      }
+      renderBrewingUi()
+      renderPlayerUi()
+      return
+    }
+    if (action === 'drink') {
+      const result = Effect.runSync(useBrewingPotion(gameplayState))
+      brewingStatus = result._tag === 'Consumed'
+        ? `Drank ${result.consumed.item}`
+        : `Cannot drink bottle: ${result.reason}`
+      if (result._tag === 'Consumed') markSessionDirty()
+      renderBrewingUi()
+      renderPlayerUi()
+    }
+  })
+
   let selectedHotbarIndex = 0
   let miningProgress: MiningProgressState | null = null
   let primaryAttackGestureConsumed = false
@@ -2260,7 +2450,7 @@ const bootGame = async (
     nowSecs = Effect.runSync(browserClock.monotonicSecs),
   ): void => {
     crosshair.render(crosshairViewModel({
-      modals: paused ? ['pause'] : inventoryOpen || tradeOpen ? ['inventory'] : [],
+      modals: paused ? ['pause'] : inventoryOpen || tradeOpen || brewingOpen ? ['inventory'] : [],
       lastHitAtSecs: undefined,
       breakProgress:
         miningProgress === null ? undefined : miningProgressFraction(miningProgress),
@@ -2281,6 +2471,36 @@ const bootGame = async (
     onInventoryChanged: () => markSessionDirty(),
   })
   const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
+  const targetedBrewingStand = (): Effect.Effect<boolean> => Effect.gen(function* () {
+    const pose = yield* playerApi.pose
+    const candidates: Array<{ x: number; y: number; z: number }> = []
+    const visited = new Set<string>()
+    const coordinateKey = (x: number, y: number, z: number): string => `${x},${y},${z}`
+    targetBlockFromPlayerPose(pose, DEFAULT_BLOCK_REACH, (x, y, z) => {
+      const key = coordinateKey(x, y, z)
+      if (!visited.has(key)) {
+        visited.add(key)
+        candidates.push({ x, y, z })
+      }
+      return false
+    })
+    const targetable = new Set<string>()
+    for (const position of candidates) {
+      const reading = yield* currentChunkStore.getBlock(position)
+      if (reading._tag === 'Block' && reading.block !== 0) {
+        targetable.add(coordinateKey(position.x, position.y, position.z))
+        break
+      }
+    }
+    const target = targetBlockFromPlayerPose(
+      pose,
+      DEFAULT_BLOCK_REACH,
+      (x, y, z) => targetable.has(coordinateKey(x, y, z)),
+    )
+    if (Option.isNone(target)) return false
+    const reading = yield* currentChunkStore.getBlock(target.value.position)
+    return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'brewing_stand'
+  })
   let touchControlsVisible = false
   const resetTouchInput = (
     reason: Parameters<typeof resetTouchLook>[1],
@@ -2294,7 +2514,7 @@ const bootGame = async (
       touchAvailable,
       playing: true,
       dead: playerIsDead(),
-      inventoryOpen: inventoryOpen || tradeOpen,
+      inventoryOpen: inventoryOpen || tradeOpen || brewingOpen,
       paused,
     })
     const wasVisible = touchControlsVisible
@@ -2306,12 +2526,20 @@ const bootGame = async (
   }
   const applyPlayerDamage = (
     damage: Parameters<typeof world.vitals.damage>[0],
+    minimumHealthPoints = 0,
   ): void => {
     if (isCreativeMode) return
     const equipment = Effect.runSync(world.inventory.equipmentSnapshot)
     const reducedDamage = applyArmorToDamage(damage, armorPointsForEquipment(equipment))
     const healthBefore = Effect.runSync(world.vitals.view).healthPoints
     Effect.runSync(world.vitals.damage(reducedDamage))
+    const damagedVitals = Effect.runSync(world.vitals.snapshot)
+    if (damagedVitals.healthPoints < minimumHealthPoints) {
+      Effect.runSync(world.vitals.restore({
+        ...damagedVitals,
+        healthPoints: minimumHealthPoints,
+      }))
+    }
     const healthAfter = Effect.runSync(world.vitals.view).healthPoints
     if (healthAfter < healthBefore) {
       const wear = armorDurabilityWearFromPreMitigationDamage(damage)
@@ -2367,6 +2595,14 @@ const bootGame = async (
         .map((slot, slotIndex) => slotSnapshotOf(slot, durabilityBySlot.get(slotIndex))),
       selectedHotbarIndex,
     }))
+    const activeEffects = Effect.runSync(snapshotStatusEffects(gameplayState)).effects
+    statusEffectsHud.hidden = activeEffects.length === 0
+    statusEffectsHud.textContent = activeEffects
+      .map((effect) => `${effect.type}: ${Math.ceil(effect.remainingSecs)}s`)
+      .join(' | ')
+    document.body.setAttribute('data-status-effects', activeEffects
+      .map((effect) => `${effect.type}:${Math.ceil(effect.remainingSecs)}`)
+      .join(','))
     inventoryView.root.style.setProperty(
       'display', inventoryMode === 'furnace' || inventoryMode === 'chest' ? 'none' : '',
     )
@@ -2726,6 +2962,7 @@ const bootGame = async (
     if (open && playerIsDead()) return
     if (open && bowInteractionLocked()) return
     if (open && tradeOpen) setTradeOpen(false)
+    if (open && brewingOpen) setBrewingOpen(false)
     const previousOpen = inventoryOpen
     const switchingMode = open && previousOpen && inventoryMode !== mode
     if (previousOpen === open && !switchingMode) return
@@ -2890,6 +3127,10 @@ const bootGame = async (
   }
 
   const handlePauseRequest = (): void => {
+    if (brewingOpen) {
+      setBrewingOpen(false)
+      return
+    }
     if (tradeOpen) {
       setTradeOpen(false)
       return
@@ -3073,6 +3314,8 @@ const bootGame = async (
       },
       villagers: [...villagerResidents.values()],
       villagerTrades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
+      brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
+      statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
       entityCount: entities.length,
       renderedEntities: entityRenderProjection(),
       mobDrops: observedMobDrops.map(({ renderId: _, ...drop }) => drop),
@@ -3473,6 +3716,37 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedBrewingEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('brewing_stand')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('blaze_powder', 2))
+    Effect.runSync(world.inventory.add('water_bottle', 1))
+    Effect.runSync(world.inventory.add('nether_wart', 1))
+    Effect.runSync(world.inventory.add('spider_eye', 1))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    Effect.runSync(restoreBrewingStand(gameplayState, emptyBrewingStandState()))
+    Effect.runSync(restoreStatusEffects(gameplayState, emptyStatusEffectState()))
+    setBrewingOpen(false)
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
   const grantNearestVillagerTradeInput = () => {
     const pose = Effect.runSync(playerApi.pose)
     const villager = nearestVillagerForTrade(pose.feetPosition, 'overworld')
@@ -3803,6 +4077,7 @@ const bootGame = async (
           renderPlayerUi()
           return gameplaySnapshot()
         },
+        seedBrewingEncounter,
       },
     },
     {
@@ -3932,6 +4207,7 @@ const bootGame = async (
     syncTouchControls()
     if (dead) {
       if (inventoryOpen) setInventoryOpen(false)
+      if (brewingOpen) setBrewingOpen(false)
       if (document.pointerLockElement === canvas) document.exitPointerLock()
     }
 
@@ -3953,21 +4229,25 @@ const bootGame = async (
     }
 
     const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
-      !dead && !inventoryOpen && !tradeOpen && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
+      !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+        && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
 
     const attackTriggered =
-      !dead && !inventoryOpen && !tradeOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
+      !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+      && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
     const attackHeld = held('attack') > 0
     if (!attackHeld) resetPrimaryAttackGesture()
     const useTriggered =
-      !dead && !inventoryOpen && !tradeOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))
+      !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+      && Effect.runSync(inputApi.wasActionJustTriggered('use'))
     const useHeld = held('use') > 0
     const lookDelta = {
       x: walk.pointerDelta.x + consumedTouchLook.delta.x,
       y: walk.pointerDelta.y + consumedTouchLook.delta.y,
     }
-    const looked = !dead && !inventoryOpen && !tradeOpen && (lookDelta.x !== 0 || lookDelta.y !== 0)
-    if (!dead && !inventoryOpen && !tradeOpen) {
+    const looked = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+      && (lookDelta.x !== 0 || lookDelta.y !== 0)
+    if (!dead && !inventoryOpen && !tradeOpen && !brewingOpen) {
       Effect.runSync(playerApi.look(
         -lookDelta.x * LOOK_SENSITIVITY * playerSettings.sensitivity,
         -lookDelta.y * LOOK_SENSITIVITY * playerSettings.sensitivity,
@@ -3981,7 +4261,13 @@ const bootGame = async (
     }))
     Effect.runSync(Ref.set(simState.jumpIntent, held('jump') > 0))
     Effect.runSync(
-      Ref.set(simState.physicsConfig, dead ? Option.none() : Option.some(simPhysicsConfig)),
+      Ref.set(simState.physicsConfig, dead
+        ? Option.none()
+        : Option.some({
+            ...simPhysicsConfig,
+            walkSpeed: simPhysicsConfig.walkSpeed
+              * Effect.runSync(getPlayerMovementSpeedMultiplier(gameplayState)),
+          })),
     )
     Effect.runSync(Ref.set(gameplayState.timeOfDay, Effect.runSync(time.timeOfDay)))
     const weatherBeforeFrame = Effect.runSync(weather.snapshot)
@@ -4165,7 +4451,19 @@ const bootGame = async (
 
     const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
     for (const event of playerDamages) {
-      applyPlayerDamage(event.damage)
+      applyPlayerDamage(
+        event.damage,
+        event._tag === 'StatusEffect' ? event.minimumHealthPoints : 0,
+      )
+    }
+    const playerHeals = Effect.runSync(drainPlayerHeals(gameplayState))
+    for (const event of playerHeals) {
+      const vitals = Effect.runSync(world.vitals.view)
+      const allowed = Math.max(
+        0,
+        Math.min(event.maximumHealthPoints, vitals.maxHealthPoints) - vitals.healthPoints,
+      )
+      if (allowed > 0) Effect.runSync(world.vitals.heal(Math.min(event.amount, allowed)))
     }
     if (playerDamages.length > 0) {
       markSessionDirty()
@@ -4444,10 +4742,13 @@ const bootGame = async (
       && !bowAdvance.capturedUse
       && pendingBowShots.size === 0
     ) {
-      const route = Effect.runSync(
-        targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH),
-      )
-      if (route?.kind === 'craftingTable') {
+      const opensBrewing = Effect.runSync(targetedBrewingStand())
+      const route = opensBrewing
+        ? undefined
+        : Effect.runSync(targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH))
+      if (opensBrewing) {
+        setBrewingOpen(true)
+      } else if (route?.kind === 'craftingTable') {
         setInventoryOpen(true, 'craftingTable')
       } else if (route?.kind === 'furnace') {
         const dimension = Effect.runSync(playerApi.dimension)
@@ -4779,8 +5080,15 @@ const bootGame = async (
       nextMobDropId += 1
       observedMobDrops.push({ ...drop, renderId: `mob-drop-${nextMobDropId}` })
     }
+    const mobExperience = Effect.runSync(drainMobExperience(gameplayState))
+    for (const event of mobExperience) {
+      const currentVitals = Effect.runSync(world.vitals.snapshot)
+      Effect.runSync(world.vitals.restore(addVitalsExperience(currentVitals, event.amount)))
+    }
+    if (mobExperience.length > 0 || playerHeals.length > 0) markSessionDirty()
 
     Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
+    if (brewingOpen) renderBrewingUi()
     renderPlayerUi()
     renderCrosshair(nowSecs)
     const captions = playerSettings.captionsEnabled ? audio.visible(nowSecs) : []

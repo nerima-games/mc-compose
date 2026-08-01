@@ -44,15 +44,19 @@ import {
 } from '@nerima-games/mc-worldgen'
 import {
   emptyVillagerTradeState,
+  emptyBrewingStandState,
+  emptyStatusEffectState,
   isValidPlayerVitals,
   SPAWN_PLAYER_VITALS,
   type PlayerVitals,
+  type BrewingStandState,
+  type StatusEffectState,
   type VillagerProfession,
   type VillagerTradeState,
 } from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
-export const SESSION_FORMAT_VERSION = 14
+export const SESSION_FORMAT_VERSION = 15
 
 export type SessionPosition = {
   readonly x: number
@@ -193,6 +197,8 @@ export type SessionState = {
   readonly crops: CropSnapshot
   readonly entities: PersistedEntityRoster
   readonly villagers: PersistedVillagerState
+  readonly brewing: BrewingStandState
+  readonly statusEffects: StatusEffectState
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -357,6 +363,8 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   crops: CropSnapshotSchema,
   entities: Schema.Unknown as unknown as Schema.Schema<PersistedEntityRoster>,
   villagers: Schema.Unknown as unknown as Schema.Schema<PersistedVillagerState>,
+  brewing: Schema.Unknown as unknown as Schema.Schema<BrewingStandState>,
+  statusEffects: Schema.Unknown as unknown as Schema.Schema<StatusEffectState>,
 })
 
 export type SessionChunkManifestEntry = {
@@ -692,6 +700,30 @@ const migrateSessionV13ToV14: Migration = {
   },
 }
 
+const migrateSessionV14ToV15: Migration = {
+  from: 14,
+  describe: 'add brewing stand and player status effects',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v14 payload must contain an object state')
+    }
+    return Effect.succeed({
+      ...head,
+      state: {
+        ...state,
+        brewing: Object.prototype.hasOwnProperty.call(state, 'brewing')
+          ? state['brewing']
+          : emptyBrewingStandState(),
+        statusEffects: Object.prototype.hasOwnProperty.call(state, 'statusEffects')
+          ? state['statusEffects']
+          : emptyStatusEffectState(),
+      },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
   version: SESSION_FORMAT_VERSION,
@@ -710,6 +742,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV11ToV12,
     migrateSessionV12ToV13,
     migrateSessionV13ToV14,
+    migrateSessionV14ToV15,
   ],
 })
 

@@ -266,6 +266,60 @@
         pointer-events: auto;
       }
 
+      #brewing-root {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        z-index: 31;
+        display: grid;
+        width: min(460px, calc(100vw - 40px));
+        box-sizing: border-box;
+        gap: 9px;
+        padding: 22px;
+        transform: translate(-50%, -50%);
+        border: 2px solid #8b7854;
+        background: #262116;
+        box-shadow: 0 20px 70px rgba(0, 0, 0, 0.68);
+        pointer-events: auto;
+      }
+
+      #brewing-root[hidden] {
+        display: none;
+      }
+
+      #brewing-root h2 {
+        margin: 0;
+        color: #f2dfae;
+        font-size: 18px;
+      }
+
+      #brewing-root button {
+        min-height: 42px;
+        border: 1px solid #b6a172;
+        background: #443923;
+        color: #fff8df;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .brewing-status {
+        min-height: 1.4em;
+        margin: 0;
+        color: #dfcf9d;
+      }
+
+      #status-effects-hud {
+        position: fixed;
+        top: 18px;
+        right: 18px;
+        padding: 8px 11px;
+        border: 1px solid rgba(238, 223, 174, 0.55);
+        background: rgba(28, 24, 16, 0.78);
+        color: #f2dfae;
+        font-size: 13px;
+        text-transform: capitalize;
+      }
+
       #trade-root h2 {
         margin: 0 0 14px;
         color: #f2dfae;
@@ -578,6 +632,7 @@
       <div id="hud-root"></div>
       <div id="inventory-root" hidden></div>
       <div id="trade-root" hidden></div>
+      <div id="brewing-root" hidden></div>
       <div
         id="sound-captions"
         role="status"

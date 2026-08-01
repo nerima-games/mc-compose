@@ -212,10 +212,20 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
       ...published.vitals,
       foodTimerSecs: expect.any(Number),
     },
+    villagerTrades: {
+      ...published.villagerTrades,
+      restockElapsedSecs: expect.any(Number),
+    },
   })
   expect(Math.abs(restored.weather.remainingSecs - published.weather.remainingSecs)).toBeLessThan(5)
   expect(restored.vitals.foodTimerSecs).toBeGreaterThanOrEqual(0)
   expect(restored.vitals.foodTimerSecs).toBeLessThan(4)
+  expect(restored.villagerTrades.restockElapsedSecs).toBeGreaterThan(0)
+  expect(
+    Math.abs(
+      restored.villagerTrades.restockElapsedSecs - published.villagerTrades.restockElapsedSecs,
+    ),
+  ).toBeLessThan(1)
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })
