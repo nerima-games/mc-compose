@@ -244,9 +244,9 @@ import {
   EMPTY_MODULE_LAYER,
   registerModule,
   type GameModule,
-} from '../../domain/composition'
-import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../domain/kernel-vocabulary'
-import { buildQaRegistry, describeQaApiError, installQaApi } from '../../domain/qa-api'
+} from '../../src/domain/composition'
+import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../src/domain/kernel-vocabulary'
+import { buildQaRegistry, describeQaApiError, installQaApi } from '../../src/domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
 import {
   makeBrowserWebSocketTransport,
@@ -1306,8 +1306,8 @@ const bootGame = async (
   // assign to `ModuleLayer`: `Layer` declares `in ROut` contravariantly, so the
   // empty Layer is the single case where `any` would have to assign to `never`.
   // `domain/composition.ts` exports the constant precisely so that the cast
-  // lives in one place — and `pnpm typecheck:app` caught this the first time,
-  // which is the whole argument for that project existing.
+  // lives in one place — and `pnpm typecheck:preview` caught this the first
+  // time, which is the whole argument for that project existing.
   const registeredUi = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mx-ui',

@@ -29,26 +29,26 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
-import { ORG_SCOPE, REPOSITORY_POLICY } from './scripts/check-dependency-whitelist'
+import { DEV_SERVER_RESOLVED_SIBLINGS, ORG_SCOPE } from './scripts/dev-server-siblings'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
 /**
  * The siblings the entry point composes.
  *
- * DERIVED from the gate's own `devServerResolved` set rather than restated.
- * docs/e2e-triage.md §2.1 keeps a running tally of what it costs this project
- * when the same fact is written in more than one place — "同じことを述べる場所が
- * 3 つある" — and this fact has two natural homes: the list vite aliases and the
- * list check:deps waives a declaration for. If they disagreed, the failure would
- * be an import that resolves in the browser and fails the gate, or the reverse.
- * So there is one list, it lives with the gate, and this derives from it.
+ * DERIVED from `scripts/dev-server-siblings.ts`'s `DEV_SERVER_RESOLVED_SIBLINGS`
+ * rather than restated. That module used to be a single constant inside
+ * `scripts/check-dependency-whitelist.ts` — the cross-repo import gate that
+ * org policy has since retired in favour of `oxlint.json`'s
+ * `no-restricted-imports` (DEPENDENCY_POLICY.md §5) — but the sibling roster
+ * itself is still one fact with one home, now `scripts/dev-server-siblings.ts`,
+ * so that this list and any future reader of the roster cannot disagree.
  *
  * The set includes the host-boundary persistence packages because the browser
  * session imports their public storage and regeneration APIs directly.
  */
 export const COMPOSED_SIBLINGS: ReadonlyArray<string> = [
-  ...REPOSITORY_POLICY.devServerResolved,
+  ...DEV_SERVER_RESOLVED_SIBLINGS,
 ].map((packageName) => packageName.slice(`${ORG_SCOPE}/`.length))
 
 const candidateRoots = (): ReadonlyArray<string> => {
@@ -61,7 +61,11 @@ const candidateRoots = (): ReadonlyArray<string> => {
   return declared.filter((root): root is string => root !== undefined)
 }
 
-const entryPointOf = (root: string, sibling: string): string => path.join(root, sibling, 'index.ts')
+// `src/index.ts`, not `index.ts`: every one of the composed siblings has
+// migrated to the org's `src/` layout (PACKAGE_STANDARD.md "なぜ `src/` か"),
+// so this assumes the org-standard entry point unconditionally rather than
+// probing for the pre-migration location.
+const entryPointOf = (root: string, sibling: string): string => path.join(root, sibling, 'src', 'index.ts')
 
 /**
  * Pick the first root that has EVERY composed sibling in it.

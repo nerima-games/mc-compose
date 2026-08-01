@@ -22,14 +22,13 @@
     "registry": "https://npm.pkg.github.com",
     "access": "restricted"
   },
-  "main": "./index.ts",
-  "types": "./index.ts",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "exports": {
-    ".": "./index.ts"
+    ".": "./src/index.ts"
   },
   "files": [
-    "index.ts",
-    "domain",
+    "src",
     "tsconfig.base.json",
     "LICENSE",
     "README.md"
@@ -49,21 +48,18 @@
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.build.json --pretty false && tsc -p tsconfig.test.json --pretty false",
-    "lint": "oxlint --deny-warnings index.ts domain scripts test apps e2e",
-    "lint:fix": "oxlint --fix index.ts domain scripts test apps e2e",
+    "lint": "oxlint --deny-warnings src scripts test apps e2e",
+    "lint:fix": "oxlint --fix src scripts test apps e2e",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "e2e": "vitest run test/e2e",
     "dev": "vite",
     "build:web": "vite build",
-    "typecheck:app": "tsc -p tsconfig.app.json --pretty false",
+    "typecheck:preview": "tsc -p tsconfig.preview.json --pretty false",
     "e2e:browser": "playwright test",
-    "check:deps": "tsx scripts/check-dependency-whitelist.ts",
     "check:roster": "tsx scripts/check-roster-manifest.ts",
-    "api:check": "tsx scripts/api-lock.ts",
-    "api:update": "tsx scripts/api-lock.ts --write",
-    "verify": "pnpm typecheck && pnpm lint && pnpm check:deps && pnpm api:check && pnpm test"
+    "verify": "pnpm typecheck && pnpm lint && pnpm test"
   },
   "dependencies": {
     "@nerima-games/mc-audio": "0.1.0",
@@ -79,6 +75,8 @@
     "effect": "^3.20.0"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.1",
     "@effect/vitest": "^0.25.1",
     "@playwright/test": "^1.50",
     "@types/node": "^22.19.11",

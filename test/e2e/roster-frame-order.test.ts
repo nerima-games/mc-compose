@@ -51,21 +51,21 @@ import {
   EMPTY_MODULE_LAYER,
   type ComposedGame,
   type GameModule,
-} from '../../domain/composition'
+} from '../../src/domain/composition'
 import {
   EpochMillis,
   FixedClockLayer,
   MonotonicTimeSecs,
   type FrameServices,
-} from '../../domain/kernel-vocabulary'
+} from '../../src/domain/kernel-vocabulary'
 import {
   describeStageOrderError,
   phaseOf,
   StageId,
   stagePhase,
   type StageOrderError,
-} from '../../domain/stage-order'
-import { STANDARD_STAGE_SKELETON } from '../../domain/stage-skeleton'
+} from '../../src/domain/stage-order'
+import { STANDARD_STAGE_SKELETON } from '../../src/domain/stage-skeleton'
 import {
   EXPECTED_PHASE_OF,
   PLAN_4_2_FRAME,

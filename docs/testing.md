@@ -165,7 +165,7 @@ mc-render が登録するのは `render:input` / `render:camera-mirror` / `rende
 | `pnpm e2e`(= `vitest run test/e2e`) | マニフェストが §4.2 のフレームに合成されるか | **入る**。`effect` と自分の `domain/` しか要らない純粋なテストで、`pnpm test` のグロブが既に拾う |
 | `pnpm check:roster` | マニフェストが兄弟リポジトリの**実ソース**と一致するか(id・`after`・`file:line` の 26 箇所すべて) | **入らない**。兄弟リポジトリのチェックアウトが要る |
 | `pnpm e2e:browser`(= `playwright test`) | **合成済みのゲームが実ブラウザで起動し、フレームが回るか**([e2e-triage.md](./e2e-triage.md) §3.1) | **入らない**。Chromium と dev サーバと**兄弟リポジトリのチェックアウト**が要る |
-| `pnpm typecheck:app` | `apps/` と `e2e/` が型として通るか(`tsconfig.app.json`) | **入らない**。同上 — 兄弟の `index.ts` を `paths` で解決する |
+| `pnpm typecheck:preview` | `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) | **入らない**。同上 — 兄弟の `index.ts` を `paths` で解決する |
 
 `pnpm check:roster` を `verify` に入れない理由は 1 つで、
 **mc-compose の CI は mc-compose しか clone しない**からである。
@@ -189,7 +189,7 @@ CI で走れないゲートを CI が走らせるゲートに入れると、`pnp
 ファイルシステムで検証しており、これは CI で走る。
 **テストされていない腐り検出器は、それが守るはずだった腐ったマニフェストと同じ価値しか無い。**
 
-`pnpm e2e:browser` と `pnpm typecheck:app` が `verify` の外にあるのは
+`pnpm e2e:browser` と `pnpm typecheck:preview` が `verify` の外にあるのは
 **`check:roster` と同じ 1 つの理由**である。`check:mirrors` / `check:repoint` が
 mc-dev-meta で置いた先例もこれと同じ形で、そちらは
 `mc-dev-meta/scripts/check-repoint.ts` のヘッダが理由を書いている。

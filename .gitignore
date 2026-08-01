@@ -3,6 +3,7 @@
 # Tool caches
 .serena/
 .sisyphus/
+.corepack/
 
 # devenv / direnv
 .devenv/
@@ -63,3 +64,4 @@ pnpm-debug.log*
 # System files
 .DS_Store
 Thumbs.db
+.worktrees/

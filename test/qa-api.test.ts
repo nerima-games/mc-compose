@@ -10,7 +10,7 @@ import {
   type QaApiError,
   type QaNamespace,
   type QaRegistry,
-} from '../domain/qa-api'
+} from '../src/domain/qa-api'
 
 const noop = (): unknown => undefined
 
