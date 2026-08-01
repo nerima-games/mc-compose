@@ -66,9 +66,9 @@
  */
 
 import { Effect, Ref } from 'effect'
-import { EMPTY_MODULE_LAYER, type GameModule, type StageRegistration } from '../../domain/composition'
-import { monotonicSecs } from '../../domain/kernel-vocabulary'
-import { StageId } from '../../domain/stage-order'
+import { EMPTY_MODULE_LAYER, type GameModule, type StageRegistration } from '../../src/domain/composition'
+import { monotonicSecs } from '../../src/domain/kernel-vocabulary'
+import { StageId } from '../../src/domain/stage-order'
 
 /** One `StageRegistration` as some repository actually writes it down. */
 export type RosterStage = {

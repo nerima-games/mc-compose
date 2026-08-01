@@ -30,7 +30,7 @@ import {
   EpochMillis,
   MonotonicTimeSecs,
   type ClockService,
-} from '../../domain/kernel-vocabulary'
+} from '../../src/domain/kernel-vocabulary'
 
 /**
  * `performance.now()` is milliseconds since the page's time origin; the Port is

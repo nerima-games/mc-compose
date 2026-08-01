@@ -10,16 +10,16 @@ import {
   type ComposedGame,
   type GameModule,
   type StageRegistration,
-} from '../domain/composition'
+} from '../src/domain/composition'
 import {
   EpochMillis,
   FixedClockLayer,
   monotonicSecs,
   MonotonicTimeSecs,
   type FrameServices,
-} from '../domain/kernel-vocabulary'
-import { StageId, type StageOrderError, type StagePhase } from '../domain/stage-order'
-import { STAGE_HUD_SYNC, STAGE_INPUT, STAGE_RENDER, STANDARD_STAGE_SKELETON } from '../domain/stage-skeleton'
+} from '../src/domain/kernel-vocabulary'
+import { StageId, type StageOrderError, type StagePhase } from '../src/domain/stage-order'
+import { STAGE_HUD_SYNC, STAGE_INPUT, STAGE_RENDER, STANDARD_STAGE_SKELETON } from '../src/domain/stage-skeleton'
 
 const id = (value: string): StageId => StageId(value)
 

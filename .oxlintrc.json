@@ -1,0 +1,184 @@
+{
+  "$schema": "https://oxc-project.github.io/oxc/schema/linter.json",
+  // oxlint is the ONLY lint/format configuration in this repository.
+  // There is deliberately no prettier, no biome and no .editorconfig.
+  //
+  // NOTE on the `Date.now()` ban (see README 現状): `scripts/check-dependency-whitelist.ts`
+  // used to enforce this (it banned Date.now() / new Date() / performance.now() in favour of
+  // the injected clock Port). That script was removed org-wide in favour of oxlint's
+  // `no-restricted-imports` for the cross-repo dependency graph (DEPENDENCY_POLICY.md §5,
+  // PACKAGE_STANDARD.md "scripts/check-dependency-whitelist.ts の廃止"), which does not cover
+  // raw clock reads. oxlint 0.12 does not implement `no-restricted-syntax` or
+  // `no-restricted-properties`, and while `no-restricted-globals` is listed by
+  // `oxlint --rules` it is not implemented either (no checkmark; verified empirically
+  // against oxlint 0.12.0: a file containing `Date.now()` produces 0 diagnostics under all
+  // three rules). Per org policy this ban is not required to have a replacement script
+  // (PACKAGE_STANDARD.md leaves it to each repository's discretion); none is added here.
+  // When oxlint gains `no-restricted-syntax`, this is the place to add the ban.
+  "env": {
+    "es2022": true,
+    "node": true
+  },
+  "settings": {
+    "typescript": {
+      "version": "5.9"
+    }
+  },
+  "plugins": [],
+  "categories": {
+    "correctness": "warn",
+    "suspicious": "warn",
+    "perf": "warn",
+    "style": "warn",
+    "restriction": "warn"
+  },
+  "rules": {
+    // TypeScript-specific rules
+    // Prefer `type` over `interface` for pure data types (Schema.Struct pattern).
+    "@typescript-eslint/consistent-type-definitions": ["warn", "type"],
+    "@typescript-eslint/no-explicit-any": "off",
+    "@typescript-eslint/no-unused-vars": "warn",
+    "@typescript-eslint/no-floating-promises": "warn",
+    "@typescript-eslint/no-misused-new": "warn",
+    "@typescript-eslint/no-unnecessary-type-assertion": "warn",
+    "@typescript-eslint/no-var-requires": "warn",
+    "@typescript-eslint/prefer-enum-initializers": "warn",
+    "@typescript-eslint/prefer-for-of": "warn",
+    "@typescript-eslint/prefer-literal-enum-member": "warn",
+
+    // Correctness
+    "no-array-constructor": "warn",
+    "no-empty": "warn",
+    "no-eq-null": "warn",
+    "no-extra-boolean-cast": "warn",
+    "no-fallthrough": "warn",
+    "no-irregular-whitespace": "warn",
+    "no-self-compare": "warn",
+    "no-throw-literal": "warn",
+    "no-unreachable": "warn",
+    "use-isnan": "warn",
+    "valid-typeof": "warn",
+
+    // Suspicious
+    "no-console": "warn",
+    "no-debugger": "warn",
+    "no-empty-function": "warn",
+    "no-empty-pattern": "warn",
+    "no-eval": "error",
+    "no-implied-eval": "error",
+    "no-redeclare": "warn",
+    "no-shadow": "warn",
+    "no-unreachable-loop": "warn",
+    "no-unused-private-class-members": "warn",
+
+    // Performance
+    "no-await-in-loop": "warn",
+    "no-loop-func": "warn",
+    "no-promise-executor-return": "warn",
+    "no-sync": "warn",
+
+    // Style
+    "array-bracket-spacing": "warn",
+    "block-spacing": "warn",
+    "brace-style": ["warn", "1tbs", { "allowSingleLine": true }],
+    "camelcase": "warn",
+    "comma-dangle": ["warn", "always-multiline"],
+    "comma-spacing": "warn",
+    "comma-style": "warn",
+    "computed-property-spacing": "warn",
+    "eol-last": "warn",
+    "func-call-spacing": "warn",
+    "indent": "off",
+    "key-spacing": "warn",
+    "keyword-spacing": "warn",
+    "linebreak-style": ["warn", "unix"],
+    "lines-between-class-members": "warn",
+    "no-array-method-this-argument": "warn",
+    "no-bitwise": "warn",
+    "no-mixed-spaces-and-tabs": "error",
+    "no-new-object": "warn",
+    "no-tabs": "error",
+    "no-trailing-spaces": "warn",
+    "no-whitespace-before-property": "warn",
+    "object-curly-spacing": ["warn", "always"],
+    "one-var": ["warn", "never"],
+    "operator-linebreak": "warn",
+    "padded-blocks": ["warn", "never"],
+    "quote-props": ["warn", "as-needed"],
+    "semi-spacing": "warn",
+    "space-before-blocks": "warn",
+    "space-infix-ops": "warn",
+    "space-unary-ops": "warn",
+    "spaced-comment": "warn",
+
+    // Restriction
+    "default-case": "warn",
+    "default-case-last": "warn",
+    "no-empty-character-class": "warn",
+    // Declared for intent and for the day oxlint implements it; inert in 0.12
+    // (listed by `oxlint --rules` but unchecked; verified empirically). There is
+    // deliberately no replacement script: `scripts/check-dependency-whitelist.ts`,
+    // which used to be the real enforcement here, was deleted org-wide by this
+    // same migration (DEPENDENCY_POLICY.md §5) and is not coming back.
+    "no-restricted-globals": ["warn", "name", "open", "close", "event"],
+    // mc-compose is Tier4, the apex of the dependency graph (DEPENDENCY_POLICY.md §1): it
+    // may depend on mc-audio, mc-render, mc-save, mc-sim, mc-worldgen, mx-gameplay,
+    // mx-redstone, mx-ui and mx-multiplayer (all declared in package.json#dependencies),
+    // plus mc-kernel (universally importable, and therefore deliberately absent from both
+    // package.json's allowlist reasoning and this list — DEPENDENCY_POLICY.md §2 rule 5).
+    // Unlike every other Tier, there is close to nothing left to forbid here; the two
+    // `patterns` entries below are the two things that are NOT licensed even though they
+    // are reachable on disk. (The `effect` entry moved into `paths` here too — the bare
+    // object form used previously is not part of the rule's real schema, which requires
+    // `paths`/`patterns` wrapper keys; https://oxc.rs/docs/guide/usage/linter/rules/eslint/no-restricted-imports.)
+    //
+    // STATUS as of the file-rename fix (2026-08, this PR): this file is now named
+    // `.oxlintrc.json` (the only filename oxlint auto-discovers), which is a real fix for
+    // the previous `oxlint.json` (no dot) never being picked up. But on the oxlint version
+    // this repository actually pins (`^0.12.0`), that fix is not sufficient on its own:
+    // (1) 0.12.0's `--help` marks `-c/--config` as "(experimental)" and, verified
+    // empirically, does not auto-discover ANY filename without it — `oxlint --print-config`
+    // is byte-identical whether or not this file is present in the working directory;
+    // (2) even loaded explicitly via `-c .oxlintrc.json`, `no-restricted-imports` does not
+    // appear in `oxlint --rules` and does not fire for a file that plainly violates the
+    // `mc-playground-kit` pattern below — it is simply unimplemented in 0.12.0, the same
+    // situation as `no-restricted-globals` above. `pnpm lint` does not pass `-c`, so none of
+    // this — including the two patterns below — is mechanically enforced yet. Real
+    // enforcement needs the oxlint version bump `feat/modernize-toolchain` already carries
+    // (`oxlint: ^1.76.0`); this rule's shape here is written correctly (and kept permissive,
+    // per Tier4) so it takes effect with no further edits once that bump lands.
+    "no-restricted-imports": [
+      "warn",
+      {
+        "paths": [
+          {
+            "name": "effect",
+            "message": "Please use named imports from 'effect' package",
+            "importNames": ["default"]
+          }
+        ],
+        "patterns": [
+          {
+            "regex": "^@nerima-games/mc-playground-kit(/.*)?$",
+            "message": "mc-playground-kit is devDependency-only (DEPENDENCY_POLICY.md §3); it must never be imported from shipped composition code."
+          },
+          {
+            "regex": "^@nerima-games/(mc-noise|mc-meshing|mc-physics)(/.*)?$",
+            "message": "mc-compose reaches these only transitively through mc-worldgen/mc-sim/mc-render. Reaching through a dependency is not an import licence (DEPENDENCY_POLICY.md §2, no-transitive-closure)."
+          }
+        ]
+      }
+    ],
+    "prefer-template": "warn",
+
+    // Disabled rules (conflict with project style)
+    "@typescript-eslint/explicit-function-return-type": "off",
+    "@typescript-eslint/explicit-module-boundary-types": "off",
+    "@typescript-eslint/no-non-null-assertion": "off",
+    "no-case-declarations": "off",
+    "no-constant-condition": "off",
+    "no-param-reassign": "off",
+    "no-plusplus": "off"
+  },
+  "ignore": ["node_modules/**", "coverage/**", "dist/**", ".git/**", "*.config.ts", "docs/**"]
+}

@@ -11,7 +11,7 @@ import {
   type StageOrderError,
   type StageOrderPlan,
   type StagePhase,
-} from '../domain/stage-order'
+} from '../src/domain/stage-order'
 import {
   SIMULATION_STAGES,
   STAGE_CAMERA_MIRROR,
@@ -27,7 +27,7 @@ import {
   STAGE_SIM_REDSTONE,
   STAGE_SIM_TIME_WEATHER,
   STANDARD_STAGE_SKELETON,
-} from '../domain/stage-skeleton'
+} from '../src/domain/stage-skeleton'
 // The roster, transcribed from the siblings' source and kept honest by
 // `pnpm check:roster`. Imported rather than restated: the hand-written copy
 // this file used to carry named six stages nobody registers.

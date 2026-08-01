@@ -18,12 +18,12 @@ plan.md §3.15:
 
 | 責務 | 実装 |
 | --- | --- |
-| **stage 全順序の解決**(唯一の所有者、§2.3-3) | `domain/stage-order.ts` |
-| **stage 順序表**(§4.2 + ネットワーク 2 フェーズ。14 個の**フェーズ**の列) | `domain/stage-skeleton.ts` |
-| **Layer マージ** | `domain/composition.ts` |
-| セッションライフサイクル(タイトル ⇄ ゲーム) | `domain/session.ts` |
-| QA / デバッグ API | `domain/qa-api.ts` |
-| Modding 入口 | `domain/modding.ts` |
+| **stage 全順序の解決**(唯一の所有者、§2.3-3) | `src/domain/stage-order.ts` |
+| **stage 順序表**(§4.2 + ネットワーク 2 フェーズ。14 個の**フェーズ**の列) | `src/domain/stage-skeleton.ts` |
+| **Layer マージ** | `src/domain/composition.ts` |
+| セッションライフサイクル(タイトル ⇄ ゲーム) | `src/domain/session.ts` |
+| QA / デバッグ API | `src/domain/qa-api.ts` |
+| Modding 入口 | `src/domain/modding.ts` |
 | **E2E**(最終ゲート) | 未実装 |
 
 **ゲームルールは 1 行も持たない。**
@@ -40,16 +40,26 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 経緯は [docs/architecture.md](./docs/architecture.md) §5。
 
 **推移的には全リポジトリに到達する。だからこそ推移閉包の禁止がここで最も重要になる。**
-`pnpm install` すると `node_modules` には mc-sim も mc-worldgen も物理的に置かれるが、
-**import は禁止**であり `pnpm check:deps` が `transitive-import` として非ゼロ終了する。
+`pnpm install` すると `node_modules` には mc-noise / mc-meshing / mc-physics も物理的に置かれるが、
+**import は禁止**であり、規範としては `.oxlintrc.json`(旧 `oxlint.json`。oxlint はドット付きの
+`.oxlintrc.json` しか自動検出しないため、この 2026-08 の PR でファイル名を訂正した)の
+`no-restricted-imports`(Tier4 の 2 パターン)がその import を検出して `pnpm lint` を落とす想定である。
+**ただし現在このリポジトリが固定している oxlint 0.12.0 では、この機構はまだ機械的には効いていない**:
+(1) 0.12.0 の `-c/--config` は "(experimental)" 扱いで自動検出そのものが無く、`.oxlintrc.json` を
+置くだけでは読み込まれない(明示的に `-c` を渡す必要がある。`pnpm lint` はまだ渡していない)、
+(2) `-c` で明示的に読み込ませても `no-restricted-imports` は `oxlint --rules` の一覧に現れず、
+このリポジトリ全体に対して実行しても一度も発火しない ── つまりこのバージョンには実装がない。
+両方とも実測確認済み。実効化には oxlint 自体のバージョン更新が要る(`feat/modernize-toolchain` が
+`oxlint: ^1.76.0` への更新を別途進めている)。
 
 これが規範の機械化された半分である。mc-sim を直接必要とするルールは、体験モジュールに属するルールである。
 
-> **現状**: `package.json` の `dependencies` は `effect` のみ。
-> mc-compose は依存順の最後尾であり、他の 15 リポジトリが publish されるまで書ける依存が無い
-> (plan.md §6 Step 3)。依存契約は
-> `scripts/check-dependency-whitelist.ts` の `REPOSITORY_POLICY` 側に宣言してある。
-> 詳細は [docs/versioning.md](./docs/versioning.md) §3。
+> **現状**: `package.json` の `dependencies` は org 標準の Tier4 グラフと一致しており、
+> mc-audio / mc-render / mc-save / mc-sim / mc-worldgen / mx-gameplay / mx-redstone / mx-ui /
+> mx-multiplayer(+ どこからでも import 可能な mc-kernel)を宣言している。
+> 依存契約(誰が誰に依存してよいか)は org リポジトリ `.github` の
+> [`DEPENDENCY_POLICY.md`](https://github.com/nerima-games/.github/blob/main/DEPENDENCY_POLICY.md)
+> に一本化されている。詳細は [docs/versioning.md](./docs/versioning.md) §3。
 
 ## ドキュメント
 
@@ -77,22 +87,26 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 | kernel は例外 | mc-kernel はどこからでも import 可 |
 | 宣言と実体の一致 | import する `@nerima-games/*` は `package.json` に記載されていなければならない |
 | mc-playground-kit は devDependency 専用 | `dependencies` に入れてはならない。実行時依存になると、出荷ビルドから入力処理が消える |
-| `Date.now()` 禁止 | 時刻はすべて注入された Clock Port から取得する |
 
-`scripts/check-dependency-whitelist.ts` は 16 リポジトリ共通のテンプレートである。
-姉妹リポジトリへ移植する際は、ファイル冒頭で囲ってある `REPOSITORY_POLICY` 定数だけを書き換えればよい。
+正典は org リポジトリ `.github` の `DEPENDENCY_POLICY.md`。実効機構(の設計)は各リポジトリの
+`.oxlintrc.json` の `no-restricted-imports` であり(このリポジトリの分は本ファイル内の
+Tier4 向けパターンを参照)、内容は Tier ごと・リポジトリごとに異なってよい
+(byte-identical は適合条件ではない)。旧 `scripts/check-dependency-whitelist.ts`(16 リポジトリ
+byte-for-byte テンプレート + `REPOSITORY_POLICY` 定数の差し替え方式)は org 標準から廃止済み。
+**このリポジトリの oxlint 0.12.0 では上記「実効機構」は現状アイドル状態**(理由は前節、および
+`.oxlintrc.json` 内のコメント)。
 
-### `Date.now()` 禁止の実装方法
+### `Date.now()` 禁止について
 
 oxlint 0.12 は `no-restricted-syntax` も `no-restricted-properties` も実装しておらず、
 `no-restricted-globals` は `oxlint --rules` の一覧に出るものの実装されていない(0.12.0 で実測確認済み)。
 
-そのため禁止は **`scripts/check-dependency-whitelist.ts` 側で実装**している。
-対象は `Date.now()` / `new Date()` / `performance.now()` の 3 つ。
-コメント・文字列リテラル・正規表現リテラルの中身はマスクされるので誤検知しない。
-
-Clock Port の実装アダプタ自身だけは実クロックを読む必要があるため、
-その行に `mc-kernel-allow-time-source` コメントを付けると除外される。
+以前はこの禁止を `scripts/check-dependency-whitelist.ts` 側で実装していたが、そのスクリプト自体が
+org 標準から廃止された。PACKAGE_STANDARD.md はこの種の(oxlint で表現できない)チェックの
+代替スクリプトを置くかどうかを各リポジトリの裁量とし、org 標準としては要求していない。
+**現在このリポジトリに `Date.now()` / `performance.now()` を禁止するツールは無い** —
+時刻は注入された Clock Port から取得する規約自体は変わっていないが、機械的な検査は
+oxlint が `no-restricted-syntax` 相当を実装するまで存在しない(`.oxlintrc.json` のコメント参照)。
 
 ## 開発
 
@@ -114,17 +128,16 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
 | コマンド | 内容 |
 | --- | --- |
 | `pnpm typecheck` | `tsconfig.build.json` と `tsconfig.test.json` の両方を型検査 |
-| `pnpm lint` | oxlint(このリポジトリ唯一の lint / format 設定)。**`--deny-warnings` 付きで走る**ため、`warn` のルールもビルドを落とす（`oxlint.json` は 5 カテゴリすべてと個別 67 ルールが `warn`、`error` は 4 つだけ。このフラグが無かった頃は実質その 4 つしかゲートになっていなかった） |
+| `pnpm lint` | oxlint(このリポジトリ唯一の lint / format 設定)。**`--deny-warnings` 付きで走る**ため、`warn` のルールもビルドを落とす設計だが、`.oxlintrc.json`(5 カテゴリすべてと個別 67 ルールが `warn`、`error` は 4 つだけ)は `-c` なしでは読み込まれず(前節「依存ルール」参照)、この `lint` スクリプトはまだ `-c` を渡していないため、**実際に効いているのは oxlint 0.12.0 の組み込みデフォルトのみ** |
 | `pnpm lint:fix` | oxlint の自動修正 |
 | `pnpm test` | vitest(`@effect/vitest` の `it.effect` が主 API) |
 | `pnpm test:watch` | vitest watch |
-| `pnpm test:coverage` | カバレッジ計測(閾値は未設定) |
+| `pnpm test:coverage` | カバレッジ計測 + 4 指標 99% ゲート。`verify` には含まれない別ゲート(TEST_STANDARD.md §1/§3) |
 | `pnpm e2e` | E2E だけを走らせる(`vitest run test/e2e`)。純粋なので `pnpm test` も `pnpm verify` も既に拾っている |
-| `pnpm check:deps` | 依存ホワイトリスト + 循環検査 + `Date.now()` 禁止の検査 |
 | `pnpm check:roster` | `test/e2e/roster.ts` の転記が兄弟リポジトリの実ソースと一致するかを照合。**`verify` に入っていない** — 兄弟のチェックアウトが要り、CI には無いため([docs/testing.md](./docs/testing.md) §3.5) |
-| `pnpm api:check` | `api-lock.md` が実際の公開 API と食い違えば非ゼロ終了（[`docs/public-api.md`](./docs/public-api.md) §7） |
-| `pnpm api:update` | `api-lock.md` を書き直す。公開面を変える PR は結果を同じ PR に含める |
-| `pnpm verify` | `typecheck && lint && check:deps && api:check && test`。CI と同じ内容 |
+| `pnpm typecheck:preview` | `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`)。**`verify` に入っていない** — 同上、兄弟のチェックアウトが要る |
+| `pnpm changeset` | ユーザー向け変更に `.changeset/*.md` を追加する(RELEASE_STANDARD.md §1) |
+| `pnpm verify` | `typecheck && lint && test`。CI と同じ内容 |
 
 ## 現状
 
@@ -170,7 +183,14 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
   mc-compose は mc-sim を import できない(rule 3)。stage を登録することと import 可能で
   あることは別の性質である([docs/design-notes.md](./docs/design-notes.md) DN-14)
 - ビルド / publish。`package.json` の `exports` は TypeScript ソースを直接指している
-- カバレッジ閾値(99% ゲートは完成条件到達時に有効化)
+
+確定している **仕組み(org 標準への移行)**:
+
+- **カバレッジ 4 指標 99% ゲートは有効。** org の一律ロールアウト決定(TEST_STANDARD.md §3)により、
+  完成条件を待たず有効化した。実測ベースライン(2026-08-01、このリポジトリで初めて計測):
+  statements 96.13% / branches 88.39% / functions 100% / lines 96.13%。
+  3 指標が未達であり CI は赤くなるが、これは既知・受容済みの結果であって延期の理由にしない
+  (TEST_STANDARD.md §4)
 
 ## License
 

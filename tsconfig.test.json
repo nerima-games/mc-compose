@@ -6,9 +6,9 @@
   "compilerOptions": {
     "types": ["node"],
     "paths": {
-      "@nerima-games/mc-audio": ["../mc-audio/index.ts"]
+      "@nerima-games/mc-audio": ["../mc-audio/src/index.ts"]
     }
   },
-  "include": ["index.ts", "domain/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"],
+  "include": ["src/index.ts", "src/domain/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "coverage", "dist"]
 }
