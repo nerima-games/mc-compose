@@ -18,6 +18,11 @@ import {
   type WorldSnapshot,
 } from '@nerima-games/mx-multiplayer'
 import { Either } from 'effect'
+import {
+  SleepAuthority,
+  decodeSleepWireMessage,
+  type SleepWireMessage,
+} from '../web/sleep-network'
 
 export type ClientId = string
 export type SendFrame = (frame: WireText) => void
@@ -39,6 +44,7 @@ export interface MultiplayerServerOptions {
   readonly onStateChanged?: (state: MultiplayerServerState) => void
   readonly maxMoveDistance?: number
   readonly passableBlocks?: ReadonlySet<string>
+  readonly sleepPercentage?: number
 }
 
 export interface MultiplayerServerState {
@@ -53,7 +59,7 @@ export interface MultiplayerServerState {
 }
 
 export type ReceiveResult =
-  | Readonly<{ accepted: true; message: NetworkMessage }>
+  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage }>
   | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' | 'invalid-command' }>
 
 interface ConnectedClient {
@@ -220,6 +226,27 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   }))
   const commandResults = new Map<CommandId, AuthoritativeCommandResult>()
   let revision = options.initialState?.revision ?? 0
+  const sleepAuthority = new SleepAuthority({
+    world: worldId,
+    revision: 0,
+    actors: [],
+    blocks: {},
+    drops: [],
+  }, {
+    reach: Number.MAX_SAFE_INTEGER,
+    sleepPercentage: options.sleepPercentage ?? 100,
+    validateSleep: ({ actor, bed }) => {
+      const at = players.get(actor.player)?.at
+      const withinReach = at !== undefined
+        && (at.x - bed.x) ** 2 + (at.y - bed.y) ** 2 + (at.z - bed.z) ** 2 <= 5 ** 2
+      return {
+        dimension: worldId,
+        bedValid: withinReach && blockAt(bed) === 'bed',
+        nightOrThunder: timeWeather.weather === 'thunder' || timeWeather.timeOfDay >= 12_542,
+        safe: true,
+      }
+    },
+  })
 
   const sendMessage = (client: ConnectedClient, message: NetworkMessage): void => {
     const encoded = encodeFrame(message)
@@ -230,6 +257,14 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     for (const [clientId, client] of clients) {
       if (clientId !== except && client.playerId !== null) sendMessage(client, message)
     }
+  }
+
+  const sendSleep = (client: ConnectedClient, message: SleepWireMessage): void => {
+    client.send(JSON.stringify(message) as WireText)
+  }
+
+  const broadcastSleep = (message: SleepWireMessage): void => {
+    for (const client of clients.values()) if (client.playerId !== null) sendSleep(client, message)
   }
 
   const snapshot = (): WorldSnapshot => ({
@@ -538,6 +573,17 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const receive = (clientId: ClientId, frame: WireText): ReceiveResult => {
     const client = clients.get(clientId)
     if (client === undefined) return { accepted: false, reason: 'unknown-client' }
+    const sleepMessage = decodeSleepWireMessage(frame)
+    if (sleepMessage?._tag === 'SleepCommand') {
+      if (client.playerId === null) return { accepted: false, reason: 'join-required' }
+      if (sleepMessage.command.actor !== client.playerId) return { accepted: false, reason: 'identity-spoof' }
+      const result = sleepAuthority.execute(sleepMessage.command)
+      sendSleep(client, { _tag: 'SleepCommandResult', result })
+      if (result.accepted) broadcastSleep({ _tag: 'SleepEvents', revision: result.revision, events: result.events })
+      return result.accepted
+        ? { accepted: true, message: sleepMessage }
+        : { accepted: false, reason: 'invalid-command' }
+    }
     const decoded = decodeFrame(frame)
     if (Either.isLeft(decoded)) return { accepted: false, reason: 'malformed-frame' }
     const message = decoded.right
@@ -556,9 +602,20 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         facing: DEFAULT_FACING,
       })
       playerClients.set(message.player, clientId)
+      const sleepSnapshot = sleepAuthority.addActor({
+        player: message.player,
+        session: String(message.player),
+        position: message.at,
+        gameMode: 'survival',
+        inventory: [],
+        health: 20,
+        spawn: message.at,
+        lastActionTick: 0,
+      })
       ensurePlayerState(message.player)
       sendMessage(client, snapshot())
       sendMessage(client, authoritativeSnapshot())
+      sendSleep(client, { _tag: 'SleepSnapshot', snapshot: sleepSnapshot })
       broadcast(message, clientId)
       return { accepted: true, message }
     }
@@ -581,6 +638,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
     switch (message._tag) {
       case 'PlayerLeave':
+        {
+          const events = sleepAuthority.disconnect(message.player)
+          if (events.length > 0) broadcastSleep({ _tag: 'SleepEvents', revision: sleepAuthority.snapshot().revision, events })
+        }
         removePlayer(clientId, client)
         return { accepted: true, message }
       case 'PlayerMove': {
@@ -624,6 +685,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         revision += 1
         notifyStateChanged()
         broadcast({ ...message, world: worldId })
+        {
+          const events = sleepAuthority.reconcile()
+          if (events.length > 0) broadcastSleep({ _tag: 'SleepEvents', revision: sleepAuthority.snapshot().revision, events })
+        }
         return { accepted: true, message }
       }
       case 'Pong':
@@ -651,7 +716,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const disconnect = (clientId: ClientId): void => {
     const client = clients.get(clientId)
     if (client === undefined) return
+    const playerId = client.playerId
     removePlayer(clientId, client)
+    if (playerId !== null) {
+      const events = sleepAuthority.disconnect(playerId)
+      if (events.length > 0) broadcastSleep({ _tag: 'SleepEvents', revision: sleepAuthority.snapshot().revision, events })
+    }
     clients.delete(clientId)
   }
 

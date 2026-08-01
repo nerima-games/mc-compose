@@ -11,6 +11,7 @@ import { Either } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { makeMultiplayerServerCore, type ReceiveResult } from '../../apps/multiplayer-server/core'
+import { decodeSleepWireMessage, type SleepWireMessage } from '../../apps/web/sleep-network'
 
 const playerId = (value: string): PlayerId => value as PlayerId
 const playerName = (value: string): PlayerName => value as PlayerName
@@ -23,10 +24,16 @@ const frame = (message: NetworkMessage): WireText => {
 }
 
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
-  frames.map((wire) => {
+  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined).map((wire) => {
     const result = decodeFrame(wire)
     if (Either.isLeft(result)) throw result.left
     return result.right
+  })
+
+const sleepMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<SleepWireMessage> =>
+  frames.flatMap((wire) => {
+    const message = decodeSleepWireMessage(wire)
+    return message === undefined ? [] : [message]
   })
 
 const join = (player: string, name = player): NetworkMessage => ({
@@ -36,7 +43,10 @@ const join = (player: string, name = player): NetworkMessage => ({
   at: { x: 0, y: 64, z: 0 },
 })
 
-const makeFixture = (generatedBlockAt: (at: { x: number; y: number; z: number }) => string | null = () => null) => {
+const makeFixture = (
+  generatedBlockAt: (at: { x: number; y: number; z: number }) => string | null = () => null,
+  timeOfDay = 6_000,
+) => {
   const sent = new Map<string, Array<WireText>>()
   const server = makeMultiplayerServerCore({
     worldId: 'world-1',
@@ -44,6 +54,16 @@ const makeFixture = (generatedBlockAt: (at: { x: number; y: number; z: number })
     allowedBlocks: new Set(['stone', 'dirt']),
     bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
     generatedBlockAt,
+    initialState: {
+      revision: 0,
+      blocks: [],
+      inventories: [],
+      vitals: [],
+      timeWeather: { timeOfDay, weather: 'clear' },
+      containers: [],
+      furnaces: [],
+      villagerTrades: [],
+    },
   })
   const connect = (clientId: string): Array<WireText> => {
     const out: Array<WireText> = []
@@ -53,7 +73,9 @@ const makeFixture = (generatedBlockAt: (at: { x: number; y: number; z: number })
   }
   const receive = (clientId: string, message: NetworkMessage): ReceiveResult =>
     server.receive(clientId, frame(message))
-  return { server, sent, connect, receive }
+  const receiveSleep = (clientId: string, message: SleepWireMessage): ReceiveResult =>
+    server.receive(clientId, JSON.stringify(message) as WireText)
+  return { server, sent, connect, receive, receiveSleep }
 }
 
 describe('authoritative multiplayer server core', () => {
@@ -276,5 +298,37 @@ describe('authoritative multiplayer server core', () => {
     const frames = fixture.connect('socket-a')
     expect(fixture.receive('socket-a', { _tag: 'Ping', nonce: 17 }).accepted).toBe(true)
     expect(messages(frames)).toEqual([{ _tag: 'Pong', nonce: 17 }])
+  })
+
+  it('accepts sleep commands authoritatively and cleans sleepers on disconnect', () => {
+    const fixture = makeFixture(({ x, y, z }) => x === 0 && y === 64 && z === 1 ? 'bed' : null, 13_000)
+    const aliceFrames = fixture.connect('socket-a')
+    const bobFrames = fixture.connect('socket-b')
+    fixture.receive('socket-a', join('alice'))
+    fixture.receive('socket-b', join('bob'))
+    aliceFrames.length = 0
+    bobFrames.length = 0
+
+    const receiveResult = fixture.receiveSleep('socket-a', {
+      _tag: 'SleepCommand',
+      command: {
+        _tag: 'EnterSleep', actor: playerId('alice'), session: 'alice', requestId: 'sleep-a',
+        expectedRevision: 0, clientTick: 20, bed: { x: 0, y: 64, z: 1 },
+      },
+    })
+    expect(sleepMessages(aliceFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'SleepCommandResult', result: expect.objectContaining({ accepted: true, revision: 1 }),
+    }))
+    expect(receiveResult).toEqual(expect.objectContaining({ accepted: true }))
+    expect(sleepMessages(bobFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'SleepEvents', revision: 1,
+    }))
+
+    aliceFrames.length = 0
+    fixture.server.disconnect('socket-a')
+    expect(sleepMessages(bobFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'SleepEvents',
+      events: expect.arrayContaining([expect.objectContaining({ _tag: 'ActorSleepChanged', sleeping: null })]),
+    }))
   })
 })

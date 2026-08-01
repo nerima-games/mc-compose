@@ -376,6 +376,15 @@ import {
   type SleepLocation,
 } from './sleep-runtime'
 import {
+  applySleepCommandResult,
+  applySleepEvents,
+  initialSleepClientState,
+  queueSleepCommand,
+  sleepClientFromSnapshot,
+  type SleepClientState,
+  type SleepCommand,
+} from './sleep-network'
+import {
   DEFAULT_PLAYER_SETTINGS,
   PLAYER_BINDING_ACTIONS,
   loadPlayerSettings,
@@ -2314,6 +2323,9 @@ const bootGame = async (
         }),
       )
   let multiplayerRevision = 0
+  let networkSleepState: SleepClientState = initialSleepClientState()
+  let nextSleepRequest = 1
+  let appliedNightSkipRevision: number | null = null
   let multiplayerRejection = ''
   let multiplayerHandshakeComplete = false
   let multiplayerClosed = false
@@ -5592,6 +5604,18 @@ const bootGame = async (
     if (villagerTradeResults.length > 0) renderTradeUi()
 
     if (multiplayer !== undefined) {
+      for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.sleepInbound))) {
+        if (message._tag === 'SleepSnapshot') networkSleepState = sleepClientFromSnapshot(message.snapshot)
+        else if (message._tag === 'SleepCommandResult') networkSleepState = applySleepCommandResult(networkSleepState, message.result)
+        else if (message._tag === 'SleepEvents') networkSleepState = applySleepEvents(networkSleepState, message.revision, message.events)
+        sleepRuntimeState = initialSleepRuntimeState()
+        for (const [player, location] of networkSleepState.sleepers) {
+          sleepRuntimeState = enterSleep(sleepRuntimeState, String(player), {
+            dimension: location.dimension as Dimension,
+            position: location.bed,
+          })
+        }
+      }
       for (const message of Effect.runSync(multiplayer.host.drainInbound)) {
         applyNetworkMessage(message)
       }
@@ -6321,12 +6345,23 @@ const bootGame = async (
           })
           if (decision._tag === 'SleepAccepted') {
             respawnLocation = { ...decision.respawnLocation, bedPosition }
-            sleepRuntimeState = enterSleep(
-              sleepRuntimeState,
-              multiplayer?.query.player ?? 'local',
-              respawnLocation,
-            )
-            document.body.setAttribute('data-sleep-result', 'accepted')
+            if (multiplayer === undefined) {
+              sleepRuntimeState = enterSleep(sleepRuntimeState, 'local', respawnLocation)
+              document.body.setAttribute('data-sleep-result', 'accepted')
+            } else {
+              const command: SleepCommand = {
+                _tag: 'EnterSleep',
+                actor: multiplayer.query.player,
+                session: String(multiplayer.query.player),
+                requestId: `sleep-${String(nextSleepRequest++)}`,
+                expectedRevision: networkSleepState.revision,
+                clientTick: Math.floor(performance.now()),
+                bed: bedPosition,
+              }
+              networkSleepState = queueSleepCommand(networkSleepState, command)
+              Effect.runFork(multiplayer.transport.sendSleep({ _tag: 'SleepCommand', command }))
+              document.body.setAttribute('data-sleep-result', 'pending')
+            }
             markSessionDirty()
           } else {
             document.body.setAttribute('data-sleep-result', decision.reason)
@@ -6617,10 +6652,21 @@ const bootGame = async (
       localSleepPlayerId,
       ...[...(multiplayer?.players.keys() ?? [])].map(String),
     ])
-    if (deadAfterFrame || dimensionChanged) {
+    if (multiplayer === undefined && (deadAfterFrame || dimensionChanged)) {
       sleepRuntimeState = leaveSleep(sleepRuntimeState, localSleepPlayerId)
+    } else if (multiplayer !== undefined && (deadAfterFrame || dimensionChanged) && networkSleepState.sleepers.has(multiplayer.query.player)) {
+      const command: SleepCommand = {
+        _tag: 'LeaveSleep',
+        actor: multiplayer.query.player,
+        session: String(multiplayer.query.player),
+        requestId: `sleep-${String(nextSleepRequest++)}`,
+        expectedRevision: networkSleepState.revision,
+        clientTick: Math.floor(performance.now()),
+      }
+      networkSleepState = queueSleepCommand(networkSleepState, command)
+      Effect.runFork(multiplayer.transport.sendSleep({ _tag: 'SleepCommand', command }))
     }
-    sleepRuntimeState = reconcileSleepers(
+    if (multiplayer === undefined) sleepRuntimeState = reconcileSleepers(
       sleepRuntimeState,
       connectedSurvivalPlayers,
       (location) => {
@@ -6629,13 +6675,17 @@ const bootGame = async (
         return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'bed'
       },
     )
-    const sleepAdvance = advanceSleep(
+    const sleepAdvance = multiplayer === undefined ? advanceSleep(
       sleepRuntimeState,
       deltaSecs,
       connectedSurvivalPlayers.size,
       requiredSleepRatio,
       2,
-    )
+    ) : {
+      state: sleepRuntimeState,
+      skipToMorning: networkSleepState.skippedRevision === networkSleepState.revision
+        && appliedNightSkipRevision !== networkSleepState.revision,
+    }
     sleepRuntimeState = sleepAdvance.state
     const requiredSleepers = requiredSleeperCount(connectedSurvivalPlayers.size, requiredSleepRatio)
     sleepHud.textContent = `Sleeping ${String(sleepRuntimeState.sleepers.length)}/${String(requiredSleepers)}`
@@ -6643,6 +6693,7 @@ const bootGame = async (
     document.body.setAttribute('data-sleeping-players', String(sleepRuntimeState.sleepers.length))
     document.body.setAttribute('data-sleep-required', String(requiredSleepers))
     if (sleepAdvance.skipToMorning) {
+      appliedNightSkipRevision = multiplayer === undefined ? null : networkSleepState.revision
       const clearWeather: WeatherState = { weather: 'clear', remainingSecs: 300 }
       Effect.runSync(time.setTimeOfDay(0.25))
       Effect.runSync(weather.applyTransition(clearWeather))
