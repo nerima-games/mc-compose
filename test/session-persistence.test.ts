@@ -119,6 +119,29 @@ const sessionState = (seed: number): SessionState => {
     brewing: emptyBrewingStandState(),
     statusEffects: emptyStatusEffectState(),
     end: EMPTY_END_STATE,
+    wither: {
+      nextWitherId: 1,
+      nextSkullId: 0,
+      withers: [{
+        id: 'wither-1',
+        dimension: 'overworld',
+        snapshot: {
+          kind: 'wither',
+          version: 1,
+          state: {
+            phase: 'charging',
+            healthPoints: 300,
+            chargeRemainingSecs: 4,
+            feetPosition: { x: 2.5, y: 66, z: -3.5 },
+            velocity: { x: 0, y: 0, z: 0 },
+          },
+        },
+        rangedCooldownSecs: 2,
+        meleeCooldownSecs: 1,
+        shotsFired: 0,
+      }],
+      skulls: [],
+    },
   }
 }
 

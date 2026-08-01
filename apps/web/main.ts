@@ -106,6 +106,7 @@ import {
   makeSimFrameState,
   makeTimeService,
   makeWeatherService,
+  planExplosion,
   maxStackCountForItem,
   totalExperienceAtLevel,
   POTATO_MATURITY_SECS,
@@ -336,6 +337,15 @@ import {
   projectileRuntimeSnapshot,
   recoverProjectile,
 } from './projectile-runtime'
+import {
+  advanceWitherRuntime,
+  damageRuntimeWither,
+  matchRuntimeWitherSummon,
+  restoreWitherRuntime,
+  snapshotWitherRuntime,
+  summonRuntimeWither,
+  witherRenderDescriptors,
+} from './wither-runtime'
 import {
   composeGame,
   EMPTY_MODULE_LAYER,
@@ -1359,6 +1369,9 @@ const bootGame = async (
   let endPortalComplete = loadedEndState?.portalComplete ?? false
   let exitPortalMaterialized = loadedEndState?.exitPortalMaterialized ?? false
   let dragonEggRewarded = loadedEndState?.dragonEggRewarded ?? false
+  let witherRuntimeState = restoreWitherRuntime(
+    Option.isSome(loadedSession) ? loadedSession.value.state.wither : undefined,
+  )
   const endDragonPosition = (): SessionPosition => {
     const dragon = Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
     const angle = dragon.phaseTimerSecs * (dragon.phase === 'charging' ? 1.4 : 0.35)
@@ -1563,6 +1576,7 @@ const bootGame = async (
       },
       brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
       statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
+      wither: snapshotWitherRuntime(witherRuntimeState),
       fishing: {
         result: fishingResult,
         phase: fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
@@ -2290,6 +2304,11 @@ const bootGame = async (
     string,
     { readonly dimension: Dimension; readonly position: { readonly x: number; readonly y: number; readonly z: number } }
   >()
+  const pendingWitherSummonChecks: Array<{
+    readonly dimension: Dimension
+    readonly item: 'wither_skeleton_skull'
+    readonly position: { readonly x: number; readonly y: number; readonly z: number }
+  }> = []
   const pendingMiningToolDamage: Array<{
     readonly dimension: Dimension
     readonly position: { readonly x: number; readonly y: number; readonly z: number }
@@ -4151,6 +4170,7 @@ const bootGame = async (
       category: entity.kind === 'dropped_item' ? 'item' : 'hostile',
     } satisfies RenderEntity)),
     ...projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
+    ...witherRenderDescriptors(witherRuntimeState, currentChunkContext.dimension),
     ...[...(multiplayer?.players.entries() ?? [])]
       .filter(([, player]) => player.world === currentChunkContext.dimension)
       .map(([playerId, player]) => ({
@@ -4256,6 +4276,7 @@ const bootGame = async (
       },
       swimming: swimmingState,
       projectiles: projectileRuntimeSnapshot(projectileRuntimeState),
+      wither: snapshotWitherRuntime(witherRuntimeState),
       weather: Effect.runSync(weather.snapshot),
       vitals,
       dead: vitals.healthPoints <= 0,
@@ -5906,6 +5927,60 @@ const bootGame = async (
     deadAfterFrame = playerIsDead()
     syncTouchControls()
 
+    if (!deadAfterFrame && !dimensionChanged) {
+      const advancedWither = advanceWitherRuntime(
+        witherRuntimeState,
+        dimensionAfterFrame,
+        postFramePose.feetPosition,
+        Math.min(deltaSecs, 0.1),
+        (_skull, position) => isGameplayBlockSolid({
+          x: Math.floor(position.x),
+          y: Math.floor(position.y),
+          z: Math.floor(position.z),
+        }),
+      )
+      witherRuntimeState = advancedWither.state
+      if (advancedWither.meleeDamage > 0) {
+        applyPlayerDamage({ amount: advancedWither.meleeDamage, cause: 'generic' })
+      }
+      for (const explosion of advancedWither.explosions) {
+        const explosionEntities = Effect.runSync(world.entities.entities)
+        const plan = planExplosion({
+          center: explosion.position,
+          radius: explosion.power,
+          seed: Math.floor(simulationElapsedSecs * 20),
+          blocks: (position) => {
+            const reading = Effect.runSync(currentChunkStore.getBlock(position))
+            if (reading._tag !== 'Block') return undefined
+            const type = blockTypeOfId(reading.block)
+            if (type === 'air') return { resistance: 0, destructible: false }
+            const hardness = propertyOfBlockId(reading.block, 'hardness')
+            return {
+              resistance: explosion.destroysResistantBlocks ? 0 : hardness,
+              destructible: type !== 'bedrock',
+            }
+          },
+          entities: explosionEntities,
+        })
+        for (const position of plan.destroyedBlocks) {
+          Effect.runSync(currentChunkStore.setBlock(position, 0))
+        }
+        for (const effect of plan.entityEffects) {
+          Effect.runSync(resolveBowHits(world.entities, [{ id: effect.id, damage: effect.damage }]))
+        }
+        const playerDistance = Math.hypot(
+          postFramePose.feetPosition.x - explosion.position.x,
+          postFramePose.feetPosition.y + 0.9 - explosion.position.y,
+          postFramePose.feetPosition.z - explosion.position.z,
+        )
+        if (playerDistance < explosion.power) {
+          const exposure = 1 - playerDistance / explosion.power
+          applyPlayerDamage({ amount: ((exposure * exposure + exposure) / 2) * 7 * explosion.power + 1, cause: 'generic' })
+        }
+      }
+      if (advancedWither.explosions.length > 0 || advancedWither.meleeDamage > 0) markSessionDirty()
+    }
+
     if (deadAfterFrame) {
       projectileRuntimeState = initialProjectileRuntimeState()
     } else if (!dimensionChanged) {
@@ -5939,6 +6014,19 @@ const bootGame = async (
                 maxX: entity.feetPosition.x + 0.3,
                 maxY: entity.feetPosition.y + 1.8,
                 maxZ: entity.feetPosition.z + 0.3,
+              },
+            })),
+          ...witherRuntimeState.withers
+            .filter((wither) => wither.dimension === dimensionAfterFrame)
+            .map((wither) => ({
+              id: wither.id,
+              bounds: {
+                minX: wither.state.feetPosition.x - 0.75,
+                minY: wither.state.feetPosition.y,
+                minZ: wither.state.feetPosition.z - 0.75,
+                maxX: wither.state.feetPosition.x + 0.75,
+                maxY: wither.state.feetPosition.y + 3.5,
+                maxZ: wither.state.feetPosition.z + 0.75,
               },
             })),
           {
@@ -5979,6 +6067,20 @@ const bootGame = async (
       projectileRuntimeState = advancedProjectiles.state
       for (const impact of advancedProjectiles.impacts) {
         if (impact.hit.kind !== 'entity' || impact.hit.entityId === 'player') continue
+        const hitWither = witherRuntimeState.withers.find(({ id }) => id === impact.hit.entityId)
+        if (hitWither !== undefined) {
+          const result = damageRuntimeWither(witherRuntimeState, hitWither.id, impact.damage, 'ranged')
+          witherRuntimeState = result.state
+          if (result.death !== undefined) {
+            Effect.runSync(spawnDroppedItems(world.entities, [{
+              item: result.death.drop.item,
+              count: result.death.drop.count,
+              at: result.death.drop.position,
+            }]))
+          }
+          markSessionDirty()
+          continue
+        }
         const target = projectileEntities.find(({ id }) => String(id) === impact.hit.entityId)
         if (target === undefined) continue
         Effect.runSync(resolveBowHits(world.entities, [{ id: target.id, damage: impact.damage }]))
@@ -6093,6 +6195,48 @@ const bootGame = async (
     }
     if (looked || moved) markSessionDirty()
     Effect.runSync(Ref.set(gameplayState.targetPosition, postFramePose.feetPosition))
+
+    if (attackTriggered && !primaryAttackGestureConsumed) {
+      const eye = { ...postFramePose.feetPosition, y: postFramePose.feetPosition.y + EYE_LEVEL_OFFSET }
+      const horizontal = Math.cos(postFramePose.pitchRadians)
+      const forward = {
+        x: -Math.sin(postFramePose.yawRadians) * horizontal,
+        y: Math.sin(postFramePose.pitchRadians),
+        z: -Math.cos(postFramePose.yawRadians) * horizontal,
+      }
+      const target = witherRuntimeState.withers
+        .filter((wither) => wither.dimension === dimensionAfterFrame)
+        .map((wither) => {
+          const center = { ...wither.state.feetPosition, y: wither.state.feetPosition.y + 1.75 }
+          const dx = center.x - eye.x
+          const dy = center.y - eye.y
+          const dz = center.z - eye.z
+          const distance = Math.hypot(dx, dy, dz)
+          const alignment = distance === 0 ? 1 : (dx * forward.x + dy * forward.y + dz * forward.z) / distance
+          return { wither, distance, alignment }
+        })
+        .filter(({ distance, alignment }) => distance <= DEFAULT_BLOCK_REACH && alignment >= 0.8)
+        .sort((left, right) => left.distance - right.distance)[0]
+      if (target !== undefined) {
+        const selectedItem = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]?.item ?? null
+        const result = damageRuntimeWither(
+          witherRuntimeState,
+          target.wither.id,
+          Math.max(1, meleeDamageForItem(selectedItem === null ? null : gameplayModuleItem(selectedItem))),
+          'melee',
+        )
+        witherRuntimeState = result.state
+        if (result.death !== undefined) {
+          Effect.runSync(spawnDroppedItems(world.entities, [{
+            item: result.death.drop.item,
+            count: result.death.drop.count,
+            at: result.death.drop.position,
+          }]))
+        }
+        primaryAttackGestureConsumed = true
+        markSessionDirty()
+      }
+    }
 
     if (
       attackTriggered
@@ -6611,6 +6755,13 @@ const bootGame = async (
                 ),
               )
               if (Option.isSome(target)) {
+                if (heldItem === 'wither_skeleton_skull') {
+                  pendingWitherSummonChecks.push({
+                    dimension: currentChunkContext.dimension,
+                    item: heldItem,
+                    position: target.value.adjacentPosition,
+                  })
+                }
                 const reading = Effect.runSync(currentChunkStore.getBlock(target.value.position))
                 if (reading._tag === 'Block' && reading.block === 76) {
                   pendingBlockUses.set(requestId, {
@@ -6657,6 +6808,42 @@ const bootGame = async (
         const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
         if (selected?.item === item) {
           Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, item, 1))
+        }
+      }
+      let summonCheckIndex = -1
+      for (let index = pendingWitherSummonChecks.length - 1; index >= 0; index -= 1) {
+        if (pendingWitherSummonChecks[index]?.item === item) {
+          summonCheckIndex = index
+          break
+        }
+      }
+      if (summonCheckIndex >= 0) {
+        const [pending] = pendingWitherSummonChecks.splice(summonCheckIndex, 1)
+        for (let index = pendingWitherSummonChecks.length - 1; index >= 0; index -= 1) {
+          if (pendingWitherSummonChecks[index]?.item === item) {
+            pendingWitherSummonChecks.splice(index, 1)
+          }
+        }
+        if (pending !== undefined) {
+          const context = dimensionContexts.get(pending.dimension)
+          const match = context === undefined ? undefined : matchRuntimeWitherSummon(
+            pending.position,
+            (cell) => {
+              const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(cell.x, cell.y, cell.z)))
+              return reading._tag === 'Block' ? blockTypeOfId(reading.block) : undefined
+            },
+          )
+          if (match !== undefined && context !== undefined) {
+            for (const position of match.consumedBlocks) {
+              Effect.runSync(context.chunkStore.setBlock(blockPosition(position.x, position.y, position.z), 0))
+            }
+            witherRuntimeState = summonRuntimeWither(
+              witherRuntimeState,
+              pending.dimension,
+              match.spawnPosition,
+            )
+            markSessionDirty()
+          }
         }
       }
     }

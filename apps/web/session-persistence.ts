@@ -1,4 +1,5 @@
 import { Data, Effect, Option, Schema } from 'effect'
+import type { WitherRuntimeSnapshot } from './wither-runtime'
 
 import {
   loadFrom,
@@ -234,6 +235,7 @@ export type SessionState = {
       readonly position: SessionPosition
     } | null
   } | undefined
+  readonly wither?: WitherRuntimeSnapshot | undefined
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -422,6 +424,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
       position: PositionSchema,
     })),
   })),
+  wither: Schema.optional(Schema.Unknown as unknown as Schema.Schema<WitherRuntimeSnapshot>),
 })
 
 export type SessionChunkManifestEntry = {
