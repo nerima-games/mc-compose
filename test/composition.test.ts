@@ -1,4 +1,7 @@
+/// <reference lib="dom" />
+
 import { describe, expect, it } from '@effect/vitest'
+import { makeUiFrameState, uiStages } from '@nerima-games/mx-ui'
 import { Context, Effect, Either, Layer, Option, Ref } from 'effect'
 import {
   collectStages,
@@ -272,6 +275,32 @@ describe('the frame carries and discharges FrameServices', () => {
 })
 
 describe('registerModule — the bridge to kernel’s GameModule', () => {
+  it.effect('drives the shared mx-ui FPS state from composed frame delta', () =>
+    Effect.gen(function* () {
+      const state = yield* makeUiFrameState
+      const ui = yield* registerModule({
+        name: '@nerima-games/mx-ui',
+        layers: EMPTY_MODULE_LAYER,
+        frameStages: Effect.succeed(uiStages(state)),
+      })
+      const game = composed([ui], STANDARD_STAGE_SKELETON)
+
+      yield* game.runFrameWith(FRAME_SERVICES)(dt(0.5))
+      expect(yield* Ref.get(state.fpsCounter)).toStrictEqual({
+        elapsedSecs: 0.5,
+        frameCount: 1,
+        fps: 0,
+      })
+
+      yield* game.runFrameWith(FRAME_SERVICES)(dt(0.5))
+      expect(yield* Ref.get(state.fpsCounter)).toStrictEqual({
+        elapsedSecs: 0,
+        frameCount: 0,
+        fps: 2,
+      })
+    }),
+  )
+
   // kernel's `frameStages` is an Effect precisely so that a module can acquire
   // a service in order to BUILD a stage. This is that, end to end.
   it.effect('runs a module’s registration Effect and keeps its requirement in the type', () =>

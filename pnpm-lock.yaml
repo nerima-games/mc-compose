@@ -39,8 +39,8 @@ importers:
         specifier: 0.1.5
         version: 0.1.5
       '@nerima-games/mx-ui':
-        specifier: 0.2.6
-        version: 0.2.6
+        specifier: 0.2.10
+        version: 0.2.10
       effect:
         specifier: ^3.20.0
         version: 3.22.0
@@ -440,8 +440,8 @@ packages:
     resolution: {integrity: sha512-t9MzOHmm0eW7yQU7vPiSi7jocUxSv396eGMG27ASQWeB2J4VU4jMGrzBWy84itOM+wcxOxsVG/U3dH2llHJgPg==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-redstone/0.1.5/e5a5d5341b1d537660582c85b08f664646f9d4bc}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
-  '@nerima-games/mx-ui@0.2.6':
-    resolution: {integrity: sha512-VL1EGvFp/W7rUGsucQq3eJ6akgCPtPropFB0HdF8DA1A0knUgiv1LTrs5UrJecXnqv7qeSp44Ut02tR8v0Kxow==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-ui/0.2.6/62d45cc6746d25f18807219281276f4329d48915}
+  '@nerima-games/mx-ui@0.2.10':
+    resolution: {integrity: sha512-LXVEqJRV5SAiYxIYdLWSpn5Y3UV+gNf9K2pzmRV53ctkF+N6dzbmPigX4TNcAWNr7m93WRUEFvXv/CqidCsBTg==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-ui/0.2.10/57389506646d5cd4a99272bc6182697f2a7d0542}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
 
   '@nodelib/fs.scandir@2.1.5':
@@ -1815,8 +1815,11 @@ snapshots:
       '@nerima-games/mc-worldgen': 0.1.1
       effect: 3.22.0
 
-  '@nerima-games/mx-ui@0.2.6':
+  '@nerima-games/mx-ui@0.2.10':
     dependencies:
+      '@nerima-games/mc-audio': 0.1.0
+      '@nerima-games/mc-kernel': 0.2.8
+      '@nerima-games/mc-sim': 0.1.24
       effect: 3.22.0
 
   '@nodelib/fs.scandir@2.1.5':

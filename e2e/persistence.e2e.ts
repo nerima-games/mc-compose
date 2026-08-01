@@ -43,6 +43,15 @@ type GameplaySnapshot = {
     readonly framePosition: Position
     readonly frameBlock: number | null
   }
+  readonly environmentalContact: {
+    readonly simulationElapsedSecs: number
+    readonly lastDamageElapsedSecs: number | null
+    readonly cells: ReadonlyArray<{
+      readonly position: Position
+      readonly block: 'lava' | 'cactus'
+      readonly contactDamage: number
+    }>
+  }
 }
 
 type PageFaults = {

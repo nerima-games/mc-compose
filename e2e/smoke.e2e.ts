@@ -244,11 +244,12 @@ test.describe('smoke — the composed frame in a real browser', () => {
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
-    // The FPS readout is recomputed on a 0.5s window, so the first value takes
-    // that long to appear. Waiting for the DOM rather than sleeping.
-    await expect(page.locator('#fps-value')).not.toHaveText('0', { timeout: 10_000 })
+    // mx-ui publishes after frame-supplied dt accumulates to its one-second
+    // window. The source marker ensures the host is projecting that state.
+    const fpsReadout = page.locator('#fps-value[data-fps-source="mx-ui-frame-dt"]')
+    await expect(fpsReadout).not.toHaveText('0', { timeout: 10_000 })
 
-    const fps = Number(await page.locator('#fps-value').textContent())
+    const fps = Number(await fpsReadout.textContent())
     expect(fps).toBeGreaterThan(0)
 
     const before = await framesDrawn(page)

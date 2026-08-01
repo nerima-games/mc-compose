@@ -146,8 +146,9 @@ import {
   initialMainMenuState,
   inventoryViewModel,
   mainMenuViewModel,
+  makeUiFrameState,
   slotSnapshotOf,
-  uiModule,
+  uiStages,
   type CreateWorldRequest,
   type ChestStorageSlotTarget,
   type FurnaceSlotId,
@@ -329,7 +330,6 @@ const clampDelta = (raw: number): DeltaTimeSecs =>
   DeltaTimeSecs(Math.min(Math.max(MIN_FRAME_SECS, raw), MAX_FRAME_SECS))
 
 /** How often the FPS readout is recomputed. Long enough to be a rate, short enough to watch. */
-const FPS_WINDOW_SECS = 0.5
 
 /**
  * How fast the player walks, jumps and turns.
@@ -444,6 +444,21 @@ const isSwordItem = (item: ItemStack['item']): item is SwordItem =>
 
 type GameplayUseItemType = Exclude<ItemStack['item'], EquipmentOnlyItemType>
 type LegacyGameplayItemType = Exclude<ItemStack['item'], 'arrow' | 'bow'>
+type GameplayModuleItemType = Parameters<typeof isPlaceableItem>[0]
+type GameplayHoeItemType = Parameters<typeof requestTargetedSoilTill>[4]
+type GameplayIgnitionItemType = Parameters<typeof requestTargetedItemUse>[4]
+
+// mx-ui 0.2.10 and mx-gameplay 0.1.35 expose adjacent mc-sim item unions.
+// Their shared runtime item identifiers remain compatible at this host boundary.
+const gameplayModuleItem = (item: ItemStack['item']): GameplayModuleItemType =>
+  item as GameplayModuleItemType
+
+const isGameplayHoeItem = (item: ItemStack['item']): item is GameplayHoeItemType =>
+  isHoeItem(gameplayModuleItem(item))
+
+const isGameplayIgnitionItem = (
+  item: ItemStack['item'],
+): item is GameplayIgnitionItemType => isIgnitionItem(gameplayModuleItem(item))
 
 const EQUIPMENT_ONLY_ITEM_NAMES: ReadonlySet<string> = new Set(EQUIPMENT_ONLY_ITEM_TYPES)
 
@@ -454,7 +469,9 @@ const isLegacyGameplayItemType = (item: ItemStack['item']): item is LegacyGamepl
   item !== 'arrow' && item !== 'bow'
 
 const isPlaceableGameplayItem = (item: ItemStack['item']): item is PlaceableItemType =>
-  isGameplayUseItemType(item) && isLegacyGameplayItemType(item) && isPlaceableItem(item)
+  isGameplayUseItemType(item) &&
+  isLegacyGameplayItemType(item) &&
+  isPlaceableItem(gameplayModuleItem(item))
 
 type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest'
 
@@ -738,6 +755,7 @@ const bootGame = async (
   const touchControlsParent = requireElement('touch-controls')
   const touchLookSurface = requireElement('touch-look-surface')
   const fpsValue = requireElement('fps-value')
+  fpsValue.setAttribute('data-fps-source', 'mx-ui-frame-dt')
   const stageList = requireElement('stage-order')
   let inventoryOpen = false
   let inventoryMode: InventoryMode = 'player'
@@ -1380,11 +1398,12 @@ const bootGame = async (
   // `domain/composition.ts` exports the constant precisely so that the cast
   // lives in one place — and `pnpm typecheck:preview` caught this the first
   // time, which is the whole argument for that project existing.
+  const uiFrameState = Effect.runSync(makeUiFrameState)
   const registeredUi = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mx-ui',
       layers: EMPTY_MODULE_LAYER,
-      frameStages: uiModule.frameStages,
+      frameStages: Effect.succeed(uiStages(uiFrameState)),
     }),
   )
 
@@ -3428,8 +3447,6 @@ const bootGame = async (
   const readNow = (): MonotonicTimeSecs => Effect.runSync(browserClock.monotonicSecs)
 
   let previousSecs: MonotonicTimeSecs | undefined
-  let framesThisWindow = 0
-  let windowStartedAtSecs = readNow()
   let framesTotal = 0
   let renderedCaptionSignature: string | undefined
 
@@ -3826,7 +3843,11 @@ const bootGame = async (
             currentChunkStore,
             world.entities,
             playerApi,
-            { meleeDamage: meleeDamageForItem(selectedItem) },
+            {
+              meleeDamage: meleeDamageForItem(
+                selectedItem === null ? null : gameplayModuleItem(selectedItem),
+              ),
+            },
           ),
         )
         if (resolution._tag === 'Melee') {
@@ -4009,7 +4030,10 @@ const bootGame = async (
               )
               pendingItemUses.set(requestId, { kind: 'eat', slotIndex: selectedHotbarIndex })
             }
-          } else if (isLegacyGameplayItemType(selected.item) && isHoeItem(selected.item)) {
+          } else if (
+            isLegacyGameplayItemType(selected.item) &&
+            isGameplayHoeItem(selected.item)
+          ) {
             const target = Effect.runSync(
               requestTargetedSoilTill(
                 gameplayState,
@@ -4026,7 +4050,10 @@ const bootGame = async (
                 heldItem: selected.item,
               })
             }
-          } else if (isLegacyGameplayItemType(selected.item) && isIgnitionItem(selected.item)) {
+          } else if (
+            isLegacyGameplayItemType(selected.item) &&
+            isGameplayIgnitionItem(selected.item)
+          ) {
             const target = Effect.runSync(
               requestTargetedItemUse(
                 gameplayState,
@@ -4288,14 +4315,7 @@ const bootGame = async (
     }
 
     framesTotal += 1
-    framesThisWindow += 1
-
-    const windowSecs = nowSecs - windowStartedAtSecs
-    if (windowSecs >= FPS_WINDOW_SECS) {
-      fpsValue.textContent = String(Math.round(framesThisWindow / windowSecs))
-      framesThisWindow = 0
-      windowStartedAtSecs = nowSecs
-    }
+    fpsValue.textContent = String(Math.round(Effect.runSync(Ref.get(uiFrameState.fpsCounter)).fps))
 
     // Readable by a test without a QA command: the frame count IS the claim
     // that the loop is running, and docs/e2e-triage.md #4 is exactly that claim.
