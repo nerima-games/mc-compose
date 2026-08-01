@@ -88,7 +88,7 @@ import {
   makeWebAudioBackend,
   type Vec3,
 } from '@nerima-games/mc-audio'
-import { blockIdOf, blockTypeOfId, propertyOfBlockId } from '@nerima-games/mc-kernel'
+import { blockIdOf, blockTypeOfId, capabilityOfBlockId, propertyOfBlockId } from '@nerima-games/mc-kernel'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   advanceFurnace,
@@ -157,9 +157,14 @@ import {
   type SavedWorld,
 } from '@nerima-games/mx-ui'
 import {
+  applyPistonPlan,
   makeRuntimeRedstoneStages,
+  pistonPositionAt,
+  planPistonTransition,
   RedstoneWorldRuntime,
   RedstoneWorldRuntimeLayer,
+  type PistonMovementPlan,
+  type PoweredPistonTransition,
   type RedstoneComponentSnapshot,
 } from '@nerima-games/mx-redstone'
 import {
@@ -354,6 +359,10 @@ const QA_IGNITION_HIT_BLOCK = { x: 8, y: 66, z: 8 } as const
 const QA_IGNITION_CELL = { x: 8, y: 66, z: 9 } as const
 const QA_IGNITION_SUPPORT_BLOCK = { x: 8, y: 65, z: 9 } as const
 const QA_IGNITION_FLOOR_BLOCK = { x: 8, y: 64, z: 10 } as const
+const QA_PISTON = { x: 8, y: 66, z: 8 } as const
+const QA_PISTON_LEVER = { x: 8, y: 66, z: 9 } as const
+const QA_PISTON_NEAR = { x: 8, y: 66, z: 7 } as const
+const QA_PISTON_FAR = { x: 8, y: 66, z: 6 } as const
 const QA_ENVIRONMENT_OVERLAP_POSE = {
   feetPosition: { x: 24.95, y: 65, z: 8.5 },
   yawRadians: 0,
@@ -405,6 +414,7 @@ const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'redstone_dust',
   'lever',
   'redstone_lamp',
+  'piston',
 ])
 
 const EQUIPMENT_ONLY_ITEM_TYPES = [
@@ -985,6 +995,7 @@ const bootGame = async (
     await Effect.runPromise(world.inventory.add('redstone_dust', 16))
     await Effect.runPromise(world.inventory.add('lever', 4))
     await Effect.runPromise(world.inventory.add('redstone_lamp', 8))
+    await Effect.runPromise(world.inventory.add('piston', 4))
   }
   const time = await Effect.runPromise(makeTimeService())
   const weather = await Effect.runPromise(makeWeatherService())
@@ -1225,6 +1236,8 @@ const bootGame = async (
                 ? 'lever'
                 : block === 79 || block === 80
                   ? 'lamp'
+                  : block === 16
+                    ? 'piston'
                   : undefined
             if (kind === undefined) continue
             const position = { x: chunk.coord.cx * 16 + lx, y, z: chunk.coord.cz * 16 + lz }
@@ -1232,6 +1245,17 @@ const bootGame = async (
               const key = leverKeyOf({ dimension: context.dimension, position })
               observedLevers.add(key)
               components.push({ position, kind, active: leverStates.get(key)?.active ?? false })
+            } else if (kind === 'piston') {
+              const head = Effect.runSync(context.chunkStore.getBlock(
+                pistonPositionAt(position, 'north', 1),
+              ))
+              components.push({
+                position,
+                kind,
+                pistonFacing: 'north',
+                pistonKind: 'sticky',
+                pistonState: head._tag === 'Block' && head.block === 85 ? 'extended' : 'retracted',
+              })
             } else {
               components.push({ position, kind })
             }
@@ -1253,6 +1277,48 @@ const bootGame = async (
     }
     Effect.runSync(redstoneRuntime.syncSnapshot({ dimension: context.dimension, components }))
     redstoneDirty = false
+  }
+
+  const applyPoweredPistonTransition = (transition: PoweredPistonTransition): void => {
+    const context = dimensionContexts.get(transition.dimension as Dimension)
+    if (context === undefined) return
+    const outcome = planPistonTransition(
+      transition,
+      {
+        read: (position) => {
+          if (position.y < 0 || position.y >= 256) return { kind: 'out-of-world' }
+          const reading = Effect.runSync(context.chunkStore.getBlock(position))
+          if (reading._tag !== 'Block') return { kind: 'missing' }
+          return reading.block === 0
+            ? { kind: 'empty' }
+            : { kind: 'block', block: String(reading.block) }
+        },
+      },
+      {
+        pistonImmovable: (block) => capabilityOfBlockId(Number(block), 'pistonImmovable'),
+      },
+    )
+    if (outcome.kind !== 'move') return
+
+    Effect.runSync(applyPistonPlan(outcome.plan, {
+      commit: (plan: PistonMovementPlan) => Effect.gen(function* () {
+        for (const move of plan.moves) {
+          const source = yield* context.chunkStore.getBlock(move.from)
+          if (source._tag !== 'Block' || source.block !== Number(move.block)) {
+            return yield* Effect.dieMessage('piston source changed before commit')
+          }
+        }
+        const head = pistonPositionAt(plan.piston, plan.facing, 1)
+        if (plan.toState === 'retracted') yield* context.chunkStore.setBlock(head, 0)
+        for (const move of plan.moves) {
+          yield* context.chunkStore.setBlock(move.to, Number(move.block))
+          yield* context.chunkStore.setBlock(move.from, 0)
+        }
+        if (plan.toState === 'extended') yield* context.chunkStore.setBlock(head, 85)
+      }),
+    }))
+    markSessionDirty()
+    redstoneDirty = true
   }
 
   await Effect.runPromise(
@@ -2747,6 +2813,47 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const stickyPistonSnapshot = () => {
+    const dimension = Effect.runSync(playerApi.dimension)
+    const readBlock = (position: { readonly x: number; readonly y: number; readonly z: number }) => {
+      const reading = Effect.runSync(currentChunkStore.getBlock(position))
+      return reading._tag === 'Block' ? reading.block : null
+    }
+    return {
+      active: leverStates.get(leverKeyOf({ dimension, position: QA_PISTON_LEVER }))?.active ?? false,
+      lever: readBlock(QA_PISTON_LEVER),
+      piston: readBlock(QA_PISTON),
+      near: readBlock(QA_PISTON_NEAR),
+      far: readBlock(QA_PISTON_FAR),
+    }
+  }
+
+  const seedStickyPistonEncounter = () => {
+    respawnPlayer()
+    const dimension = Effect.runSync(playerApi.dimension)
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, dimension))
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('stone', 1))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_LEVER, 76))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON, 16))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_NEAR, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_FAR, 0))
+    leverStates.set(leverKeyOf({ dimension, position: QA_PISTON_LEVER }), {
+      dimension,
+      position: QA_PISTON_LEVER,
+      active: false,
+    })
+    pendingBlockUses.clear()
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    redstoneDirty = true
+    markSessionDirty()
+    renderPlayerUi()
+    return stickyPistonSnapshot()
+  }
+
   const seedWoodenPickaxeProgression = () => {
     respawnPlayer()
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
@@ -3030,6 +3137,8 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedCraftingTableEncounter,
+        seedStickyPistonEncounter,
+        stickyPistonSnapshot,
         seedFarmingEncounter,
         harvestFarmingCrop,
         seedCactusApproach: () => seedEnvironmentalContactEncounter('cactus'),
@@ -4045,6 +4154,9 @@ const bootGame = async (
       if (context === undefined) continue
       Effect.runSync(context.chunkStore.setBlock(transition.position, transition.lit ? 80 : 79))
       markSessionDirty()
+    }
+    for (const transition of Effect.runSync(redstoneRuntime.drainPistonTransitions)) {
+      applyPoweredPistonTransition(transition)
     }
 
     // Portal stages can replace both dimension and pose. Stream and present
