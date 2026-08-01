@@ -35,6 +35,7 @@ import {
 } from '@nerima-games/mx-gameplay'
 
 import {
+  EMPTY_END_STATE,
   EMPTY_ENTITY_ROSTER,
   EMPTY_VILLAGER_STATE,
   SESSION_FORMAT_NAME,
@@ -117,6 +118,7 @@ const sessionState = (seed: number): SessionState => {
     villagers: EMPTY_VILLAGER_STATE,
     brewing: emptyBrewingStandState(),
     statusEffects: emptyStatusEffectState(),
+    end: EMPTY_END_STATE,
   }
 }
 
@@ -284,7 +286,7 @@ describe('session persistence', () => {
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 15,
+        version: 16,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -580,7 +582,7 @@ describe('session persistence', () => {
     const sessionId = 'future-version'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 16,
+      version: 17,
       payload: {
         sessionId,
         revision: 'r1',
@@ -595,7 +597,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 16,
+        version: 17,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -1087,7 +1089,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(15)
+      expect(storage.envelope(headKey)?.version).toBe(16)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )

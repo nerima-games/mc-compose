@@ -48,6 +48,9 @@ import {
   emptyStatusEffectState,
   isValidPlayerVitals,
   SPAWN_PLAYER_VITALS,
+  EnderDragonEncounterSnapshotSchema,
+  initialEnderDragonEncounter,
+  type EnderDragonEncounterSnapshot,
   type PlayerVitals,
   type BrewingStandState,
   type StatusEffectState,
@@ -56,7 +59,7 @@ import {
 } from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
-export const SESSION_FORMAT_VERSION = 15
+export const SESSION_FORMAT_VERSION = 16
 
 export type SessionPosition = {
   readonly x: number
@@ -159,6 +162,28 @@ export type PersistedPortalState = {
   readonly position: SessionPosition
 }
 
+export type PersistedEndPortalFrameState = {
+  readonly position: SessionPosition
+  readonly facing: 'north' | 'south' | 'east' | 'west'
+  readonly eye: boolean
+}
+
+export type PersistedEndState = {
+  readonly frames: ReadonlyArray<PersistedEndPortalFrameState>
+  readonly portalComplete: boolean
+  readonly dragon: EnderDragonEncounterSnapshot
+  readonly exitPortalMaterialized: boolean
+  readonly dragonEggRewarded: boolean
+}
+
+export const EMPTY_END_STATE: PersistedEndState = {
+  frames: [],
+  portalComplete: false,
+  dragon: initialEnderDragonEncounter(),
+  exitPortalMaterialized: false,
+  dragonEggRewarded: false,
+}
+
 const PositionSchema: Schema.Schema<SessionPosition> = Schema.Struct({
   x: Schema.Number,
   y: Schema.Number,
@@ -199,6 +224,7 @@ export type SessionState = {
   readonly villagers: PersistedVillagerState
   readonly brewing: BrewingStandState
   readonly statusEffects: StatusEffectState
+  readonly end: PersistedEndState
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -338,6 +364,18 @@ const PersistedPortalsSchema: Schema.Schema<ReadonlyArray<PersistedPortalState>>
   }),
 )
 
+const PersistedEndStateSchema: Schema.Schema<PersistedEndState> = Schema.Struct({
+  frames: Schema.Array(Schema.Struct({
+    position: BlockPositionSchema,
+    facing: Schema.Literal('north', 'south', 'east', 'west'),
+    eye: Schema.Boolean,
+  })),
+  portalComplete: Schema.Boolean,
+  dragon: EnderDragonEncounterSnapshotSchema,
+  exitPortalMaterialized: Schema.Boolean,
+  dragonEggRewarded: Schema.Boolean,
+})
+
 const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   seed: Schema.Number,
   dimension: DimensionSchema,
@@ -365,6 +403,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   villagers: Schema.Unknown as unknown as Schema.Schema<PersistedVillagerState>,
   brewing: Schema.Unknown as unknown as Schema.Schema<BrewingStandState>,
   statusEffects: Schema.Unknown as unknown as Schema.Schema<StatusEffectState>,
+  end: PersistedEndStateSchema,
 })
 
 export type SessionChunkManifestEntry = {
@@ -724,6 +763,24 @@ const migrateSessionV14ToV15: Migration = {
   },
 }
 
+const migrateSessionV15ToV16: Migration = {
+  from: 15,
+  describe: 'add End portal and dragon encounter state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v15 payload must contain an object state')
+    }
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'end')
+        ? state
+        : { ...state, end: EMPTY_END_STATE },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
   version: SESSION_FORMAT_VERSION,
@@ -743,6 +800,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV12ToV13,
     migrateSessionV13ToV14,
     migrateSessionV14ToV15,
+    migrateSessionV15ToV16,
   ],
 })
 

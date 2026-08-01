@@ -85,7 +85,9 @@
 import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Ref, Scope } from 'effect'
 import {
+  makeEndAudioController,
   makeWebAudioBackend,
+  type EndAudioEvent,
   type Vec3,
 } from '@nerima-games/mc-audio'
 import { blockIdOf, blockTypeOfId, capabilityOfBlockId, propertyOfBlockId } from '@nerima-games/mc-kernel'
@@ -115,10 +117,17 @@ import {
 } from '@nerima-games/mc-sim'
 import {
   biomeFor,
+  blockPosition,
   chunkCoord,
   chunkSnapshotOf,
   DEFAULT_TERRAIN_LEVELS,
+  detectCompletedEndPortal,
+  END_PORTAL_BLOCK,
+  END_PORTAL_FRAME_OFFSETS,
+  endArrivalDescriptor,
+  endPortalCenterForStronghold,
   generatedChunkSource,
+  nearestStrongholdSite,
   surfaceHeightAt,
   villageVillagerSpawnsForChunk,
   type ChunkSource,
@@ -335,6 +344,7 @@ import {
   type PersistedFurnaceState,
   type PersistedLeverState,
   type PersistedPortalState,
+  type PersistedEndPortalFrameState,
   type PersistedVillager,
   type SessionMetadata,
   type SessionState,
@@ -941,6 +951,30 @@ const bootGame = async (
     listenerForward: () => readAudioListenerForward(),
     settings: playerSettings,
   }))
+  const endAudio = makeEndAudioController({
+    createLoop: (_kind, initialGain) => Effect.runSync(audioBackend.playTone({
+      durationSecs: 3600,
+      frequency: 42,
+      gain: initialGain,
+      loop: true,
+      pan: 0,
+      wave: 'sine',
+    })),
+    setLoopGain: () => {},
+    stopLoop: (handle) => Effect.runSync(audioBackend.stopTone(handle)),
+    playEvent: () => null,
+    playFallback: (request) => Effect.runSync(audioBackend.playTone({ ...request, loop: false })),
+    release: () => {},
+  })
+  let nextEndAudioEventId = 0
+  const pendingEndAudioEvents: EndAudioEvent[] = []
+  const queueEndAudio = (kind: EndAudioEvent['kind'], position: Vec3): void => {
+    pendingEndAudioEvents.push({
+      id: `end-${String(nextEndAudioEventId++)}`,
+      kind,
+      position,
+    })
+  }
   const placementAudio = makePlacementAudioLatch(audio)
   const loadedSession = await runStorage(
     Effect.provide(loadSession(sessionId), storageContext),
@@ -1145,6 +1179,26 @@ const bootGame = async (
     ))
     await Effect.runPromise(restoreBrewingStand(gameplayState, loadedSession.value.state.brewing))
     await Effect.runPromise(restoreStatusEffects(gameplayState, loadedSession.value.state.statusEffects))
+    await Effect.runPromise(gameplayState.enderDragonEncounter.restore(loadedSession.value.state.end.dragon))
+  }
+  const loadedEndState = Option.isSome(loadedSession) ? loadedSession.value.state.end : undefined
+  const endPortalFrameKey = (position: SessionPosition): string =>
+    `${String(position.x)},${String(position.y)},${String(position.z)}`
+  const endPortalFrames = new Map<string, PersistedEndPortalFrameState>(
+    (loadedEndState?.frames ?? []).map((frame) => [endPortalFrameKey(frame.position), frame]),
+  )
+  let endPortalComplete = loadedEndState?.portalComplete ?? false
+  let exitPortalMaterialized = loadedEndState?.exitPortalMaterialized ?? false
+  let dragonEggRewarded = loadedEndState?.dragonEggRewarded ?? false
+  const endDragonPosition = (): SessionPosition => {
+    const dragon = Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
+    const angle = dragon.phaseTimerSecs * (dragon.phase === 'charging' ? 1.4 : 0.35)
+    const radius = dragon.phase === 'perching' ? 4 : dragon.phase === 'charging' ? 8 : 20
+    return {
+      x: Math.cos(angle) * radius,
+      y: dragon.phase === 'perching' ? 68 : 76,
+      z: Math.sin(angle) * radius,
+    }
   }
 
   const presentWeather = (state: WeatherState): void => {
@@ -1282,6 +1336,13 @@ const bootGame = async (
       },
       brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
       statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
+      end: {
+        frames: [...endPortalFrames.values()],
+        portalComplete: endPortalComplete,
+        dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
+        exitPortalMaterialized,
+        dragonEggRewarded,
+      },
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -2501,6 +2562,111 @@ const bootGame = async (
     const reading = yield* currentChunkStore.getBlock(target.value.position)
     return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'brewing_stand'
   })
+  const targetedBlock = (): Effect.Effect<{
+    readonly position: SessionPosition
+    readonly block: number
+  } | undefined> => Effect.gen(function* () {
+    const pose = yield* playerApi.pose
+    const candidates: SessionPosition[] = []
+    const visited = new Set<string>()
+    targetBlockFromPlayerPose(pose, DEFAULT_BLOCK_REACH, (x, y, z) => {
+      const key = `${String(x)},${String(y)},${String(z)}`
+      if (!visited.has(key)) {
+        visited.add(key)
+        candidates.push({ x, y, z })
+      }
+      return false
+    })
+    for (const position of candidates) {
+      const reading = yield* currentChunkStore.getBlock(position)
+      if (reading._tag === 'Block' && reading.block !== 0) return { position, block: reading.block }
+    }
+    return undefined
+  })
+
+  const materializeEndArrival = (): Effect.Effect<void> => Effect.gen(function* () {
+    const arrival = endArrivalDescriptor(blockPosition(0, 64, 0))
+    const context = getOrCreateDimensionChunkContext('end')
+    const mutations = [...arrival.platform, ...arrival.clear.map((at) => ({ at, block: 0 }))]
+    const chunks = new Map<string, ChunkRef>()
+    for (const mutation of mutations) {
+      const chunk = { cx: Math.floor(mutation.at.x / 16), cz: Math.floor(mutation.at.z / 16) }
+      chunks.set(chunkKeyOf(chunk), chunk)
+    }
+    for (const [key, chunk] of chunks) {
+      if (!context.streamLoaded.has(key)) {
+        yield* context.chunkStore.load(chunk)
+        context.streamLoaded.add(key)
+      }
+    }
+    for (const mutation of mutations) yield* context.chunkStore.setBlock(mutation.at, mutation.block)
+    const pose = yield* playerApi.pose
+    yield* playerApi.restore({ ...pose, feetPosition: arrival.spawn, yawRadians: Math.PI }, 'end')
+    alignActiveDimension('end')
+    resetSimState(true)
+    markSessionDirty()
+  })
+
+  const useEndFeature = (): Effect.Effect<boolean> => Effect.gen(function* () {
+    const dimension = yield* playerApi.dimension
+    const pose = yield* playerApi.pose
+    const target = yield* targetedBlock()
+    if (dimension === 'end' && exitPortalMaterialized && target?.block === END_PORTAL_BLOCK.PORTAL) {
+      yield* playerApi.restore({ ...pose, feetPosition: { x: 0.5, y: 80, z: 0.5 } }, 'overworld')
+      alignActiveDimension('overworld')
+      resetSimState(true)
+      queueEndAudio('exitPortal', pose.feetPosition)
+      markSessionDirty()
+      return true
+    }
+    if (dimension === 'overworld' && endPortalComplete && target?.block === END_PORTAL_BLOCK.PORTAL) {
+      yield* materializeEndArrival()
+      queueEndAudio('portalActivate', target.position)
+      return true
+    }
+    const inventory = yield* world.inventory.snapshot
+    const selected = inventory.slots[selectedHotbarIndex]
+    if (dimension !== 'overworld' || selected?.item !== 'eye_of_ender') return false
+    const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
+    if (Option.isNone(site)) return false
+    const center = endPortalCenterForStronghold(site.value)
+    const offset = target === undefined ? undefined : END_PORTAL_FRAME_OFFSETS.find((candidate) =>
+      center.x + candidate.dx === target.position.x
+      && center.y === target.position.y
+      && center.z + candidate.dz === target.position.z)
+    if (target?.block === END_PORTAL_BLOCK.FRAME_EMPTY && offset !== undefined) {
+      yield* currentChunkStore.setBlock(target.position, END_PORTAL_BLOCK.FRAME_FILLED)
+      endPortalFrames.set(endPortalFrameKey(target.position), {
+        position: target.position,
+        facing: offset.facing,
+        eye: true,
+      })
+      if (!isCreativeMode) yield* world.inventory.removeAt(selectedHotbarIndex, 'eye_of_ender', 1)
+      queueEndAudio('frameInsert', target.position)
+      canvas.setAttribute('data-end-portal-progress', String(endPortalFrames.size))
+      const completed = detectCompletedEndPortal((x, y, z) => {
+        const frame = endPortalFrames.get(endPortalFrameKey({ x, y, z }))
+        return frame === undefined ? undefined : { block: END_PORTAL_BLOCK.FRAME_FILLED, facing: frame.facing }
+      }, dimension, center)
+      if (Option.isSome(completed)) {
+        for (const mutation of completed.value.materialization) {
+          yield* currentChunkStore.setBlock(mutation.at, mutation.block)
+        }
+        endPortalComplete = true
+        queueEndAudio('portalActivate', center)
+      }
+      markSessionDirty()
+      return true
+    }
+    const dx = site.value.x - pose.feetPosition.x
+    const dz = site.value.z - pose.feetPosition.z
+    canvas.setAttribute('data-stronghold-direction', String(Math.atan2(dx, -dz)))
+    canvas.setAttribute('data-stronghold-distance', String(Math.round(Math.hypot(dx, dz))))
+    if (!isCreativeMode) yield* world.inventory.removeAt(selectedHotbarIndex, 'eye_of_ender', 1)
+    queueEndAudio('eyeThrow', pose.feetPosition)
+    markSessionDirty()
+    return true
+  })
   let touchControlsVisible = false
   const resetTouchInput = (
     reason: Parameters<typeof resetTouchLook>[1],
@@ -3223,6 +3389,15 @@ const bootGame = async (
         kind: 'villager',
         feetPosition: villager.feetPosition,
       } satisfies RenderEntity)),
+    ...(currentChunkContext.dimension === 'end'
+      && Effect.runSync(gameplayState.enderDragonEncounter.snapshot).phase !== 'dead'
+      ? [{
+          id: 'ender-dragon',
+          kind: 'ender_dragon',
+          category: 'hostile' as const,
+          feetPosition: endDragonPosition(),
+        } satisfies RenderEntity]
+      : []),
   ]
 
   const nearestVillagerForTrade = (
@@ -3316,6 +3491,13 @@ const bootGame = async (
       villagerTrades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
       brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
       statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
+      end: {
+        frames: [...endPortalFrames.values()],
+        portalComplete: endPortalComplete,
+        dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
+        exitPortalMaterialized,
+        dragonEggRewarded,
+      },
       entityCount: entities.length,
       renderedEntities: entityRenderProjection(),
       mobDrops: observedMobDrops.map(({ renderId: _, ...drop }) => drop),
@@ -3747,6 +3929,116 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const poseLookingAt = (target: SessionPosition, distance: number): typeof QA_POSE => ({
+    feetPosition: {
+      x: target.x + 0.5,
+      y: target.y + 0.5 - EYE_LEVEL_OFFSET,
+      z: target.z + 0.5 + distance,
+    },
+    yawRadians: 0,
+    pitchRadians: 0,
+  })
+
+  const seedEndEyeCrafting = () => {
+    respawnPlayer()
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('ender_pearl', 1))
+    Effect.runSync(world.inventory.add('blaze_powder', 1))
+    inventoryInteraction.reset()
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedEndPortalFinalFrame = () => {
+    respawnPlayer()
+    const currentPose = Effect.runSync(playerApi.pose)
+    const site = nearestStrongholdSite(activeSeed, currentPose.feetPosition.x, currentPose.feetPosition.z)
+    if (Option.isNone(site)) throw new Error('no stronghold found near the QA player')
+    const center = endPortalCenterForStronghold(site.value)
+    const finalOffset = END_PORTAL_FRAME_OFFSETS[0]
+    if (finalOffset === undefined) throw new Error('End portal frame layout is empty')
+    Effect.runSync(streamAround(currentChunkContext, center.x, center.z))
+    endPortalFrames.clear()
+    endPortalComplete = false
+    for (const offset of END_PORTAL_FRAME_OFFSETS) {
+      const position = { x: center.x + offset.dx, y: center.y, z: center.z + offset.dz }
+      const isFinal = offset === finalOffset
+      Effect.runSync(currentChunkStore.setBlock(
+        position,
+        isFinal ? END_PORTAL_BLOCK.FRAME_EMPTY : END_PORTAL_BLOCK.FRAME_FILLED,
+      ))
+      if (!isFinal) {
+        endPortalFrames.set(endPortalFrameKey(position), {
+          position,
+          facing: offset.facing,
+          eye: true,
+        })
+      }
+    }
+    const finalPosition = {
+      x: center.x + finalOffset.dx,
+      y: center.y,
+      z: center.z + finalOffset.dz,
+    }
+    Effect.runSync(playerApi.restore(poseLookingAt(finalPosition, 3), 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('eye_of_ender', 1))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const targetCompletedEndPortal = () => {
+    const frame = endPortalFrames.values().next().value as PersistedEndPortalFrameState | undefined
+    if (frame === undefined || !endPortalComplete) throw new Error('End portal is not complete')
+    const site = nearestStrongholdSite(activeSeed, frame.position.x, frame.position.z)
+    if (Option.isNone(site)) throw new Error('no stronghold found for the completed portal')
+    const center = endPortalCenterForStronghold(site.value)
+    Effect.runSync(playerApi.restore({
+      feetPosition: {
+        x: center.x + 0.5,
+        y: center.y + 3 - EYE_LEVEL_OFFSET,
+        z: center.z + 0.5,
+      },
+      yawRadians: 0,
+      pitchRadians: -Math.PI / 2 + 0.01,
+    }, 'overworld'))
+    resetSimState(true)
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
+  const seedEndDragonFinalHit = () => {
+    Effect.runSync(gameplayState.enderDragonEncounter.restore({
+      phase: 'circling',
+      phaseTimerSecs: 0,
+      health: 1,
+      rewardEmitted: false,
+    }))
+    const dragon = endDragonPosition()
+    Effect.runSync(playerApi.restore(poseLookingAt(dragon, 5), 'end'))
+    alignActiveDimension('end')
+    resetSimState(true)
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
+  const targetEndExitPortal = () => {
+    if (!exitPortalMaterialized) throw new Error('End exit portal is not materialized')
+    Effect.runSync(playerApi.restore(poseLookingAt({ x: 0, y: 64, z: 0 }, 3), 'end'))
+    resetSimState(true)
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
   const grantNearestVillagerTradeInput = () => {
     const pose = Effect.runSync(playerApi.pose)
     const villager = nearestVillagerForTrade(pose.feetPosition, 'overworld')
@@ -4078,6 +4370,11 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedBrewingEncounter,
+        seedEndEyeCrafting,
+        seedEndPortalFinalFrame,
+        targetCompletedEndPortal,
+        seedEndDragonFinalHit,
+        targetEndExitPortal,
       },
     },
     {
@@ -4135,6 +4432,7 @@ const bootGame = async (
     disposeMultiplayer()
     if (!event.persisted) {
       settingsView.dispose()
+      endAudio.dispose()
       audio.close()
     }
   })
@@ -4145,6 +4443,7 @@ const bootGame = async (
     void stopBrowserPreview?.()
     disposeMultiplayer()
     settingsView.dispose()
+    endAudio.dispose()
     audio.close()
   })
 
@@ -4594,6 +4893,34 @@ const bootGame = async (
     if (looked || moved) markSessionDirty()
     Effect.runSync(Ref.set(gameplayState.targetPosition, postFramePose.feetPosition))
 
+    if (
+      attackTriggered
+      && dimensionAfterFrame === 'end'
+      && !primaryAttackGestureConsumed
+    ) {
+      const dragonPosition = endDragonPosition()
+      const dx = dragonPosition.x - postFramePose.feetPosition.x
+      const dy = dragonPosition.y - (postFramePose.feetPosition.y + EYE_LEVEL_OFFSET)
+      const dz = dragonPosition.z - postFramePose.feetPosition.z
+      const distance = Math.hypot(dx, dy, dz)
+      const horizontal = Math.cos(postFramePose.pitchRadians)
+      const forward = {
+        x: -Math.sin(postFramePose.yawRadians) * horizontal,
+        y: Math.sin(postFramePose.pitchRadians),
+        z: -Math.cos(postFramePose.yawRadians) * horizontal,
+      }
+      const alignment = distance === 0 ? 1 : (dx * forward.x + dy * forward.y + dz * forward.z) / distance
+      if (distance <= DEFAULT_BLOCK_REACH + 3 && alignment >= 0.8) {
+        const selectedItem = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]?.item ?? null
+        const damage = meleeDamageForItem(
+          selectedItem === null ? null : gameplayModuleItem(selectedItem),
+        )
+        Effect.runSync(gameplayState.enderDragonEncounter.damageByPlayer(Math.max(1, damage)))
+        primaryAttackGestureConsumed = true
+        markSessionDirty()
+      }
+    }
+
     // Resolve click rays from the authoritative post-simulation pose. Requests
     // enter gameplay's inbox and are consumed by the next frame.
     if (!deadAfterFrame && !dimensionChanged && attackHeld) {
@@ -4742,11 +5069,14 @@ const bootGame = async (
       && !bowAdvance.capturedUse
       && pendingBowShots.size === 0
     ) {
-      const opensBrewing = Effect.runSync(targetedBrewingStand())
-      const route = opensBrewing
+      const usedEndFeature = Effect.runSync(useEndFeature())
+      const opensBrewing = usedEndFeature ? false : Effect.runSync(targetedBrewingStand())
+      const route = usedEndFeature || opensBrewing
         ? undefined
         : Effect.runSync(targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH))
-      if (opensBrewing) {
+      if (usedEndFeature) {
+        renderPlayerUi()
+      } else if (opensBrewing) {
         setBrewingOpen(true)
       } else if (route?.kind === 'craftingTable') {
         setInventoryOpen(true, 'craftingTable')
@@ -5087,6 +5417,61 @@ const bootGame = async (
     }
     if (mobExperience.length > 0 || playerHeals.length > 0) markSessionDirty()
 
+    const dragonEvents = Effect.runSync(gameplayState.enderDragonEncounter.drainEvents)
+    for (const event of dragonEvents) {
+      switch (event._tag) {
+        case 'PlayerDamaged': {
+          if (dimensionAfterFrame !== 'end') break
+          const dragon = endDragonPosition()
+          const player = Effect.runSync(playerApi.pose).feetPosition
+          if (Math.hypot(dragon.x - player.x, dragon.y - player.y, dragon.z - player.z) <= 6) {
+            applyPlayerDamage({ amount: event.amount, cause: 'generic' })
+            queueEndAudio('playerHit', player)
+          }
+          break
+        }
+        case 'ExperienceRewarded': {
+          const currentVitals = Effect.runSync(world.vitals.snapshot)
+          Effect.runSync(world.vitals.restore(addVitalsExperience(currentVitals, event.amount)))
+          queueEndAudio('dragonReward', endDragonPosition())
+          break
+        }
+        case 'DragonEggRewarded':
+          if (!dragonEggRewarded) {
+            Effect.runSync(world.inventory.add(event.item, event.count))
+            dragonEggRewarded = true
+          }
+          break
+        case 'ExitPortalMaterializationRequested':
+          if (!exitPortalMaterialized) {
+            const portalY = 64
+            for (let x = -1; x <= 1; x += 1) {
+              for (let z = -1; z <= 1; z += 1) {
+                Effect.runSync(currentChunkStore.setBlock({ x, y: portalY, z }, END_PORTAL_BLOCK.PORTAL))
+              }
+            }
+            exitPortalMaterialized = true
+            queueEndAudio('exitPortal', { x: 0, y: portalY, z: 0 })
+          }
+          break
+        case 'DragonDamagedByPlayer':
+          queueEndAudio('dragonHurt', endDragonPosition())
+          break
+      }
+    }
+    if (dragonEvents.length > 0) markSessionDirty()
+    const dragonSnapshot = Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
+    canvas.setAttribute('data-end-dragon-phase', dragonSnapshot.phase)
+    canvas.setAttribute('data-end-dragon-health', String(dragonSnapshot.health))
+    endAudio.update({
+      dimension: dimensionAfterFrame,
+      phase: dragonSnapshot.phase === 'dead' ? 'defeated' : 'active',
+      nowSecs,
+      listener: postFramePose.feetPosition,
+      listenerForward: readAudioListenerForward(),
+      events: pendingEndAudioEvents.splice(0),
+    })
+
     Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
     if (brewingOpen) renderBrewingUi()
     renderPlayerUi()
@@ -5128,6 +5513,7 @@ const bootGame = async (
           requestBackgroundFlush()
           disposeMultiplayer()
           settingsView.dispose()
+          endAudio.dispose()
           audio.close()
         }),
       }
