@@ -326,6 +326,37 @@ test.describe('smoke — the composed frame in a real browser', () => {
     ])
   })
 
+  test('#4c audio QA exposes the camera-derived listener orientation', async ({ page }) => {
+    await startGameSession(page)
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+    const snapshots = await page.evaluate(async (key) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const audioSnapshot = surface?.['audio.snapshot']
+      const gameplaySnapshot = surface?.['gameplay.snapshot']
+      if (audioSnapshot === undefined) throw new Error('missing QA command: audio.snapshot')
+      if (gameplaySnapshot === undefined) throw new Error('missing QA command: gameplay.snapshot')
+      return { audio: await audioSnapshot(), gameplay: await gameplaySnapshot() }
+    }, QA_GLOBAL_KEY) as {
+      readonly audio: {
+        readonly listener: { readonly x: number; readonly y: number; readonly z: number }
+        readonly listenerForward: { readonly x: number; readonly y: number; readonly z: number }
+      }
+      readonly gameplay: {
+        readonly pose: {
+          readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
+        }
+      }
+    }
+
+    expect(snapshots.audio.listener).toEqual(snapshots.gameplay.pose.feetPosition)
+    expect(snapshots.audio.listenerForward.x).toBeCloseTo(0)
+    expect(snapshots.audio.listenerForward.y).toBe(0)
+    expect(snapshots.audio.listenerForward.z).toBeCloseTo(-1)
+  })
+
   /**
    * #7 `no fatal startup errors during session`.
    *

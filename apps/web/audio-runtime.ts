@@ -19,9 +19,17 @@ type RuntimeBackend = AudioBackend & Pick<WebAudioBackend, 'unlock' | 'close'>
 export type AudioRuntimeSnapshot = {
   readonly cueIds: ReadonlyArray<SoundCueId>
   readonly captions: ReadonlyArray<CaptionEvent>
+  readonly listener: Vec3
+  readonly listenerForward?: Vec3
   readonly closed: boolean
   readonly unlockPending: boolean
 }
+
+export const horizontalListenerForward = (yawRadians: number): Vec3 => ({
+  x: -Math.sin(yawRadians),
+  y: 0,
+  z: -Math.cos(yawRadians),
+})
 
 export type AudioRuntimeSettings = {
   readonly masterVolume: number
@@ -38,10 +46,35 @@ export type AudioRuntime = {
   readonly close: () => void
 }
 
+export type PlacementAudioLatch = {
+  readonly request: (position?: Vec3) => void
+  readonly confirm: (consumedPlacements: ReadonlyArray<unknown>) => boolean
+}
+
+export const makePlacementAudioLatch = (
+  audio: Pick<AudioRuntime, 'play'>,
+): PlacementAudioLatch => {
+  // Gameplay exposes no placement correlation id. Keep exactly one target and
+  // replace or clear it at the start of every browser placement attempt.
+  let pendingPosition: Vec3 | undefined
+  return {
+    request: (position) => {
+      pendingPosition = position
+    },
+    confirm: (consumedPlacements) => {
+      if (consumedPlacements.length === 0) return false
+      const position = pendingPosition
+      pendingPosition = undefined
+      return announceConfirmedPlacements(audio, consumedPlacements, position)
+    },
+  }
+}
+
 export const makeAudioRuntime = (input: {
   readonly backend: RuntimeBackend
   readonly nowSecs: Effect.Effect<number>
   readonly listener: () => Vec3
+  readonly listenerForward?: () => Vec3
   readonly settings?: AudioRuntimeSettings
 }): Effect.Effect<AudioRuntime> =>
   Effect.gen(function* () {
@@ -65,6 +98,9 @@ export const makeAudioRuntime = (input: {
         enabled: settings.audioEnabled,
         availability,
         listener: input.listener(),
+        ...(input.listenerForward === undefined
+          ? {}
+          : { listenerForward: input.listenerForward() }),
       })),
       nowSecs: input.nowSecs,
     }).pipe(Effect.provide(layer))
@@ -102,6 +138,10 @@ export const makeAudioRuntime = (input: {
       snapshot: (nowSecs) => ({
         cueIds: [...cueIds],
         captions: currentCaptions(nowSecs),
+        listener: input.listener(),
+        ...(input.listenerForward === undefined
+          ? {}
+          : { listenerForward: input.listenerForward() }),
         closed,
         unlockPending: unlockPending !== undefined,
       }),
@@ -146,8 +186,9 @@ export const announceInventoryTransition = (
 export const announceConfirmedPlacements = (
   audio: Pick<AudioRuntime, 'play'>,
   consumedPlacements: ReadonlyArray<unknown>,
+  position?: Vec3,
 ): boolean => {
   if (consumedPlacements.length === 0) return false
-  audio.play('blockPlace')
+  audio.play('blockPlace', position === undefined ? undefined : { position })
   return true
 }

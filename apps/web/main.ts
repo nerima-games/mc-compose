@@ -265,10 +265,11 @@ import {
   type BrowserWebSocketTransport,
 } from './multiplayer-websocket'
 import {
-  announceConfirmedPlacements,
   announceInventoryTransition,
   captionRenderSignature,
+  horizontalListenerForward,
   makeAudioRuntime,
+  makePlacementAudioLatch,
 } from './audio-runtime'
 import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
@@ -827,6 +828,7 @@ const bootGame = async (
   ).catch(() => DEFAULT_PLAYER_SETTINGS)
   const settingsWrites = makeSettingsWriteQueue()
   let readAudioListener = (): Vec3 => ({ x: 0, y: 0, z: 0 })
+  let readAudioListenerForward = (): Vec3 => horizontalListenerForward(0)
   const audioBackend = Effect.runSync(makeWebAudioBackend({
     global: globalThis,
     initialMasterGain: playerSettings.audioEnabled ? playerSettings.masterVolume : 0,
@@ -835,8 +837,10 @@ const bootGame = async (
     backend: audioBackend,
     nowSecs: browserClock.monotonicSecs,
     listener: () => readAudioListener(),
+    listenerForward: () => readAudioListenerForward(),
     settings: playerSettings,
   }))
+  const placementAudio = makePlacementAudioLatch(audio)
   const loadedSession = await runStorage(
     Effect.provide(loadSession(sessionId), storageContext),
   )
@@ -1432,6 +1436,9 @@ const bootGame = async (
   //
   const playerApi = world.player
   readAudioListener = () => Effect.runSync(playerApi.pose).feetPosition
+  readAudioListenerForward = () => horizontalListenerForward(
+    Effect.runSync(playerApi.pose).yawRadians,
+  )
   const inputApi = Context.get(inputContext, InputService)
   const applyBindings = (bindings: PlayerSettingsV1['bindings']): void => {
     for (const action of PLAYER_BINDING_ACTIONS) {
@@ -4076,6 +4083,7 @@ const bootGame = async (
         }
 
         if (shouldAttemptPlacement) {
+          placementAudio.request()
           requestPlacementFromSelectedSlot(
             inventoryBeforeUse.slots,
             selectedHotbarIndex,
@@ -4100,6 +4108,7 @@ const bootGame = async (
                     block: heldItem,
                   }))
                   placementsRequested += 1
+                  placementAudio.request(target.value.adjacentPosition)
                   canvas.setAttribute('data-placements-requested', String(placementsRequested))
                 }
                 return
@@ -4124,6 +4133,7 @@ const bootGame = async (
                   })
                 } else {
                   placementsRequested += 1
+                  placementAudio.request(target.value.adjacentPosition)
                   canvas.setAttribute('data-placements-requested', String(placementsRequested))
                 }
                 markSessionDirty()
@@ -4149,7 +4159,7 @@ const bootGame = async (
         }
       }
     }
-    announceConfirmedPlacements(audio, consumedPlacements)
+    placementAudio.confirm(consumedPlacements)
     if (consumedPlacements.some((item) => REDSTONE_PLACEMENT_ITEMS.has(item))) {
       redstoneDirty = true
     }

@@ -1,6 +1,7 @@
 import {
   makeRecordingBackend,
   type AudioBackend,
+  type Vec3,
   type WebAudioBackend,
 } from '@nerima-games/mc-audio'
 import { describe, expect, it } from 'vitest'
@@ -10,7 +11,9 @@ import {
   announceConfirmedPlacements,
   announceInventoryTransition,
   captionRenderSignature,
+  horizontalListenerForward,
   makeAudioRuntime,
+  makePlacementAudioLatch,
   pruneExpiredCaptionEvents,
 } from '../apps/web/audio-runtime'
 
@@ -29,6 +32,34 @@ const makeBackend = (
 })
 
 describe('web audio runtime', () => {
+  it('derives the horizontal listener direction from camera yaw', () => {
+    expect(horizontalListenerForward(0)).toEqual({ x: -0, y: 0, z: -1 })
+    expect(horizontalListenerForward(Math.PI / 2).x).toBeCloseTo(-1)
+    expect(horizontalListenerForward(-Math.PI / 2).x).toBeCloseTo(1)
+  })
+
+  it('rotates world-space placement panning with the listener', async () => {
+    const recording = await Effect.runPromise(makeRecordingBackend('ready'))
+    let yawRadians = 0
+    const runtime = await Effect.runPromise(
+      makeAudioRuntime({
+        backend: makeBackend(recording.backend, { unlocks: 0, closes: 0 }),
+        nowSecs: Effect.succeed(0),
+        listener: () => ({ x: 0, y: 0, z: 0 }),
+        listenerForward: () => horizontalListenerForward(yawRadians),
+      }),
+    )
+
+    runtime.play('blockPlace', { position: { x: 12, y: 0, z: 0 } })
+    yawRadians = Math.PI
+    runtime.play('blockPlace', { position: { x: 12, y: 0, z: 0 } })
+
+    const played = await Effect.runPromise(recording.played)
+    expect(played[0]?.pan).toBeCloseTo(1)
+    expect(played[1]?.pan).toBeCloseTo(-1)
+    expect(runtime.snapshot(0).listenerForward).toEqual(horizontalListenerForward(Math.PI))
+  })
+
   it('emits the damage caption while autoplay remains locked', async () => {
     const recording = await Effect.runPromise(makeRecordingBackend('locked'))
     const runtime = await Effect.runPromise(
@@ -96,6 +127,25 @@ describe('web audio runtime', () => {
     expect(runtime.snapshot(0).cueIds).toEqual([])
     expect(announceConfirmedPlacements(runtime, ['oak_planks'])).toBe(true)
     expect(runtime.snapshot(0).cueIds).toEqual(['blockPlace'])
+  })
+
+  it('clears an unconfirmed placement position before the next single in-flight request', () => {
+    const plays: Array<{ cueId: string; position: Vec3 | undefined }> = []
+    const latch = makePlacementAudioLatch({
+      play: (cueId, options) => plays.push({ cueId, position: options?.position }),
+    })
+
+    latch.request({ x: 4, y: 5, z: 6 })
+    latch.request()
+    expect(latch.confirm([])).toBe(false)
+    latch.request({ x: -2, y: 1, z: 3 })
+    expect(latch.confirm(['stone'])).toBe(true)
+    expect(latch.confirm(['stone'])).toBe(true)
+
+    expect(plays).toEqual([
+      { cueId: 'blockPlace', position: { x: -2, y: 1, z: 3 } },
+      { cueId: 'blockPlace', position: undefined },
+    ])
   })
 
   it('unlocks and closes at most once while their work is active', async () => {
