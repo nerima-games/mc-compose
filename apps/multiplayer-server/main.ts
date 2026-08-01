@@ -1,11 +1,23 @@
 import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { createServer, type Server as HttpServer } from 'node:http'
+import { dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import type { WireText } from '@nerima-games/mx-multiplayer'
+import { blockTypeOfId } from '@nerima-games/mc-kernel'
+import {
+  blockPosition,
+  CHUNK_HEIGHT,
+  chunkCoordOfBlock,
+  generateChunkAt,
+  getBlockAt,
+  localCoordOfBlock,
+  type Chunk,
+} from '@nerima-games/mc-worldgen'
+import type { BlockPos, WireText } from '@nerima-games/mx-multiplayer'
 import { WebSocket, WebSocketServer } from 'ws'
 
-import { makeMultiplayerServerCore } from './core'
+import { makeMultiplayerServerCore, type MultiplayerServerState } from './core'
 
 const DEFAULT_BLOCKS = [
   'bedrock',
@@ -29,6 +41,7 @@ export interface MultiplayerRuntimeOptions {
   readonly seed: number
   readonly allowedBlocks?: ReadonlySet<string>
   readonly installSignalHandlers?: boolean
+  readonly stateFile?: string
 }
 
 export interface MultiplayerRuntime {
@@ -57,13 +70,96 @@ export const resolveMultiplayerRuntimeOptions = (
   environment: NodeJS.ProcessEnv = process.env,
 ): MultiplayerRuntimeOptions => {
   const port = integerOption(valueAfter(arguments_, 'port') ?? environment['MULTIPLAYER_PORT'], 5182, 'port')
+  const stateFile = valueAfter(arguments_, 'state-file') ?? environment['MULTIPLAYER_STATE_FILE']
   if (port < 0 || port > 65_535) throw new Error('port must be between 0 and 65535')
   return {
     host: valueAfter(arguments_, 'host') ?? environment['MULTIPLAYER_HOST'] ?? '127.0.0.1',
     port,
     worldId: valueAfter(arguments_, 'world') ?? environment['MULTIPLAYER_WORLD'] ?? 'overworld',
     seed: integerOption(valueAfter(arguments_, 'seed') ?? environment['MULTIPLAYER_SEED'], 0, 'seed'),
+    ...(stateFile === undefined ? {} : { stateFile }),
     installSignalHandlers: true,
+  }
+}
+
+interface PersistedServerState {
+  readonly format: 1
+  readonly worldId: string
+  readonly seed: number
+  readonly state: MultiplayerServerState
+}
+
+const isBlockPos = (value: unknown): value is BlockPos => {
+  if (typeof value !== 'object' || value === null) return false
+  const position = value as Record<string, unknown>
+  return Number.isInteger(position['x']) && Number.isInteger(position['y']) && Number.isInteger(position['z'])
+}
+
+const isServerState = (value: unknown): value is MultiplayerServerState => {
+  if (typeof value !== 'object' || value === null) return false
+  const state = value as Record<string, unknown>
+  if (!Number.isInteger(state['revision']) || (state['revision'] as number) < 0 || !Array.isArray(state['blocks'])) return false
+  return state['blocks'].every((entry: unknown) => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const mutation = entry as Record<string, unknown>
+    return isBlockPos(mutation['at']) && (mutation['block'] === null || typeof mutation['block'] === 'string')
+  })
+}
+
+const loadServerState = async (
+  path: string,
+  worldId: string,
+  seed: number,
+): Promise<MultiplayerServerState | undefined> => {
+  let source: string
+  try {
+    source = await readFile(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw new Error(`Failed to read multiplayer state: ${path}`, { cause: error })
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch (error) {
+    throw new Error(`Failed to read multiplayer state: ${path}`, { cause: error })
+  }
+  if (typeof value !== 'object' || value === null) throw new Error(`invalid multiplayer state file: ${path}`)
+  const persisted = value as Record<string, unknown>
+  if (persisted['format'] !== 1 || persisted['worldId'] !== worldId || persisted['seed'] !== seed || !isServerState(persisted['state'])) {
+    throw new Error(`multiplayer state file does not match world ${worldId} and seed ${String(seed)}: ${path}`)
+  }
+  return persisted['state']
+}
+
+const writeServerState = async (
+  path: string,
+  worldId: string,
+  seed: number,
+  state: MultiplayerServerState,
+): Promise<void> => {
+  await mkdir(dirname(path), { recursive: true })
+  const temporaryPath = `${path}.${String(process.pid)}.${randomUUID()}.tmp`
+  const persisted: PersistedServerState = { format: 1, worldId, seed, state }
+  await writeFile(temporaryPath, `${JSON.stringify(persisted)}\n`, 'utf8')
+  await rename(temporaryPath, path)
+}
+
+export const makeGeneratedBlockAt = (seed: number): ((position: BlockPos) => string | null) => {
+  const chunks = new Map<string, Chunk>()
+  return (at) => {
+    if (!Number.isInteger(at.x) || !Number.isInteger(at.y) || !Number.isInteger(at.z) || at.y < 0 || at.y >= CHUNK_HEIGHT) return null
+    const position = blockPosition(at.x, at.y, at.z)
+    const coordinate = chunkCoordOfBlock(position)
+    const key = `${String(coordinate.cx)},${String(coordinate.cz)}`
+    let chunk = chunks.get(key)
+    if (chunk === undefined) {
+      chunk = generateChunkAt(seed, coordinate.cx, coordinate.cz)
+      chunks.set(key, chunk)
+    }
+    const local = localCoordOfBlock(position)
+    const block = blockTypeOfId(getBlockAt(chunk, local.lx, local.ly, local.lz))
+    return block === undefined || block === 'air' ? null : block
   }
 }
 
@@ -83,10 +179,26 @@ const listen = (server: HttpServer, port: number, host: string): Promise<number>
   })
 
 export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions): Promise<MultiplayerRuntime> => {
+  const initialState = options.stateFile === undefined
+    ? undefined
+    : await loadServerState(options.stateFile, options.worldId, options.seed)
+  let persistenceQueue = Promise.resolve()
+  let persistenceFailure: unknown
+  const persist = options.stateFile === undefined
+    ? undefined
+    : (state: MultiplayerServerState): void => {
+        persistenceQueue = persistenceQueue
+          .then(() => writeServerState(options.stateFile as string, options.worldId, options.seed, state))
+          .catch((error: unknown) => { persistenceFailure = error })
+      }
   const core = makeMultiplayerServerCore({
     worldId: options.worldId,
     seed: options.seed,
     allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
+    generatedBlockAt: makeGeneratedBlockAt(options.seed),
+    ...(initialState === undefined ? {} : { initialState }),
+    ...(persist === undefined ? {} : { onStateChanged: persist }),
+    passableBlocks: new Set(['water']),
   })
   const server = createServer((request, response) => {
     if (request.method === 'GET' && request.url === '/health') {
@@ -131,11 +243,14 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   const signalHandlers = new Map<NodeJS.Signals, () => void>()
   const close = (): Promise<void> => {
     if (closing !== undefined) return closing
-    closing = new Promise((resolve, reject) => {
+    closing = new Promise<void>((resolve, reject) => {
       for (const [signal, handler] of signalHandlers) process.off(signal, handler)
       for (const socket of sockets.clients) socket.close(1001, 'server shutting down')
       sockets.close()
       server.close((error) => error === undefined ? resolve() : reject(error))
+    }).then(async () => {
+      await persistenceQueue
+      if (persistenceFailure !== undefined) throw persistenceFailure
     })
     return closing
   }

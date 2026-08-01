@@ -29,11 +29,20 @@ export interface MultiplayerServerOptions {
     maxZ: number
   }>
   readonly generatedBlockAt?: (position: BlockPos) => string | null
+  readonly initialState?: MultiplayerServerState
+  readonly onStateChanged?: (state: MultiplayerServerState) => void
+  readonly maxMoveDistance?: number
+  readonly passableBlocks?: ReadonlySet<string>
+}
+
+export interface MultiplayerServerState {
+  readonly revision: number
+  readonly blocks: ReadonlyArray<Readonly<{ at: BlockPos; block: string | null }>>
 }
 
 export type ReceiveResult =
   | Readonly<{ accepted: true; message: NetworkMessage }>
-  | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-mutation' }>
+  | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' }>
 
 interface ConnectedClient {
   readonly send: SendFrame
@@ -58,6 +67,10 @@ const DEFAULT_BOUNDS = {
 } as const
 
 const DEFAULT_FACING: Orientation = { yawRadians: 0, pitchRadians: 0 }
+const DEFAULT_MAX_MOVE_DISTANCE = 8
+const PLAYER_HALF_WIDTH = 0.3
+const PLAYER_HEIGHT = 1.8
+const COLLISION_EPSILON = 1e-9
 const positionKey = ({ x, y, z }: BlockPos): string => `${String(x)},${String(y)},${String(z)}`
 
 export interface MultiplayerServerCore {
@@ -73,8 +86,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const clients = new Map<ClientId, ConnectedClient>()
   const players = new Map<PlayerId, MutablePlayer>()
   const playerClients = new Map<PlayerId, ClientId>()
-  const blocks = new Map<string, Readonly<{ at: BlockPos; block: string | null }>>()
-  let revision = 0
+  const blocks = new Map<string, Readonly<{ at: BlockPos; block: string | null }>>(
+    (options.initialState?.blocks ?? []).map((mutation) => [positionKey(mutation.at), mutation]),
+  )
+  let revision = options.initialState?.revision ?? 0
 
   const sendMessage = (client: ConnectedClient, message: NetworkMessage): void => {
     const encoded = encodeFrame(message)
@@ -104,6 +119,40 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const blockAt = (at: BlockPos): string | null => {
     const override = blocks.get(positionKey(at))
     return override === undefined ? (options.generatedBlockAt?.(at) ?? null) : override.block
+  }
+
+  const persistentState = (): MultiplayerServerState => ({
+    revision,
+    blocks: [...blocks.values()].map((mutation) => ({ ...mutation, at: { ...mutation.at } })),
+  })
+
+  const notifyStateChanged = (): void => options.onStateChanged?.(persistentState())
+
+  const isValidMovement = (player: MutablePlayer, at: PlayerSnapshot['at']): boolean => {
+    if (![at.x, at.y, at.z].every(Number.isFinite)) return false
+    const dx = at.x - player.at.x
+    const dy = at.y - player.at.y
+    const dz = at.z - player.at.z
+    const maximum = options.maxMoveDistance ?? DEFAULT_MAX_MOVE_DISTANCE
+    if (dx * dx + dy * dy + dz * dz > maximum * maximum) return false
+
+    const minX = Math.floor(at.x - PLAYER_HALF_WIDTH)
+    const maxX = Math.floor(at.x + PLAYER_HALF_WIDTH - COLLISION_EPSILON)
+    const minY = Math.floor(at.y)
+    const maxY = Math.floor(at.y + PLAYER_HEIGHT - COLLISION_EPSILON)
+    const minZ = Math.floor(at.z - PLAYER_HALF_WIDTH)
+    const maxZ = Math.floor(at.z + PLAYER_HALF_WIDTH - COLLISION_EPSILON)
+    for (let x = minX; x <= maxX; x += 1) {
+      for (let y = minY; y <= maxY; y += 1) {
+        for (let z = minZ; z <= maxZ; z += 1) {
+          const position = { x, y, z }
+          if (!isInBounds(position)) return false
+          const block = blockAt(position)
+          if (block !== null && !options.passableBlocks?.has(block)) return false
+        }
+      }
+    }
+    return true
   }
 
   const rejectMutation = (
@@ -186,6 +235,16 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (message.world !== undefined && message.world !== worldId) return { accepted: false, reason: 'wrong-world' }
         const player = players.get(message.player)
         if (player === undefined) return { accepted: false, reason: 'join-required' }
+        if (!isValidMovement(player, message.at)) {
+          sendMessage(client, {
+            _tag: 'PlayerMove',
+            player: player.player,
+            world: worldId,
+            at: player.at,
+            facing: player.facing,
+          })
+          return { accepted: false, reason: 'invalid-movement' }
+        }
         player.at = message.at
         player.facing = message.facing
         broadcast({ ...message, world: worldId })
@@ -201,6 +260,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (blockAt(message.at) !== null) return rejectMutation(client, message, 'occupied')
         blocks.set(positionKey(message.at), { at: message.at, block: message.block })
         revision += 1
+        notifyStateChanged()
         broadcast({ ...message, world: worldId })
         return { accepted: true, message }
       }
@@ -210,6 +270,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (blockAt(message.at) === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })
         revision += 1
+        notifyStateChanged()
         broadcast({ ...message, world: worldId })
         return { accepted: true, message }
       }

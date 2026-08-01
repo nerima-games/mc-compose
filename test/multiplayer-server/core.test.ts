@@ -134,6 +134,27 @@ describe('authoritative multiplayer server core', () => {
     })
   })
 
+  it('rejects movement that exceeds the speed limit or intersects generated terrain', () => {
+    const fixture = makeFixture(({ x, y, z }) => x === 1 && y === 64 && z === 0 ? 'stone' : null)
+    const aliceFrames = fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+    aliceFrames.length = 0
+
+    const move = (at: { x: number; y: number; z: number }): ReceiveResult => fixture.receive('socket-a', {
+      _tag: 'PlayerMove',
+      player: playerId('alice'),
+      at,
+      facing: { yawRadians: 1, pitchRadians: 0 },
+    })
+    expect(move({ x: 9, y: 64, z: 0 })).toEqual({ accepted: false, reason: 'invalid-movement' })
+    expect(move({ x: 1, y: 64, z: 0 })).toEqual({ accepted: false, reason: 'invalid-movement' })
+    expect(fixture.server.snapshot().players[0]?.at).toEqual({ x: 0, y: 64, z: 0 })
+    expect(messages(aliceFrames)).toEqual([
+      expect.objectContaining({ _tag: 'PlayerMove', at: { x: 0, y: 64, z: 0 } }),
+      expect.objectContaining({ _tag: 'PlayerMove', at: { x: 0, y: 64, z: 0 } }),
+    ])
+  })
+
   it('rejects a spoofed mutation without changing authoritative state', () => {
     const fixture = makeFixture()
     const bobFrames = fixture.connect('socket-b')
