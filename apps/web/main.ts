@@ -363,6 +363,7 @@ import {
 import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
+import { makeSurvivalHungerCoordinator } from './survival-hunger-runtime'
 import {
   advanceSleep,
   enterSleep,
@@ -458,7 +459,6 @@ const clampDelta = (raw: number): DeltaTimeSecs =>
  * grouped and labelled so that deletion is one block rather than a search.
  */
 const WALK_SPEED_M_PER_S = 4.3
-const WALK_EXHAUSTION_PER_METRE = 0.01
 const JUMP_SPEED_M_PER_S = 8.4
 const LOOK_SENSITIVITY = 0.0022
 const WORLD_SEED = 20260728
@@ -1304,6 +1304,7 @@ const bootGame = async (
       dimension: initialDimension,
     }),
   )
+  const survivalHunger = makeSurvivalHungerCoordinator(world.vitals)
   const initialSpawnPose = await Effect.runPromise(world.player.pose)
   const initialSpawnDimension = await Effect.runPromise(world.player.dimension)
   if (Option.isSome(loadedSession)) {
@@ -3881,7 +3882,7 @@ const bootGame = async (
     setFishingResult('idle')
     swimmingState = initialPlayerSwimmingRuntimeState()
     presentSwimmingState()
-    Effect.runSync(world.vitals.respawn)
+    survivalHunger.respawn()
     Effect.runSync(world.entities.reset)
     Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
     Effect.runSync(Ref.set(gameplayState.playerDamages, []))
@@ -5035,7 +5036,7 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         eat: () => {
-          Effect.runSync(world.vitals.eat(4, 0.3))
+          survivalHunger.eat(4, 0.3)
           markSessionDirty()
           renderPlayerUi()
           return gameplaySnapshot()
@@ -5328,10 +5329,17 @@ const bootGame = async (
     // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, which keeps a
     // backgrounded tab from returning with a multi-second physics step.
     const walk = frameInput
-    const foodOutcome = isCreativeMode
-      ? { signal: 'none' as const }
-      : Effect.runSync(world.vitals.advanceFoodTimer(deltaSecs))
-    if (foodOutcome.signal !== 'none') markSessionDirty()
+    const hungerOutcome = isCreativeMode || multiplayer !== undefined
+      ? undefined
+      : survivalHunger.tick(deltaSecs)
+    if (
+      hungerOutcome !== undefined && (
+        hungerOutcome.exhaustionAdded > 0 ||
+        hungerOutcome.foodTicks > 0 ||
+        hungerOutcome.regeneratedHealth > 0 ||
+        hungerOutcome.starvationDamage > 0
+      )
+    ) markSessionDirty()
     simulationElapsedSecs += deltaSecs
 
     const dead = playerIsDead()
@@ -5366,6 +5374,9 @@ const bootGame = async (
     const attackTriggered =
       !dead && !inventoryOpen && !tradeOpen && !brewingOpen
       && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
+    if (attackTriggered && !isCreativeMode && multiplayer === undefined) {
+      survivalHunger.submit({ _tag: 'attack', count: 1 })
+    }
     const attackHeld = held('attack') > 0
     if (!attackHeld) resetPrimaryAttackGesture()
     const useTriggered =
@@ -5385,6 +5396,7 @@ const bootGame = async (
       ))
     }
     const poseBeforeFrame = Effect.runSync(playerApi.pose)
+    const groundedBeforeFrame = Effect.runSync(Ref.get(simState.isGrounded))
     const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
     const mountedVehicle = mountedVehicleId === undefined ? undefined : vehicles.get(mountedVehicleId)
     const movementForward = mountedVehicle === undefined
@@ -5996,9 +6008,15 @@ const bootGame = async (
         postFramePose.feetPosition.x - poseBeforeFrame.feetPosition.x,
         postFramePose.feetPosition.z - poseBeforeFrame.feetPosition.z,
       )
-      if (!isCreativeMode && horizontalDistance > 0) {
-        Effect.runSync(world.vitals.addExhaustion(horizontalDistance * WALK_EXHAUSTION_PER_METRE))
+      if (!isCreativeMode && multiplayer === undefined && horizontalDistance > 0) {
+        survivalHunger.submit(swimmingState.active
+          ? { _tag: 'swim', distance: horizontalDistance }
+          : { _tag: 'walk', distance: horizontalDistance })
       }
+      if (
+        !isCreativeMode && multiplayer === undefined && groundedBeforeFrame &&
+        !groundedAfterFrame && held('jump') > 0
+      ) survivalHunger.submit({ _tag: 'jump', count: 1 })
     }
     if (looked || moved) markSessionDirty()
     Effect.runSync(Ref.set(gameplayState.targetPosition, postFramePose.feetPosition))
@@ -6098,6 +6116,9 @@ const bootGame = async (
           miningProgress = isCreativeMode ? null : advancement.nextProgress
           const shouldBreak = isCreativeMode ? attackTriggered : advancement.shouldBreak
           if (shouldBreak && target !== null) {
+            if (!isCreativeMode && multiplayer === undefined) {
+              survivalHunger.submit({ _tag: 'mine', blocks: 1 })
+            }
             const dimension = Effect.runSync(playerApi.dimension)
             if (multiplayer !== undefined) {
               Effect.runSync(multiplayer.host.enqueueOutbound({
@@ -6773,11 +6794,9 @@ const bootGame = async (
                 world.inventory.removeAt(pending.slotIndex, 'potato', result.consumedCount),
               )
               if (removal._tag === 'Removed') {
-                Effect.runSync(
-                  world.vitals.eat(
-                    result.outcome.foodPoints,
-                    result.outcome.saturationModifier,
-                  ),
+                survivalHunger.eat(
+                  result.outcome.foodPoints,
+                  result.outcome.saturationModifier,
                 )
               }
             }
