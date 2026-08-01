@@ -114,11 +114,14 @@ import {
   STARTER_FUEL_RULES,
   STARTER_SMELTING_RECIPES,
   targetBlockFromPlayerPose,
+  OccupantId,
+  VehicleId,
   type FurnaceState,
   type CropLocation,
   type ItemStack,
   type SimPhysicsConfig,
   type WeatherState,
+  type Vehicle,
 } from '@nerima-games/mc-sim'
 import {
   biomeFor,
@@ -201,7 +204,11 @@ import {
 } from '@nerima-games/mx-redstone'
 import {
   addVillager,
+  advanceFishing,
   advanceMiningProgress,
+  boardVehicle,
+  cancelFishing,
+  castFishing,
   applyEnchantmentOffer,
   applyArmorToDamage,
   armorPointsForEquipment,
@@ -222,6 +229,8 @@ import {
   EYE_LEVEL_OFFSET,
   emptyBrewingStandState,
   emptyStatusEffectState,
+  exitVehicle,
+  fishingPhase,
   gameplayStages,
   getPlayerMovementSpeedMultiplier,
   insertBrewingBottle,
@@ -235,6 +244,7 @@ import {
   isDroppedItemBehaviour,
   isHoeItem,
   isIgnitionItem,
+  isBucketItem,
   isPlaceableItem,
   PLAYER_HALF_HEIGHT,
   PLAYER_HALF_WIDTH,
@@ -252,6 +262,7 @@ import {
   requestTargetedBlockUse,
   requestTargetedItemUse,
   requestVillagerTrade,
+  reelFishing,
   resolveBedSleep,
   resolveEnvironmentalContactDamage,
   resolveFallDamage,
@@ -263,12 +274,15 @@ import {
   solidityFromStore,
   spawnDroppedItems,
   spawnMobDrops,
+  stepBoat,
+  stepMinecart,
   snapshotVillagerTrades,
   snapshotBrewingStand,
   snapshotStatusEffects,
   collectBrewingPotion,
   targetedRightClickRoute,
   useBrewingPotion,
+  useBucket,
   weatherLightScale,
   miningLootContextForItem,
   miningProgressFraction,
@@ -285,6 +299,8 @@ import {
   type BrewingBottle,
   type BrewingIngredient,
   type EnchantedItem,
+  type FishingRod,
+  type FishingSession,
 } from '@nerima-games/mx-gameplay'
 import {
   encodeFrame,
@@ -1401,6 +1417,14 @@ const bootGame = async (
   const observerInputs = new Map<string, number>()
   const observerPulses = new Map<string, number>()
   const poweredRails = new Set<string>()
+  const vehicles = new Map<string, Vehicle>()
+  const localVehicleOccupant = OccupantId.make('local-player')
+  let mountedVehicleId: string | undefined
+  let nextVehicleSerial = 1
+  let fishingSession: FishingSession | undefined
+  let fishingWater: { readonly dimension: Dimension; readonly position: SessionPosition } | undefined
+  let fishingResult = 'idle'
+  let nextFishingRoll = 1
   const furnaceKeyOf = (
     furnace: Pick<PersistedFurnaceState, 'dimension' | 'position'>,
   ): string => JSON.stringify([
@@ -1488,6 +1512,13 @@ const bootGame = async (
       },
       brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
       statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
+      fishing: {
+        result: fishingResult,
+        phase: fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
+        water: fishingWater ?? null,
+      },
+      vehicles: [...vehicles.values()],
+      mountedVehicleId: mountedVehicleId ?? null,
       end: {
         frames: [...endPortalFrames.values()],
         portalComplete: endPortalComplete,
@@ -2791,6 +2822,7 @@ const bootGame = async (
   })
   const targetedBlock = (): Effect.Effect<{
     readonly position: SessionPosition
+    readonly adjacentPosition: SessionPosition
     readonly block: number
   } | undefined> => Effect.gen(function* () {
     const pose = yield* playerApi.pose
@@ -2804,12 +2836,73 @@ const bootGame = async (
       }
       return false
     })
+    const targetable = new Set<string>()
     for (const position of candidates) {
       const reading = yield* currentChunkStore.getBlock(position)
-      if (reading._tag === 'Block' && reading.block !== 0) return { position, block: reading.block }
+      if (reading._tag === 'Block' && reading.block !== 0) {
+        targetable.add(coordinateKey(position.x, position.y, position.z))
+        break
+      }
     }
-    return undefined
+    const target = targetBlockFromPlayerPose(
+      pose,
+      DEFAULT_BLOCK_REACH,
+      (x, y, z) => targetable.has(coordinateKey(x, y, z)),
+    )
+    if (Option.isNone(target)) return undefined
+    const reading = yield* currentChunkStore.getBlock(target.value.position)
+    return reading._tag === 'Block'
+      ? { ...target.value, block: reading.block }
+      : undefined
   })
+
+  const fishingEnvironmentAt = (
+    position: SessionPosition,
+    isRaining: boolean,
+  ): Effect.Effect<{
+    readonly hasWater: boolean
+    readonly hasSkyAccess: boolean
+    readonly isRaining: boolean
+    readonly isOpenWater: boolean
+  }> => Effect.gen(function* () {
+    const center = yield* currentChunkStore.getBlock(position)
+    const hasWater = center._tag === 'Block' && blockTypeOfId(center.block) === 'water'
+    if (!hasWater) return { hasWater: false, hasSkyAccess: false, isRaining, isOpenWater: false }
+
+    let hasSkyAccess = true
+    for (let y = position.y + 1; y <= 127; y += 1) {
+      const reading = yield* currentChunkStore.getBlock(blockPosition(position.x, y, position.z))
+      if (reading._tag === 'Block' && reading.block !== 0) {
+        hasSkyAccess = false
+        break
+      }
+    }
+
+    let isOpenWater = true
+    for (let x = position.x - 2; x <= position.x + 2 && isOpenWater; x += 1) {
+      for (let z = position.z - 2; z <= position.z + 2; z += 1) {
+        const water = yield* currentChunkStore.getBlock(blockPosition(x, position.y, z))
+        const above = yield* currentChunkStore.getBlock(blockPosition(x, position.y + 1, z))
+        if (
+          water._tag !== 'Block' || blockTypeOfId(water.block) !== 'water'
+          || above._tag !== 'Block' || above.block !== 0
+        ) {
+          isOpenWater = false
+          break
+        }
+      }
+    }
+    return { hasWater, hasSkyAccess, isRaining, isOpenWater }
+  })
+
+  const setFishingResult = (result: string): void => {
+    fishingResult = result
+    document.body.setAttribute('data-fishing-result', result)
+    document.body.setAttribute(
+      'data-fishing-phase',
+      fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
+    )
+  }
 
   const materializeEndArrival = (): Effect.Effect<void> => Effect.gen(function* () {
     const arrival = endArrivalDescriptor(blockPosition(0, 64, 0))
@@ -3713,6 +3806,15 @@ const bootGame = async (
   const respawnPlayer = (): void => {
     resetPrimaryAttackGesture()
     resetBowUse()
+    if (mountedVehicleId !== undefined) {
+      const vehicle = vehicles.get(mountedVehicleId)
+      if (vehicle !== undefined) vehicles.set(mountedVehicleId, exitVehicle(vehicle).vehicle)
+      mountedVehicleId = undefined
+    }
+    if (fishingSession !== undefined) cancelFishing(fishingSession)
+    fishingSession = undefined
+    fishingWater = undefined
+    setFishingResult('idle')
     Effect.runSync(world.vitals.respawn)
     Effect.runSync(world.entities.reset)
     Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
@@ -3933,6 +4035,14 @@ const bootGame = async (
           feetPosition: endDragonPosition(),
         } satisfies RenderEntity]
       : []),
+    ...[...vehicles.values()]
+      .filter((vehicle) => vehicle.dimension === currentChunkContext.dimension)
+      .map((vehicle) => ({
+        id: String(vehicle.id),
+        kind: vehicle.type,
+        feetPosition: vehicle.position,
+        facingRadians: vehicle.yawRadians,
+      } satisfies RenderEntity)),
   ]
 
   const nearestVillagerForTrade = (
@@ -4539,6 +4649,32 @@ const bootGame = async (
     pitchRadians: 0,
   })
 
+  const seedFishingEncounter = () => {
+    respawnPlayer()
+    const water = { x: QA_IGNITION_HIT_BLOCK.x, y: QA_IGNITION_HIT_BLOCK.y, z: QA_IGNITION_HIT_BLOCK.z }
+    Effect.runSync(streamAround(currentChunkContext, water.x, water.z))
+    for (let x = water.x - 2; x <= water.x + 2; x += 1) {
+      for (let z = water.z - 2; z <= water.z + 2; z += 1) {
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, water.y, z), blockIdOf('water')))
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, water.y + 1, z), blockIdOf('air')))
+      }
+    }
+    Effect.runSync(playerApi.restore(poseLookingAt(water, 3), 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('fishing_rod', 1))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    fishingSession = undefined
+    fishingWater = undefined
+    setFishingResult('idle')
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
   const seedEndEyeCrafting = () => {
     respawnPlayer()
     Effect.runSync(world.inventory.reset)
@@ -4764,6 +4900,7 @@ const bootGame = async (
         pressRedstoneBranchButton,
         mutateObserverInput,
         seedFarmingEncounter,
+        seedFishingEncounter,
         seedVillageTradingEncounter,
         grantNearestVillagerTradeInput,
         harvestFarmingCrop,
@@ -5173,13 +5310,14 @@ const bootGame = async (
     }
     const poseBeforeFrame = Effect.runSync(playerApi.pose)
     const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
+    const mountedVehicle = mountedVehicleId === undefined ? undefined : vehicles.get(mountedVehicleId)
     Effect.runSync(Ref.set(simState.movementIntent, {
-      forward: held('moveForward') - held('moveBackward'),
-      strafe: held('moveRight') - held('moveLeft'),
+      forward: mountedVehicle === undefined ? held('moveForward') - held('moveBackward') : 0,
+      strafe: mountedVehicle === undefined ? held('moveRight') - held('moveLeft') : 0,
     }))
-    Effect.runSync(Ref.set(simState.jumpIntent, held('jump') > 0))
+    Effect.runSync(Ref.set(simState.jumpIntent, mountedVehicle === undefined && held('jump') > 0))
     Effect.runSync(
-      Ref.set(simState.physicsConfig, dead
+      Ref.set(simState.physicsConfig, dead || mountedVehicle !== undefined
         ? Option.none()
         : Option.some({
             ...simPhysicsConfig,
@@ -5192,6 +5330,31 @@ const bootGame = async (
     Effect.runSync(Ref.set(gameplayState.weather, weatherBeforeFrame))
     Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
     Effect.runSync(syncPortalCandidateSnapshots())
+
+    if (fishingSession !== undefined && fishingWater !== undefined) {
+      const storage = Effect.runSync(world.inventory.storageSnapshot)
+      const held = storage.inventory.slots[selectedHotbarIndex]
+      if (held?.item !== 'fishing_rod') {
+        cancelFishing(fishingSession)
+        fishingSession = undefined
+        fishingWater = undefined
+        setFishingResult('cancelled')
+      } else {
+        const fishingContext = getOrCreateDimensionChunkContext(fishingWater.dimension)
+        const water = Effect.runSync(fishingContext.chunkStore.getBlock(fishingWater.position))
+        const advanced = advanceFishing(fishingSession, deltaSecs, {
+          hasWater: water._tag === 'Block' && blockTypeOfId(water.block) === 'water',
+        })
+        if (advanced._tag === 'Cancelled') {
+          fishingSession = undefined
+          fishingWater = undefined
+          setFishingResult('lost-water')
+        } else if (advanced._tag !== 'InvalidDuration') {
+          fishingSession = advanced.session
+          setFishingResult(advanced._tag.toLowerCase())
+        }
+      }
+    }
 
     if (multiplayer !== undefined && !multiplayerHandshakeComplete && multiplayer.transport.state() === 'open') {
       const pose = Effect.runSync(playerApi.pose)
@@ -5231,6 +5394,69 @@ const bootGame = async (
     }
 
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
+    if (mountedVehicle !== undefined) {
+      const throttle = held('moveForward') - held('moveBackward')
+      const steering = held('moveRight') - held('moveLeft')
+      const cell = blockPosition(
+        Math.floor(mountedVehicle.position.x),
+        Math.floor(mountedVehicle.position.y),
+        Math.floor(mountedVehicle.position.z),
+      )
+      const reading = Effect.runSync(currentChunkStore.getBlock(cell))
+      const block = reading._tag === 'Block' ? blockTypeOfId(reading.block) : 'air'
+      const uncollided = mountedVehicle.type === 'boat'
+        ? stepBoat(mountedVehicle, { throttle, steering, inWater: block === 'water' }, deltaSecs)
+        : stepMinecart(mountedVehicle, {
+            kind: block === 'powered_rail' ? 'powered' : block === 'rail' ? 'normal' : 'none',
+            shape: 'north_south',
+            powered: throttle > 0 || block === 'powered_rail',
+          }, {}, deltaSecs)
+      const candidatePosition = {
+        x: uncollided.vehicle.position.x + uncollided.vehicle.velocity.x * deltaSecs,
+        y: uncollided.vehicle.position.y + uncollided.vehicle.velocity.y * deltaSecs,
+        z: uncollided.vehicle.position.z + uncollided.vehicle.velocity.z * deltaSecs,
+      }
+      const candidateReading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
+        Math.floor(candidatePosition.x),
+        Math.floor(candidatePosition.y),
+        Math.floor(candidatePosition.z),
+      )))
+      const candidateBlock = candidateReading._tag === 'Block'
+        ? blockTypeOfId(candidateReading.block)
+        : undefined
+      const collided = candidateBlock !== undefined
+        && candidateBlock !== 'air'
+        && candidateBlock !== 'water'
+        && candidateBlock !== 'rail'
+        && candidateBlock !== 'powered_rail'
+      const impactSpeed = Math.hypot(
+        uncollided.vehicle.velocity.x,
+        uncollided.vehicle.velocity.y,
+        uncollided.vehicle.velocity.z,
+      )
+      const transition = collided
+        ? mountedVehicle.type === 'boat'
+          ? stepBoat(mountedVehicle, {
+              throttle,
+              steering,
+              inWater: block === 'water',
+              collided: true,
+              impactSpeed,
+            }, deltaSecs)
+          : stepMinecart(mountedVehicle, {
+              kind: block === 'powered_rail' ? 'powered' : block === 'rail' ? 'normal' : 'none',
+              shape: 'north_south',
+              powered: throttle > 0 || block === 'powered_rail',
+            }, { collided: true, impactSpeed }, deltaSecs)
+        : uncollided
+      const moved = {
+        ...transition.vehicle,
+        position: collided ? transition.vehicle.position : candidatePosition,
+      }
+      vehicles.set(mountedVehicleId!, moved)
+      Effect.runSync(playerApi.moveTo(moved.position))
+      if (transition.exited !== undefined) mountedVehicleId = undefined
+    }
 
     if (Exit.isFailure(outcome)) {
       // A stage's error channel is `never`, so reaching here means a DEFECT.
@@ -5688,7 +5914,131 @@ const bootGame = async (
       && !bowAdvance.capturedUse
       && pendingBowShots.size === 0
     ) {
-      const usedEndFeature = Effect.runSync(useEndFeature())
+      let usedSpecialItem = false
+      const fishingStorage = Effect.runSync(world.inventory.storageSnapshot)
+      const fishingHeld = fishingStorage.inventory.slots[selectedHotbarIndex]
+      const fishingDurability = fishingStorage.inventoryDurability[selectedHotbarIndex]
+      if (fishingSession !== undefined) {
+        const result = reelFishing(fishingSession)
+        Effect.runSync(world.inventory.damageAt(
+          { _tag: 'Inventory', slotIndex: selectedHotbarIndex },
+          1,
+        ))
+        if (result._tag === 'Caught') {
+          Effect.runSync(world.inventory.add(result.loot.item, result.loot.count))
+          setFishingResult(`caught-${result.loot.item}`)
+        } else {
+          setFishingResult(result._tag === 'ReeledTooEarly' ? 'too-early' : 'too-late')
+        }
+        fishingSession = undefined
+        fishingWater = undefined
+        document.body.setAttribute('data-fishing-phase', 'idle')
+        markSessionDirty()
+        renderPlayerUi()
+        usedSpecialItem = true
+      } else if (fishingHeld?.item === 'fishing_rod' && fishingDurability !== null) {
+        const target = Effect.runSync(targetedBlock())
+        const dimension = Effect.runSync(playerApi.dimension)
+        const environment = target === undefined
+          ? { hasWater: false, hasSkyAccess: false, isRaining: false, isOpenWater: false }
+          : Effect.runSync(fishingEnvironmentAt(
+              target.position,
+              weatherBeforeFrame.weather === 'rain' || weatherBeforeFrame.weather === 'thunder',
+            ))
+        const serial = nextFishingRoll++
+        const cast = castFishing({
+          item: 'fishing_rod',
+          count: 1,
+          durability: fishingDurability,
+        } satisfies FishingRod, environment, {
+          wait: ((serial * 37) % 997) / 997,
+          category: ((serial * 101) % 997) / 997,
+          item: ((serial * 211) % 997) / 997,
+        })
+        if (cast._tag === 'Cast' && target !== undefined) {
+          fishingSession = cast.session
+          fishingWater = { dimension, position: target.position }
+          setFishingResult('cast')
+        } else {
+          setFishingResult(cast._tag === 'NoWater' ? 'no-water' : 'invalid-rod')
+        }
+        usedSpecialItem = true
+      }
+      if (!usedSpecialItem && mountedVehicleId !== undefined) {
+        const vehicle = vehicles.get(mountedVehicleId)
+        if (vehicle !== undefined) vehicles.set(mountedVehicleId, exitVehicle(vehicle).vehicle)
+        mountedVehicleId = undefined
+        usedSpecialItem = true
+      } else if (!usedSpecialItem) {
+        const pose = Effect.runSync(playerApi.pose)
+        const nearbyVehicle = [...vehicles.values()]
+          .filter((vehicle) => vehicle.dimension === currentChunkContext.dimension && vehicle.occupant === undefined)
+          .map((vehicle) => ({ vehicle, distance: Math.hypot(
+            vehicle.position.x - pose.feetPosition.x,
+            vehicle.position.y - pose.feetPosition.y,
+            vehicle.position.z - pose.feetPosition.z,
+          ) }))
+          .filter(({ distance }) => distance <= 2)
+          .sort((left, right) => left.distance - right.distance)[0]
+        if (nearbyVehicle !== undefined) {
+          const boarded = boardVehicle(nearbyVehicle.vehicle, localVehicleOccupant, nearbyVehicle.distance)
+          vehicles.set(String(boarded.id), boarded)
+          mountedVehicleId = String(boarded.id)
+          usedSpecialItem = true
+        }
+      }
+      const specialInventory = Effect.runSync(world.inventory.snapshot)
+      const specialSelected = specialInventory.slots[selectedHotbarIndex]
+      if (!usedSpecialItem && specialSelected !== undefined && isBucketItem(specialSelected.item)) {
+        const target = Effect.runSync(targetedBlock())
+        if (target !== undefined) {
+          const dimension = Effect.runSync(playerApi.dimension)
+          const result = Effect.runSync(useBucket(
+            currentChunkStore,
+            world.inventory,
+            gameplayState.fluidFrontier,
+            {
+              activeDimension: dimension,
+              targetDimension: dimension,
+              position: specialSelected.item === 'bucket' ? target.position : target.adjacentPosition,
+              heldItem: specialSelected.item,
+            },
+          ))
+          document.body.setAttribute('data-bucket-result', result._tag)
+          usedSpecialItem = true
+          if (result._tag === 'Collected' || result._tag === 'Placed') {
+            markSessionDirty()
+            renderPlayerUi()
+          }
+        }
+      }
+      if (!usedSpecialItem && specialSelected !== undefined
+        && (specialSelected.item === 'boat' || specialSelected.item === 'minecart')) {
+        const target = Effect.runSync(targetedBlock())
+        if (target !== undefined) {
+          const type = specialSelected.item
+          const at = type === 'minecart' && (blockTypeOfId(target.block) === 'rail' || blockTypeOfId(target.block) === 'powered_rail')
+            ? target.position
+            : target.adjacentPosition
+          const removed = Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, type, 1))
+          if (removed._tag === 'Removed') {
+            const id = VehicleId.make(`vehicle-${String(nextVehicleSerial++)}`)
+            vehicles.set(String(id), {
+              id,
+              type,
+              dimension: Effect.runSync(playerApi.dimension),
+              position: { x: at.x + 0.5, y: at.y, z: at.z + 0.5 },
+              velocity: type === 'minecart' ? { x: 0, y: 0, z: -0.25 } : { x: 0, y: 0, z: 0 },
+              yawRadians: poseBeforeFrame.yawRadians,
+            })
+            document.body.setAttribute('data-vehicle-result', `placed-${type}`)
+            markSessionDirty()
+            renderPlayerUi()
+          }
+          usedSpecialItem = true
+        }
+      }
+      const usedEndFeature = usedSpecialItem || Effect.runSync(useEndFeature())
       const opensBrewing = usedEndFeature ? false : Effect.runSync(targetedBrewingStand())
       const route = usedEndFeature || opensBrewing
         ? undefined
