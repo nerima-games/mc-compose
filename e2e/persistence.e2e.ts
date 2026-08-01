@@ -19,6 +19,13 @@ type GameplaySnapshot = {
   readonly pose: Pose
   readonly dimension: string
   readonly activeChunkDimension: string
+  readonly entities: ReadonlyArray<{
+    readonly id: string
+    readonly kind: string
+    readonly feetPosition: Position
+    readonly healthPoints: number
+    readonly behaviour: unknown
+  }>
   readonly weather: {
     readonly weather: 'clear' | 'rain' | 'thunder'
     readonly remainingSecs: number
@@ -103,6 +110,27 @@ const deleteSessionDatabase = async (page: Page): Promise<void> => {
     })
   }, DATABASE_NAME)
 }
+
+test('restores a dynamic entity with stable identity and state', async ({ page }) => {
+  const faults = watchForFaults(page)
+  await deleteSessionDatabase(page)
+
+  await startGameSession(page)
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await callQa(page, 'gameplay.seedMeleeDropEncounter')
+  const published = await snapshot(page)
+  expect(published.entities).toHaveLength(1)
+
+  await callQa(page, 'persistence.flush')
+  await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+  await page.reload()
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  const restored = await snapshot(page)
+  expect(restored.entities).toEqual(published.entities)
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
 
 test('publishes a mined world, inventory, and exact pose across reload', async ({ page }) => {
   const faults = watchForFaults(page)

@@ -49,12 +49,73 @@ import {
 } from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
-export const SESSION_FORMAT_VERSION = 12
+export const SESSION_FORMAT_VERSION = 13
 
 export type SessionPosition = {
   readonly x: number
   readonly y: number
   readonly z: number
+}
+
+export type PersistedEntity = {
+  readonly id: string
+  readonly kind: string
+  readonly feetPosition: SessionPosition
+  readonly healthPoints: number
+  readonly behaviour: unknown
+}
+
+export type PersistedEntityRoster = {
+  readonly entities: ReadonlyArray<PersistedEntity>
+  readonly nextSerial: number
+}
+
+export const EMPTY_ENTITY_ROSTER: PersistedEntityRoster = { entities: [], nextSerial: 0 }
+
+export const normalizePersistedEntityRoster = (value: unknown): PersistedEntityRoster => {
+  const roster = asRecord(value)
+  if (roster === undefined || !Array.isArray(roster['entities'])) return EMPTY_ENTITY_ROSTER
+
+  const entities: Array<PersistedEntity> = []
+  for (const value of roster['entities']) {
+    const entity = asRecord(value)
+    const feetPosition = asRecord(entity?.['feetPosition'])
+    const kind = entity?.['kind']
+    const id = entity?.['id']
+    const x = feetPosition?.['x']
+    const y = feetPosition?.['y']
+    const z = feetPosition?.['z']
+    const healthPoints = entity?.['healthPoints']
+    if (
+      entity === undefined
+      || typeof kind !== 'string'
+      || kind.trim().length === 0
+      || typeof id !== 'string'
+      || typeof x !== 'number'
+      || !Number.isFinite(x)
+      || typeof y !== 'number'
+      || !Number.isFinite(y)
+      || typeof z !== 'number'
+      || !Number.isFinite(z)
+      || typeof healthPoints !== 'number'
+      || !Number.isFinite(healthPoints)
+    ) continue
+    entities.push({
+      id,
+      kind,
+      feetPosition: { x, y, z },
+      healthPoints,
+      behaviour: entity['behaviour'],
+    })
+  }
+
+  const nextSerial = roster['nextSerial']
+  return {
+    entities,
+    nextSerial: typeof nextSerial === 'number' && Number.isFinite(nextSerial)
+      ? Math.max(0, Math.floor(nextSerial))
+      : 0,
+  }
 }
 
 export type PersistedLeverState = {
@@ -110,6 +171,7 @@ export type SessionState = {
   readonly furnaces: ReadonlyArray<PersistedFurnaceState>
   readonly portals: ReadonlyArray<PersistedPortalState>
   readonly crops: CropSnapshot
+  readonly entities: PersistedEntityRoster
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -272,6 +334,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   furnaces: PersistedFurnacesSchema,
   portals: PersistedPortalsSchema,
   crops: CropSnapshotSchema,
+  entities: Schema.Unknown as unknown as Schema.Schema<PersistedEntityRoster>,
 })
 
 export type SessionChunkManifestEntry = {
@@ -569,6 +632,25 @@ const migrateSessionV11ToV12: Migration = {
   },
 }
 
+const migrateSessionV12ToV13: Migration = {
+  from: 12,
+  describe: 'add dynamic entity roster',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v12 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'entities')
+        ? state
+        : { ...state, entities: EMPTY_ENTITY_ROSTER },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
   version: SESSION_FORMAT_VERSION,
@@ -585,6 +667,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV9ToV10,
     migrateSessionV10ToV11,
     migrateSessionV11ToV12,
+    migrateSessionV12ToV13,
   ],
 })
 

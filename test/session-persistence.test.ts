@@ -31,11 +31,13 @@ import {
 import { SPAWN_PLAYER_VITALS } from '@nerima-games/mx-gameplay'
 
 import {
+  EMPTY_ENTITY_ROSTER,
   SESSION_FORMAT_NAME,
   deleteSession,
   listSessions,
   loadSession,
   makeSessionChunkSource,
+  normalizePersistedEntityRoster,
   saveSession as persistSession,
   sessionChunkKey,
   sessionHeadKey,
@@ -106,6 +108,7 @@ const sessionState = (seed: number): SessionState => {
         growthSecs: 123,
       }],
     },
+    entities: { entities: [], nextSerial: 0 },
   }
 }
 
@@ -121,6 +124,47 @@ const dimensionChunk = (
   cz: number,
   marker: number,
 ): DimensionChunk => ({ dimension, chunk: chunk(cx, cz, marker) })
+
+describe('dynamic entity persistence', () => {
+  it('keeps valid entity rows and sanitizes invalid roster data', () => {
+    expect(normalizePersistedEntityRoster({
+      entities: [
+        {
+          id: 'creeper-7',
+          kind: 'creeper',
+          feetPosition: { x: 1.5, y: 64, z: -2.5 },
+          healthPoints: 13,
+          behaviour: { fuse: 'dormant' },
+        },
+        {
+          id: 'broken',
+          kind: 'creeper',
+          feetPosition: { x: Number.POSITIVE_INFINITY, y: 64, z: 0 },
+          healthPoints: 20,
+          behaviour: null,
+        },
+        {
+          id: 'blank-kind',
+          kind: ' ',
+          feetPosition: { x: 0, y: 64, z: 0 },
+          healthPoints: 20,
+          behaviour: null,
+        },
+      ],
+      nextSerial: 8.9,
+    })).toEqual({
+      entities: [{
+        id: 'creeper-7',
+        kind: 'creeper',
+        feetPosition: { x: 1.5, y: 64, z: -2.5 },
+        healthPoints: 13,
+        behaviour: { fuse: 'dormant' },
+      }],
+      nextSerial: 8,
+    })
+    expect(normalizePersistedEntityRoster(null)).toEqual(EMPTY_ENTITY_ROSTER)
+  })
+})
 
 const defaultMetadata: SessionMetadata = { name: 'Test World', mode: 'survival' }
 const saveSession = (
@@ -232,7 +276,7 @@ describe('session persistence', () => {
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 12,
+        version: 13,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -330,6 +374,30 @@ describe('session persistence', () => {
 
       expect(loaded.state.containerStorage).toEqual({ version: 1, containers: [] })
       expect(storage.envelope(key)?.version).toBe(11)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a v12 session with an absent dynamic entity roster', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v12')
+    const { entities: _entities, ...v12State } = sessionState(42)
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 12,
+      payload: {
+        sessionId: 'legacy-v12',
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: v12State,
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v12'))
+
+      expect(loaded.state.entities).toEqual(EMPTY_ENTITY_ROSTER)
+      expect(storage.envelope(key)?.version).toBe(12)
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -504,7 +572,7 @@ describe('session persistence', () => {
     const sessionId = 'future-version'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 13,
+      version: 14,
       payload: {
         sessionId,
         revision: 'r1',
@@ -519,7 +587,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 13,
+        version: 14,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -1011,7 +1079,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(12)
+      expect(storage.envelope(headKey)?.version).toBe(13)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )

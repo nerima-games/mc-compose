@@ -299,6 +299,7 @@ import {
   loadSession,
   makeSessionChunkSource,
   saveSession,
+  normalizePersistedEntityRoster,
   SESSION_FORMAT_VERSION,
   snapshotResidentChunks,
   type DimensionChunk,
@@ -1007,6 +1008,13 @@ const bootGame = async (
   const initialSpawnPose = await Effect.runPromise(world.player.pose)
   const initialSpawnDimension = await Effect.runPromise(world.player.dimension)
   if (Option.isSome(loadedSession)) {
+    await Effect.runPromise(
+      world.entities.restore(
+        normalizePersistedEntityRoster(loadedSession.value.state.entities) as Parameters<
+          typeof world.entities.restore
+        >[0],
+      ),
+    )
     await Effect.runPromise(world.inventory.restoreStorage(loadedSession.value.state.storage))
     await Effect.runPromise(
       world.inventory.restoreContainerStorage(loadedSession.value.state.containerStorage),
@@ -1158,6 +1166,7 @@ const bootGame = async (
       furnaces: [...furnaceStates.values()],
       portals: [...portalStates.values()],
       crops: Effect.runSync(crops.snapshot),
+      entities: Effect.runSync(world.entities.snapshot),
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -2782,6 +2791,7 @@ const bootGame = async (
           kind: entity.kind,
           feetPosition: entity.feetPosition,
           healthPoints: entity.healthPoints,
+          behaviour: entity.behaviour,
           ...(dropped === undefined ? {} : {
             item: dropped.item,
             count: dropped.count,
