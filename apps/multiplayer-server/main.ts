@@ -268,11 +268,13 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   })
 
   const port = await listen(server, options.port, options.host)
+  const hungerTimer = setInterval(() => core.tick(4_000), 4_000)
   let closing: Promise<void> | undefined
   const signalHandlers = new Map<NodeJS.Signals, () => void>()
   const close = (): Promise<void> => {
     if (closing !== undefined) return closing
     closing = new Promise<void>((resolve, reject) => {
+      clearInterval(hungerTimer)
       for (const [signal, handler] of signalHandlers) process.off(signal, handler)
       for (const socket of sockets.clients) socket.close(1001, 'server shutting down')
       sockets.close()

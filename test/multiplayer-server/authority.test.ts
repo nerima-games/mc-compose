@@ -64,14 +64,14 @@ const initialState = (): MultiplayerServerState => ({
   villagerTrades: [],
 })
 
-const makeFixture = () => {
+const makeFixture = (state: MultiplayerServerState = initialState()) => {
   const sent: Array<WireText> = []
   const persisted: Array<MultiplayerServerState> = []
   const server = makeMultiplayerServerCore({
     worldId: 'world-1',
     seed: 42,
     allowedBlocks: new Set(['stone']),
-    initialState: initialState(),
+    initialState: state,
     onStateChanged: (state) => persisted.push(state),
   })
   expect(server.connect('socket-a', (wire) => sent.push(wire))).toBe(true)
@@ -82,7 +82,7 @@ const makeFixture = () => {
     name: playerName('Alice'),
     at: { x: 0, y: 64, z: 0 },
   }).accepted).toBe(true)
-  return { sent, persisted, receive }
+  return { sent, persisted, receive, server }
 }
 
 describe('multiplayer server authoritative state', () => {
@@ -171,6 +171,75 @@ describe('multiplayer server authoritative state', () => {
         _tag: 'PlayerVitalsDelta',
         revision: 6,
         state: { health: 20, hunger: 20, experience: 0 },
+      }),
+    ])
+  })
+
+  it('uses hunger authority for activity ticks and preserves state across rejoin', () => {
+    const fixture = makeFixture()
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'PlayerVitalsCommand',
+      commandId: commandId('activity-1'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'activity', activity: 'jump', amount: 100 },
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+    fixture.server.tick(2_000)
+    expect(messages(fixture.sent)).toEqual([])
+    fixture.server.tick(2_000)
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'PlayerVitalsDelta',
+        revision: 6,
+        player: 'alice',
+        state: { health: 3, hunger: 2, experience: 7 },
+      }),
+    ])
+
+    fixture.server.disconnect('socket-a')
+    fixture.sent.length = 0
+    expect(fixture.server.connect('socket-b', (wire) => fixture.sent.push(wire))).toBe(true)
+    expect(fixture.server.receive('socket-b', frame({
+      _tag: 'PlayerJoin',
+      player: playerId('alice'),
+      name: playerName('Alice'),
+      at: { x: 0, y: 64, z: 0 },
+    })).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeSnapshot',
+      revision: 6,
+      vitals: [{ player: 'alice', state: { health: 3, hunger: 2, experience: 7 } }],
+    }))
+  })
+
+  it('consumes food and broadcasts inventory and vitals deltas atomically', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [...state.inventories[0]!.state.slots, { item: 'potato', count: 2 }], selectedSlot: 0 },
+      }],
+    })
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'PlayerVitalsCommand',
+      commandId: commandId('eat-1'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'eat', item: 'potato' },
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', revision: 5 }),
+      expect.objectContaining({ _tag: 'PlayerVitalsDelta', revision: 5, state: { health: 3, hunger: 3, experience: 7 } }),
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        revision: 5,
+        state: expect.objectContaining({ slots: expect.arrayContaining([{ item: 'potato', count: 1 }]) }),
       }),
     ])
   })

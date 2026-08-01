@@ -313,6 +313,7 @@ import {
 } from '@nerima-games/mx-gameplay'
 import {
   encodeFrame,
+  CommandId,
   makeMultiplayerHost,
   PlayerId,
   PlayerName,
@@ -2324,6 +2325,8 @@ const bootGame = async (
         }),
       )
   let multiplayerRevision = 0
+  let nextVitalsCommand = 0
+  let pendingVitalsCommand: CommandId | null = null
   let networkSleepState: SleepClientState = initialSleepClientState()
   let nextSleepRequest = 1
   let appliedNightSkipRevision: number | null = null
@@ -2360,6 +2363,41 @@ const bootGame = async (
     if (dimension === currentChunkContext.dimension) redstoneDirty = true
   }
 
+  const sendVitalsCommand = (action: Extract<NetworkMessage, { readonly _tag: 'PlayerVitalsCommand' }>['action']): void => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingVitalsCommand !== null) return
+    nextVitalsCommand += 1
+    const commandId = CommandId.make(`vitals-${String(nextVitalsCommand)}`)
+    pendingVitalsCommand = commandId
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'PlayerVitalsCommand',
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+      action,
+    }))
+  }
+
+  const applyNetworkVitals = (state: { readonly health: number; readonly hunger: number; readonly experience: number }): void => {
+    const current = Effect.runSync(world.vitals.snapshot)
+    Effect.runSync(world.vitals.restore({
+      ...current,
+      healthPoints: state.health,
+      foodPoints: state.hunger,
+      experiencePoints: state.experience,
+    }))
+    renderPlayerUi()
+  }
+
+  const applyNetworkInventory = (state: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryDelta' }>['state']): void => {
+    Effect.runSync(world.inventory.restore({
+      slots: state.slots.map((stack) => stack === null
+        ? undefined
+        : { item: stack.item as ItemStack['item'], count: stack.count }),
+    }))
+    selectedHotbarIndex = state.selectedSlot
+  }
+
   const applyNetworkMessage = (message: NetworkMessage): void => {
     if (multiplayer === undefined) return
     switch (message._tag) {
@@ -2371,6 +2409,35 @@ const bootGame = async (
           if (player.player !== multiplayer.query.player) multiplayer.players.set(player.player, player)
         }
         for (const block of message.blocks) applyNetworkBlock(block.world, block.at, block.block)
+        break
+      case 'AuthoritativeSnapshot': {
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        const local = message.vitals.find(({ player }) => player === multiplayer.query.player)
+        if (local !== undefined) applyNetworkVitals(local.state)
+        const localInventory = message.inventories.find(({ player }) => player === multiplayer.query.player)
+        if (localInventory !== undefined) applyNetworkInventory(localInventory.state)
+        break
+      }
+      case 'PlayerInventoryDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        if (message.player === multiplayer.query.player) applyNetworkInventory(message.state)
+        break
+      case 'PlayerVitalsDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        if (message.player === multiplayer.query.player) applyNetworkVitals(message.state)
+        break
+      case 'AuthoritativeCommandAccepted':
+        multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+        if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
+        break
+      case 'AuthoritativeCommandRejected':
+        multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+        multiplayerRejection = message.reason
+        if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
+        if (message.resyncRequired) Effect.runSync(multiplayer.host.enqueueOutbound({ _tag: 'AuthoritativeResyncRequest', world: message.world, lastKnownRevision: multiplayerRevision }))
         break
       case 'PlayerJoin':
         if (message.player !== multiplayer.query.player) {
@@ -3882,7 +3949,8 @@ const bootGame = async (
     setFishingResult('idle')
     swimmingState = initialPlayerSwimmingRuntimeState()
     presentSwimmingState()
-    survivalHunger.respawn()
+    if (multiplayer === undefined) survivalHunger.respawn()
+    else sendVitalsCommand('respawn')
     Effect.runSync(world.entities.reset)
     Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
     Effect.runSync(Ref.set(gameplayState.playerDamages, []))
@@ -5374,8 +5442,9 @@ const bootGame = async (
     const attackTriggered =
       !dead && !inventoryOpen && !tradeOpen && !brewingOpen
       && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
-    if (attackTriggered && !isCreativeMode && multiplayer === undefined) {
-      survivalHunger.submit({ _tag: 'attack', count: 1 })
+    if (attackTriggered && !isCreativeMode) {
+      if (multiplayer === undefined) survivalHunger.submit({ _tag: 'attack', count: 1 })
+      else sendVitalsCommand({ _tag: 'activity', activity: 'attack', amount: 1 })
     }
     const attackHeld = held('attack') > 0
     if (!attackHeld) resetPrimaryAttackGesture()
@@ -6008,15 +6077,19 @@ const bootGame = async (
         postFramePose.feetPosition.x - poseBeforeFrame.feetPosition.x,
         postFramePose.feetPosition.z - poseBeforeFrame.feetPosition.z,
       )
-      if (!isCreativeMode && multiplayer === undefined && horizontalDistance > 0) {
-        survivalHunger.submit(swimmingState.active
+      if (!isCreativeMode && horizontalDistance > 0) {
+        if (multiplayer === undefined) survivalHunger.submit(swimmingState.active
           ? { _tag: 'swim', distance: horizontalDistance }
           : { _tag: 'walk', distance: horizontalDistance })
+        else sendVitalsCommand({ _tag: 'activity', activity: swimmingState.active ? 'swim' : 'walk', amount: horizontalDistance })
       }
       if (
-        !isCreativeMode && multiplayer === undefined && groundedBeforeFrame &&
+        !isCreativeMode && groundedBeforeFrame &&
         !groundedAfterFrame && held('jump') > 0
-      ) survivalHunger.submit({ _tag: 'jump', count: 1 })
+      ) {
+        if (multiplayer === undefined) survivalHunger.submit({ _tag: 'jump', count: 1 })
+        else sendVitalsCommand({ _tag: 'activity', activity: 'jump', amount: 1 })
+      }
     }
     if (looked || moved) markSessionDirty()
     Effect.runSync(Ref.set(gameplayState.targetPosition, postFramePose.feetPosition))
@@ -6116,8 +6189,9 @@ const bootGame = async (
           miningProgress = isCreativeMode ? null : advancement.nextProgress
           const shouldBreak = isCreativeMode ? attackTriggered : advancement.shouldBreak
           if (shouldBreak && target !== null) {
-            if (!isCreativeMode && multiplayer === undefined) {
-              survivalHunger.submit({ _tag: 'mine', blocks: 1 })
+            if (!isCreativeMode) {
+              if (multiplayer === undefined) survivalHunger.submit({ _tag: 'mine', blocks: 1 })
+              else sendVitalsCommand({ _tag: 'activity', activity: 'mine', amount: 1 })
             }
             const dimension = Effect.runSync(playerApi.dimension)
             if (multiplayer !== undefined) {
@@ -6790,6 +6864,10 @@ const bootGame = async (
             break
           case 'EatPotato':
             if (pending.kind === 'eat' && result.outcome._tag === 'consume') {
+              if (multiplayer !== undefined) {
+                sendVitalsCommand({ _tag: 'eat', item: 'potato' })
+                break
+              }
               const removal = Effect.runSync(
                 world.inventory.removeAt(pending.slotIndex, 'potato', result.consumedCount),
               )

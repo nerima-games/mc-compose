@@ -1,4 +1,5 @@
 import {
+  createHungerAuthority,
   decodeFrame,
   encodeFrame,
   type AuthoritativeCommand,
@@ -17,6 +18,7 @@ import {
   type WorldId,
   type WorldSnapshot,
 } from '@nerima-games/mx-multiplayer'
+import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { Either } from 'effect'
 import {
   SleepAuthority,
@@ -184,6 +186,7 @@ export interface MultiplayerServerCore {
   readonly receive: (clientId: ClientId, frame: WireText) => ReceiveResult
   readonly disconnect: (clientId: ClientId) => void
   readonly snapshot: () => WorldSnapshot
+  readonly tick: (elapsedMs: number) => void
 }
 
 export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): MultiplayerServerCore => {
@@ -226,6 +229,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   }))
   const commandResults = new Map<CommandId, AuthoritativeCommandResult>()
   let revision = options.initialState?.revision ?? 0
+  const hungerActors = new Map<PlayerId, HungerActor>()
+  let hungerTickRemainderMs = 0
   const sleepAuthority = new SleepAuthority({
     world: worldId,
     revision: 0,
@@ -316,6 +321,77 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       inventories.set(player, { slots: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), selectedSlot: 0 })
     }
     if (!vitals.has(player)) vitals.set(player, { ...DEFAULT_VITALS })
+    const playerVitals = vitals.get(player) as MutableVitalsState
+    const inventory = inventories.get(player) as MutableInventoryState
+    const food: Record<string, number> = {}
+    for (const stack of inventory.slots) {
+      if (stack !== null) food[stack.item] = (food[stack.item] ?? 0) + stack.count
+    }
+    const previous = hungerActors.get(player)
+    hungerActors.set(player, {
+      player,
+      session: String(player),
+      state: previous?.state ?? { food: playerVitals.hunger, saturation: 5, exhaustion: 0, health: playerVitals.health },
+      food,
+    })
+  }
+
+  const applyHungerEvents = (events: ReadonlyArray<HungerEvent>): ReadonlyArray<PlayerId> => {
+    const changed = new Set<PlayerId>()
+    for (const event of events) {
+      if (event._tag !== 'HungerChanged') continue
+      const playerVitals = vitals.get(event.player)
+      const actor = hungerActors.get(event.player)
+      if (playerVitals === undefined || actor === undefined) continue
+      playerVitals.health = event.state.health
+      playerVitals.hunger = event.state.food
+      hungerActors.set(event.player, { ...actor, state: event.state })
+      changed.add(event.player)
+    }
+    return [...changed]
+  }
+
+  const executeHungerCommand = (message: Extract<AuthoritativeCommand, { readonly _tag: 'PlayerVitalsCommand' }>): CommandDecision => {
+    ensurePlayerState(message.player)
+    const authority = createHungerAuthority({
+      world: worldId,
+      revision,
+      difficulty: 'normal',
+      actors: [...hungerActors.values()],
+      tickRemainderMs: hungerTickRemainderMs,
+    })
+    const action: HungerCommand = message.action === 'respawn'
+      ? { _tag: 'Respawn', player: message.player, session: String(message.player), commandId: message.commandId, expectedRevision: revision }
+      : message.action._tag === 'eat'
+        ? { _tag: 'Eat', player: message.player, session: String(message.player), commandId: message.commandId, expectedRevision: revision, item: message.action.item }
+        : { _tag: 'Activity', player: message.player, session: String(message.player), commandId: message.commandId, expectedRevision: revision, activity: message.action.activity, amount: message.action.amount }
+    const result = authority.execute(action)
+    if (!result.accepted) {
+      const reason: CommandRejectionReason = result.reason === 'insufficient-items' || result.reason === 'stale-revision'
+        ? result.reason
+        : result.reason === 'unauthorized-player' ? 'unauthorized-player' : 'invalid-command'
+      return { accepted: false, reason }
+    }
+    hungerActors.clear()
+    const nextSnapshot = authority.snapshot()
+    hungerTickRemainderMs = nextSnapshot.tickRemainderMs
+    for (const actor of nextSnapshot.actors) hungerActors.set(actor.player, actor)
+    const changed = applyHungerEvents(result.events)
+    if (message.action === 'respawn') {
+      const playerVitals = vitals.get(message.player)
+      if (playerVitals !== undefined) playerVitals.experience = 0
+    }
+    const consumed = result.events.find((event) => event._tag === 'FoodConsumed')
+    if (consumed !== undefined) {
+      const inventory = inventories.get(consumed.player)
+      const slot = inventory?.slots.findIndex((stack) => stack?.item === consumed.item) ?? -1
+      const stack = slot >= 0 ? inventory?.slots[slot] : undefined
+      if (inventory !== undefined && stack != null) inventory.slots[slot] = stack.count === 1 ? null : { ...stack, count: stack.count - 1 }
+    }
+    return { accepted: true, deltas: (nextRevision) => [
+      ...changed.map((player) => ({ _tag: 'PlayerVitalsDelta' as const, world: worldId, revision: nextRevision, player, state: vitalsSnapshot(vitals.get(player) as MutableVitalsState) })),
+      ...(consumed === undefined ? [] : [{ _tag: 'PlayerInventoryDelta' as const, world: worldId, revision: nextRevision, player: consumed.player, state: inventorySnapshot(inventories.get(consumed.player) as MutableInventoryState) }]),
+    ] }
   }
 
   const decideCommand = (message: AuthoritativeCommand): CommandDecision => {
@@ -357,21 +433,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
       }
       case 'PlayerVitalsCommand': {
-        const playerVitals = vitals.get(message.player)
-        if (playerVitals === undefined) return { accepted: false, reason: 'resource-not-found' }
-        playerVitals.health = DEFAULT_VITALS.health
-        playerVitals.hunger = DEFAULT_VITALS.hunger
-        playerVitals.experience = DEFAULT_VITALS.experience
-        return {
-          accepted: true,
-          deltas: (nextRevision) => [{
-            _tag: 'PlayerVitalsDelta',
-            world: worldId,
-            revision: nextRevision,
-            player: message.player,
-            state: vitalsSnapshot(playerVitals),
-          }],
-        }
+        return executeHungerCommand(message)
       }
       case 'WorldTimeWeatherCommand': {
         timeWeather = message.action._tag === 'set-time'
@@ -725,5 +787,20 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     clients.delete(clientId)
   }
 
-  return { connect, receive, disconnect, snapshot }
+  const tick = (elapsedMs: number): void => {
+    if (hungerActors.size === 0) return
+    const authority = createHungerAuthority({ world: worldId, revision, difficulty: 'normal', actors: [...hungerActors.values()], tickRemainderMs: hungerTickRemainderMs })
+    const events = authority.tick(elapsedMs)
+    hungerTickRemainderMs = authority.snapshot().tickRemainderMs
+    if (events.length === 0) return
+    hungerActors.clear()
+    for (const actor of authority.snapshot().actors) hungerActors.set(actor.player, actor)
+    const changed = applyHungerEvents(events)
+    if (changed.length === 0) return
+    revision += 1
+    notifyStateChanged()
+    for (const player of changed) broadcast({ _tag: 'PlayerVitalsDelta', world: worldId, revision, player, state: vitalsSnapshot(vitals.get(player) as MutableVitalsState) })
+  }
+
+  return { connect, receive, disconnect, snapshot, tick }
 }
