@@ -1,6 +1,6 @@
 {
   "name": "@nerima-games/mc-compose",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "type": "module",
   "description": "The composition repository for the nerima-games Minecraft-clone rebuild: Layer merge, the single total ordering of frame stages, session lifecycle, the QA/debug API and the modding entry point. It holds no game rules.",
   "homepage": "https://github.com/nerima-games/mc-compose#readme",
@@ -65,7 +65,7 @@
   "dependencies": {
     "@nerima-games/mc-audio": "0.2.4",
     "@nerima-games/mc-kernel": "0.2.12",
-    "@nerima-games/mc-render": "0.2.3",
+    "@nerima-games/mc-render": "0.2.4",
     "@nerima-games/mc-save": "0.1.0",
     "@nerima-games/mc-sim": "0.1.29",
     "@nerima-games/mc-worldgen": "0.1.9",

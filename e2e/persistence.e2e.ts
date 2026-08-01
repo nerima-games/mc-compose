@@ -139,6 +139,8 @@ test('publishes a mined world, inventory, and exact pose across reload', async (
   await startGameSession(page)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect(page.locator('[data-mx-ui="hotbar"] [data-mx-ui="slot"]')).toHaveCount(9)
+  await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather-audio-mode', 'clear')
+  await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather-particles', '0')
 
   await callQa(page, 'gameplay.setPose')
   const beforeBreak = await snapshot(page)
@@ -151,6 +153,10 @@ test('publishes a mined world, inventory, and exact pose across reload', async (
 
   await callQa(page, 'gameplay.setWeather')
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather', 'thunder')
+  await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather-audio-mode', 'thunder')
+  await expect.poll(async () => Number(
+    await page.locator('#game-canvas').getAttribute('data-weather-particles'),
+  )).toBeGreaterThan(0)
 
   const published = await snapshot(page)
   const publishedHotbar = await hotbarText(page)
@@ -164,6 +170,10 @@ test('publishes a mined world, inventory, and exact pose across reload', async (
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'persisted')
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather', 'thunder')
+  await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather-audio-mode', 'thunder')
+  await expect.poll(async () => Number(
+    await page.locator('#game-canvas').getAttribute('data-weather-particles'),
+  )).toBeGreaterThan(0)
 
   await expect.poll(async () => (await snapshot(page)).target.block).toBe(AIR_BLOCK_ID)
   const restored = await snapshot(page)

@@ -86,8 +86,11 @@ import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Ref, Scope } from 'effect'
 import {
   makeEndAudioController,
+  makeWeatherAudioController,
   makeWebAudioBackend,
   type EndAudioEvent,
+  type WeatherAudioHandle,
+  type WeatherLoopKind,
   type Vec3,
 } from '@nerima-games/mc-audio'
 import { blockIdOf, blockTypeOfId, capabilityOfBlockId, propertyOfBlockId } from '@nerima-games/mc-kernel'
@@ -966,6 +969,45 @@ const bootGame = async (
     playFallback: (request) => Effect.runSync(audioBackend.playTone({ ...request, loop: false })),
     release: () => {},
   })
+  let nextWeatherAudioHandleId = -1
+  const pendingThunder = new Map<number, number>()
+  const weatherAudio = makeWeatherAudioController({
+    createLoop: (kind: WeatherLoopKind, initialGain: number) => Effect.runSync(
+      audioBackend.playTone({
+        durationSecs: 3600,
+        frequency: kind === 'rain' ? 180 : 72,
+        gain: initialGain,
+        loop: true,
+        pan: 0,
+        wave: kind === 'rain' ? 'sawtooth' : 'triangle',
+      }),
+    ),
+    setLoopGain: () => {},
+    stopLoop: (handle) => Effect.runSync(audioBackend.stopTone(handle)),
+    playThunder: ({ delaySecs, gain, pan }): WeatherAudioHandle => {
+      const handle = { id: nextWeatherAudioHandleId-- }
+      const timeout = window.setTimeout(() => {
+        pendingThunder.delete(handle.id)
+        Effect.runSync(audioBackend.playTone({
+          durationSecs: 1.8,
+          frequency: 46,
+          gain,
+          loop: false,
+          pan,
+          wave: 'sawtooth',
+        }))
+      }, delaySecs * 1_000)
+      pendingThunder.set(handle.id, timeout)
+      return handle
+    },
+    release: (handle) => {
+      const timeout = pendingThunder.get(handle.id)
+      if (timeout !== undefined) {
+        window.clearTimeout(timeout)
+        pendingThunder.delete(handle.id)
+      }
+    },
+  })
   let nextEndAudioEventId = 0
   const pendingEndAudioEvents: EndAudioEvent[] = []
   const queueEndAudio = (kind: EndAudioEvent['kind'], position: Vec3): void => {
@@ -1204,9 +1246,54 @@ const bootGame = async (
   const presentWeather = (state: WeatherState): void => {
     canvas.setAttribute('data-weather', state.weather)
     canvas.setAttribute('data-weather-remaining-secs', String(state.remainingSecs))
-    canvas.style.filter = `brightness(${String(weatherLightScale(state.weather))})`
   }
   presentWeather(Effect.runSync(weather.snapshot))
+
+  const weatherDaylight = (timeOfDay: number): number =>
+    Math.max(0.08, Math.sin(Math.PI * 2 * (timeOfDay - 0.25)))
+
+  const presentWeatherRuntime = (
+    state: WeatherState,
+    pose: { readonly feetPosition: Vec3 },
+    nowSecs: number,
+  ): void => {
+    const timeState = Effect.runSync(time.snapshot)
+    const lightningSequence = state.weather === 'thunder'
+      ? Math.floor(timeState.ticks / (60 * 8))
+      : undefined
+    const intensity = state.weather === 'clear' ? 0 : 1
+    const camera = {
+      x: pose.feetPosition.x,
+      y: pose.feetPosition.y + EYE_LEVEL_OFFSET,
+      z: pose.feetPosition.z,
+    }
+    const renderPlan = Effect.runSync(worldRenderer.weather.frame({
+      mode: state.weather,
+      intensity,
+      daylight: weatherDaylight(Effect.runSync(time.timeOfDay)),
+      temperature: 1,
+      seed: activeSeed,
+      lightningSequence,
+    }, camera))
+    const thunder = lightningSequence === undefined
+      ? undefined
+      : {
+          id: `weather-thunder-${String(lightningSequence)}`,
+          occurredAtSecs: nowSecs,
+          position: { x: camera.x + 24, y: camera.y + 12, z: camera.z + 12 },
+        }
+    weatherAudio.update({
+      mode: state.weather,
+      intensity,
+      listener: camera,
+      listenerForward: readAudioListenerForward(),
+      occlusion: 0,
+      thunder,
+    })
+    canvas.setAttribute('data-weather-particles', String(renderPlan.particles.length))
+    canvas.setAttribute('data-weather-lightning', String(renderPlan.lightningFlash > 0))
+    canvas.setAttribute('data-weather-audio-mode', weatherAudio.state().mode)
+  }
 
   type ChunkColorFor = NonNullable<
     NonNullable<Parameters<typeof syncWorld>[3]>['colorForChunk']
@@ -4424,6 +4511,18 @@ const bootGame = async (
       : multiplayer.transport.close
     void Effect.runPromise(close)
   }
+  let runtimeDisposed = false
+  const disposeRuntime = (): void => {
+    if (runtimeDisposed) return
+    runtimeDisposed = true
+    settingsView.dispose()
+    endAudio.dispose()
+    weatherAudio.dispose()
+    for (const timeout of pendingThunder.values()) window.clearTimeout(timeout)
+    pendingThunder.clear()
+    Effect.runSync(worldRenderer.dispose)
+    audio.close()
+  }
   // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
   // Periodic publication persists advancing time and weather without gameplay mutations.
   window.addEventListener('pagehide', (event) => {
@@ -4431,9 +4530,7 @@ const bootGame = async (
     void stopBrowserPreview?.()
     disposeMultiplayer()
     if (!event.persisted) {
-      settingsView.dispose()
-      endAudio.dispose()
-      audio.close()
+      disposeRuntime()
     }
   })
   const hot = (import.meta as ImportMeta & {
@@ -4442,9 +4539,7 @@ const bootGame = async (
   hot?.dispose(() => {
     void stopBrowserPreview?.()
     disposeMultiplayer()
-    settingsView.dispose()
-    endAudio.dispose()
-    audio.close()
+    disposeRuntime()
   })
 
   // -------------------------------------------------------------------------
@@ -5322,6 +5417,11 @@ const bootGame = async (
       presentWeather(weatherAdvanced)
       if (weatherAdvanced.weather !== weatherBeforeFrame.weather) markSessionDirty()
     }
+    presentWeatherRuntime(
+      weatherAdvanced ?? Effect.runSync(weather.snapshot),
+      postFramePose,
+      nowSecs,
+    )
 
     const itemUseResults = Effect.runSync(drainItemUseResults(gameplayState))
     for (const result of itemUseResults) {
@@ -5512,9 +5612,7 @@ const bootGame = async (
         stop: Effect.sync(() => {
           requestBackgroundFlush()
           disposeMultiplayer()
-          settingsView.dispose()
-          endAudio.dispose()
-          audio.close()
+          disposeRuntime()
         }),
       }
     }),
