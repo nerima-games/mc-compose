@@ -122,6 +122,7 @@ import {
   ESCAPE_KEY_CODE,
   InputService,
   chunkKeyOf,
+  makeChunkStoreLightColor,
   makeChunkStoreMesher,
   makeWorldRenderer,
   renderModule,
@@ -130,6 +131,7 @@ import {
   type ChunkRef,
   type RenderEntity,
 } from '@nerima-games/mc-render'
+import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
 import {
   chestStorageCloseIntent,
   chestStorageSlotClickIntent,
@@ -1035,25 +1037,37 @@ const bootGame = async (
   }
   presentWeather(Effect.runSync(weather.snapshot))
 
+  type ChunkColorFor = NonNullable<
+    NonNullable<Parameters<typeof syncWorld>[3]>['colorForChunk']
+  >
   type DimensionChunkContext = {
     readonly dimension: Dimension
     readonly chunkStore: typeof world.chunkStore
     readonly worldgenChunkStore: typeof world.worldgenChunkStore
     readonly dirtyChunks: Parameters<typeof syncWorld>[1]
     readonly meshChunkFromStore: Parameters<typeof syncWorld>[2]
+    readonly colorForChunk: ChunkColorFor
+    readonly lightingSnapshot: () => RenderLightingSnapshot
     readonly streamLoaded: Set<string>
   }
   const makeDimensionChunkContext = (
     dimension: Dimension,
     dimensionWorld: typeof world,
-  ): DimensionChunkContext => ({
-    dimension,
-    chunkStore: dimensionWorld.chunkStore,
-    worldgenChunkStore: dimensionWorld.worldgenChunkStore,
-    dirtyChunks: Effect.runSync(dimensionWorld.worldgenChunkStore.subscribeDirty),
-    meshChunkFromStore: makeChunkStoreMesher(dimensionWorld.worldgenChunkStore),
-    streamLoaded: new Set<string>(),
-  })
+  ): DimensionChunkContext => {
+    const lighting = trackChunkLightColor((chunk, quads) =>
+      makeChunkStoreLightColor(dimensionWorld.worldgenChunkStore, chunk, quads),
+    )
+    return {
+      dimension,
+      chunkStore: dimensionWorld.chunkStore,
+      worldgenChunkStore: dimensionWorld.worldgenChunkStore,
+      dirtyChunks: Effect.runSync(dimensionWorld.worldgenChunkStore.subscribeDirty),
+      meshChunkFromStore: makeChunkStoreMesher(dimensionWorld.worldgenChunkStore),
+      colorForChunk: lighting.colorForChunk,
+      lightingSnapshot: lighting.snapshot,
+      streamLoaded: new Set<string>(),
+    }
+  }
   const dimensionContexts = new Map<Dimension, DimensionChunkContext>()
   const initialChunkContext = makeDimensionChunkContext(initialDimension, world)
   dimensionContexts.set(initialDimension, initialChunkContext)
@@ -1222,7 +1236,9 @@ const bootGame = async (
 
       if (changed.length > 0 || removed.length > 0) redstoneDirty = true
 
-      yield* syncWorld(worldRenderer, context.dirtyChunks, context.meshChunkFromStore)
+      yield* syncWorld(worldRenderer, context.dirtyChunks, context.meshChunkFromStore, {
+        colorForChunk: context.colorForChunk,
+      })
       chunksStreamedIn += changed.length
       chunksDropped += removed.length
       canvas.setAttribute('data-chunks-meshed', String(context.streamLoaded.size))
@@ -3089,6 +3105,15 @@ const bootGame = async (
 
   let stopBrowserPreview: (() => Promise<void>) | undefined
   const registry = buildQaRegistry([
+    {
+      namespace: 'render',
+      commands: {
+        snapshotLighting: () => ({
+          ...currentChunkContext.lightingSnapshot(),
+          weatherBrightness: weatherLightScale(Effect.runSync(weather.snapshot).weather),
+        }),
+      },
+    },
     {
       namespace: 'gameplay',
       commands: {

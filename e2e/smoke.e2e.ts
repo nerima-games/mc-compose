@@ -323,6 +323,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.stickyPistonSnapshot',
       'lifecycle.stop',
       'persistence.flush',
+      'render.snapshotLighting',
     ])
   })
 
