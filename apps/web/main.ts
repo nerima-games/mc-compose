@@ -425,6 +425,19 @@ const QA_PISTON = { x: 8, y: 66, z: 8 } as const
 const QA_PISTON_LEVER = { x: 8, y: 66, z: 9 } as const
 const QA_PISTON_NEAR = { x: 8, y: 66, z: 7 } as const
 const QA_PISTON_FAR = { x: 8, y: 66, z: 6 } as const
+const QA_REDSTONE_BUTTON = { x: 8, y: 66, z: 9 } as const
+const QA_REDSTONE_REPEATER = { x: 8, y: 66, z: 8 } as const
+const QA_REDSTONE_LAMP = { x: 8, y: 66, z: 7 } as const
+const QA_REDSTONE_BRANCH_BUTTON = { x: 12, y: 66, z: 9 } as const
+const QA_REDSTONE_BRANCH_WIRE = { x: 12, y: 66, z: 8 } as const
+const QA_REDSTONE_DOOR = { x: 11, y: 66, z: 8 } as const
+const QA_REDSTONE_RAIL = { x: 13, y: 66, z: 8 } as const
+const QA_REDSTONE_DISPENSER = { x: 12, y: 67, z: 8 } as const
+const QA_REDSTONE_HOPPER = { x: 12, y: 65, z: 8 } as const
+const QA_REDSTONE_OBSERVER = { x: 16, y: 66, z: 8 } as const
+const QA_REDSTONE_OBSERVER_INPUT = { x: 16, y: 66, z: 9 } as const
+const QA_REDSTONE_OBSERVER_LAMP = { x: 16, y: 66, z: 7 } as const
+const QA_REDSTONE_COMPARATOR = { x: 20, y: 66, z: 8 } as const
 const QA_ENVIRONMENT_OVERLAP_POSE = {
   feetPosition: { x: 24.95, y: 65, z: 8.5 },
   yawRadians: 0,
@@ -474,9 +487,18 @@ const QA_PORTAL_LAYOUT = {
 } as const
 const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'redstone_dust',
+  'redstone_torch',
   'lever',
+  'stone_button',
+  'repeater',
   'redstone_lamp',
+  'observer',
+  'comparator',
+  'dispenser',
+  'hopper',
   'piston',
+  'powered_rail',
+  'door',
 ])
 
 const EQUIPMENT_ONLY_ITEM_TYPES = [
@@ -1375,6 +1397,10 @@ const bootGame = async (
     (Option.isSome(loadedSession) ? loadedSession.value.state.redstone.levers : [])
       .map((lever) => [leverKeyOf(lever), lever]),
   )
+  const comparatorModes = new Map<string, 'compare' | 'subtract'>()
+  const observerInputs = new Map<string, number>()
+  const observerPulses = new Map<string, number>()
+  const poweredRails = new Set<string>()
   const furnaceKeyOf = (
     furnace: Pick<PersistedFurnaceState, 'dimension' | 'position'>,
   ): string => JSON.stringify([
@@ -1624,12 +1650,30 @@ const bootGame = async (
             const block = chunk.blocks[y + lz * 256 + lx * 4096]
             const kind = block === 74
               ? 'wire'
+              : block === 75
+                ? 'torch'
               : block === 76
                 ? 'lever'
+                : block === 77
+                  ? 'button'
+                  : block === 78
+                    ? 'repeater'
                 : block === 79 || block === 80
                   ? 'lamp'
+                  : block === 81
+                    ? 'observer'
+                    : block === 82
+                      ? 'comparator'
+                      : block === 83
+                        ? 'dispenser'
+                        : block === 84
+                          ? 'hopper'
                   : block === 16
                     ? 'piston'
+                    : block === 32
+                      ? 'powered-rail'
+                      : block === 106 || block === 107
+                        ? 'door'
                   : undefined
             if (kind === undefined) continue
             const position = { x: chunk.coord.cx * 16 + lx, y, z: chunk.coord.cz * 16 + lz }
@@ -1648,6 +1692,51 @@ const bootGame = async (
                 pistonKind: 'sticky',
                 pistonState: head._tag === 'Block' && head.block === 85 ? 'extended' : 'retracted',
               })
+            } else if (kind === 'repeater') {
+              components.push({
+                position,
+                kind,
+                inputFrom: { x: position.x, y, z: position.z + 1 },
+                outputTo: { x: position.x, y, z: position.z - 1 },
+                delayTicks: 1,
+              })
+            } else if (kind === 'comparator') {
+              components.push({
+                position,
+                kind,
+                inputFrom: { x: position.x, y, z: position.z + 1 },
+                outputTo: { x: position.x, y, z: position.z - 1 },
+                sideInputs: [
+                  { x: position.x - 1, y, z: position.z },
+                  { x: position.x + 1, y, z: position.z },
+                ],
+                mode: comparatorModes.get(leverKeyOf({ dimension: context.dimension, position })) ?? 'compare',
+              })
+            } else if (kind === 'observer') {
+              const key = leverKeyOf({ dimension: context.dimension, position })
+              const watched = Effect.runSync(context.chunkStore.getBlock({
+                x: position.x,
+                y,
+                z: position.z + 1,
+              }))
+              const watchedBlock = watched._tag === 'Block' ? watched.block : 0
+              const previous = observerInputs.get(key)
+              if (previous !== undefined && previous !== watchedBlock) {
+                observerPulses.set(key, simulationElapsedSecs + 0.2)
+              }
+              observerInputs.set(key, watchedBlock)
+              components.push({
+                position,
+                kind,
+                active: (observerPulses.get(key) ?? 0) > simulationElapsedSecs,
+                outputTo: { x: position.x, y, z: position.z - 1 },
+                pulseTicks: 2,
+              })
+            } else if (kind === 'door') {
+              components.push({ position, kind, powered: block === 107 })
+            } else if (kind === 'powered-rail') {
+              const key = leverKeyOf({ dimension: context.dimension, position })
+              components.push({ position, kind, powered: poweredRails.has(key) })
             } else {
               components.push({ position, kind })
             }
@@ -4070,6 +4159,71 @@ const bootGame = async (
     return stickyPistonSnapshot()
   }
 
+  const redstoneFixturesSnapshot = () => {
+    const dimension = Effect.runSync(playerApi.dimension)
+    const readBlock = (position: { readonly x: number; readonly y: number; readonly z: number }) => {
+      const reading = Effect.runSync(currentChunkStore.getBlock(position))
+      return reading._tag === 'Block' ? reading.block : null
+    }
+    return {
+      button: readBlock(QA_REDSTONE_BUTTON),
+      repeater: readBlock(QA_REDSTONE_REPEATER),
+      lamp: readBlock(QA_REDSTONE_LAMP),
+      door: readBlock(QA_REDSTONE_DOOR),
+      poweredRail: poweredRails.has(leverKeyOf({ dimension, position: QA_REDSTONE_RAIL })),
+      dispenser: readBlock(QA_REDSTONE_DISPENSER),
+      hopper: readBlock(QA_REDSTONE_HOPPER),
+      observer: readBlock(QA_REDSTONE_OBSERVER),
+      observerLamp: readBlock(QA_REDSTONE_OBSERVER_LAMP),
+      comparator: readBlock(QA_REDSTONE_COMPARATOR),
+      trigger: canvas.getAttribute('data-redstone-trigger'),
+    }
+  }
+
+  const seedRedstoneFixtures = () => {
+    respawnPlayer()
+    const dimension = Effect.runSync(playerApi.dimension)
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, dimension))
+    resetSimState(true)
+    const fixtures = [
+      [QA_REDSTONE_BUTTON, 77],
+      [QA_REDSTONE_REPEATER, 78],
+      [QA_REDSTONE_LAMP, 79],
+      [QA_REDSTONE_BRANCH_BUTTON, 77],
+      [QA_REDSTONE_BRANCH_WIRE, 74],
+      [QA_REDSTONE_DOOR, 106],
+      [QA_REDSTONE_RAIL, 32],
+      [QA_REDSTONE_DISPENSER, 83],
+      [QA_REDSTONE_HOPPER, 84],
+      [QA_REDSTONE_OBSERVER, 81],
+      [QA_REDSTONE_OBSERVER_INPUT, 2],
+      [QA_REDSTONE_OBSERVER_LAMP, 79],
+      [QA_REDSTONE_COMPARATOR, 82],
+    ] as const
+    for (const [position, block] of fixtures) {
+      Effect.runSync(currentChunkStore.setBlock(position, block))
+    }
+    poweredRails.delete(leverKeyOf({ dimension, position: QA_REDSTONE_RAIL }))
+    canvas.removeAttribute('data-redstone-trigger')
+    redstoneDirty = true
+    markSessionDirty()
+    return redstoneFixturesSnapshot()
+  }
+
+  const pressRedstoneBranchButton = () => {
+    Effect.runSync(redstoneRuntime.pressButton(
+      Effect.runSync(playerApi.dimension),
+      QA_REDSTONE_BRANCH_BUTTON,
+    ))
+    return redstoneFixturesSnapshot()
+  }
+
+  const mutateObserverInput = () => {
+    Effect.runSync(currentChunkStore.setBlock(QA_REDSTONE_OBSERVER_INPUT, 3))
+    redstoneDirty = true
+    return redstoneFixturesSnapshot()
+  }
+
   const seedWoodenPickaxeProgression = () => {
     respawnPlayer()
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
@@ -4605,6 +4759,10 @@ const bootGame = async (
         seedCraftingTableEncounter,
         seedStickyPistonEncounter,
         stickyPistonSnapshot,
+        seedRedstoneFixtures,
+        redstoneFixturesSnapshot,
+        pressRedstoneBranchButton,
+        mutateObserverInput,
         seedFarmingEncounter,
         seedVillageTradingEncounter,
         grantNearestVillagerTradeInput,
@@ -4939,6 +5097,12 @@ const bootGame = async (
     const raw = previousSecs === undefined ? FIRST_FRAME_SECS : nowSecs - previousSecs
     previousSecs = nowSecs
     const deltaSecs = clampDelta(raw)
+    for (const [key, expiresAt] of observerPulses) {
+      if (expiresAt <= simulationElapsedSecs) {
+        observerPulses.delete(key)
+        redstoneDirty = true
+      }
+    }
     if (redstoneDirty) syncRedstoneSnapshot(currentChunkContext)
 
     // -----------------------------------------------------------------------
@@ -5714,6 +5878,21 @@ const bootGame = async (
                     dimension: currentChunkContext.dimension,
                     position: target.value.position,
                   })
+                } else if (reading._tag === 'Block' && reading.block === 77) {
+                  Effect.runSync(redstoneRuntime.pressButton(
+                    currentChunkContext.dimension,
+                    target.value.position,
+                  ))
+                } else if (reading._tag === 'Block' && reading.block === 82) {
+                  const key = leverKeyOf({
+                    dimension: currentChunkContext.dimension,
+                    position: target.value.position,
+                  })
+                  comparatorModes.set(
+                    key,
+                    comparatorModes.get(key) === 'subtract' ? 'compare' : 'subtract',
+                  )
+                  redstoneDirty = true
                 } else {
                   placementsRequested += 1
                   placementAudio.request(target.value.adjacentPosition)
@@ -5777,6 +5956,29 @@ const bootGame = async (
     }
     for (const transition of Effect.runSync(redstoneRuntime.drainPistonTransitions)) {
       applyPoweredPistonTransition(transition)
+    }
+    for (const event of Effect.runSync(redstoneRuntime.drainTriggerEvents)) {
+      canvas.setAttribute(
+        'data-redstone-trigger',
+        `${event.kind}:${event.dimension}:${event.position.x},${event.position.y},${event.position.z}`,
+      )
+      markSessionDirty()
+    }
+    for (const transition of Effect.runSync(redstoneRuntime.drainPoweredComponentTransitions)) {
+      const context = dimensionContexts.get(transition.dimension as Dimension)
+      if (context === undefined) continue
+      const key = leverKeyOf({
+        dimension: transition.dimension as Dimension,
+        position: transition.position,
+      })
+      if (transition.kind === 'door') {
+        Effect.runSync(context.chunkStore.setBlock(transition.position, transition.powered ? 107 : 106))
+      } else if (transition.kind === 'powered-rail') {
+        if (transition.powered) poweredRails.add(key)
+        else poweredRails.delete(key)
+        canvas.setAttribute('data-powered-rail', `${key}:${String(transition.powered)}`)
+      }
+      markSessionDirty()
     }
 
     // Portal stages can replace both dimension and pose. Stream and present
