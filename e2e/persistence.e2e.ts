@@ -163,6 +163,10 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
   const restored = await snapshot(page)
   expect(restored).toEqual({
     ...published,
+    environmentalContact: {
+      ...published.environmentalContact,
+      simulationElapsedSecs: expect.any(Number),
+    },
     weather: {
       ...published.weather,
       remainingSecs: expect.any(Number),

@@ -3159,6 +3159,8 @@ const bootGame = async (
         },
         seedFoodUseEncounter: () => {
           respawnPlayer()
+          Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
           Effect.runSync(world.inventory.reset)
           Effect.runSync(world.inventory.add('potato', 2))
           applyPlayerDamage({ amount: 4, cause: 'generic' })
