@@ -47,6 +47,12 @@ describe('player settings', () => {
     expect(new Set(Object.values(remapped)).size).toBe(Object.values(remapped).length)
   })
 
+  it('preserves swapped bindings while normalizing persisted settings', () => {
+    const bindings = rebindPlayerSettings(DEFAULT_BINDINGS, 'moveForward', 'KeyS')
+
+    expect(normalizePlayerSettings({ ...DEFAULT_PLAYER_SETTINGS, bindings }).bindings).toEqual(bindings)
+  })
+
   it.effect('persists independently under the player settings format', () =>
     Effect.gen(function* () {
       const expected = normalizePlayerSettings({
@@ -57,5 +63,14 @@ describe('player settings', () => {
 
       yield* savePlayerSettings(expected)
       expect(yield* loadPlayerSettings()).toEqual(expected)
+    }).pipe(Effect.provide(InMemoryStorageLayer)))
+
+  it.effect('round-trips swapped bindings through player settings storage', () =>
+    Effect.gen(function* () {
+      const bindings = rebindPlayerSettings(DEFAULT_BINDINGS, 'moveForward', 'KeyS')
+      const expected = { ...DEFAULT_PLAYER_SETTINGS, bindings }
+
+      yield* savePlayerSettings(expected)
+      expect((yield* loadPlayerSettings()).bindings).toEqual(bindings)
     }).pipe(Effect.provide(InMemoryStorageLayer)))
 })
