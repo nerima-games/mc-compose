@@ -143,4 +143,58 @@ describe('multiplayer WebSocket runtime', () => {
       installSignalHandlers: false,
     })).rejects.toThrow(/Failed to read multiplayer state/)
   })
+
+  it('restores legacy block-only persisted state with authority defaults', async () => {
+    const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-server-')), 'state.json')
+    await writeFile(stateFile, JSON.stringify({
+      format: 1,
+      worldId: 'legacy-world',
+      seed: 73,
+      state: { revision: 2, blocks: [{ at: { x: 1, y: 64, z: 1 }, block: null }] },
+    }), 'utf8')
+
+    const runtime = await startMultiplayerServer({
+      host: '127.0.0.1',
+      port: 0,
+      worldId: 'legacy-world',
+      seed: 73,
+      stateFile,
+      installSignalHandlers: false,
+    })
+    runtimes.push(runtime)
+
+    const socket = await connect(runtime)
+    const snapshot = nextMessage(socket)
+    socket.send(encode({
+      _tag: 'PlayerJoin', player: 'legacy-player' as PlayerId, name: 'Legacy Player' as PlayerName,
+      at: { x: 0, y: 200, z: 0 },
+    }))
+    await expect(snapshot).resolves.toMatchObject({
+      _tag: 'WorldSnapshot', revision: 2, blocks: [{ at: { x: 1, y: 64, z: 1 }, block: null }],
+    })
+    socket.close()
+  })
+
+  it('refuses persisted authority state with invalid nested values', async () => {
+    const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-server-')), 'state.json')
+    await writeFile(stateFile, JSON.stringify({
+      format: 1,
+      worldId: 'invalid-authority-world',
+      seed: 73,
+      state: {
+        revision: 0,
+        blocks: [],
+        inventories: [{ player: 'player', state: { slots: [], selectedSlot: -1 } }],
+      },
+    }), 'utf8')
+
+    await expect(startMultiplayerServer({
+      host: '127.0.0.1',
+      port: 0,
+      worldId: 'invalid-authority-world',
+      seed: 73,
+      stateFile,
+      installSignalHandlers: false,
+    })).rejects.toThrow(/does not match world/)
+  })
 })

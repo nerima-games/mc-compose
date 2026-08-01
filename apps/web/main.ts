@@ -106,6 +106,7 @@ import {
   makeTimeService,
   makeWeatherService,
   maxStackCountForItem,
+  totalExperienceAtLevel,
   POTATO_MATURITY_SECS,
   resetLandingImpact,
   simStages,
@@ -154,7 +155,9 @@ import {
   chestStorageCloseIntent,
   chestStorageSlotClickIntent,
   chestStorageViewModel,
+  createAnvilView,
   createChestStorageView,
+  createEnchantingTableView,
   createMainMenuView,
   createCrosshairView,
   createFurnaceView,
@@ -162,6 +165,8 @@ import {
   createInventoryView,
   crosshairViewModel,
   furnaceViewModel,
+  anvilViewModel,
+  enchantingTableViewModel,
   hudViewModel,
   initialMainMenuState,
   inventoryViewModel,
@@ -191,6 +196,7 @@ import {
 import {
   addVillager,
   advanceMiningProgress,
+  applyEnchantmentOffer,
   applyArmorToDamage,
   armorPointsForEquipment,
   armorDurabilityWearFromPreMitigationDamage,
@@ -205,6 +211,7 @@ import {
   drainPlayerDamages,
   drainPlayerHeals,
   drainVillagerTradeResults,
+  enchantmentOffers,
   DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
   emptyBrewingStandState,
@@ -239,6 +246,7 @@ import {
   requestTargetedBlockUse,
   requestTargetedItemUse,
   requestVillagerTrade,
+  resolveBedSleep,
   resolveEnvironmentalContactDamage,
   resolveFallDamage,
   resolveTargetedPrimaryAttack,
@@ -270,6 +278,7 @@ import {
   type VillagerTradeResult,
   type BrewingBottle,
   type BrewingIngredient,
+  type EnchantedItem,
 } from '@nerima-games/mx-gameplay'
 import {
   encodeFrame,
@@ -520,13 +529,15 @@ const isPlaceableGameplayItem = (item: ItemStack['item']): item is PlaceableItem
   isLegacyGameplayItemType(item) &&
   isPlaceableItem(gameplayModuleItem(item))
 
-type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest'
+type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest' | 'anvil' | 'enchanting'
 
 const INVENTORY_PRESENTATIONS = {
   player: { label: 'Inventory', width: 2, height: 2 },
   craftingTable: { label: 'Crafting Table', width: 3, height: 3 },
   furnace: { label: 'Furnace', width: 0, height: 0 },
   chest: { label: 'Chest', width: 0, height: 0 },
+  anvil: { label: 'Anvil', width: 0, height: 0 },
+  enchanting: { label: 'Enchanting Table', width: 0, height: 0 },
 } as const
 
 type SettingsWriteQueue = {
@@ -874,6 +885,13 @@ const bootGame = async (
   let tradeStatus = ''
   let nextVillagerTradeRequestId = 0
   let inventoryMode: InventoryMode = 'player'
+  let enchantmentSeed = WORLD_SEED
+  const customNames = new Map<string, string>()
+  const enchantedItems = new Map<string, EnchantedItem>()
+  let respawnLocation: Vec3 | null = null
+  let anvilName = ''
+  let anvilStatus = ''
+  let enchantingStatus = ''
   let paused = false
 
   const touchControlTargets = Object.fromEntries(TOUCH_CONTROL_ACTIONS.map((action) => {
@@ -1132,6 +1150,20 @@ const bootGame = async (
   // store returned here wrap the same store instance, so a mined block cannot
   // disappear from collision while remaining visible (or vice versa).
   let activeSeed = WORLD_SEED
+  const restoredWorkstations = Option.isSome(loadedSession)
+    ? loadedSession.value.state.workstations
+    : undefined
+  for (const [slot, name] of Object.entries(restoredWorkstations?.customNames ?? {})) {
+    customNames.set(slot, name)
+  }
+  for (const [slot, encoded] of Object.entries(restoredWorkstations?.enchantedItems ?? {})) {
+    try {
+      enchantedItems.set(slot, JSON.parse(encoded) as EnchantedItem)
+    } catch {
+      // Ignore a malformed optional workstation entry without losing the world save.
+    }
+  }
+  respawnLocation = restoredWorkstations?.respawn ?? null
   let initialKnownChunks: ReadonlyArray<DimensionChunk> = []
   type Dimension = SessionState['dimension']
   const initialDimension: Dimension = Option.isSome(loadedSession)
@@ -1156,6 +1188,7 @@ const bootGame = async (
       chunk: chunkSnapshotOf(chunk),
     }))
   }
+  enchantmentSeed = restoredWorkstations?.enchantmentSeed ?? activeSeed
 
   const persistedChunks = new Map(
     (restored?.chunks ?? []).map(({ dimension, chunk }) => [
@@ -1429,6 +1462,14 @@ const bootGame = async (
         dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
         exitPortalMaterialized,
         dragonEggRewarded,
+      },
+      workstations: {
+        enchantmentSeed,
+        customNames: Object.fromEntries(customNames),
+        enchantedItems: Object.fromEntries(
+          [...enchantedItems].map(([slot, item]) => [slot, JSON.stringify(item)]),
+        ),
+        respawn: respawnLocation,
       },
     }),
     publish: ({ state, chunks }) =>
@@ -2338,6 +2379,8 @@ const bootGame = async (
   const inventoryView = createInventoryView(document, inventoryParent)
   const furnaceView = createFurnaceView(document, inventoryParent)
   const chestView = createChestStorageView(document, inventoryParent)
+  const anvilView = createAnvilView(document, inventoryParent)
+  const enchantingView = createEnchantingTableView(document, inventoryParent)
   const crosshair = createCrosshairView(document, hudParent, motion)
   const statusEffectsHud = document.createElement('div')
   statusEffectsHud.id = 'status-effects-hud'
@@ -2857,10 +2900,74 @@ const bootGame = async (
       .map((effect) => `${effect.type}:${Math.ceil(effect.remainingSecs)}`)
       .join(','))
     inventoryView.root.style.setProperty(
-      'display', inventoryMode === 'furnace' || inventoryMode === 'chest' ? 'none' : '',
+      'display', ['furnace', 'chest', 'anvil', 'enchanting'].includes(inventoryMode) ? 'none' : '',
     )
     furnaceView.root.style.setProperty('display', inventoryMode === 'furnace' ? '' : 'none')
     chestView.root.style.setProperty('display', inventoryMode === 'chest' ? '' : 'none')
+    anvilView.root.style.setProperty('display', inventoryMode === 'anvil' ? '' : 'none')
+    enchantingView.root.style.setProperty('display', inventoryMode === 'enchanting' ? '' : 'none')
+    const selectedStack = storage.inventory.slots[selectedHotbarIndex]
+    const selectedSlotKey = String(selectedHotbarIndex)
+    const selectedSlot = selectedStack == null
+      ? undefined
+      : { itemId: selectedStack.item, count: selectedStack.count }
+    if (inventoryMode === 'anvil') {
+      const hasIron = storage.inventory.slots.some(
+        (slot) => slot?.item === 'iron_ingot' && slot.count > 0,
+      )
+      const level = Effect.runSync(world.vitals.view).experienceLevel
+      anvilView.render(anvilViewModel({
+        primaryInput: selectedSlot,
+        secondaryInput: hasIron ? { itemId: 'iron_ingot', count: 1 } : undefined,
+        output: selectedStack != null && hasIron && level >= 1 ? selectedSlot : undefined,
+        name: anvilName,
+        levelCost: 1,
+        rejectionReason: selectedStack == null
+          ? 'Select an item in the hotbar'
+          : !hasIron
+            ? 'Requires one iron ingot'
+            : level < 1
+              ? 'Requires level 1'
+              : undefined,
+      }), { focusedTarget: 'name', status: anvilStatus })
+      return
+    }
+    if (inventoryMode === 'enchanting') {
+      const lapis = storage.inventory.slots.reduce(
+        (count, slot) => count + (slot?.item === 'lapis_lazuli' ? slot.count : 0),
+        0,
+      )
+      const item = selectedStack == null
+        ? null
+        : enchantedItems.get(selectedSlotKey) ?? {
+            item: selectedStack.item,
+            durability: null,
+            enchantments: [],
+          }
+      const playerLevel = Effect.runSync(world.vitals.view).experienceLevel
+      const offers = enchantmentOffers(enchantmentSeed, 15)
+      enchantingView.render(enchantingTableViewModel({
+        item: selectedSlot,
+        lapis: lapis > 0 ? { itemId: 'lapis_lazuli', count: lapis } : undefined,
+        offers: offers.map((offer) => {
+          const result = applyEnchantmentOffer({
+            seed: enchantmentSeed,
+            bookshelfCount: 15,
+            playerLevel,
+            lapis,
+            item,
+          }, offer)
+          return {
+            enchantmentId: offer.enchantment.id,
+            enchantmentLevel: offer.enchantment.level,
+            levelCost: offer.requiredPlayerLevel,
+            lapisCost: offer.lapisCost,
+            rejectionReason: result.ok ? undefined : result.reason,
+          }
+        }) as [NonNullable<Parameters<typeof enchantingTableViewModel>[0]['offers'][0]>, NonNullable<Parameters<typeof enchantingTableViewModel>[0]['offers'][1]>, NonNullable<Parameters<typeof enchantingTableViewModel>[0]['offers'][2]>],
+      }), { focusedTarget: 'offer-1', status: enchantingStatus })
+      return
+    }
     if (inventoryMode === 'chest') {
       const container = activeChestId === undefined
         ? null
@@ -3148,8 +3255,101 @@ const bootGame = async (
     renderPlayerUi()
   }
 
+  const removeInventoryItem = (item: ItemStack['item'], count: number): boolean => {
+    let remaining = count
+    const slots = Effect.runSync(world.inventory.snapshot).slots
+    for (let index = 0; index < slots.length && remaining > 0; index += 1) {
+      const stack = slots[index]
+      if (stack?.item !== item) continue
+      const removed = Math.min(stack.count, remaining)
+      Effect.runSync(world.inventory.removeAt(index, item, removed))
+      remaining -= removed
+    }
+    return remaining === 0
+  }
+
+  const activateAnvilOutput = (): void => {
+    const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
+    const vitals = Effect.runSync(world.vitals.snapshot)
+    const level = Effect.runSync(world.vitals.view).experienceLevel
+    if (selected === undefined || level < 1 || !removeInventoryItem('iron_ingot', 1)) {
+      anvilStatus = 'Repair or rename requirements are not met'
+      renderPlayerUi()
+      return
+    }
+    const normalizedName = anvilName.trim()
+    if (normalizedName.length > 0) customNames.set(String(selectedHotbarIndex), normalizedName)
+    else customNames.delete(String(selectedHotbarIndex))
+    Effect.runSync(world.vitals.restore(
+      addVitalsExperience(vitals, totalExperienceAtLevel(level - 1) - vitals.totalExperience),
+    ))
+    anvilStatus = normalizedName.length > 0 ? `Renamed to ${normalizedName}` : 'Item repaired'
+    document.body.setAttribute('data-anvil-result', anvilStatus)
+    markSessionDirty()
+    renderPlayerUi()
+  }
+
+  const activateEnchantingOffer = (slot: 0 | 1 | 2): void => {
+    const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
+    if (selected === undefined) return
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const lapis = storage.inventory.slots.reduce(
+      (count, stack) => count + (stack?.item === 'lapis_lazuli' ? stack.count : 0),
+      0,
+    )
+    const vitals = Effect.runSync(world.vitals.snapshot)
+    const playerLevel = Effect.runSync(world.vitals.view).experienceLevel
+    const key = String(selectedHotbarIndex)
+    const result = applyEnchantmentOffer({
+      seed: enchantmentSeed,
+      bookshelfCount: 15,
+      playerLevel,
+      lapis,
+      item: enchantedItems.get(key) ?? { item: selected.item, durability: null, enchantments: [] },
+    }, enchantmentOffers(enchantmentSeed, 15)[slot])
+    if (!result.ok || result.state.item === null) {
+      enchantingStatus = result.ok ? 'No item selected' : result.reason
+      renderPlayerUi()
+      return
+    }
+    removeInventoryItem('lapis_lazuli', lapis - result.state.lapis)
+    enchantedItems.set(key, result.state.item)
+    enchantmentSeed = result.state.seed
+    Effect.runSync(world.vitals.restore(addVitalsExperience(
+      vitals,
+      totalExperienceAtLevel(result.state.playerLevel) - vitals.totalExperience,
+    )))
+    enchantingStatus = `Applied ${result.state.item.enchantments.at(-1)?.id ?? 'enchantment'}`
+    document.body.setAttribute('data-enchanting-result', enchantingStatus)
+    markSessionDirty()
+    renderPlayerUi()
+  }
+
+  inventoryParent.addEventListener('input', (event) => {
+    if (inventoryMode !== 'anvil' || !(event.target instanceof HTMLInputElement)) return
+    if (event.target.matches('[data-operation-target="name"]')) {
+      anvilName = event.target.value.slice(0, 50)
+      renderPlayerUi()
+    }
+  })
+
   inventoryParent.addEventListener('click', (event) => {
     if (playerIsDead()) return
+    if (inventoryMode === 'anvil') {
+      const target = event.target instanceof Element
+        ? event.target.closest('[data-operation-target]')?.getAttribute('data-operation-target')
+        : null
+      if (target === 'output') activateAnvilOutput()
+      return
+    }
+    if (inventoryMode === 'enchanting') {
+      const target = event.target instanceof Element
+        ? event.target.closest('[data-operation-target]')?.getAttribute('data-operation-target')
+        : null
+      const slot = target === 'offer-1' ? 0 : target === 'offer-2' ? 1 : target === 'offer-3' ? 2 : undefined
+      if (slot !== undefined) activateEnchantingOffer(slot)
+      return
+    }
     if (inventoryMode === 'chest') {
       if (event.target instanceof Element && event.target.closest(
         '[data-interaction-target="chest-storage-close"]',
@@ -3171,7 +3371,7 @@ const bootGame = async (
   })
   inventoryParent.addEventListener('contextmenu', (event) => {
     if (playerIsDead()) return
-    if (inventoryMode === 'furnace' || inventoryMode === 'chest') return
+    if (['furnace', 'chest', 'anvil', 'enchanting'].includes(inventoryMode)) return
     const target = targetOf(event.target)
     if (target === undefined) return
     event.preventDefault()
@@ -3181,6 +3381,7 @@ const bootGame = async (
   inventoryParent.addEventListener('keydown', (event) => {
     if (playerIsDead()) return
     if (event.key !== 'Enter' && event.key !== ' ') return
+    if (inventoryMode === 'anvil' || inventoryMode === 'enchanting') return
     if (inventoryMode === 'chest') {
       if (event.target instanceof Element && event.target.closest(
         '[data-interaction-target="chest-storage-close"]',
@@ -3248,6 +3449,11 @@ const bootGame = async (
         chestFocus = { region: 'chest', slot: 0 }
         chestSelected = undefined
         chestStatus = ''
+      } else if (mode === 'anvil') {
+        anvilName = customNames.get(String(selectedHotbarIndex)) ?? ''
+        anvilStatus = ''
+      } else if (mode === 'enchanting') {
+        enchantingStatus = ''
       } else {
         inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
       }
@@ -3276,8 +3482,12 @@ const bootGame = async (
     Effect.runSync(Ref.set(gameplayState.spawnAttempts, []))
     Effect.runSync(Ref.set(gameplayState.mobDrops, []))
     observedMobDrops.splice(0)
-    Effect.runSync(world.player.restore(initialSpawnPose, initialSpawnDimension))
-    alignActiveDimension(initialSpawnDimension)
+    const respawnDimension = respawnLocation?.dimension ?? initialSpawnDimension
+    const respawnPose = respawnLocation === null
+      ? initialSpawnPose
+      : { ...initialSpawnPose, feetPosition: respawnLocation.position }
+    Effect.runSync(world.player.restore(respawnPose, respawnDimension))
+    alignActiveDimension(respawnDimension)
     resetSimState(true)
     setInventoryOpen(false)
     syncTouchControls()
@@ -5175,6 +5385,30 @@ const bootGame = async (
         setBrewingOpen(true)
       } else if (route?.kind === 'craftingTable') {
         setInventoryOpen(true, 'craftingTable')
+      } else if (route?.kind === 'anvil') {
+        setInventoryOpen(true, 'anvil')
+      } else if (route?.kind === 'enchantingTable') {
+        setInventoryOpen(true, 'enchanting')
+      } else if (route?.kind === 'bed') {
+        const decision = resolveBedSleep({
+          bedPosition: {
+            x: Math.floor(route.at.x),
+            y: Math.floor(route.at.y),
+            z: Math.floor(route.at.z),
+          },
+          dangerNearby: false,
+          dimension: Effect.runSync(playerApi.dimension),
+          timeOfDay: Effect.runSync(time.timeOfDay),
+          weather: Effect.runSync(weather.snapshot).weather,
+        })
+        if (decision._tag === 'SleepAccepted') {
+          Effect.runSync(time.setTimeOfDay(decision.morningTimeOfDay))
+          respawnLocation = decision.respawnLocation
+          document.body.setAttribute('data-sleep-result', 'accepted')
+          markSessionDirty()
+        } else {
+          document.body.setAttribute('data-sleep-result', decision.reason)
+        }
       } else if (route?.kind === 'furnace') {
         const dimension = Effect.runSync(playerApi.dimension)
         const position = {

@@ -14,7 +14,8 @@ import {
   localCoordOfBlock,
   type Chunk,
 } from '@nerima-games/mc-worldgen'
-import type { BlockPos, WireText } from '@nerima-games/mx-multiplayer'
+import { AuthoritativeSnapshot, type BlockPos, type WireText } from '@nerima-games/mx-multiplayer'
+import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
 
 import { makeMultiplayerServerCore, type MultiplayerServerState } from './core'
@@ -95,15 +96,39 @@ const isBlockPos = (value: unknown): value is BlockPos => {
   return Number.isInteger(position['x']) && Number.isInteger(position['y']) && Number.isInteger(position['z'])
 }
 
-const isServerState = (value: unknown): value is MultiplayerServerState => {
-  if (typeof value !== 'object' || value === null) return false
+const decodeServerState = (value: unknown, worldId: string): MultiplayerServerState | undefined => {
+  if (typeof value !== 'object' || value === null) return undefined
   const state = value as Record<string, unknown>
-  if (!Number.isInteger(state['revision']) || (state['revision'] as number) < 0 || !Array.isArray(state['blocks'])) return false
-  return state['blocks'].every((entry: unknown) => {
+  if (!Number.isInteger(state['revision']) || (state['revision'] as number) < 0 || !Array.isArray(state['blocks'])) return undefined
+  if (!state['blocks'].every((entry: unknown) => {
     if (typeof entry !== 'object' || entry === null) return false
     const mutation = entry as Record<string, unknown>
     return isBlockPos(mutation['at']) && (mutation['block'] === null || typeof mutation['block'] === 'string')
+  })) return undefined
+
+  const decoded = Schema.decodeUnknownEither(AuthoritativeSnapshot)({
+    _tag: 'AuthoritativeSnapshot',
+    world: worldId,
+    revision: state['revision'],
+    inventories: state['inventories'] ?? [],
+    vitals: state['vitals'] ?? [],
+    timeWeather: state['timeWeather'] ?? { timeOfDay: 6_000, weather: 'clear' },
+    containers: state['containers'] ?? [],
+    furnaces: state['furnaces'] ?? [],
+    villagerTrades: state['villagerTrades'] ?? [],
   })
+  if (Either.isLeft(decoded)) return undefined
+  const snapshot = decoded.right
+  return {
+    revision: snapshot.revision,
+    blocks: state['blocks'] as MultiplayerServerState['blocks'],
+    inventories: snapshot.inventories,
+    vitals: snapshot.vitals,
+    timeWeather: snapshot.timeWeather,
+    containers: snapshot.containers,
+    furnaces: snapshot.furnaces,
+    villagerTrades: snapshot.villagerTrades,
+  }
 }
 
 const loadServerState = async (
@@ -126,10 +151,14 @@ const loadServerState = async (
   }
   if (typeof value !== 'object' || value === null) throw new Error(`invalid multiplayer state file: ${path}`)
   const persisted = value as Record<string, unknown>
-  if (persisted['format'] !== 1 || persisted['worldId'] !== worldId || persisted['seed'] !== seed || !isServerState(persisted['state'])) {
+  if (persisted['format'] !== 1 || persisted['worldId'] !== worldId || persisted['seed'] !== seed) {
     throw new Error(`multiplayer state file does not match world ${worldId} and seed ${String(seed)}: ${path}`)
   }
-  return persisted['state']
+  const state = decodeServerState(persisted['state'], worldId)
+  if (state === undefined) {
+    throw new Error(`multiplayer state file does not match world ${worldId} and seed ${String(seed)}: ${path}`)
+  }
+  return state
 }
 
 const writeServerState = async (

@@ -225,6 +225,15 @@ export type SessionState = {
   readonly brewing: BrewingStandState
   readonly statusEffects: StatusEffectState
   readonly end: PersistedEndState
+  readonly workstations?: {
+    readonly enchantmentSeed: number
+    readonly customNames: Readonly<Record<string, string>>
+    readonly enchantedItems: Readonly<Record<string, string>>
+    readonly respawn: {
+      readonly dimension: 'overworld'
+      readonly position: SessionPosition
+    } | null
+  } | undefined
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -404,6 +413,15 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   brewing: Schema.Unknown as unknown as Schema.Schema<BrewingStandState>,
   statusEffects: Schema.Unknown as unknown as Schema.Schema<StatusEffectState>,
   end: PersistedEndStateSchema,
+  workstations: Schema.optional(Schema.Struct({
+    enchantmentSeed: Schema.Number,
+    customNames: Schema.Record({ key: Schema.String, value: Schema.String }),
+    enchantedItems: Schema.Record({ key: Schema.String, value: Schema.String }),
+    respawn: Schema.NullOr(Schema.Struct({
+      dimension: Schema.Literal('overworld'),
+      position: PositionSchema,
+    })),
+  })),
 })
 
 export type SessionChunkManifestEntry = {

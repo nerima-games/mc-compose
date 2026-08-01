@@ -73,6 +73,14 @@ const receiveMessage = (socket: WebSocket): Promise<WireMessage> =>
     })
   })
 
+const receiveMessageWithTag = async (socket: WebSocket, tag: string): Promise<WireMessage> => {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const message = await receiveMessage(socket)
+    if (message._tag === tag) return message
+  }
+  throw new Error(`did not receive ${tag} within three messages`)
+}
+
 const expectOutOfBoundsPlacementRejection = async (revision: number): Promise<void> => {
   const socket = new WebSocket(E2E_MULTIPLAYER_URL)
   try {
@@ -94,7 +102,7 @@ const expectOutOfBoundsPlacementRejection = async (revision: number): Promise<vo
       at: { x: 30_000_001, y: 64, z: 0 },
       block: 'stone',
     }))
-    expect(await receiveMessage(socket)).toMatchObject({
+    expect(await receiveMessageWithTag(socket, 'BlockMutationRejected')).toMatchObject({
       _tag: 'BlockMutationRejected',
       operation: 'place',
       reason: 'out-of-bounds',
