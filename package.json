@@ -1,6 +1,6 @@
 {
   "name": "@nerima-games/mc-compose",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "type": "module",
   "description": "The composition repository for the nerima-games Minecraft-clone rebuild: Layer merge, the single total ordering of frame stages, session lifecycle, the QA/debug API and the modding entry point. It holds no game rules.",
   "homepage": "https://github.com/nerima-games/mc-compose#readme",

@@ -364,6 +364,18 @@ import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
 import {
+  advanceSleep,
+  enterSleep,
+  initialSleepRuntimeState,
+  isDangerNearby,
+  leaveSleep,
+  reconcileSleepers,
+  requiredSleeperCount,
+  sleepRatioFromPercentage,
+  validRespawnLocation,
+  type SleepLocation,
+} from './sleep-runtime'
+import {
   DEFAULT_PLAYER_SETTINGS,
   PLAYER_BINDING_ACTIONS,
   loadPlayerSettings,
@@ -947,7 +959,8 @@ const bootGame = async (
   let enchantmentSeed = WORLD_SEED
   const customNames = new Map<string, string>()
   const enchantedItems = new Map<string, EnchantedItem>()
-  let respawnLocation: Vec3 | null = null
+  let respawnLocation: SleepLocation | null = null
+  let sleepRuntimeState = initialSleepRuntimeState()
   let anvilName = ''
   let anvilStatus = ''
   let enchantingStatus = ''
@@ -1222,7 +1235,18 @@ const bootGame = async (
       // Ignore a malformed optional workstation entry without losing the world save.
     }
   }
-  respawnLocation = restoredWorkstations?.respawn ?? null
+  const restoredRespawn = restoredWorkstations?.respawn
+  respawnLocation = restoredRespawn === undefined
+    ? null
+    : {
+        dimension: 'overworld',
+        position: restoredRespawn.position,
+        bedPosition: {
+          x: Math.floor(restoredRespawn.position.x),
+          y: Math.floor(restoredRespawn.position.y) - 1,
+          z: Math.floor(restoredRespawn.position.z),
+        },
+      }
   let initialKnownChunks: ReadonlyArray<DimensionChunk> = []
   type Dimension = SessionState['dimension']
   const initialDimension: Dimension = Option.isSome(loadedSession)
@@ -2269,6 +2293,9 @@ const bootGame = async (
   }> = []
 
   const multiplayerQuery = readMultiplayerQuery(window.location.search)
+  const requiredSleepRatio = sleepRatioFromPercentage(
+    new URLSearchParams(window.location.search).get('sleepPercentage'),
+  )
   const multiplayer = multiplayerQuery === undefined
     ? undefined
     : await Effect.runPromise(
@@ -2519,6 +2546,11 @@ const bootGame = async (
   projectileHud.id = 'projectile-hud'
   projectileHud.dataset['testid'] = 'projectiles'
   hudParent.append(projectileHud)
+  const sleepHud = document.createElement('div')
+  sleepHud.id = 'sleep-hud'
+  sleepHud.dataset['testid'] = 'sleep'
+  sleepHud.hidden = true
+  hudParent.append(sleepHud)
 
   inventoryParent.setAttribute('role', 'dialog')
   inventoryParent.setAttribute('aria-label', 'Inventory')
@@ -3844,10 +3876,17 @@ const bootGame = async (
     Effect.runSync(Ref.set(gameplayState.spawnAttempts, []))
     Effect.runSync(Ref.set(gameplayState.mobDrops, []))
     observedMobDrops.splice(0)
-    const respawnDimension = respawnLocation?.dimension ?? initialSpawnDimension
-    const respawnPose = respawnLocation === null
+    const validRespawn = validRespawnLocation(respawnLocation, (location) => {
+      const context = getOrCreateDimensionChunkContext(location.dimension)
+      const reading = Effect.runSync(context.chunkStore.getBlock(location.bedPosition))
+      return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'bed'
+    })
+    if (validRespawn === null) respawnLocation = null
+    sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
+    const respawnDimension = validRespawn?.dimension ?? initialSpawnDimension
+    const respawnPose = validRespawn === null
       ? initialSpawnPose
-      : { ...initialSpawnPose, feetPosition: respawnLocation.position }
+      : { ...initialSpawnPose, feetPosition: validRespawn.position }
     Effect.runSync(world.player.restore(respawnPose, respawnDimension))
     alignActiveDimension(respawnDimension)
     resetSimState(true)
@@ -6256,24 +6295,42 @@ const bootGame = async (
       } else if (route?.kind === 'enchantingTable') {
         setInventoryOpen(true, 'enchanting')
       } else if (route?.kind === 'bed') {
-        const decision = resolveBedSleep({
-          bedPosition: {
-            x: Math.floor(route.at.x),
-            y: Math.floor(route.at.y),
-            z: Math.floor(route.at.z),
-          },
-          dangerNearby: false,
-          dimension: Effect.runSync(playerApi.dimension),
-          timeOfDay: Effect.runSync(time.timeOfDay),
-          weather: Effect.runSync(weather.snapshot).weather,
-        })
-        if (decision._tag === 'SleepAccepted') {
-          Effect.runSync(time.setTimeOfDay(decision.morningTimeOfDay))
-          respawnLocation = decision.respawnLocation
-          document.body.setAttribute('data-sleep-result', 'accepted')
-          markSessionDirty()
+        const bedPosition = {
+          x: Math.floor(route.at.x),
+          y: Math.floor(route.at.y),
+          z: Math.floor(route.at.z),
+        }
+        const currentDimension = Effect.runSync(playerApi.dimension)
+        if (currentDimension !== 'overworld') {
+          sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
+          document.body.setAttribute(
+            'data-bed-explosion-request',
+            `${currentDimension}:${bedPosition.x},${bedPosition.y},${bedPosition.z}`,
+          )
+          document.body.setAttribute('data-sleep-result', 'explosion-requested')
         } else {
-          document.body.setAttribute('data-sleep-result', decision.reason)
+          const hostilePositions = Effect.runSync(world.entities.snapshot).entities
+            .filter((entity) => entity.kind !== 'dropped_item')
+            .map((entity) => entity.feetPosition)
+          const decision = resolveBedSleep({
+            bedPosition,
+            dangerNearby: isDangerNearby(bedPosition, hostilePositions),
+            dimension: currentDimension,
+            timeOfDay: Effect.runSync(time.timeOfDay),
+            weather: Effect.runSync(weather.snapshot).weather,
+          })
+          if (decision._tag === 'SleepAccepted') {
+            respawnLocation = { ...decision.respawnLocation, bedPosition }
+            sleepRuntimeState = enterSleep(
+              sleepRuntimeState,
+              multiplayer?.query.player ?? 'local',
+              respawnLocation,
+            )
+            document.body.setAttribute('data-sleep-result', 'accepted')
+            markSessionDirty()
+          } else {
+            document.body.setAttribute('data-sleep-result', decision.reason)
+          }
         }
       } else if (route?.kind === 'furnace') {
         const dimension = Effect.runSync(playerApi.dimension)
@@ -6554,6 +6611,46 @@ const bootGame = async (
       Effect.runSync(weather.applyTransition(weatherAdvanced))
       presentWeather(weatherAdvanced)
       if (weatherAdvanced.weather !== weatherBeforeFrame.weather) markSessionDirty()
+    }
+    const localSleepPlayerId = String(multiplayer?.query.player ?? 'local')
+    const connectedSurvivalPlayers = new Set<string>([
+      localSleepPlayerId,
+      ...[...(multiplayer?.players.keys() ?? [])].map(String),
+    ])
+    if (deadAfterFrame || dimensionChanged) {
+      sleepRuntimeState = leaveSleep(sleepRuntimeState, localSleepPlayerId)
+    }
+    sleepRuntimeState = reconcileSleepers(
+      sleepRuntimeState,
+      connectedSurvivalPlayers,
+      (location) => {
+        const context = getOrCreateDimensionChunkContext(location.dimension)
+        const reading = Effect.runSync(context.chunkStore.getBlock(location.bedPosition))
+        return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'bed'
+      },
+    )
+    const sleepAdvance = advanceSleep(
+      sleepRuntimeState,
+      deltaSecs,
+      connectedSurvivalPlayers.size,
+      requiredSleepRatio,
+      2,
+    )
+    sleepRuntimeState = sleepAdvance.state
+    const requiredSleepers = requiredSleeperCount(connectedSurvivalPlayers.size, requiredSleepRatio)
+    sleepHud.textContent = `Sleeping ${String(sleepRuntimeState.sleepers.length)}/${String(requiredSleepers)}`
+    sleepHud.hidden = sleepRuntimeState.sleepers.length === 0
+    document.body.setAttribute('data-sleeping-players', String(sleepRuntimeState.sleepers.length))
+    document.body.setAttribute('data-sleep-required', String(requiredSleepers))
+    if (sleepAdvance.skipToMorning) {
+      const clearWeather: WeatherState = { weather: 'clear', remainingSecs: 300 }
+      Effect.runSync(time.setTimeOfDay(0.25))
+      Effect.runSync(weather.applyTransition(clearWeather))
+      presentWeather(clearWeather)
+      sleepRuntimeState = initialSleepRuntimeState()
+      sleepHud.hidden = true
+      document.body.setAttribute('data-sleep-result', 'morning-skipped')
+      markSessionDirty()
     }
     presentWeatherRuntime(
       weatherAdvanced ?? Effect.runSync(weather.snapshot),
