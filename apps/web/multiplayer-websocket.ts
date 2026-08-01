@@ -5,6 +5,7 @@ import {
 } from '@nerima-games/mx-multiplayer'
 import { Deferred, Effect, Queue } from 'effect'
 import { decodeSleepWireMessage, type SleepWireMessage } from './sleep-network'
+import { decodeWitherWireMessage, type WitherWireMessage } from './wither-network'
 
 export type WebSocketTransportState = 'connecting' | 'open' | 'closed'
 
@@ -41,6 +42,7 @@ export interface BrowserWebSocketLike {
 export interface BrowserWebSocketTransport extends TransportService {
   readonly close: Effect.Effect<void>
   readonly sleepInbound: Queue.Dequeue<SleepWireMessage>
+  readonly witherInbound: Queue.Dequeue<WitherWireMessage>
   readonly sendSleep: (message: SleepWireMessage) => Effect.Effect<void, TransportError>
   readonly state: () => WebSocketTransportState
 }
@@ -78,6 +80,7 @@ export const makeBrowserWebSocketTransport = (
     // while the consumer is behind; protocol parsing remains the consumer's job.
     const inbound = yield* Queue.dropping<WireText>(capacity)
     const sleepInbound = yield* Queue.dropping<SleepWireMessage>(capacity)
+    const witherInbound = yield* Queue.dropping<WitherWireMessage>(capacity)
     const opened = yield* Deferred.make<void, TransportError>()
     const socket = yield* Effect.try({
       try: () => (options.socketFactory ?? defaultSocketFactory)(options.url),
@@ -108,6 +111,7 @@ export const makeBrowserWebSocketTransport = (
       detachListeners()
       if (shutdownInbound) Effect.runSync(Queue.shutdown(inbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(sleepInbound))
+      if (shutdownInbound) Effect.runSync(Queue.shutdown(witherInbound))
     }
 
     function handleOpen(): void {
@@ -121,6 +125,11 @@ export const makeBrowserWebSocketTransport = (
       const sleepMessage = decodeSleepWireMessage(event.data)
       if (sleepMessage !== undefined) {
         Queue.unsafeOffer(sleepInbound, sleepMessage)
+        return
+      }
+      const witherMessage = decodeWitherWireMessage(event.data as WireText)
+      if (witherMessage !== undefined) {
+        Queue.unsafeOffer(witherInbound, witherMessage)
         return
       }
       Queue.unsafeOffer(inbound, event.data as WireText)
@@ -183,10 +192,11 @@ export const makeBrowserWebSocketTransport = (
       detachListeners()
       Effect.runSync(Queue.shutdown(inbound))
       Effect.runSync(Queue.shutdown(sleepInbound))
+      Effect.runSync(Queue.shutdown(witherInbound))
       if (shouldCloseSocket) socket.close(1000, 'transport disposed')
     })
 
     const sendSleep = (message: SleepWireMessage): Effect.Effect<void, TransportError> =>
       send(JSON.stringify(message) as WireText)
-    return { send, inbound, sleepInbound, sendSleep, close, state: () => currentState }
+    return { send, inbound, sleepInbound, witherInbound, sendSleep, close, state: () => currentState }
   })

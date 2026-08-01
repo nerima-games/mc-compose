@@ -130,6 +130,8 @@ const openPlayer = async (
   const page = await context.newPage()
   const sessionUrl = await createCreativeWorld(page, worldName)
   await callQa<GameplaySnapshot>(page, 'gameplay.seedCreativePlacementEncounter')
+  await page.keyboard.press('Escape')
+  await callQa(page, 'persistence.flush')
   await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
   const url = multiplayerUrl(sessionUrl, player, name)
   await connectPage(page, url)
@@ -162,6 +164,13 @@ test('joins a saved world from the title screen multiplayer form', async ({ page
 
 test('synchronizes two Creative browser sessions through the authoritative server', async ({ browser }) => {
   const alice = await openPlayer(browser, 'Alice Multiplayer E2E', 'alice-e2e', 'Alice')
+  await alice.page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
   const bob = await openPlayer(browser, 'Bob Multiplayer E2E', 'bob-e2e', 'Bob')
 
   try {
@@ -192,6 +201,12 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     expect(placedBlock).not.toBe(0)
     await expect.poll(async () => (await snapshot(bob.page)).ignitionTarget.block).toBe(placedBlock)
 
+    await callQa<GameplaySnapshot>(alice.page, 'gameplay.requestMultiplayerBlockBreak')
+    const revisionAfterBreak = revisionBeforePlace + 2
+    await expect.poll(() => canvasRevision(alice.page)).toBe(revisionAfterBreak)
+    await expect.poll(() => canvasRevision(bob.page)).toBe(revisionAfterBreak)
+    await expect.poll(async () => (await snapshot(bob.page)).ignitionTarget.block).toBe(0)
+
     const chatPayload = '<img src=x onerror=alert(1)> hello'
     await alice.page.locator('#multiplayer-chat-input').fill(chatPayload)
     await alice.page.locator('#multiplayer-chat-form button').click()
@@ -209,19 +224,19 @@ test('synchronizes two Creative browser sessions through the authoritative serve
       '<Alice> bounded message 1',
     )
 
-    await alice.page.waitForTimeout(300)
     const authoritativeX = (await snapshot(alice.page)).pose.feetPosition.x
     await callQa<GameplaySnapshot>(alice.page, 'gameplay.setMultiplayerInvalidPose')
     await expect(alice.page.locator('#multiplayer-status')).toContainText('corrected')
     await expect.poll(async () => Math.abs(
       (await snapshot(alice.page)).pose.feetPosition.x - authoritativeX,
     )).toBeLessThan(2)
-    await alice.page.waitForTimeout(300)
-    expect(Math.abs((await snapshot(alice.page)).pose.feetPosition.x - authoritativeX)).toBeLessThan(2)
+    await expect.poll(async () => Math.abs(
+      (await snapshot(alice.page)).pose.feetPosition.x - authoritativeX,
+    )).toBeLessThan(2)
 
-    await expectOutOfBoundsPlacementRejection(revisionBeforePlace + 1)
+    await expectOutOfBoundsPlacementRejection(revisionAfterBreak)
     await expect(aliceCanvas).toHaveAttribute('data-multiplayer-player-count', '2')
-    expect(await canvasRevision(alice.page)).toBe(revisionBeforePlace + 1)
+    expect(await canvasRevision(alice.page)).toBe(revisionAfterBreak)
 
     await bob.page.close()
     await expect(aliceCanvas).toHaveAttribute('data-multiplayer-player-count', '1')
@@ -233,10 +248,8 @@ test('synchronizes two Creative browser sessions through the authoritative serve
       'data-multiplayer-player-count',
       '2',
     )
-    await expect.poll(() => canvasRevision(reconnectedBob)).toBe(revisionBeforePlace + 1)
-    await expect.poll(async () => (await snapshot(reconnectedBob)).ignitionTarget.block).toBe(
-      placedBlock,
-    )
+    await expect.poll(() => canvasRevision(reconnectedBob)).toBe(revisionAfterBreak)
+    await expect.poll(async () => (await snapshot(reconnectedBob)).ignitionTarget.block).toBe(0)
   } finally {
     await Promise.all([alice.context.close(), bob.context.close()])
   }

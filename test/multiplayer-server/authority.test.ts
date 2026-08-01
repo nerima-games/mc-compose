@@ -17,6 +17,7 @@ import {
   type ReceiveResult,
 } from '../../apps/multiplayer-server/core'
 import { decodeSleepWireMessage } from '../../apps/web/sleep-network'
+import { decodeWitherWireMessage } from '../../apps/web/wither-network'
 
 const playerId = (value: string): PlayerId => value as PlayerId
 const playerName = (value: string): PlayerName => value as PlayerName
@@ -30,7 +31,7 @@ const frame = (message: NetworkMessage): WireText => {
 }
 
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
-  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined).map((wire) => {
+  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined && decodeWitherWireMessage(wire) === undefined).map((wire) => {
     const decoded = decodeFrame(wire)
     if (Either.isLeft(decoded)) throw decoded.left
     return decoded.right

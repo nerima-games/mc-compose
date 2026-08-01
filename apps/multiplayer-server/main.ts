@@ -128,6 +128,8 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     containers: snapshot.containers,
     furnaces: snapshot.furnaces,
     villagerTrades: snapshot.villagerTrades,
+    ...(state['wither'] === undefined ? {} : { wither: state['wither'] as NonNullable<MultiplayerServerState['wither']> }),
+    ...(Number.isInteger(state['witherRevision']) ? { witherRevision: state['witherRevision'] as number } : {}),
   }
 }
 

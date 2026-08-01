@@ -83,7 +83,7 @@
  * dirty chunk notifications are the only render synchronization path.
  */
 import * as THREE from 'three'
-import { Context, Effect, Either, Exit, Layer, Option, Ref, Scope } from 'effect'
+import { Context, Effect, Either, Exit, Layer, Option, Queue, Ref, Scope } from 'effect'
 import {
   makeEndAudioController,
   makeWeatherAudioController,
@@ -1256,7 +1256,7 @@ const bootGame = async (
     }
   }
   const restoredRespawn = restoredWorkstations?.respawn
-  respawnLocation = restoredRespawn === undefined
+  respawnLocation = restoredRespawn == null
     ? null
     : {
         dimension: 'overworld',
@@ -1481,7 +1481,7 @@ const bootGame = async (
   const observerPulses = new Map<string, number>()
   const poweredRails = new Set<string>()
   const vehicles = new Map<string, Vehicle>()
-  const localVehicleOccupant = OccupantId.make('local-player')
+  const localVehicleOccupant = OccupantId('local-player')
   let mountedVehicleId: string | undefined
   let nextVehicleSerial = 1
   let fishingSession: FishingSession | undefined
@@ -2343,6 +2343,9 @@ const bootGame = async (
           } satisfies MultiplayerRuntime
         }),
       )
+  const multiplayerInboundStage = multiplayer?.host.stages.find(
+    (stage) => stage.id === 'multiplayer:inbound',
+  )
   let multiplayerRevision = 0
   let nextVitalsCommand = 0
   let pendingVitalsCommand: CommandId | null = null
@@ -2358,6 +2361,30 @@ const bootGame = async (
     readonly at: { readonly x: number; readonly y: number; readonly z: number }
     readonly facing: { readonly yawRadians: number; readonly pitchRadians: number }
   } | undefined
+
+  const drainMultiplayerInbound = (): void => {
+    if (multiplayer === undefined) return
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.sleepInbound))) {
+      if (message._tag === 'SleepSnapshot') networkSleepState = sleepClientFromSnapshot(message.snapshot)
+      else if (message._tag === 'SleepCommandResult') networkSleepState = applySleepCommandResult(networkSleepState, message.result)
+      else if (message._tag === 'SleepEvents') networkSleepState = applySleepEvents(networkSleepState, message.revision, message.events)
+      sleepRuntimeState = initialSleepRuntimeState()
+      for (const [player, location] of networkSleepState.sleepers) {
+        sleepRuntimeState = enterSleep(sleepRuntimeState, String(player), {
+          dimension: location.dimension as Dimension,
+          position: location.bed,
+        })
+      }
+    }
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.witherInbound))) {
+      if (message._tag === 'WitherSnapshot') {
+        witherRuntimeState = restoreWitherRuntime(message.snapshot)
+      }
+    }
+    for (const message of Effect.runSync(multiplayer.host.drainInbound)) {
+      applyNetworkMessage(message)
+    }
+  }
   multiplayerStatus.hidden = multiplayer === undefined
   multiplayerStatus.textContent = multiplayer === undefined ? '' : 'Connecting to multiplayer server...'
   multiplayerChat.hidden = multiplayer === undefined
@@ -5033,6 +5060,16 @@ const bootGame = async (
           }))
           return gameplaySnapshot()
         },
+        requestMultiplayerBlockBreak: () => {
+          if (multiplayer === undefined || !multiplayerHandshakeComplete) return gameplaySnapshot()
+          Effect.runSync(multiplayer.host.enqueueOutbound({
+            _tag: 'BlockBreak',
+            player: multiplayer.query.player,
+            world: WorldId.make(Effect.runSync(playerApi.dimension)),
+            at: QA_IGNITION_CELL,
+          }))
+          return gameplaySnapshot()
+        },
         returnToCraftingTable: () => {
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
@@ -5706,21 +5743,7 @@ const bootGame = async (
     if (villagerTradeResults.length > 0) renderTradeUi()
 
     if (multiplayer !== undefined) {
-      for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.sleepInbound))) {
-        if (message._tag === 'SleepSnapshot') networkSleepState = sleepClientFromSnapshot(message.snapshot)
-        else if (message._tag === 'SleepCommandResult') networkSleepState = applySleepCommandResult(networkSleepState, message.result)
-        else if (message._tag === 'SleepEvents') networkSleepState = applySleepEvents(networkSleepState, message.revision, message.events)
-        sleepRuntimeState = initialSleepRuntimeState()
-        for (const [player, location] of networkSleepState.sleepers) {
-          sleepRuntimeState = enterSleep(sleepRuntimeState, String(player), {
-            dimension: location.dimension as Dimension,
-            position: location.bed,
-          })
-        }
-      }
-      for (const message of Effect.runSync(multiplayer.host.drainInbound)) {
-        applyNetworkMessage(message)
-      }
+      drainMultiplayerInbound()
       if (multiplayerHandshakeComplete && nowSecs - lastPlayerMoveSentAt >= 0.1) {
         const pose = Effect.runSync(playerApi.pose)
         const world = WorldId.make(Effect.runSync(playerApi.dimension))
@@ -6036,7 +6059,7 @@ const bootGame = async (
               minY: postFramePose.feetPosition.y,
               minZ: postFramePose.feetPosition.z - PLAYER_HALF_WIDTH,
               maxX: postFramePose.feetPosition.x + PLAYER_HALF_WIDTH,
-              maxY: postFramePose.feetPosition.y + PLAYER_HEIGHT,
+              maxY: postFramePose.feetPosition.y + PLAYER_HALF_HEIGHT * 2,
               maxZ: postFramePose.feetPosition.z + PLAYER_HALF_WIDTH,
             },
           },
@@ -6526,7 +6549,7 @@ const bootGame = async (
             : target.adjacentPosition
           const removed = Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, type, 1))
           if (removed._tag === 'Removed') {
-            const id = VehicleId.make(`vehicle-${String(nextVehicleSerial++)}`)
+            const id = VehicleId(`vehicle-${String(nextVehicleSerial++)}`)
             vehicles.set(String(id), {
               id,
               type,
@@ -7173,7 +7196,13 @@ const bootGame = async (
     container: gameShell,
     canvas,
     startRuntime: (surface) => Effect.sync(() => {
+      const hiddenNetworkPump = window.setInterval(() => {
+        if (document.visibilityState !== 'hidden' || multiplayerInboundStage === undefined) return
+        Effect.runSync(multiplayerInboundStage.run(0))
+        drainMultiplayerInbound()
+      }, 100)
       surface.onCleanup(() => {
+        window.clearInterval(hiddenNetworkPump)
         Reflect.deleteProperty(globalThis, QA_GLOBAL_KEY)
         document.body.setAttribute('data-mc-compose-boot', 'stopped')
       })

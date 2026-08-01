@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest'
 
 import { makeMultiplayerServerCore, type ReceiveResult } from '../../apps/multiplayer-server/core'
 import { decodeSleepWireMessage, type SleepWireMessage } from '../../apps/web/sleep-network'
+import { decodeWitherWireMessage, type WitherWireMessage } from '../../apps/web/wither-network'
 
 const playerId = (value: string): PlayerId => value as PlayerId
 const playerName = (value: string): PlayerName => value as PlayerName
@@ -24,7 +25,7 @@ const frame = (message: NetworkMessage): WireText => {
 }
 
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
-  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined).map((wire) => {
+  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined && decodeWitherWireMessage(wire) === undefined).map((wire) => {
     const result = decodeFrame(wire)
     if (Either.isLeft(result)) throw result.left
     return result.right
@@ -33,6 +34,12 @@ const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage
 const sleepMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<SleepWireMessage> =>
   frames.flatMap((wire) => {
     const message = decodeSleepWireMessage(wire)
+    return message === undefined ? [] : [message]
+  })
+
+const witherMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<WitherWireMessage> =>
+  frames.flatMap((wire) => {
+    const message = decodeWitherWireMessage(wire)
     return message === undefined ? [] : [message]
   })
 
@@ -75,7 +82,9 @@ const makeFixture = (
     server.receive(clientId, frame(message))
   const receiveSleep = (clientId: string, message: SleepWireMessage): ReceiveResult =>
     server.receive(clientId, JSON.stringify(message) as WireText)
-  return { server, sent, connect, receive, receiveSleep }
+  const receiveWither = (clientId: string, message: WitherWireMessage): ReceiveResult =>
+    server.receive(clientId, JSON.stringify(message) as WireText)
+  return { server, sent, connect, receive, receiveSleep, receiveWither }
 }
 
 describe('authoritative multiplayer server core', () => {
@@ -329,6 +338,41 @@ describe('authoritative multiplayer server core', () => {
     expect(sleepMessages(bobFrames)).toContainEqual(expect.objectContaining({
       _tag: 'SleepEvents',
       events: expect.arrayContaining([expect.objectContaining({ _tag: 'ActorSleepChanged', sleeping: null })]),
+    }))
+  })
+
+  it('synchronizes authoritative Wither state to two clients and a rejoining session', () => {
+    const fixture = makeFixture()
+    const aliceFrames = fixture.connect('socket-a')
+    const bobFrames = fixture.connect('socket-b')
+    fixture.receive('socket-a', join('alice'))
+    fixture.receive('socket-b', join('bob'))
+    aliceFrames.length = 0
+    bobFrames.length = 0
+
+    expect(fixture.receiveWither('socket-a', {
+      _tag: 'WitherCommand',
+      command: {
+        _tag: 'SummonWither', actor: 'alice', requestId: 'summon-1', expectedRevision: 0,
+        dimension: 'world-1', position: { x: 2, y: 64, z: 3 },
+      },
+    })).toEqual(expect.objectContaining({ accepted: true }))
+    expect(witherMessages(aliceFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'WitherCommandResult', requestId: 'summon-1', accepted: true, revision: 1,
+    }))
+    for (const frames of [aliceFrames, bobFrames]) {
+      expect(witherMessages(frames)).toContainEqual(expect.objectContaining({
+        _tag: 'WitherSnapshot', revision: 1,
+        snapshot: expect.objectContaining({ withers: [expect.objectContaining({ id: 'wither-1' })] }),
+      }))
+    }
+
+    fixture.server.disconnect('socket-b')
+    const rejoinedFrames = fixture.connect('socket-b2')
+    fixture.receive('socket-b2', join('bob'))
+    expect(witherMessages(rejoinedFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'WitherSnapshot', revision: 1,
+      snapshot: expect.objectContaining({ withers: [expect.objectContaining({ id: 'wither-1' })] }),
     }))
   })
 })

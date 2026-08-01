@@ -25,6 +25,15 @@ import {
   decodeSleepWireMessage,
   type SleepWireMessage,
 } from '../web/sleep-network'
+import {
+  damageRuntimeWither,
+  restoreWitherRuntime,
+  snapshotWitherRuntime,
+  summonRuntimeWither,
+  type WitherRuntimeSnapshot,
+  type WitherRuntimeState,
+} from '../web/wither-runtime'
+import { decodeWitherWireMessage, type WitherWireMessage } from '../web/wither-network'
 
 export type ClientId = string
 export type SendFrame = (frame: WireText) => void
@@ -58,10 +67,12 @@ export interface MultiplayerServerState {
   readonly containers: AuthoritativeSnapshot['containers']
   readonly furnaces: AuthoritativeSnapshot['furnaces']
   readonly villagerTrades: AuthoritativeSnapshot['villagerTrades']
+  readonly wither?: WitherRuntimeSnapshot
+  readonly witherRevision?: number
 }
 
 export type ReceiveResult =
-  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage }>
+  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage }>
   | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' | 'invalid-command' }>
 
 interface ConnectedClient {
@@ -229,6 +240,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   }))
   const commandResults = new Map<CommandId, AuthoritativeCommandResult>()
   let revision = options.initialState?.revision ?? 0
+  let witherRevision = options.initialState?.witherRevision ?? 0
+  let witherState: WitherRuntimeState = restoreWitherRuntime(options.initialState?.wither)
   const hungerActors = new Map<PlayerId, HungerActor>()
   let hungerTickRemainderMs = 0
   const sleepAuthority = new SleepAuthority({
@@ -271,6 +284,20 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const broadcastSleep = (message: SleepWireMessage): void => {
     for (const client of clients.values()) if (client.playerId !== null) sendSleep(client, message)
   }
+
+  const sendWither = (client: ConnectedClient, message: WitherWireMessage): void => {
+    client.send(JSON.stringify(message) as WireText)
+  }
+
+  const broadcastWither = (message: WitherWireMessage): void => {
+    for (const client of clients.values()) if (client.playerId !== null) sendWither(client, message)
+  }
+
+  const witherSnapshot = (): WitherWireMessage => ({
+    _tag: 'WitherSnapshot',
+    revision: witherRevision,
+    snapshot: snapshotWitherRuntime(witherState),
+  })
 
   const snapshot = (): WorldSnapshot => ({
     _tag: 'WorldSnapshot',
@@ -635,6 +662,31 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const receive = (clientId: ClientId, frame: WireText): ReceiveResult => {
     const client = clients.get(clientId)
     if (client === undefined) return { accepted: false, reason: 'unknown-client' }
+    const witherMessage = decodeWitherWireMessage(frame)
+    if (witherMessage?._tag === 'WitherCommand') {
+      if (client.playerId === null) return { accepted: false, reason: 'join-required' }
+      const command = witherMessage.command
+      if (command.actor !== client.playerId) return { accepted: false, reason: 'identity-spoof' }
+      if (command.expectedRevision !== witherRevision) {
+        sendWither(client, { _tag: 'WitherCommandResult', requestId: command.requestId, accepted: false, revision: witherRevision, reason: 'stale-revision' })
+        return { accepted: false, reason: 'invalid-command' }
+      }
+      if (command._tag === 'SummonWither') {
+        if (command.dimension !== worldId) return { accepted: false, reason: 'wrong-world' }
+        witherState = summonRuntimeWither(witherState, command.dimension, command.position)
+      } else {
+        if (command.amount <= 0 || !witherState.withers.some(({ id }) => id === command.id)) {
+          sendWither(client, { _tag: 'WitherCommandResult', requestId: command.requestId, accepted: false, revision: witherRevision, reason: 'invalid-command' })
+          return { accepted: false, reason: 'invalid-command' }
+        }
+        witherState = damageRuntimeWither(witherState, command.id, command.amount, command.kind).state
+      }
+      witherRevision += 1
+      notifyStateChanged()
+      sendWither(client, { _tag: 'WitherCommandResult', requestId: command.requestId, accepted: true, revision: witherRevision })
+      broadcastWither(witherSnapshot())
+      return { accepted: true, message: witherMessage }
+    }
     const sleepMessage = decodeSleepWireMessage(frame)
     if (sleepMessage?._tag === 'SleepCommand') {
       if (client.playerId === null) return { accepted: false, reason: 'join-required' }
@@ -679,6 +731,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       sendMessage(client, authoritativeSnapshot())
       sendSleep(client, { _tag: 'SleepSnapshot', snapshot: sleepSnapshot })
       broadcast(message, clientId)
+      sendWither(client, witherSnapshot())
       return { accepted: true, message }
     }
 
