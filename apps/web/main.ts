@@ -112,9 +112,13 @@ import {
   type WeatherState,
 } from '@nerima-games/mc-sim'
 import {
+  biomeFor,
   chunkCoord,
   chunkSnapshotOf,
+  DEFAULT_TERRAIN_LEVELS,
   generatedChunkSource,
+  surfaceHeightAt,
+  villageVillagerSpawnsForChunk,
   type ChunkSource,
 } from '@nerima-games/mc-worldgen'
 import {
@@ -171,6 +175,7 @@ import {
   type RedstoneComponentSnapshot,
 } from '@nerima-games/mx-redstone'
 import {
+  addVillager,
   advanceMiningProgress,
   applyArmorToDamage,
   armorPointsForEquipment,
@@ -183,11 +188,13 @@ import {
   drainMobDrops,
   drainPortalTravels,
   drainPlayerDamages,
+  drainVillagerTradeResults,
   DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
   gameplayStages,
   INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
   makeGameplayFrameState,
+  makeVillager,
   makeGeneratedWorld,
   meleeDamageForItem,
   isDroppedItemBehaviour,
@@ -209,13 +216,16 @@ import {
   requestTargetedBlockPlacement,
   requestTargetedBlockUse,
   requestTargetedItemUse,
+  requestVillagerTrade,
   resolveEnvironmentalContactDamage,
   resolveFallDamage,
   resolveTargetedPrimaryAttack,
+  restoreVillagerTrades,
   setPortalCandidates,
   solidityFromStore,
   spawnDroppedItems,
   spawnMobDrops,
+  snapshotVillagerTrades,
   targetedRightClickRoute,
   weatherLightScale,
   miningLootContextForItem,
@@ -229,6 +239,7 @@ import {
   type MobDropEvent,
   type MiningProgressState,
   type PlaceableItemType,
+  type VillagerTradeResult,
 } from '@nerima-games/mx-gameplay'
 import {
   encodeFrame,
@@ -306,6 +317,7 @@ import {
   type PersistedFurnaceState,
   type PersistedLeverState,
   type PersistedPortalState,
+  type PersistedVillager,
   type SessionMetadata,
   type SessionState,
 } from './session-persistence'
@@ -804,6 +816,7 @@ const bootGame = async (
   const hudParent = requireElement('hud-root')
   const captionsParent = requireElement('sound-captions')
   const inventoryParent = requireElement('inventory-root')
+  const tradeParent = requireElement('trade-root')
   const touchControlsParent = requireElement('touch-controls')
   const touchLookSurface = requireElement('touch-look-surface')
   const fpsValue = requireElement('fps-value')
@@ -822,6 +835,10 @@ const bootGame = async (
   fpsValue.setAttribute('data-fps-source', 'mx-ui-frame-dt')
   const stageList = requireElement('stage-order')
   let inventoryOpen = false
+  let tradeOpen = false
+  let activeVillagerId: string | undefined
+  let tradeStatus = ''
+  let nextVillagerTradeRequestId = 0
   let inventoryMode: InventoryMode = 'player'
   let paused = false
 
@@ -921,7 +938,7 @@ const bootGame = async (
     targets: { window, document },
     canvas,
     bindings: playerSettings.bindings,
-    allowsPointerLock: () => !inventoryOpen && !paused,
+    allowsPointerLock: () => !inventoryOpen && !tradeOpen && !paused,
     touchControls,
   })
 
@@ -936,7 +953,7 @@ const bootGame = async (
   // clicks stay UI clicks, and `attack` does not fire.
   canvas.addEventListener('click', (event) => {
     if (event.isTrusted) audio.unlock()
-    if (inventoryOpen || document.pointerLockElement === canvas) {
+    if (inventoryOpen || tradeOpen || document.pointerLockElement === canvas) {
       return
     }
     try {
@@ -1092,10 +1109,19 @@ const bootGame = async (
   const time = await Effect.runPromise(makeTimeService())
   const weather = await Effect.runPromise(makeWeatherService())
   const crops = await Effect.runPromise(makeCropService())
+  const gameplayState = await Effect.runPromise(makeGameplayFrameState)
+  const villagerResidents = new Map<string, PersistedVillager>(
+    (Option.isSome(loadedSession) ? loadedSession.value.state.villagers.residents : [])
+      .map((villager) => [villager.id, villager]),
+  )
   if (Option.isSome(loadedSession)) {
     await Effect.runPromise(time.restore(loadedSession.value.state.time))
     await Effect.runPromise(weather.restore(loadedSession.value.state.weather))
     await Effect.runPromise(crops.restore(loadedSession.value.state.crops))
+    await Effect.runPromise(restoreVillagerTrades(
+      gameplayState,
+      loadedSession.value.state.villagers.trades,
+    ))
   }
 
   const presentWeather = (state: WeatherState): void => {
@@ -1227,6 +1253,10 @@ const bootGame = async (
       portals: [...portalStates.values()],
       crops: Effect.runSync(crops.snapshot),
       entities: Effect.runSync(world.entities.snapshot),
+      villagers: {
+        residents: [...villagerResidents.values()],
+        trades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
+      },
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -1292,6 +1322,41 @@ const bootGame = async (
       for (const chunk of changed) {
         yield* context.chunkStore.load(chunk)
         context.streamLoaded.add(chunkKeyOf(chunk))
+        if (context.dimension === 'overworld') {
+          let trades = yield* snapshotVillagerTrades(gameplayState)
+          let discovered = false
+          for (const spawn of villageVillagerSpawnsForChunk(
+            activeSeed,
+            chunk.cx,
+            chunk.cz,
+            (x, z) => {
+              const surfaceY = surfaceHeightAt(activeSeed, x, z)
+              return {
+                biome: biomeFor(activeSeed, x, z, surfaceY, DEFAULT_TERRAIN_LEVELS),
+                surfaceY,
+                seaLevel: DEFAULT_TERRAIN_LEVELS.seaLevel,
+              }
+            },
+          )) {
+            if (!villagerResidents.has(spawn.id)) {
+              villagerResidents.set(spawn.id, {
+                id: spawn.id,
+                profession: spawn.profession,
+                dimension: 'overworld',
+                feetPosition: { x: spawn.x + 0.5, y: spawn.y, z: spawn.z + 0.5 },
+              })
+              discovered = true
+            }
+            if (!trades.villagers.some((villager) => villager.id === spawn.id)) {
+              trades = addVillager(trades, makeVillager(spawn.id, spawn.profession))
+              discovered = true
+            }
+          }
+          if (discovered) {
+            yield* restoreVillagerTrades(gameplayState, trades)
+            markSessionDirty()
+          }
+        }
       }
       for (const chunk of removed) {
         const snapshot = yield* context.worldgenChunkStore.snapshot(chunkCoord(chunk.cx, chunk.cz))
@@ -1710,7 +1775,6 @@ const bootGame = async (
   // A host that used `gameplayModule` directly would get stages that drain an
   // inbox nobody can reach, which is the 「callable but unreachable」 state that
   // repository has had to correct more than once.
-  const gameplayState = await Effect.runPromise(makeGameplayFrameState)
   const portalDimensions = ['overworld', 'nether', 'end'] as const satisfies ReadonlyArray<Dimension>
   const syncPortalCandidatesFor = (dimension: Dimension): Effect.Effect<void> =>
     setPortalCandidates(
@@ -2107,6 +2171,83 @@ const bootGame = async (
   inventoryParent.setAttribute('aria-label', 'Inventory')
   inventoryParent.setAttribute('aria-hidden', 'true')
   document.body.setAttribute('data-inventory-open', 'false')
+  tradeParent.setAttribute('role', 'dialog')
+  tradeParent.setAttribute('aria-label', 'Villager trading')
+  tradeParent.setAttribute('aria-hidden', 'true')
+  document.body.setAttribute('data-trade-open', 'false')
+
+  const renderTradeUi = (): void => {
+    const trades = Effect.runSync(snapshotVillagerTrades(gameplayState))
+    const villager = trades.villagers.find((candidate) => candidate.id === activeVillagerId)
+    if (!tradeOpen || villager === undefined) {
+      tradeParent.replaceChildren()
+      return
+    }
+    const title = document.createElement('h2')
+    title.textContent = villager.profession === 'farmer' ? 'Farmer' : 'Toolsmith'
+    const offers = document.createElement('div')
+    offers.className = 'trade-offers'
+    for (const offer of villager.offers) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.dataset['tradeOfferId'] = offer.id
+      button.disabled = offer.uses >= offer.maxUses
+      button.textContent = `${String(offer.input.count)} ${offer.input.item} -> ${String(offer.output.count)} ${offer.output.item} (${String(offer.uses)}/${String(offer.maxUses)})`
+      offers.append(button)
+    }
+    const status = document.createElement('p')
+    status.className = 'trade-status'
+    status.setAttribute('role', 'status')
+    status.textContent = tradeStatus
+    const close = document.createElement('button')
+    close.type = 'button'
+    close.dataset['tradeClose'] = 'true'
+    close.textContent = 'Close'
+    tradeParent.replaceChildren(title, offers, status, close)
+  }
+
+  const villagerTradeStatus = (result: VillagerTradeResult): string => {
+    if (result._tag === 'Traded') return 'Trade complete'
+    switch (result.reason) {
+      case 'UnknownOffer': return 'That offer is no longer available'
+      case 'OutOfStock': return 'This offer is out of stock'
+      case 'InsufficientItems': return 'You do not have the required items'
+      case 'InventoryFull': return 'Your inventory is full'
+    }
+  }
+
+  const setTradeOpen = (open: boolean, villagerId?: string): void => {
+    if (open && (playerIsDead() || villagerId === undefined)) return
+    tradeOpen = open
+    activeVillagerId = open ? villagerId : undefined
+    tradeStatus = ''
+    tradeParent.hidden = !open
+    tradeParent.setAttribute('aria-hidden', String(!open))
+    document.body.setAttribute('data-trade-open', String(open))
+    renderTradeUi()
+    renderCrosshair()
+    syncTouchControls()
+    if (open && document.pointerLockElement === canvas) document.exitPointerLock()
+  }
+
+  tradeParent.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return
+    if (event.target.closest('[data-trade-close]') !== null) {
+      setTradeOpen(false)
+      return
+    }
+    const button = event.target.closest<HTMLElement>('[data-trade-offer-id]')
+    const offerId = button?.dataset['tradeOfferId']
+    if (activeVillagerId === undefined || offerId === undefined) return
+    nextVillagerTradeRequestId += 1
+    Effect.runSync(requestVillagerTrade(gameplayState, {
+      requestId: `villager-trade-${String(nextVillagerTradeRequestId)}`,
+      villagerId: activeVillagerId,
+      offerId,
+    }))
+    tradeStatus = 'Trading...'
+    renderTradeUi()
+  })
 
   let selectedHotbarIndex = 0
   let miningProgress: MiningProgressState | null = null
@@ -2119,7 +2260,7 @@ const bootGame = async (
     nowSecs = Effect.runSync(browserClock.monotonicSecs),
   ): void => {
     crosshair.render(crosshairViewModel({
-      modals: paused ? ['pause'] : inventoryOpen ? ['inventory'] : [],
+      modals: paused ? ['pause'] : inventoryOpen || tradeOpen ? ['inventory'] : [],
       lastHitAtSecs: undefined,
       breakProgress:
         miningProgress === null ? undefined : miningProgressFraction(miningProgress),
@@ -2153,7 +2294,7 @@ const bootGame = async (
       touchAvailable,
       playing: true,
       dead: playerIsDead(),
-      inventoryOpen,
+      inventoryOpen: inventoryOpen || tradeOpen,
       paused,
     })
     const wasVisible = touchControlsVisible
@@ -2584,6 +2725,7 @@ const bootGame = async (
   const setInventoryOpen = (open: boolean, mode: InventoryMode = 'player'): void => {
     if (open && playerIsDead()) return
     if (open && bowInteractionLocked()) return
+    if (open && tradeOpen) setTradeOpen(false)
     const previousOpen = inventoryOpen
     const switchingMode = open && previousOpen && inventoryMode !== mode
     if (previousOpen === open && !switchingMode) return
@@ -2748,6 +2890,10 @@ const bootGame = async (
   }
 
   const handlePauseRequest = (): void => {
+    if (tradeOpen) {
+      setTradeOpen(false)
+      return
+    }
     if (inventoryOpen) {
       setInventoryOpen(false)
       return
@@ -2825,7 +2971,41 @@ const bootGame = async (
         kind: 'remote_player',
         feetPosition: player.at,
       } satisfies RenderEntity)),
+    ...[...villagerResidents.values()]
+      .filter((villager) => villager.dimension === currentChunkContext.dimension)
+      .filter((villager) => currentChunkContext.streamLoaded.has(chunkKeyOf({
+        cx: Math.floor(villager.feetPosition.x / 16),
+        cz: Math.floor(villager.feetPosition.z / 16),
+      })))
+      .map((villager) => ({
+        id: villager.id,
+        kind: 'villager',
+        feetPosition: villager.feetPosition,
+      } satisfies RenderEntity)),
   ]
+
+  const nearestVillagerForTrade = (
+    position: SessionPosition,
+    dimension: Dimension,
+  ): PersistedVillager | undefined => {
+    let nearest: PersistedVillager | undefined
+    let nearestDistanceSquared = 16
+    for (const villager of villagerResidents.values()) {
+      if (villager.dimension !== dimension) continue
+      const dx = villager.feetPosition.x - position.x
+      const dy = villager.feetPosition.y - position.y
+      const dz = villager.feetPosition.z - position.z
+      const distanceSquared = dx * dx + dy * dy + dz * dz
+      if (
+        distanceSquared < nearestDistanceSquared
+        || (distanceSquared === nearestDistanceSquared && villager.id < (nearest?.id ?? ''))
+      ) {
+        nearest = villager
+        nearestDistanceSquared = distanceSquared
+      }
+    }
+    return nearest
+  }
 
   const gameplaySnapshot = () => {
     const pose = Effect.runSync(playerApi.pose)
@@ -2886,6 +3066,13 @@ const bootGame = async (
         focusedSlot: chestFocus,
         status: chestStatus,
       },
+      villagerUi: {
+        open: tradeOpen,
+        activeVillagerId: activeVillagerId ?? null,
+        status: tradeStatus,
+      },
+      villagers: [...villagerResidents.values()],
+      villagerTrades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
       entityCount: entities.length,
       renderedEntities: entityRenderProjection(),
       mobDrops: observedMobDrops.map(({ renderId: _, ...drop }) => drop),
@@ -3219,6 +3406,86 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedVillageTradingEncounter = () => {
+    let villager: PersistedVillager | undefined
+    for (let radius = 0; radius <= 64 && villager === undefined; radius += 1) {
+      for (let cx = -radius; cx <= radius && villager === undefined; cx += 1) {
+        for (const cz of new Set([-radius, radius])) {
+          const spawn = villageVillagerSpawnsForChunk(
+            activeSeed,
+            cx,
+            cz,
+            (x, z) => {
+              const surfaceY = surfaceHeightAt(activeSeed, x, z)
+              return {
+                biome: biomeFor(activeSeed, x, z, surfaceY, DEFAULT_TERRAIN_LEVELS),
+                surfaceY,
+                seaLevel: DEFAULT_TERRAIN_LEVELS.seaLevel,
+              }
+            },
+          )[0]
+          if (spawn !== undefined) {
+            Effect.runSync(streamAround(currentChunkContext, spawn.x, spawn.z))
+            villager = villagerResidents.get(spawn.id)
+            break
+          }
+        }
+      }
+      for (let cz = -radius + 1; cz < radius && villager === undefined; cz += 1) {
+        for (const cx of new Set([-radius, radius])) {
+          const spawn = villageVillagerSpawnsForChunk(
+            activeSeed,
+            cx,
+            cz,
+            (x, z) => {
+              const surfaceY = surfaceHeightAt(activeSeed, x, z)
+              return {
+                biome: biomeFor(activeSeed, x, z, surfaceY, DEFAULT_TERRAIN_LEVELS),
+                surfaceY,
+                seaLevel: DEFAULT_TERRAIN_LEVELS.seaLevel,
+              }
+            },
+          )[0]
+          if (spawn !== undefined) {
+            Effect.runSync(streamAround(currentChunkContext, spawn.x, spawn.z))
+            villager = villagerResidents.get(spawn.id)
+            break
+          }
+        }
+      }
+    }
+    if (villager === undefined) throw new Error('no village villager found near the QA origin')
+    Effect.runSync(playerApi.restore({
+      feetPosition: {
+        x: villager.feetPosition.x + 1.5,
+        y: villager.feetPosition.y,
+        z: villager.feetPosition.z,
+      },
+      yawRadians: Math.PI / 2,
+      pitchRadians: 0,
+    }, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    setTradeOpen(false)
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const grantNearestVillagerTradeInput = () => {
+    const pose = Effect.runSync(playerApi.pose)
+    const villager = nearestVillagerForTrade(pose.feetPosition, 'overworld')
+    const trade = Effect.runSync(snapshotVillagerTrades(gameplayState)).villagers
+      .find((candidate) => candidate.id === villager?.id)
+    const offer = trade?.offers[0]
+    if (offer === undefined) throw new Error('no nearby villager trade offer')
+    Effect.runSync(world.inventory.add(offer.input.item, offer.input.count))
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
   let stopBrowserPreview: (() => Promise<void>) | undefined
   const registry = buildQaRegistry([
     {
@@ -3327,6 +3594,8 @@ const bootGame = async (
         seedStickyPistonEncounter,
         stickyPistonSnapshot,
         seedFarmingEncounter,
+        seedVillageTradingEncounter,
+        grantNearestVillagerTradeInput,
         harvestFarmingCrop,
         seedCactusApproach: () => seedEnvironmentalContactEncounter('cactus'),
         seedDuplicateLavaContact: () => seedEnvironmentalContactEncounter('duplicateLava'),
@@ -3674,7 +3943,7 @@ const bootGame = async (
       setInventoryOpen(!inventoryOpen, 'player')
     }
 
-    if (!dead && !inventoryOpen) {
+    if (!dead && !inventoryOpen && !tradeOpen) {
       selectedHotbarIndex = selectedHotbarAfterInput(
         selectedHotbarIndex,
         walk.wheelSteps,
@@ -3684,21 +3953,21 @@ const bootGame = async (
     }
 
     const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
-      !dead && !inventoryOpen && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
+      !dead && !inventoryOpen && !tradeOpen && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
 
     const attackTriggered =
-      !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
+      !dead && !inventoryOpen && !tradeOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
     const attackHeld = held('attack') > 0
     if (!attackHeld) resetPrimaryAttackGesture()
     const useTriggered =
-      !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))
+      !dead && !inventoryOpen && !tradeOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))
     const useHeld = held('use') > 0
     const lookDelta = {
       x: walk.pointerDelta.x + consumedTouchLook.delta.x,
       y: walk.pointerDelta.y + consumedTouchLook.delta.y,
     }
-    const looked = !dead && !inventoryOpen && (lookDelta.x !== 0 || lookDelta.y !== 0)
-    if (!dead && !inventoryOpen) {
+    const looked = !dead && !inventoryOpen && !tradeOpen && (lookDelta.x !== 0 || lookDelta.y !== 0)
+    if (!dead && !inventoryOpen && !tradeOpen) {
       Effect.runSync(playerApi.look(
         -lookDelta.x * LOOK_SENSITIVITY * playerSettings.sensitivity,
         -lookDelta.y * LOOK_SENSITIVITY * playerSettings.sensitivity,
@@ -3766,6 +4035,14 @@ const bootGame = async (
       failBoot('a frame stage defected', outcome.cause)
       return
     }
+
+    const villagerTradeResults = Effect.runSync(drainVillagerTradeResults(gameplayState))
+    for (const result of villagerTradeResults) {
+      if (result.villagerId !== activeVillagerId) continue
+      tradeStatus = villagerTradeStatus(result)
+      if (result._tag === 'Traded') markSessionDirty()
+    }
+    if (villagerTradeResults.length > 0) renderTradeUi()
 
     if (multiplayer !== undefined) {
       for (const message of Effect.runSync(multiplayer.host.drainInbound)) {
@@ -4153,7 +4430,20 @@ const bootGame = async (
       resetPrimaryAttackGesture()
     }
 
-    if (!deadAfterFrame && useTriggered && !bowAdvance.capturedUse && pendingBowShots.size === 0) {
+    const nearbyVillager = !deadAfterFrame && !dimensionChanged && useTriggered
+      ? nearestVillagerForTrade(postFramePose.feetPosition, currentChunkContext.dimension)
+      : undefined
+    if (nearbyVillager !== undefined && !bowAdvance.capturedUse && pendingBowShots.size === 0) {
+      setTradeOpen(true, nearbyVillager.id)
+    }
+
+    if (
+      nearbyVillager === undefined
+      && !deadAfterFrame
+      && useTriggered
+      && !bowAdvance.capturedUse
+      && pendingBowShots.size === 0
+    ) {
       const route = Effect.runSync(
         targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH),
       )

@@ -121,7 +121,7 @@ test('matures, persists, harvests, eats, and replants potatoes', async ({ page }
   await page.reload()
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   const restored = await snapshot(page)
-  expect(restored.persistence.formatVersion).toBe(13)
+  expect(restored.persistence.formatVersion).toBe(14)
   expect(restored.farming.cropStage).toBe('mature')
   expect(restored.farming.crops[0]?.growthSecs).toBe(POTATO_MATURITY_SECS)
 

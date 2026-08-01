@@ -43,13 +43,16 @@ import {
   type Dimension,
 } from '@nerima-games/mc-worldgen'
 import {
+  emptyVillagerTradeState,
   isValidPlayerVitals,
   SPAWN_PLAYER_VITALS,
   type PlayerVitals,
+  type VillagerProfession,
+  type VillagerTradeState,
 } from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
-export const SESSION_FORMAT_VERSION = 13
+export const SESSION_FORMAT_VERSION = 14
 
 export type SessionPosition = {
   readonly x: number
@@ -71,6 +74,23 @@ export type PersistedEntityRoster = {
 }
 
 export const EMPTY_ENTITY_ROSTER: PersistedEntityRoster = { entities: [], nextSerial: 0 }
+
+export type PersistedVillager = {
+  readonly id: string
+  readonly profession: VillagerProfession
+  readonly dimension: Dimension
+  readonly feetPosition: SessionPosition
+}
+
+export type PersistedVillagerState = {
+  readonly residents: ReadonlyArray<PersistedVillager>
+  readonly trades: VillagerTradeState
+}
+
+export const EMPTY_VILLAGER_STATE: PersistedVillagerState = {
+  residents: [],
+  trades: emptyVillagerTradeState(),
+}
 
 export const normalizePersistedEntityRoster = (value: unknown): PersistedEntityRoster => {
   const roster = asRecord(value)
@@ -172,6 +192,7 @@ export type SessionState = {
   readonly portals: ReadonlyArray<PersistedPortalState>
   readonly crops: CropSnapshot
   readonly entities: PersistedEntityRoster
+  readonly villagers: PersistedVillagerState
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -335,6 +356,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   portals: PersistedPortalsSchema,
   crops: CropSnapshotSchema,
   entities: Schema.Unknown as unknown as Schema.Schema<PersistedEntityRoster>,
+  villagers: Schema.Unknown as unknown as Schema.Schema<PersistedVillagerState>,
 })
 
 export type SessionChunkManifestEntry = {
@@ -651,6 +673,25 @@ const migrateSessionV12ToV13: Migration = {
   },
 }
 
+const migrateSessionV13ToV14: Migration = {
+  from: 13,
+  describe: 'add village residents and trade state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v13 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'villagers')
+        ? state
+        : { ...state, villagers: EMPTY_VILLAGER_STATE },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
   version: SESSION_FORMAT_VERSION,
@@ -668,6 +709,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV10ToV11,
     migrateSessionV11ToV12,
     migrateSessionV12ToV13,
+    migrateSessionV13ToV14,
   ],
 })
 

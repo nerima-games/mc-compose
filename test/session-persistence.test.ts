@@ -32,6 +32,7 @@ import { SPAWN_PLAYER_VITALS } from '@nerima-games/mx-gameplay'
 
 import {
   EMPTY_ENTITY_ROSTER,
+  EMPTY_VILLAGER_STATE,
   SESSION_FORMAT_NAME,
   deleteSession,
   listSessions,
@@ -109,6 +110,7 @@ const sessionState = (seed: number): SessionState => {
       }],
     },
     entities: { entities: [], nextSerial: 0 },
+    villagers: EMPTY_VILLAGER_STATE,
   }
 }
 
@@ -276,7 +278,7 @@ describe('session persistence', () => {
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 13,
+        version: 14,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -572,7 +574,7 @@ describe('session persistence', () => {
     const sessionId = 'future-version'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 14,
+      version: 15,
       payload: {
         sessionId,
         revision: 'r1',
@@ -587,7 +589,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 14,
+        version: 15,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -1079,7 +1081,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(13)
+      expect(storage.envelope(headKey)?.version).toBe(14)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )
