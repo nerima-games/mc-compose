@@ -8,13 +8,13 @@
   // the injected clock Port). That script was removed org-wide in favour of oxlint's
   // `no-restricted-imports` for the cross-repo dependency graph (DEPENDENCY_POLICY.md §5,
   // PACKAGE_STANDARD.md "scripts/check-dependency-whitelist.ts の廃止"), which does not cover
-  // raw clock reads. oxlint 0.12 does not implement `no-restricted-syntax` or
-  // `no-restricted-properties`, and while `no-restricted-globals` is listed by
-  // `oxlint --rules` it is not implemented either (no checkmark; verified empirically
-  // against oxlint 0.12.0: a file containing `Date.now()` produces 0 diagnostics under all
-  // three rules). Per org policy this ban is not required to have a replacement script
-  // (PACKAGE_STANDARD.md leaves it to each repository's discretion); none is added here.
-  // When oxlint gains `no-restricted-syntax`, this is the place to add the ban.
+  // raw clock reads. As of this PR (oxlint is now Nix-provided, not a package.json pin —
+  // see flake.nix), the real oxlint binary still does not implement `no-restricted-syntax`
+  // or `no-restricted-properties` (absent from `oxlint --rules`), so a raw `Date.now()` /
+  // `new Date()` / `performance.now()` call is still not banned by this file. Per org policy
+  // this ban is not required to have a replacement script (PACKAGE_STANDARD.md leaves it to
+  // each repository's discretion); none is added here. When oxlint gains
+  // `no-restricted-syntax`, this is the place to add the ban.
   "env": {
     "es2022": true,
     "node": true
@@ -78,48 +78,42 @@
     "no-sync": "warn",
 
     // Style
-    "array-bracket-spacing": "warn",
-    "block-spacing": "warn",
-    "brace-style": ["warn", "1tbs", { "allowSingleLine": true }],
-    "camelcase": "warn",
-    "comma-dangle": ["warn", "always-multiline"],
-    "comma-spacing": "warn",
-    "comma-style": "warn",
-    "computed-property-spacing": "warn",
-    "eol-last": "warn",
-    "func-call-spacing": "warn",
-    "indent": "off",
-    "key-spacing": "warn",
-    "keyword-spacing": "warn",
-    "linebreak-style": ["warn", "unix"],
-    "lines-between-class-members": "warn",
+    //
+    // The Nix-provided oxlint (nixpkgs, ~1.73 as of this PR) rejects the
+    // config outright — a hard parse error, not a silent skip — for any rule
+    // name it does not recognise. Verified empirically: loading this file
+    // unmodified against that version fails with "Rule '<name>' not found in
+    // plugin 'eslint'" for every purely-formatting ESLint rule this file used
+    // to carry (array-bracket-spacing, block-spacing, brace-style, camelcase,
+    // comma-dangle, comma-spacing, comma-style, computed-property-spacing,
+    // eol-last, func-call-spacing, indent, key-spacing, keyword-spacing,
+    // linebreak-style, lines-between-class-members, no-mixed-spaces-and-tabs,
+    // no-new-object, no-tabs, no-trailing-spaces, no-whitespace-before-property,
+    // object-curly-spacing, one-var, operator-linebreak, padded-blocks,
+    // quote-props, semi-spacing, space-before-blocks, space-infix-ops,
+    // space-unary-ops, spaced-comment). Those existed under oxlint 0.12.0 (the
+    // version this repository pinned before this PR) but oxc has since
+    // dropped pure-formatting rules from the linter in favour of a separate
+    // formatter; they are not renamed, they are gone. There is deliberately no
+    // replacement here (no prettier, no biome, no .editorconfig — see the file
+    // header) and no formatter added by this PR; only the two Style rules the
+    // real oxlint binary still recognises survive.
     "no-array-method-this-argument": "warn",
     "no-bitwise": "warn",
-    "no-mixed-spaces-and-tabs": "error",
-    "no-new-object": "warn",
-    "no-tabs": "error",
-    "no-trailing-spaces": "warn",
-    "no-whitespace-before-property": "warn",
-    "object-curly-spacing": ["warn", "always"],
-    "one-var": ["warn", "never"],
-    "operator-linebreak": "warn",
-    "padded-blocks": ["warn", "never"],
-    "quote-props": ["warn", "as-needed"],
-    "semi-spacing": "warn",
-    "space-before-blocks": "warn",
-    "space-infix-ops": "warn",
-    "space-unary-ops": "warn",
-    "spaced-comment": "warn",
 
     // Restriction
     "default-case": "warn",
     "default-case-last": "warn",
     "no-empty-character-class": "warn",
-    // Declared for intent and for the day oxlint implements it; inert in 0.12
-    // (listed by `oxlint --rules` but unchecked; verified empirically). There is
-    // deliberately no replacement script: `scripts/check-dependency-whitelist.ts`,
-    // which used to be the real enforcement here, was deleted org-wide by this
-    // same migration (DEPENDENCY_POLICY.md §5) and is not coming back.
+    // Was declared for intent only and was inert under the oxlint 0.12.0 this repository
+    // used to pin (listed by `oxlint --rules` but unimplemented; verified empirically: a
+    // file reading the bare global `name` produced 0 diagnostics). As of this PR, oxlint is
+    // Nix-provided (flake.nix) instead, and the real binary DOES implement this rule —
+    // verified empirically against the same kind of file, which now reports
+    // `eslint(no-restricted-globals): Unexpected use of 'name'`. There is deliberately no
+    // replacement script: `scripts/check-dependency-whitelist.ts`, which used to be the real
+    // enforcement here, was deleted org-wide by an earlier migration (DEPENDENCY_POLICY.md
+    // §5) and is not coming back.
     "no-restricted-globals": ["warn", "name", "open", "close", "event"],
     // mc-compose is Tier4, the apex of the dependency graph (DEPENDENCY_POLICY.md §1): it
     // may depend on mc-audio, mc-render, mc-save, mc-sim, mc-worldgen, mx-gameplay,
@@ -132,21 +126,22 @@
     // object form used previously is not part of the rule's real schema, which requires
     // `paths`/`patterns` wrapper keys; https://oxc.rs/docs/guide/usage/linter/rules/eslint/no-restricted-imports.)
     //
-    // STATUS as of the file-rename fix (2026-08, this PR): this file is now named
-    // `.oxlintrc.json` (the only filename oxlint auto-discovers), which is a real fix for
-    // the previous `oxlint.json` (no dot) never being picked up. But on the oxlint version
-    // this repository actually pins (`^0.12.0`), that fix is not sufficient on its own:
-    // (1) 0.12.0's `--help` marks `-c/--config` as "(experimental)" and, verified
-    // empirically, does not auto-discover ANY filename without it — `oxlint --print-config`
-    // is byte-identical whether or not this file is present in the working directory;
-    // (2) even loaded explicitly via `-c .oxlintrc.json`, `no-restricted-imports` does not
-    // appear in `oxlint --rules` and does not fire for a file that plainly violates the
-    // `mc-playground-kit` pattern below — it is simply unimplemented in 0.12.0, the same
-    // situation as `no-restricted-globals` above. `pnpm lint` does not pass `-c`, so none of
-    // this — including the two patterns below — is mechanically enforced yet. Real
-    // enforcement needs the oxlint version bump `feat/modernize-toolchain` already carries
-    // (`oxlint: ^1.76.0`); this rule's shape here is written correctly (and kept permissive,
-    // per Tier4) so it takes effect with no further edits once that bump lands.
+    // STATUS as of the Nix-provided-oxlint PR (2026-08): this file is named
+    // `.oxlintrc.json` (the only filename oxlint auto-discovers — fixed in an earlier PR,
+    // replacing the previous `oxlint.json` which was never picked up), and oxlint itself is
+    // now supplied by the Nix devShell (flake.nix) instead of the `^0.12.0` package.json pin
+    // this repository used to carry. 0.12.0's `-c/--config` was "(experimental)" and did not
+    // auto-discover any filename without it, and even loaded explicitly this rule did not
+    // appear in `oxlint --rules` and never fired — it was simply unimplemented. The
+    // Nix-provided oxlint (nixpkgs, ~1.73 as of this PR) fixes both problems at once: this
+    // file is auto-discovered with no `-c` flag needed, and `no-restricted-imports` is a real,
+    // implemented rule. Verified empirically: a file importing
+    // `@nerima-games/mc-playground-kit` now genuinely produces
+    // `eslint(no-restricted-imports)` and fails `pnpm lint`'s `--deny-warnings` — the first
+    // time this repository's Tier4 dependency rule has ever mechanically fired. (There was no
+    // need to also take the `feat/modernize-toolchain` branch's package.json version bump —
+    // that branch bumps the npm-resolved `oxlint` devDependency to `^1.76.0` instead; this PR
+    // removes the devDependency line entirely and gets a working, real oxlint from Nix.)
     "no-restricted-imports": [
       "warn",
       {
@@ -180,5 +175,5 @@
     "no-param-reassign": "off",
     "no-plusplus": "off"
   },
-  "ignore": ["node_modules/**", "coverage/**", "dist/**", ".git/**", "*.config.ts", "docs/**"]
+  "ignorePatterns": ["node_modules/**", "coverage/**", "dist/**", ".git/**", "*.config.ts", "docs/**"]
 }

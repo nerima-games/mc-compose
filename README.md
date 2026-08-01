@@ -42,15 +42,16 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 **推移的には全リポジトリに到達する。だからこそ推移閉包の禁止がここで最も重要になる。**
 `pnpm install` すると `node_modules` には mc-noise / mc-meshing / mc-physics も物理的に置かれるが、
 **import は禁止**であり、規範としては `.oxlintrc.json`(旧 `oxlint.json`。oxlint はドット付きの
-`.oxlintrc.json` しか自動検出しないため、この 2026-08 の PR でファイル名を訂正した)の
-`no-restricted-imports`(Tier4 の 2 パターン)がその import を検出して `pnpm lint` を落とす想定である。
-**ただし現在このリポジトリが固定している oxlint 0.12.0 では、この機構はまだ機械的には効いていない**:
-(1) 0.12.0 の `-c/--config` は "(experimental)" 扱いで自動検出そのものが無く、`.oxlintrc.json` を
-置くだけでは読み込まれない(明示的に `-c` を渡す必要がある。`pnpm lint` はまだ渡していない)、
-(2) `-c` で明示的に読み込ませても `no-restricted-imports` は `oxlint --rules` の一覧に現れず、
-このリポジトリ全体に対して実行しても一度も発火しない ── つまりこのバージョンには実装がない。
-両方とも実測確認済み。実効化には oxlint 自体のバージョン更新が要る(`feat/modernize-toolchain` が
-`oxlint: ^1.76.0` への更新を別途進めている)。
+`.oxlintrc.json` しか自動検出しないため、以前の PR でファイル名を訂正した)の
+`no-restricted-imports`(Tier4 の 2 パターン)がその import を検出して `pnpm lint` を落とす。
+**oxlint はこの PR から package.json の devDependency ではなく Nix の devShell(`flake.nix`)提供**
+になっており(このリポジトリが以前固定していた `^0.12.0` は `no-restricted-imports` を一切実装して
+いなかった)、この機構は**このリポジトリで初めて機械的に効くようになった**: Nix 提供の oxlint
+(nixpkgs、この PR の時点で ~1.73)は `.oxlintrc.json` を `-c` なしで自動検出し、
+`no-restricted-imports` も実装している。実測確認済み ──
+`@nerima-games/mc-playground-kit` を import するファイルに対して実際に
+`eslint(no-restricted-imports)` が発火し、`pnpm lint`(`nix develop --command pnpm lint`)が
+非ゼロで落ちる。
 
 これが規範の機械化された半分である。mc-sim を直接必要とするルールは、体験モジュールに属するルールである。
 
@@ -93,13 +94,16 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 Tier4 向けパターンを参照)、内容は Tier ごと・リポジトリごとに異なってよい
 (byte-identical は適合条件ではない)。旧 `scripts/check-dependency-whitelist.ts`(16 リポジトリ
 byte-for-byte テンプレート + `REPOSITORY_POLICY` 定数の差し替え方式)は org 標準から廃止済み。
-**このリポジトリの oxlint 0.12.0 では上記「実効機構」は現状アイドル状態**(理由は前節、および
-`.oxlintrc.json` 内のコメント)。
+**oxlint が Nix 提供になったこの PR から、上記「実効機構」は実際に機能する**(理由は前節、および
+`.oxlintrc.json` 内のコメント)。`no-restricted-globals`(下記)も同様に、この PR から初めて発火する
+ようになった。
 
 ### `Date.now()` 禁止について
 
-oxlint 0.12 は `no-restricted-syntax` も `no-restricted-properties` も実装しておらず、
-`no-restricted-globals` は `oxlint --rules` の一覧に出るものの実装されていない(0.12.0 で実測確認済み)。
+Nix 提供の oxlint(この PR の時点で ~1.73)は `no-restricted-syntax` も `no-restricted-properties` も
+まだ実装していない(`oxlint --rules` に存在しない)。`no-restricted-globals` は実装されており
+(`name` などのグローバルに対して実測で発火することを確認済み)、`Date.now()` はグローバル関数呼び出し
+であって bare global 参照ではないため、この禁止の対象には引き続きならない。
 
 以前はこの禁止を `scripts/check-dependency-whitelist.ts` 側で実装していたが、そのスクリプト自体が
 org 標準から廃止された。PACKAGE_STANDARD.md はこの種の(oxlint で表現できない)チェックの
@@ -113,11 +117,14 @@ oxlint が `no-restricted-syntax` 相当を実装するまで存在しない(`.o
 ### セットアップ
 
 ```console
-$ direnv allow          # flake.nix の devShell で nodejs_22 + corepack が入る
+$ direnv allow          # flake.nix の devShell で nodejs_22 + corepack + oxlint が入る
 $ pnpm install
 ```
 
-Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)を用意する。
+Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)を用意する。ただし
+**oxlint は package.json の devDependency ではない**ので、Nix なしでは `pnpm lint` を動かす
+`oxlint` バイナリ自体が無い ── 別途 `oxlint` を自分で用意するか、Nix 経由(`nix develop --command
+pnpm lint`)で実行すること。
 
 > **注意**: ツールチェーンは `devenv.nix` から `flake.nix` + `flake.lock` に移行済みである。
 > `flake.lock` はコミットされているので、`nix develop`（`.envrc` は `use flake`）は
@@ -128,7 +135,7 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
 | コマンド | 内容 |
 | --- | --- |
 | `pnpm typecheck` | `tsconfig.build.json` と `tsconfig.test.json` の両方を型検査 |
-| `pnpm lint` | oxlint(このリポジトリ唯一の lint / format 設定)。**`--deny-warnings` 付きで走る**ため、`warn` のルールもビルドを落とす設計だが、`.oxlintrc.json`(5 カテゴリすべてと個別 67 ルールが `warn`、`error` は 4 つだけ)は `-c` なしでは読み込まれず(前節「依存ルール」参照)、この `lint` スクリプトはまだ `-c` を渡していないため、**実際に効いているのは oxlint 0.12.0 の組み込みデフォルトのみ** |
+| `pnpm lint` | oxlint(このリポジトリ唯一の lint / format 設定。Nix 提供、`package.json` の devDependency ではない ── `direnv allow` 済みなら素の `pnpm lint`、そうでなければ `nix develop --command pnpm lint`。CI も後者)。**`--deny-warnings` 付きで走る**ため `warn` のルールもビルドを落とす設計で、`.oxlintrc.json` はこの PR から `-c` なしで実際に読み込まれる(前節「依存ルール」参照)。**その結果、このリポジトリで初めて実測した現在のベースラインは非ゼロ(数千件規模の warning)** ── oxlint 0.12.0 時代は設定自体が読まれておらず実質何も検査していなかったので、これは新規の後退ではなく「これまで一度も測っていなかった実数が初めて見えた」もの。個々の警告を消す作業はこの PR のスコープ外 |
 | `pnpm lint:fix` | oxlint の自動修正 |
 | `pnpm test` | vitest(`@effect/vitest` の `it.effect` が主 API) |
 | `pnpm test:watch` | vitest watch |
