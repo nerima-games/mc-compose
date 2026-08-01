@@ -7,6 +7,9 @@ const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
 type GameplaySnapshot = {
   readonly mode: 'survival' | 'creative'
+  readonly pose: {
+    readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
+  }
   readonly renderedEntities: ReadonlyArray<{
     readonly id: string
     readonly kind: string
@@ -49,30 +52,12 @@ const multiplayerUrl = (sessionUrl: string, player: string, name: string): strin
   const url = new URL(sessionUrl)
   url.searchParams.set('multiplayer', E2E_MULTIPLAYER_URL)
   url.searchParams.set('player', player)
-  url.searchParams.set('name', name)
+  url.searchParams.set('multiplayerName', name)
   return url.href
-}
-
-const grantPointerLock = async (page: Page): Promise<void> => {
-  await page.evaluate(() => {
-    const canvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
-    if (canvas === null) throw new Error('missing game canvas')
-    Object.defineProperty(document, 'pointerLockElement', {
-      configurable: true,
-      get: () => canvas,
-    })
-    document.dispatchEvent(new Event('pointerlockchange'))
-  })
 }
 
 const canvasRevision = async (page: Page): Promise<number> =>
   Number(await page.locator('#game-canvas').getAttribute('data-multiplayer-revision'))
-
-const triggerMouseButton = async (page: Page, button: 'left' | 'right'): Promise<void> => {
-  await page.locator('#game-canvas').hover()
-  await page.mouse.down({ button })
-  await page.mouse.up({ button })
-}
 
 type WireMessage = { readonly _tag: string; readonly [key: string]: unknown }
 
@@ -136,10 +121,36 @@ const openPlayer = async (
   const context = await browser.newContext()
   const page = await context.newPage()
   const sessionUrl = await createCreativeWorld(page, worldName)
+  await callQa<GameplaySnapshot>(page, 'gameplay.seedCreativePlacementEncounter')
+  await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
   const url = multiplayerUrl(sessionUrl, player, name)
   await connectPage(page, url)
   return { context, page, url }
 }
+
+test('joins a saved world from the title screen multiplayer form', async ({ page }) => {
+  await createCreativeWorld(page, 'Title Multiplayer E2E')
+  await page.keyboard.press('Escape')
+  await Promise.all([
+    page.waitForURL((url) => url.pathname === '/'),
+    page.locator('#save-quit-button').click(),
+  ])
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-route', 'title')
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await expect(page.locator('#multiplayer-join')).toBeVisible()
+
+  await page.locator('#multiplayer-name').fill('Title Player')
+  await page.locator('#multiplayer-player').fill('title-player-e2e')
+  await page.locator('#multiplayer-url').fill(E2E_MULTIPLAYER_URL)
+  await page.locator('#multiplayer-join-button').click()
+
+  await expect(page.locator('#game-canvas')).toHaveAttribute(
+    'data-multiplayer-connection',
+    'connected',
+  )
+  await expect(page.locator('#multiplayer-status')).toContainText('Connected')
+  expect(new URL(page.url()).searchParams.get('player')).toBe('title-player-e2e')
+})
 
 test('synchronizes two Creative browser sessions through the authoritative server', async ({ browser }) => {
   const alice = await openPlayer(browser, 'Alice Multiplayer E2E', 'alice-e2e', 'Alice')
@@ -162,22 +173,43 @@ test('synchronizes two Creative browser sessions through the authoritative serve
       ]),
     )
 
-    const aliceSeed = await callQa<GameplaySnapshot>(
-      alice.page,
-      'gameplay.seedCreativePlacementEncounter',
-    )
-    await callQa<GameplaySnapshot>(bob.page, 'gameplay.seedCreativePlacementEncounter')
+    const aliceSeed = await snapshot(alice.page)
     expect(aliceSeed.ignitionTarget.block).toBe(0)
-    await grantPointerLock(alice.page)
-
     const revisionBeforePlace = await canvasRevision(alice.page)
-    await triggerMouseButton(alice.page, 'right')
+    await callQa<GameplaySnapshot>(alice.page, 'gameplay.requestMultiplayerBlockPlacement')
     await expect.poll(() => canvasRevision(alice.page)).toBe(revisionBeforePlace + 1)
     await expect.poll(() => canvasRevision(bob.page)).toBe(revisionBeforePlace + 1)
     const placedBlock = (await snapshot(alice.page)).ignitionTarget.block
     expect(placedBlock).not.toBeNull()
     expect(placedBlock).not.toBe(0)
     await expect.poll(async () => (await snapshot(bob.page)).ignitionTarget.block).toBe(placedBlock)
+
+    const chatPayload = '<img src=x onerror=alert(1)> hello'
+    await alice.page.locator('#multiplayer-chat-input').fill(chatPayload)
+    await alice.page.locator('#multiplayer-chat-form button').click()
+    await expect(bob.page.locator('#multiplayer-chat-log li').last()).toHaveText(
+      `<Alice> ${chatPayload}`,
+    )
+    await expect(bob.page.locator('#multiplayer-chat-log img')).toHaveCount(0)
+
+    for (let index = 0; index < 51; index += 1) {
+      await alice.page.locator('#multiplayer-chat-input').fill(`bounded message ${index}`)
+      await alice.page.locator('#multiplayer-chat-form button').click()
+    }
+    await expect(bob.page.locator('#multiplayer-chat-log li')).toHaveCount(50)
+    await expect(bob.page.locator('#multiplayer-chat-log li').first()).toHaveText(
+      '<Alice> bounded message 1',
+    )
+
+    await alice.page.waitForTimeout(300)
+    const authoritativeX = (await snapshot(alice.page)).pose.feetPosition.x
+    await callQa<GameplaySnapshot>(alice.page, 'gameplay.setMultiplayerInvalidPose')
+    await expect(alice.page.locator('#multiplayer-status')).toContainText('corrected')
+    await expect.poll(async () => Math.abs(
+      (await snapshot(alice.page)).pose.feetPosition.x - authoritativeX,
+    )).toBeLessThan(2)
+    await alice.page.waitForTimeout(300)
+    expect(Math.abs((await snapshot(alice.page)).pose.feetPosition.x - authoritativeX)).toBeLessThan(2)
 
     await expectOutOfBoundsPlacementRejection(revisionBeforePlace + 1)
     await expect(aliceCanvas).toHaveAttribute('data-multiplayer-player-count', '2')

@@ -581,6 +581,20 @@ const bootTitle = async (): Promise<void> => {
   const menuParent = requireElement('main-menu-root')
   const titleStatus = requireElement('title-status')
   const settingsRoot = requireElement('settings-root')
+  const multiplayerJoin = requireElement('multiplayer-join')
+  const multiplayerWorld = requireElement('multiplayer-world')
+  const multiplayerName = requireElement('multiplayer-name')
+  const multiplayerPlayer = requireElement('multiplayer-player')
+  const multiplayerUrl = requireElement('multiplayer-url')
+  const multiplayerJoinButton = requireElement('multiplayer-join-button')
+  if (!(multiplayerJoin instanceof HTMLFormElement)
+    || !(multiplayerWorld instanceof HTMLSelectElement)
+    || !(multiplayerName instanceof HTMLInputElement)
+    || !(multiplayerPlayer instanceof HTMLInputElement)
+    || !(multiplayerUrl instanceof HTMLInputElement)
+    || !(multiplayerJoinButton instanceof HTMLButtonElement)) {
+    throw new Error('index.html has invalid multiplayer join controls')
+  }
   titleScreen.hidden = false
   document.body.setAttribute('data-mc-compose-route', 'title')
 
@@ -622,6 +636,14 @@ const bootTitle = async (): Promise<void> => {
     sessionId,
     name: metadata.name,
   }))
+  multiplayerWorld.replaceChildren(...savedWorlds.map(({ sessionId, name }) => {
+    const option = document.createElement('option')
+    option.value = sessionId
+    option.textContent = name
+    return option
+  }))
+  multiplayerPlayer.value = `player-${crypto.randomUUID().slice(0, 8)}`
+  multiplayerJoinButton.disabled = savedWorlds.length === 0
   const existingIds = savedWorlds.map(({ sessionId }) => sessionId)
   let menuState: MainMenuState = initialMainMenuState
   let menuView: ReturnType<typeof createMainMenuView>
@@ -660,6 +682,32 @@ const bootTitle = async (): Promise<void> => {
   const openSession = async (sessionId: string): Promise<void> => {
     await navigateAfterSettingsSaved(sessionHref(sessionId))
   }
+  multiplayerJoin.addEventListener('submit', (event) => {
+    event.preventDefault()
+    if (titleNavigationPending || !multiplayerJoin.reportValidity()) return
+    const player = multiplayerPlayer.value.trim()
+    const name = multiplayerName.value.trim()
+    if (player.length === 0 || name.length === 0) {
+      titleStatus.textContent = 'Player name and ID cannot be blank.'
+      return
+    }
+    let url: URL
+    try {
+      url = new URL(multiplayerUrl.value)
+    } catch {
+      titleStatus.textContent = 'Enter a valid multiplayer server URL.'
+      return
+    }
+    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+      titleStatus.textContent = 'Multiplayer server must use ws:// or wss://.'
+      return
+    }
+    const href = new URL(sessionHref(multiplayerWorld.value), window.location.origin)
+    href.searchParams.set('multiplayer', url.href)
+    href.searchParams.set('player', player)
+    href.searchParams.set('multiplayerName', name)
+    void navigateAfterSettingsSaved(`${href.pathname}${href.search}`)
+  })
   const createWorld = async ({ name, mode }: CreateWorldRequest): Promise<void> => {
     titleStatus.textContent = ''
     const sessionId = createUniqueSessionId(name, existingIds)
@@ -711,7 +759,7 @@ const readMultiplayerQuery = (search: string): MultiplayerQuery | undefined => {
   const query = new URLSearchParams(search)
   const url = query.get('multiplayer')
   const player = query.get('player')
-  const name = query.get('name')
+  const name = query.get('multiplayerName')
   if (url === null || player === null || name === null || player.length === 0 || name.length === 0) {
     return undefined
   }
@@ -759,6 +807,18 @@ const bootGame = async (
   const touchControlsParent = requireElement('touch-controls')
   const touchLookSurface = requireElement('touch-look-surface')
   const fpsValue = requireElement('fps-value')
+  const multiplayerStatus = requireElement('multiplayer-status')
+  const multiplayerChat = requireElement('multiplayer-chat')
+  const multiplayerChatLog = requireElement('multiplayer-chat-log')
+  const multiplayerChatForm = requireElement('multiplayer-chat-form')
+  const multiplayerChatInput = requireElement('multiplayer-chat-input')
+  if (!(multiplayerStatus instanceof HTMLOutputElement)
+    || !(multiplayerChat instanceof HTMLElement)
+    || !(multiplayerChatLog instanceof HTMLOListElement)
+    || !(multiplayerChatForm instanceof HTMLFormElement)
+    || !(multiplayerChatInput instanceof HTMLInputElement)) {
+    throw new Error('index.html has invalid multiplayer game controls')
+  }
   fpsValue.setAttribute('data-fps-source', 'mx-ui-frame-dt')
   const stageList = requireElement('stage-order')
   let inventoryOpen = false
@@ -1829,10 +1889,14 @@ const bootGame = async (
   let multiplayerHandshakeComplete = false
   let multiplayerClosed = false
   let lastPlayerMoveSentAt = Number.NEGATIVE_INFINITY
-  const multiplayerStatus = document.createElement('output')
-  multiplayerStatus.className = 'multiplayer-status'
-  multiplayerStatus.hidden = true
-  canvas.insertAdjacentElement('afterend', multiplayerStatus)
+  let lastPlayerMoveSent: {
+    readonly world: WorldId
+    readonly at: { readonly x: number; readonly y: number; readonly z: number }
+    readonly facing: { readonly yawRadians: number; readonly pitchRadians: number }
+  } | undefined
+  multiplayerStatus.hidden = multiplayer === undefined
+  multiplayerStatus.textContent = multiplayer === undefined ? '' : 'Connecting to multiplayer server...'
+  multiplayerChat.hidden = multiplayer === undefined
   canvas.setAttribute('data-multiplayer-connection', multiplayer === undefined ? 'disabled' : 'connecting')
   canvas.setAttribute('data-multiplayer-player-count', '0')
   canvas.setAttribute('data-multiplayer-revision', '0')
@@ -1877,7 +1941,22 @@ const bootGame = async (
         }
         break
       case 'PlayerMove': {
-        if (message.player === multiplayer.query.player) break
+        if (message.player === multiplayer.query.player) {
+          const world = message.world ?? WorldId.make(Effect.runSync(playerApi.dimension))
+          const dimension = dimensionFromWorld(world)
+          if (dimension !== undefined) {
+            Effect.runSync(playerApi.restore({
+              feetPosition: message.at,
+              yawRadians: message.facing.yawRadians,
+              pitchRadians: message.facing.pitchRadians,
+            }, dimension))
+            lastPlayerMoveSent = { world, at: message.at, facing: message.facing }
+            lastPlayerMoveSentAt = performance.now() / 1_000
+            multiplayerStatus.textContent = 'Movement corrected by server.'
+            multiplayerStatus.hidden = false
+          }
+          break
+        }
         const previous = multiplayer.players.get(message.player)
         multiplayer.players.set(message.player, {
           name: previous?.name ?? PlayerName.make(String(message.player)),
@@ -1904,12 +1983,39 @@ const bootGame = async (
         multiplayerStatus.textContent = multiplayerRejection
         multiplayerStatus.hidden = false
         break
+      case 'Chat': {
+        const row = document.createElement('li')
+        const sender = message.player === multiplayer.query.player
+          ? multiplayer.query.name
+          : multiplayer.players.get(message.player)?.name ?? message.player
+        row.textContent = `<${String(sender)}> ${message.text}`
+        multiplayerChatLog.append(row)
+        while (multiplayerChatLog.childElementCount > 50) {
+          multiplayerChatLog.firstElementChild?.remove()
+        }
+        break
+      }
       default:
         break
     }
     canvas.setAttribute('data-multiplayer-player-count', String(multiplayer.players.size + 1))
     canvas.setAttribute('data-multiplayer-revision', String(multiplayerRevision))
     canvas.setAttribute('data-multiplayer-rejection', multiplayerRejection)
+  }
+
+  multiplayerChatForm.addEventListener('submit', (event) => {
+    event.preventDefault()
+    const text = multiplayerChatInput.value.trim()
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || text.length === 0) return
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'Chat',
+      player: multiplayer.query.player,
+      text: text.slice(0, 256),
+    }))
+    multiplayerChatInput.value = ''
+  })
+  for (const eventName of ['keydown', 'keyup'] as const) {
+    multiplayerChatInput.addEventListener(eventName, (event) => event.stopPropagation())
   }
 
   const registeredSim = await Effect.runPromise(
@@ -3144,6 +3250,15 @@ const bootGame = async (
           markSessionDirty()
           return gameplaySnapshot()
         },
+        setMultiplayerInvalidPose: () => {
+          const pose = Effect.runSync(playerApi.pose)
+          Effect.runSync(playerApi.restore({
+            ...pose,
+            feetPosition: { ...pose.feetPosition, x: pose.feetPosition.x + 100 },
+          }, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
+          return gameplaySnapshot()
+        },
         seedCreativeBreakEncounter: () => {
           Effect.runSync(playerApi.restore(QA_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
@@ -3170,6 +3285,17 @@ const bootGame = async (
           inventoryInteraction.reset()
           markSessionDirty()
           renderPlayerUi()
+          return gameplaySnapshot()
+        },
+        requestMultiplayerBlockPlacement: () => {
+          if (multiplayer === undefined || !multiplayerHandshakeComplete) return gameplaySnapshot()
+          Effect.runSync(multiplayer.host.enqueueOutbound({
+            _tag: 'BlockPlace',
+            player: multiplayer.query.player,
+            world: WorldId.make(Effect.runSync(playerApi.dimension)),
+            at: QA_IGNITION_CELL,
+            block: 'stone',
+          }))
           return gameplaySnapshot()
         },
         returnToCraftingTable: () => {
@@ -3609,8 +3735,16 @@ const bootGame = async (
         at: pose.feetPosition,
       }))
       multiplayerHandshakeComplete = true
+      lastPlayerMoveSent = {
+        world: worldId,
+        at: pose.feetPosition,
+        facing: { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians },
+      }
+      lastPlayerMoveSentAt = nowSecs
       canvas.setAttribute('data-multiplayer-connection', 'connected')
       canvas.setAttribute('data-multiplayer-player-count', String(multiplayer.players.size + 1))
+      multiplayerStatus.textContent = `Connected as ${String(multiplayer.query.name)}`
+      multiplayerStatus.hidden = false
     } else if (
       multiplayer !== undefined &&
       !multiplayerClosed &&
@@ -3619,6 +3753,8 @@ const bootGame = async (
       Effect.runSync(multiplayer.host.transitionConnection({ _tag: 'PeerClosed' }))
       multiplayerClosed = true
       canvas.setAttribute('data-multiplayer-connection', 'closed')
+      multiplayerStatus.textContent = 'Multiplayer connection closed.'
+      multiplayerStatus.hidden = false
     }
 
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
@@ -3637,14 +3773,26 @@ const bootGame = async (
       }
       if (multiplayerHandshakeComplete && nowSecs - lastPlayerMoveSentAt >= 0.1) {
         const pose = Effect.runSync(playerApi.pose)
-        Effect.runSync(multiplayer.host.enqueueOutbound({
-          _tag: 'PlayerMove',
-          player: multiplayer.query.player,
-          world: WorldId.make(Effect.runSync(playerApi.dimension)),
-          at: pose.feetPosition,
-          facing: { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians },
-        }))
-        lastPlayerMoveSentAt = nowSecs
+        const world = WorldId.make(Effect.runSync(playerApi.dimension))
+        const facing = { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians }
+        const changed = lastPlayerMoveSent === undefined
+          || lastPlayerMoveSent.world !== world
+          || lastPlayerMoveSent.at.x !== pose.feetPosition.x
+          || lastPlayerMoveSent.at.y !== pose.feetPosition.y
+          || lastPlayerMoveSent.at.z !== pose.feetPosition.z
+          || lastPlayerMoveSent.facing.yawRadians !== facing.yawRadians
+          || lastPlayerMoveSent.facing.pitchRadians !== facing.pitchRadians
+        if (changed || nowSecs - lastPlayerMoveSentAt >= 1) {
+          Effect.runSync(multiplayer.host.enqueueOutbound({
+            _tag: 'PlayerMove',
+            player: multiplayer.query.player,
+            world,
+            at: pose.feetPosition,
+            facing,
+          }))
+          lastPlayerMoveSent = { world, at: pose.feetPosition, facing }
+          lastPlayerMoveSentAt = nowSecs
+        }
       }
     }
 
