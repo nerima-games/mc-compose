@@ -58,6 +58,8 @@ describe('public API surface', () => {
         // the bridge from kernel's `GameModule` (whose `frameStages` is an
         // Effect) to the post-registration module this repository composes
         'registerModule',
+        // browser runtime lifecycle composition
+        'startBrowserSession',
         // kernel's branded delta, re-exported so a host can construct one
         // without reaching into `domain/kernel-vocabulary.ts`
         'DeltaTimeSecs',

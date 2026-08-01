@@ -45,6 +45,7 @@
  */
 
 export * from './domain/composition'
+export * from './domain/browser-session'
 export * from './domain/modding'
 export * from './domain/qa-api'
 export * from './domain/session'

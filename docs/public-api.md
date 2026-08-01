@@ -321,7 +321,45 @@ Effect が型検査を通り、実行時に `Service not found` で落ちる。
 `KNOWN LIMIT: ROut stays erased, so a missing service still fails at runtime, not at tsc`
 が、これを驚きではなく既知の穴として固定している。
 
-## 4. セッションライフサイクル(`domain/session.ts`)
+## 4. ブラウザ composition root(`domain/browser-session.ts`)
+
+```typescript
+type BrowserRuntimeModule = {
+  readonly name: string
+  readonly start: Effect<GameModule, unknown>
+  readonly stop: Effect<void, unknown>
+}
+
+type BrowserSession = {
+  readonly game: ComposedGame
+  readonly stop: Effect<void, BrowserSessionStopError>
+}
+
+const startBrowserSession: (
+  runtimes: ReadonlyArray<BrowserRuntimeModule>,
+  options?: { readonly compose?: ComposeOptions },
+) => Effect<BrowserSession, BrowserSessionStartError>
+```
+
+具体的な DOM、WebGL、音声、ネットワーク実装はホストが sibling package の公開 API から構築する。
+mc-compose はそれらを `BrowserRuntimeModule` として受け取り、ブラウザセッションのライフサイクルと
+`GameModule` の stage 合成だけを所有する。この注入境界により sibling package への依存方向を逆転させず、
+同じ composition root をテスト用 adapter にも使用できる。
+
+### ライフサイクル契約
+
+| 操作 | 保証 |
+| --- | --- |
+| start | 入力配列の宣言順に直列実行する。各 runtime が返す登録済み `GameModule` を `composeGame` に渡す |
+| start 失敗 | その時点までに成功した runtime を逆順ですべて rollback する |
+| compose 失敗 | 成功した runtime を逆順ですべて rollback し、`StageOrderError` を保持する |
+| stop | 成功した runtime を逆順ですべて停止する。複数の停止失敗を集約し、残りの停止を妨げない |
+| stop 再実行 | 最初の呼び出しだけが teardown を所有し、以後は成功する no-op になる |
+
+rollback 中の停止失敗は元の start/compose 失敗を上書きせず、
+`BrowserSessionStartError.rollbackFailures` に併記される。
+
+## 5. セッションライフサイクル(`domain/session.ts`)
 
 ```typescript
 type SessionState = Title | Loading | InGame | Paused | Unloading
@@ -348,7 +386,7 @@ const roundTripEvents: (world: WorldId) => ReadonlyArray<SessionEvent>
 
 **このモジュールは fiber を止めない。** *いつ*ティアダウンするかを言い、*何が*ティアダウンかは言わない。
 
-## 5. QA / デバッグ API(`domain/qa-api.ts`)
+## 6. QA / デバッグ API(`domain/qa-api.ts`)
 
 ```typescript
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
@@ -371,7 +409,7 @@ const describeQaApiError: (error) => string
 
 **compose は QA コマンドを書かない。** 所有モジュールが名前空間ごと提供し、compose はマージするだけである。
 
-## 6. Modding 入口(`domain/modding.ts`)
+## 7. Modding 入口(`domain/modding.ts`)
 
 ```typescript
 const MODDING_API_VERSION = 1
@@ -395,7 +433,7 @@ mod 専用フックも優先度も pre/post パスも無い。
 「redstone の後に走る」と書いた mod は正当であり、dangling として報告される。
 拒否すると mod がビルドのモジュール集合に依存してしまう。
 
-## 7. まだ無いもの
+## 8. まだ無いもの
 
 | 未実装 | 追加時期 |
 | --- | --- |
