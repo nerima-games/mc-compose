@@ -39,7 +39,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
  * DERIVED from `scripts/dev-server-siblings.ts`'s `DEV_SERVER_RESOLVED_SIBLINGS`
  * rather than restated. That module used to be a single constant inside
  * `scripts/check-dependency-whitelist.ts` — the cross-repo import gate that
- * org policy has since retired in favour of `oxlint.json`'s
+ * org policy has since retired in favour of `.oxlintrc.json`'s
  * `no-restricted-imports` (DEPENDENCY_POLICY.md §5) — but the sibling roster
  * itself is still one fact with one home, now `scripts/dev-server-siblings.ts`,
  * so that this list and any future reader of the roster cannot disagree.

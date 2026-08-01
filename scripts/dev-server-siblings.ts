@@ -5,7 +5,7 @@
  * Extracted from the now-deleted `scripts/check-dependency-whitelist.ts`
  * (org-wide removal: DEPENDENCY_POLICY.md §5 / PACKAGE_STANDARD.md
  * "`scripts/check-dependency-whitelist.ts` の廃止"). That script's whitelist /
- * cycle-detection enforcement moved to `oxlint.json`'s `no-restricted-imports`
+ * cycle-detection enforcement moved to `.oxlintrc.json`'s `no-restricted-imports`
  * and is not reproduced here. The one piece of it with a real runtime
  * consumer — `vite.config.ts`'s `COMPOSED_SIBLINGS`, which resolves the
  * browser entry point's not-yet-published dependencies from a sibling

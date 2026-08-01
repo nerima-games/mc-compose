@@ -41,8 +41,16 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 
 **推移的には全リポジトリに到達する。だからこそ推移閉包の禁止がここで最も重要になる。**
 `pnpm install` すると `node_modules` には mc-noise / mc-meshing / mc-physics も物理的に置かれるが、
-**import は禁止**であり、`oxlint.json` の `no-restricted-imports`(Tier4 の 2 パターン)が
-その import を検出して `pnpm lint` を落とす。
+**import は禁止**であり、規範としては `.oxlintrc.json`(旧 `oxlint.json`。oxlint はドット付きの
+`.oxlintrc.json` しか自動検出しないため、この 2026-08 の PR でファイル名を訂正した)の
+`no-restricted-imports`(Tier4 の 2 パターン)がその import を検出して `pnpm lint` を落とす想定である。
+**ただし現在このリポジトリが固定している oxlint 0.12.0 では、この機構はまだ機械的には効いていない**:
+(1) 0.12.0 の `-c/--config` は "(experimental)" 扱いで自動検出そのものが無く、`.oxlintrc.json` を
+置くだけでは読み込まれない(明示的に `-c` を渡す必要がある。`pnpm lint` はまだ渡していない)、
+(2) `-c` で明示的に読み込ませても `no-restricted-imports` は `oxlint --rules` の一覧に現れず、
+このリポジトリ全体に対して実行しても一度も発火しない ── つまりこのバージョンには実装がない。
+両方とも実測確認済み。実効化には oxlint 自体のバージョン更新が要る(`feat/modernize-toolchain` が
+`oxlint: ^1.76.0` への更新を別途進めている)。
 
 これが規範の機械化された半分である。mc-sim を直接必要とするルールは、体験モジュールに属するルールである。
 
@@ -80,11 +88,13 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 | 宣言と実体の一致 | import する `@nerima-games/*` は `package.json` に記載されていなければならない |
 | mc-playground-kit は devDependency 専用 | `dependencies` に入れてはならない。実行時依存になると、出荷ビルドから入力処理が消える |
 
-正典は org リポジトリ `.github` の `DEPENDENCY_POLICY.md`。実効機構は各リポジトリの
-`oxlint.json` の `no-restricted-imports` であり(このリポジトリの分は本ファイル内の
+正典は org リポジトリ `.github` の `DEPENDENCY_POLICY.md`。実効機構(の設計)は各リポジトリの
+`.oxlintrc.json` の `no-restricted-imports` であり(このリポジトリの分は本ファイル内の
 Tier4 向けパターンを参照)、内容は Tier ごと・リポジトリごとに異なってよい
 (byte-identical は適合条件ではない)。旧 `scripts/check-dependency-whitelist.ts`(16 リポジトリ
 byte-for-byte テンプレート + `REPOSITORY_POLICY` 定数の差し替え方式)は org 標準から廃止済み。
+**このリポジトリの oxlint 0.12.0 では上記「実効機構」は現状アイドル状態**(理由は前節、および
+`.oxlintrc.json` 内のコメント)。
 
 ### `Date.now()` 禁止について
 
@@ -96,7 +106,7 @@ org 標準から廃止された。PACKAGE_STANDARD.md はこの種の(oxlint で
 代替スクリプトを置くかどうかを各リポジトリの裁量とし、org 標準としては要求していない。
 **現在このリポジトリに `Date.now()` / `performance.now()` を禁止するツールは無い** —
 時刻は注入された Clock Port から取得する規約自体は変わっていないが、機械的な検査は
-oxlint が `no-restricted-syntax` 相当を実装するまで存在しない(`oxlint.json` のコメント参照)。
+oxlint が `no-restricted-syntax` 相当を実装するまで存在しない(`.oxlintrc.json` のコメント参照)。
 
 ## 開発
 
@@ -118,7 +128,7 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
 | コマンド | 内容 |
 | --- | --- |
 | `pnpm typecheck` | `tsconfig.build.json` と `tsconfig.test.json` の両方を型検査 |
-| `pnpm lint` | oxlint(このリポジトリ唯一の lint / format 設定)。**`--deny-warnings` 付きで走る**ため、`warn` のルールもビルドを落とす（`oxlint.json` は 5 カテゴリすべてと個別 67 ルールが `warn`、`error` は 4 つだけ。このフラグが無かった頃は実質その 4 つしかゲートになっていなかった） |
+| `pnpm lint` | oxlint(このリポジトリ唯一の lint / format 設定)。**`--deny-warnings` 付きで走る**ため、`warn` のルールもビルドを落とす設計だが、`.oxlintrc.json`(5 カテゴリすべてと個別 67 ルールが `warn`、`error` は 4 つだけ)は `-c` なしでは読み込まれず(前節「依存ルール」参照)、この `lint` スクリプトはまだ `-c` を渡していないため、**実際に効いているのは oxlint 0.12.0 の組み込みデフォルトのみ** |
 | `pnpm lint:fix` | oxlint の自動修正 |
 | `pnpm test` | vitest(`@effect/vitest` の `it.effect` が主 API) |
 | `pnpm test:watch` | vitest watch |
