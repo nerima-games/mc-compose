@@ -1,8 +1,14 @@
 import {
   decodeFrame,
   encodeFrame,
+  type AuthoritativeCommand,
+  type AuthoritativeCommandResult,
+  type AuthoritativeDelta,
+  type AuthoritativeSnapshot,
   type BlockMutationRejected,
   type BlockPos,
+  type CommandId,
+  type CommandRejectionReason,
   type NetworkMessage,
   type Orientation,
   type PlayerId,
@@ -38,11 +44,17 @@ export interface MultiplayerServerOptions {
 export interface MultiplayerServerState {
   readonly revision: number
   readonly blocks: ReadonlyArray<Readonly<{ at: BlockPos; block: string | null }>>
+  readonly inventories: AuthoritativeSnapshot['inventories']
+  readonly vitals: AuthoritativeSnapshot['vitals']
+  readonly timeWeather: AuthoritativeSnapshot['timeWeather']
+  readonly containers: AuthoritativeSnapshot['containers']
+  readonly furnaces: AuthoritativeSnapshot['furnaces']
+  readonly villagerTrades: AuthoritativeSnapshot['villagerTrades']
 }
 
 export type ReceiveResult =
   | Readonly<{ accepted: true; message: NetworkMessage }>
-  | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' }>
+  | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' | 'invalid-command' }>
 
 interface ConnectedClient {
   readonly send: SendFrame
@@ -57,6 +69,42 @@ interface MutablePlayer {
   facing: Orientation
 }
 
+type InventoryState = AuthoritativeSnapshot['inventories'][number]['state']
+type VitalsState = AuthoritativeSnapshot['vitals'][number]['state']
+type TimeWeatherState = AuthoritativeSnapshot['timeWeather']
+type ContainerState = AuthoritativeSnapshot['containers'][number]
+type FurnaceState = AuthoritativeSnapshot['furnaces'][number]
+type ItemStack = NonNullable<InventoryState['slots'][number]>
+
+interface MutableInventoryState {
+  readonly slots: Array<ItemStack | null>
+  selectedSlot: number
+}
+
+interface MutableVitalsState {
+  health: number
+  hunger: number
+  experience: number
+}
+
+interface MutableContainerState {
+  readonly containerId: string
+  readonly slots: Array<ItemStack | null>
+}
+
+interface MutableFurnaceState {
+  readonly furnaceId: string
+  input: ItemStack | null
+  fuel: ItemStack | null
+  output: ItemStack | null
+  burnTicksRemaining: number
+  cookTicks: number
+}
+
+type CommandDecision =
+  | Readonly<{ accepted: false; reason: CommandRejectionReason }>
+  | Readonly<{ accepted: true; deltas: (revision: number) => ReadonlyArray<AuthoritativeDelta> }>
+
 const DEFAULT_BOUNDS = {
   minX: -30_000_000,
   maxX: 30_000_000,
@@ -68,10 +116,62 @@ const DEFAULT_BOUNDS = {
 
 const DEFAULT_FACING: Orientation = { yawRadians: 0, pitchRadians: 0 }
 const DEFAULT_MAX_MOVE_DISTANCE = 8
+const DEFAULT_INVENTORY_SLOTS = 36
+const DEFAULT_VITALS: VitalsState = { health: 20, hunger: 20, experience: 0 }
+const DEFAULT_TIME_WEATHER: TimeWeatherState = { timeOfDay: 6_000, weather: 'clear' }
 const PLAYER_HALF_WIDTH = 0.3
 const PLAYER_HEIGHT = 1.8
 const COLLISION_EPSILON = 1e-9
 const positionKey = ({ x, y, z }: BlockPos): string => `${String(x)},${String(y)},${String(z)}`
+
+const cloneStack = (stack: ItemStack | null): ItemStack | null => stack === null ? null : { ...stack }
+const cloneInventory = (state: InventoryState): MutableInventoryState => ({
+  slots: state.slots.map(cloneStack),
+  selectedSlot: state.selectedSlot,
+})
+const inventorySnapshot = (state: MutableInventoryState): InventoryState => ({
+  slots: state.slots.map(cloneStack),
+  selectedSlot: state.selectedSlot,
+})
+const vitalsSnapshot = (state: MutableVitalsState): VitalsState => ({ ...state })
+const containerSnapshot = (state: MutableContainerState): ContainerState => ({
+  containerId: state.containerId,
+  slots: state.slots.map(cloneStack),
+})
+const furnaceSnapshot = (state: MutableFurnaceState): FurnaceState => ({
+  ...state,
+  input: cloneStack(state.input),
+  fuel: cloneStack(state.fuel),
+  output: cloneStack(state.output),
+})
+
+const isAuthoritativeCommand = (message: NetworkMessage): message is AuthoritativeCommand =>
+  message._tag === 'PlayerInventoryCommand' ||
+  message._tag === 'PlayerVitalsCommand' ||
+  message._tag === 'WorldTimeWeatherCommand' ||
+  message._tag === 'ContainerCommand' ||
+  message._tag === 'FurnaceCommand' ||
+  message._tag === 'VillagerTradeCommand'
+
+const moveStack = (
+  sourceSlots: Array<ItemStack | null>,
+  sourceIndex: number,
+  destinationSlots: Array<ItemStack | null>,
+  destinationIndex: number,
+  count: number,
+): CommandRejectionReason | null => {
+  if (sourceSlots === destinationSlots && sourceIndex === destinationIndex) return 'invalid-command'
+  if (sourceIndex >= sourceSlots.length || destinationIndex >= destinationSlots.length) return 'invalid-command'
+  const source = sourceSlots[sourceIndex]
+  if (source === null || source === undefined || source.count < count) return 'insufficient-items'
+  const destination = destinationSlots[destinationIndex]
+  if (destination !== null && destination !== undefined && destination.item !== source.item) return 'invalid-command'
+  sourceSlots[sourceIndex] = source.count === count ? null : { ...source, count: source.count - count }
+  destinationSlots[destinationIndex] = destination === null || destination === undefined
+    ? { item: source.item, count }
+    : { ...destination, count: destination.count + count }
+  return null
+}
 
 export interface MultiplayerServerCore {
   readonly connect: (clientId: ClientId, send: SendFrame) => boolean
@@ -89,6 +189,36 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const blocks = new Map<string, Readonly<{ at: BlockPos; block: string | null }>>(
     (options.initialState?.blocks ?? []).map((mutation) => [positionKey(mutation.at), mutation]),
   )
+  const inventories = new Map<PlayerId, MutableInventoryState>(
+    (options.initialState?.inventories ?? []).map(({ player, state }) => [player, cloneInventory(state)]),
+  )
+  const vitals = new Map<PlayerId, MutableVitalsState>(
+    (options.initialState?.vitals ?? []).map(({ player, state }) => [player, { ...state }]),
+  )
+  let timeWeather: TimeWeatherState = { ...(options.initialState?.timeWeather ?? DEFAULT_TIME_WEATHER) }
+  const containers = new Map<string, MutableContainerState>(
+    (options.initialState?.containers ?? []).map((state) => [state.containerId, {
+      containerId: state.containerId,
+      slots: state.slots.map(cloneStack),
+    }]),
+  )
+  const furnaces = new Map<string, MutableFurnaceState>(
+    (options.initialState?.furnaces ?? []).map((state) => [state.furnaceId, {
+      ...state,
+      input: cloneStack(state.input),
+      fuel: cloneStack(state.fuel),
+      output: cloneStack(state.output),
+    }]),
+  )
+  const villagerTrades = (options.initialState?.villagerTrades ?? []).map((state) => ({
+    ...state,
+    offers: state.offers.map((offer) => ({
+      ...offer,
+      input: offer.input.map((stack) => ({ ...stack })),
+      output: { ...offer.output },
+    })),
+  }))
+  const commandResults = new Map<CommandId, AuthoritativeCommandResult>()
   let revision = options.initialState?.revision ?? 0
 
   const sendMessage = (client: ConnectedClient, message: NetworkMessage): void => {
@@ -111,6 +241,18 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     blocks: [...blocks.values()].map((mutation) => ({ world: worldId, ...mutation })),
   })
 
+  const authoritativeSnapshot = (): AuthoritativeSnapshot => ({
+    _tag: 'AuthoritativeSnapshot',
+    world: worldId,
+    revision,
+    inventories: [...inventories].map(([player, state]) => ({ player, state: inventorySnapshot(state) })),
+    vitals: [...vitals].map(([player, state]) => ({ player, state: vitalsSnapshot(state) })),
+    timeWeather: { ...timeWeather },
+    containers: [...containers.values()].map(containerSnapshot),
+    furnaces: [...furnaces.values()].map(furnaceSnapshot),
+    villagerTrades,
+  })
+
   const isInBounds = ({ x, y, z }: BlockPos): boolean =>
     x >= bounds.minX && x <= bounds.maxX &&
     y >= bounds.minY && y <= bounds.maxY &&
@@ -124,9 +266,215 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const persistentState = (): MultiplayerServerState => ({
     revision,
     blocks: [...blocks.values()].map((mutation) => ({ ...mutation, at: { ...mutation.at } })),
+    inventories: [...inventories].map(([player, state]) => ({ player, state: inventorySnapshot(state) })),
+    vitals: [...vitals].map(([player, state]) => ({ player, state: vitalsSnapshot(state) })),
+    timeWeather: { ...timeWeather },
+    containers: [...containers.values()].map(containerSnapshot),
+    furnaces: [...furnaces.values()].map(furnaceSnapshot),
+    villagerTrades,
   })
 
   const notifyStateChanged = (): void => options.onStateChanged?.(persistentState())
+
+  const ensurePlayerState = (player: PlayerId): void => {
+    if (!inventories.has(player)) {
+      inventories.set(player, { slots: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), selectedSlot: 0 })
+    }
+    if (!vitals.has(player)) vitals.set(player, { ...DEFAULT_VITALS })
+  }
+
+  const decideCommand = (message: AuthoritativeCommand): CommandDecision => {
+    const inventory = inventories.get(message.player)
+    if (inventory === undefined) return { accepted: false, reason: 'resource-not-found' }
+
+    switch (message._tag) {
+      case 'PlayerInventoryCommand': {
+        if (message.action._tag === 'select-slot') {
+          if (message.action.slot >= inventory.slots.length) return { accepted: false, reason: 'invalid-command' }
+          inventory.selectedSlot = message.action.slot
+        } else if (message.action._tag === 'drop-item') {
+          const source = inventory.slots[message.action.source]
+          if (source === undefined || source === null || source.count < message.action.count) {
+            return { accepted: false, reason: 'insufficient-items' }
+          }
+          inventory.slots[message.action.source] = source.count === message.action.count
+            ? null
+            : { ...source, count: source.count - message.action.count }
+        } else {
+          const reason = moveStack(
+            inventory.slots,
+            message.action.source,
+            inventory.slots,
+            message.action.destination,
+            message.action.count,
+          )
+          if (reason !== null) return { accepted: false, reason }
+        }
+        return {
+          accepted: true,
+          deltas: (nextRevision) => [{
+            _tag: 'PlayerInventoryDelta',
+            world: worldId,
+            revision: nextRevision,
+            player: message.player,
+            state: inventorySnapshot(inventory),
+          }],
+        }
+      }
+      case 'PlayerVitalsCommand': {
+        const playerVitals = vitals.get(message.player)
+        if (playerVitals === undefined) return { accepted: false, reason: 'resource-not-found' }
+        playerVitals.health = DEFAULT_VITALS.health
+        playerVitals.hunger = DEFAULT_VITALS.hunger
+        playerVitals.experience = DEFAULT_VITALS.experience
+        return {
+          accepted: true,
+          deltas: (nextRevision) => [{
+            _tag: 'PlayerVitalsDelta',
+            world: worldId,
+            revision: nextRevision,
+            player: message.player,
+            state: vitalsSnapshot(playerVitals),
+          }],
+        }
+      }
+      case 'WorldTimeWeatherCommand': {
+        timeWeather = message.action._tag === 'set-time'
+          ? { ...timeWeather, timeOfDay: message.action.timeOfDay }
+          : { ...timeWeather, weather: message.action.weather }
+        return {
+          accepted: true,
+          deltas: (nextRevision) => [{
+            _tag: 'WorldTimeWeatherDelta',
+            world: worldId,
+            revision: nextRevision,
+            state: { ...timeWeather },
+          }],
+        }
+      }
+      case 'ContainerCommand': {
+        const container = containers.get(message.containerId)
+        if (container === undefined) return { accepted: false, reason: 'resource-not-found' }
+        if (message.action._tag === 'move-item') {
+          const playerIsSource = message.action.source._tag === 'player-slot'
+          const sourceSlots = playerIsSource ? inventory.slots : container.slots
+          const destinationSlots = playerIsSource ? container.slots : inventory.slots
+          const reason = moveStack(
+            sourceSlots,
+            message.action.source.slot,
+            destinationSlots,
+            message.action.destination.slot,
+            message.action.count,
+          )
+          if (reason !== null) return { accepted: false, reason }
+        }
+        return {
+          accepted: true,
+          deltas: (nextRevision) => message.action._tag === 'move-item'
+            ? [
+                { _tag: 'ContainerDelta', world: worldId, revision: nextRevision, state: containerSnapshot(container) },
+                {
+                  _tag: 'PlayerInventoryDelta',
+                  world: worldId,
+                  revision: nextRevision,
+                  player: message.player,
+                  state: inventorySnapshot(inventory),
+                },
+              ]
+            : [],
+        }
+      }
+      case 'FurnaceCommand': {
+        const furnace = furnaces.get(message.furnaceId)
+        if (furnace === undefined) return { accepted: false, reason: 'resource-not-found' }
+        const source = message.action.source
+        const destination = message.action.destination
+        const sourceIsPlayer = source._tag === 'player-slot'
+        if (sourceIsPlayer && destination._tag !== 'furnace-slot') {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+        if (!sourceIsPlayer && destination._tag !== 'player-slot') {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+        const furnaceSlot: 'input' | 'fuel' | 'output' = sourceIsPlayer
+          ? destination.slot as 'input' | 'fuel'
+          : source.slot as 'input' | 'fuel' | 'output'
+        const temporaryFurnaceSlot = [furnace[furnaceSlot]]
+        const reason = sourceIsPlayer
+          ? moveStack(inventory.slots, source.slot, temporaryFurnaceSlot, 0, message.action.count)
+          : moveStack(temporaryFurnaceSlot, 0, inventory.slots, destination.slot as number, message.action.count)
+        if (reason !== null) return { accepted: false, reason }
+        furnace[furnaceSlot] = temporaryFurnaceSlot[0] ?? null
+        return {
+          accepted: true,
+          deltas: (nextRevision) => [
+            {
+              _tag: 'FurnaceDelta',
+              world: worldId,
+              revision: nextRevision,
+              state: furnaceSnapshot(furnace),
+            },
+            {
+              _tag: 'PlayerInventoryDelta',
+              world: worldId,
+              revision: nextRevision,
+              player: message.player,
+              state: inventorySnapshot(inventory),
+            },
+          ],
+        }
+      }
+      case 'VillagerTradeCommand':
+        return { accepted: false, reason: 'invalid-command' }
+    }
+  }
+
+  const rejectCommand = (
+    client: ConnectedClient,
+    message: AuthoritativeCommand,
+    reason: CommandRejectionReason,
+  ): ReceiveResult => {
+    const result: AuthoritativeCommandResult = {
+      _tag: 'AuthoritativeCommandRejected',
+      commandId: message.commandId,
+      world: worldId,
+      revision,
+      reason,
+      resyncRequired: reason === 'stale-revision' || reason === 'snapshot-required',
+    }
+    commandResults.set(message.commandId, result)
+    sendMessage(client, result)
+    return { accepted: false, reason: reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command' }
+  }
+
+  const handleCommand = (client: ConnectedClient, message: AuthoritativeCommand): ReceiveResult => {
+    const cached = commandResults.get(message.commandId)
+    if (cached !== undefined) {
+      sendMessage(client, cached)
+      return cached._tag === 'AuthoritativeCommandAccepted'
+        ? { accepted: true, message }
+        : { accepted: false, reason: 'invalid-command' }
+    }
+    if (message.player !== client.playerId || message.world !== worldId) {
+      return rejectCommand(client, message, 'unauthorized-player')
+    }
+    if (message.expectedRevision !== revision) return rejectCommand(client, message, 'stale-revision')
+
+    const decision = decideCommand(message)
+    if (!decision.accepted) return rejectCommand(client, message, decision.reason)
+    revision += 1
+    const result: AuthoritativeCommandResult = {
+      _tag: 'AuthoritativeCommandAccepted',
+      commandId: message.commandId,
+      world: worldId,
+      revision,
+    }
+    commandResults.set(message.commandId, result)
+    notifyStateChanged()
+    sendMessage(client, result)
+    for (const delta of decision.deltas(revision)) broadcast(delta)
+    return { accepted: true, message }
+  }
 
   const isValidMovement = (player: MutablePlayer, at: PlayerSnapshot['at']): boolean => {
     if (![at.x, at.y, at.z].every(Number.isFinite)) return false
@@ -208,7 +556,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         facing: DEFAULT_FACING,
       })
       playerClients.set(message.player, clientId)
+      ensurePlayerState(message.player)
       sendMessage(client, snapshot())
+      sendMessage(client, authoritativeSnapshot())
       broadcast(message, clientId)
       return { accepted: true, message }
     }
@@ -219,6 +569,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     }
 
     if (client.playerId === null) return { accepted: false, reason: 'join-required' }
+
+    if (isAuthoritativeCommand(message)) return handleCommand(client, message)
 
     if ('player' in message && message.player !== client.playerId) {
       if (message._tag === 'BlockPlace' || message._tag === 'BlockBreak') {
@@ -276,9 +628,22 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       }
       case 'Pong':
         return { accepted: true, message }
+      case 'AuthoritativeResyncRequest':
+        if (message.world !== worldId) return { accepted: false, reason: 'wrong-world' }
+        sendMessage(client, authoritativeSnapshot())
+        return { accepted: true, message }
       case 'WorldInfo':
       case 'WorldSnapshot':
       case 'BlockMutationRejected':
+      case 'AuthoritativeSnapshot':
+      case 'PlayerInventoryDelta':
+      case 'PlayerVitalsDelta':
+      case 'WorldTimeWeatherDelta':
+      case 'ContainerDelta':
+      case 'FurnaceDelta':
+      case 'VillagerTradeDelta':
+      case 'AuthoritativeCommandAccepted':
+      case 'AuthoritativeCommandRejected':
         return { accepted: false, reason: 'identity-spoof' }
     }
   }
