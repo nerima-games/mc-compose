@@ -85,6 +85,7 @@
 import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Queue, Ref, Scope } from 'effect'
 import {
+  createOriginalSampleManifest,
   makeEndAudioController,
   makeWeatherAudioController,
   makeWebAudioBackend,
@@ -148,8 +149,10 @@ import {
   ESCAPE_KEY_CODE,
   InputService,
   chunkKeyOf,
+  generateTerrainAtlas,
   makeChunkStoreLightColor,
   makeChunkStoreMesher,
+  makeProductionWorldRenderer,
   makeWorldRenderer,
   renderModule,
   syncWorld,
@@ -158,6 +161,7 @@ import {
   type RenderEntity,
 } from '@nerima-games/mc-render'
 import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
+import { excludeReservedPlacementConsumptions } from './placement-consumption'
 import {
   advancePlayerSwimmingRuntime,
   initialPlayerSwimmingRuntimeState,
@@ -225,6 +229,8 @@ import {
   armorPointsForEquipment,
   armorDurabilityWearFromPreMitigationDamage,
   CREEPER_KIND,
+  BLAZE_KIND,
+  ENDERMAN_KIND,
   drainBlockUseResults,
   drainItemUseResults,
   drainMeleeAttackResults,
@@ -259,6 +265,7 @@ import {
   PLAYER_HALF_HEIGHT,
   PLAYER_HALF_WIDTH,
   requestBlockBreak,
+  requestBlockPlacementCommand,
   requestItemUse,
   requestMeleeAttack,
   requestMobSpawn,
@@ -271,6 +278,7 @@ import {
   requestTargetedBlockUse,
   requestTargetedItemUse,
   requestVillagerTrade,
+  drainBlockPlacementResults,
   reelFishing,
   resolveBedSleep,
   resolveEnvironmentalContactDamage,
@@ -1055,10 +1063,13 @@ const bootGame = async (
   const settingsWrites = makeSettingsWriteQueue()
   let readAudioListener = (): Vec3 => ({ x: 0, y: 0, z: 0 })
   let readAudioListenerForward = (): Vec3 => horizontalListenerForward(0)
+  const sampleManifest = createOriginalSampleManifest()
   const audioBackend = Effect.runSync(makeWebAudioBackend({
     global: globalThis,
     initialMasterGain: playerSettings.audioEnabled ? playerSettings.masterVolume : 0,
+    sampleManifest,
   }))
+  canvas.setAttribute('data-audio-samples', String(Object.keys(sampleManifest).length))
   const audio = Effect.runSync(makeAudioRuntime({
     backend: audioBackend,
     nowSecs: browserClock.monotonicSecs,
@@ -1220,13 +1231,38 @@ const bootGame = async (
   // levels down, naming `GLBufferAttribute`. mc-render cannot pin either from
   // its side without naming a `three` type, which is the one thing that seam
   // exists not to do. The host has `three` in scope and pins them here.
-  const worldRenderer = await Effect.runPromise(
-    makeWorldRenderer<HTMLCanvasElement, THREE.BufferGeometry, THREE.MeshBasicMaterial>(
+  const terrainAtlas = generateTerrainAtlas()
+  const atlasTexture = new THREE.DataTexture(
+    terrainAtlas.data,
+    terrainAtlas.width,
+    terrainAtlas.height,
+    THREE.RGBAFormat,
+  )
+  atlasTexture.magFilter = THREE.NearestFilter
+  atlasTexture.minFilter = THREE.NearestFilter
+  atlasTexture.needsUpdate = true
+  canvas.setAttribute('data-atlas-size', `${String(terrainAtlas.width)}x${String(terrainAtlas.height)}`)
+  const webGlAvailable = canvas.getContext('webgl2') !== null || canvas.getContext('webgl') !== null
+  const worldRenderer = webGlAvailable
+    ? await Effect.runPromise(makeProductionWorldRenderer<
+      HTMLCanvasElement,
+      THREE.BufferGeometry,
+      THREE.ShaderMaterial,
+      THREE.InstancedBufferGeometry,
+      THREE.ShaderMaterial
+    >(
       THREE,
       canvas,
       { width: canvas.clientWidth, height: canvas.clientHeight },
-    ),
-  )
+      atlasTexture,
+    ))
+    : await Effect.runPromise(
+        makeWorldRenderer<HTMLCanvasElement, THREE.BufferGeometry, THREE.MeshBasicMaterial>(
+          THREE,
+          canvas,
+          { width: canvas.clientWidth, height: canvas.clientHeight },
+        ),
+      )
 
   // The canvas is the host's element and its SIZE is the host's business, so
   // the resize listener is here rather than in mc-render — mc-render ships no
@@ -1542,6 +1578,11 @@ const bootGame = async (
     get: (_target, property) => Reflect.get(currentChunkContext.chunkStore, property),
   }) as typeof world.chunkStore
 
+  let dirtyGeneration = 0
+  let savedGeneration = 0
+  let publishingGeneration = 0
+  let debounceTimer: number | undefined
+
   const reportPersistenceFailure = (error: unknown): void => {
     document.body.setAttribute('data-session-persistence', 'failed')
     console.error('[mc-compose] session persistence failed', error)
@@ -1558,50 +1599,53 @@ const bootGame = async (
       )
       return residents.flat()
     },
-    snapshotState: () => ({
-      seed: activeSeed,
-      dimension: Effect.runSync(world.player.dimension),
-      player: Effect.runSync(world.player.pose),
-      storage: Effect.runSync(world.inventory.storageSnapshot),
-      containerStorage: Effect.runSync(world.inventory.containerStorageSnapshot),
-      vitals: Effect.runSync(world.vitals.snapshot),
-      time: Effect.runSync(time.snapshot),
-      weather: Effect.runSync(weather.snapshot),
-      redstone: { levers: [...leverStates.values()] },
-      furnaces: [...furnaceStates.values()],
-      portals: [...portalStates.values()],
-      crops: Effect.runSync(crops.snapshot),
-      entities: Effect.runSync(world.entities.snapshot),
-      villagers: {
-        residents: [...villagerResidents.values()],
-        trades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
-      },
-      brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
-      statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
-      wither: snapshotWitherRuntime(witherRuntimeState),
-      fishing: {
-        result: fishingResult,
-        phase: fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
-        water: fishingWater ?? null,
-      },
-      vehicles: [...vehicles.values()],
-      mountedVehicleId: mountedVehicleId ?? null,
-      end: {
-        frames: [...endPortalFrames.values()],
-        portalComplete: endPortalComplete,
-        dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
-        exitPortalMaterialized,
-        dragonEggRewarded,
-      },
-      workstations: {
-        enchantmentSeed,
-        customNames: Object.fromEntries(customNames),
-        enchantedItems: Object.fromEntries(
-          [...enchantedItems].map(([slot, item]) => [slot, JSON.stringify(item)]),
-        ),
-        respawn: respawnLocation,
-      },
-    }),
+    snapshotState: () => {
+      publishingGeneration = dirtyGeneration
+      return {
+        seed: activeSeed,
+        dimension: Effect.runSync(world.player.dimension),
+        player: Effect.runSync(world.player.pose),
+        storage: Effect.runSync(world.inventory.storageSnapshot),
+        containerStorage: Effect.runSync(world.inventory.containerStorageSnapshot),
+        vitals: Effect.runSync(world.vitals.snapshot),
+        time: Effect.runSync(time.snapshot),
+        weather: Effect.runSync(weather.snapshot),
+        redstone: { levers: [...leverStates.values()] },
+        furnaces: [...furnaceStates.values()],
+        portals: [...portalStates.values()],
+        crops: Effect.runSync(crops.snapshot),
+        entities: Effect.runSync(world.entities.snapshot),
+        villagers: {
+          residents: [...villagerResidents.values()],
+          trades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
+        },
+        brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
+        statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
+        wither: snapshotWitherRuntime(witherRuntimeState),
+        fishing: {
+          result: fishingResult,
+          phase: fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
+          water: fishingWater ?? null,
+        },
+        vehicles: [...vehicles.values()],
+        mountedVehicleId: mountedVehicleId ?? null,
+        end: {
+          frames: [...endPortalFrames.values()],
+          portalComplete: endPortalComplete,
+          dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
+          exitPortalMaterialized,
+          dragonEggRewarded,
+        },
+        workstations: {
+          enchantmentSeed,
+          customNames: Object.fromEntries(customNames),
+          enchantedItems: Object.fromEntries(
+            [...enchantedItems].map(([slot, item]) => [slot, JSON.stringify(item)]),
+          ),
+          respawn: respawnLocation,
+        },
+      }
+    },
     publish: ({ state, chunks }) =>
       runStorage(
         Effect.provide(
@@ -1615,6 +1659,12 @@ const bootGame = async (
           storageContext,
         ),
       ).then(() => undefined),
+    onPublished: () => {
+      savedGeneration = Math.max(savedGeneration, publishingGeneration)
+      if (savedGeneration === dirtyGeneration) {
+        document.body.setAttribute('data-session-persistence', 'saved')
+      }
+    },
     onFailure: reportPersistenceFailure,
   })
   let markSessionDirty = (): void => {}
@@ -2167,8 +2217,24 @@ const bootGame = async (
   }
   let breaksRequested = 0
   let placementsRequested = 0
+  let nativeUseQueued = false
+  let nativeAttackQueued = 0
+  const queueNativeUse = (event: MouseEvent): void => {
+    const bounds = canvas.getBoundingClientRect()
+    const isOverCanvas = event.clientX >= bounds.left
+      && event.clientX <= bounds.right
+      && event.clientY >= bounds.top
+      && event.clientY <= bounds.bottom
+    if (!isOverCanvas && document.pointerLockElement !== canvas) return
+    if (event.button === 0) nativeAttackQueued += 1
+    if (event.button === 2) {
+      nativeUseQueued = true
+    }
+  }
+  window.addEventListener('mousedown', queueNativeUse, true)
   let nextItemUseRequestId = 0
   let nextBlockUseRequestId = 0
+  let nextBlockPlacementRequestId = 0
   let nextMeleeAttackRequestId = 0
 
   // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
@@ -2305,6 +2371,14 @@ const bootGame = async (
   const pendingBlockUses = new Map<
     string,
     { readonly dimension: Dimension; readonly position: { readonly x: number; readonly y: number; readonly z: number } }
+  >()
+  const pendingBlockPlacements = new Map<
+    string,
+    {
+      readonly dimension: Dimension
+      readonly item: GameplayItemType
+      readonly position: { readonly x: number; readonly y: number; readonly z: number }
+    }
   >()
   const pendingWitherSummonChecks: Array<{
     readonly dimension: Dimension
@@ -2998,11 +3072,11 @@ const bootGame = async (
     onInventoryChanged: () => markSessionDirty(),
   })
   const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
+  const coordinateKey = (x: number, y: number, z: number): string => `${x},${y},${z}`
   const targetedBrewingStand = (): Effect.Effect<boolean> => Effect.gen(function* () {
     const pose = yield* playerApi.pose
     const candidates: Array<{ x: number; y: number; z: number }> = []
     const visited = new Set<string>()
-    const coordinateKey = (x: number, y: number, z: number): string => `${x},${y},${z}`
     targetBlockFromPlayerPose(pose, DEFAULT_BLOCK_REACH, (x, y, z) => {
       const key = coordinateKey(x, y, z)
       if (!visited.has(key)) {
@@ -3138,19 +3212,24 @@ const bootGame = async (
   const useEndFeature = (): Effect.Effect<boolean> => Effect.gen(function* () {
     const dimension = yield* playerApi.dimension
     const pose = yield* playerApi.pose
-    const target = yield* targetedBlock()
-    if (dimension === 'end' && exitPortalMaterialized && target?.block === END_PORTAL_BLOCK.PORTAL) {
-      yield* playerApi.restore({ ...pose, feetPosition: { x: 0.5, y: 80, z: 0.5 } }, 'overworld')
-      alignActiveDimension('overworld')
-      resetSimState(true)
-      queueEndAudio('exitPortal', pose.feetPosition)
-      markSessionDirty()
-      return true
+    if (dimension === 'end' && exitPortalMaterialized) {
+      const target = yield* targetedBlock()
+      if (target?.block === END_PORTAL_BLOCK.PORTAL) {
+        yield* playerApi.restore({ ...pose, feetPosition: { x: 0.5, y: 80, z: 0.5 } }, 'overworld')
+        alignActiveDimension('overworld')
+        resetSimState(true)
+        queueEndAudio('exitPortal', pose.feetPosition)
+        markSessionDirty()
+        return true
+      }
     }
-    if (dimension === 'overworld' && endPortalComplete && target?.block === END_PORTAL_BLOCK.PORTAL) {
-      yield* materializeEndArrival()
-      queueEndAudio('portalActivate', target.position)
-      return true
+    if (dimension === 'overworld' && endPortalComplete) {
+      const target = yield* targetedBlock()
+      if (target?.block === END_PORTAL_BLOCK.PORTAL) {
+        yield* materializeEndArrival()
+        queueEndAudio('portalActivate', target.position)
+        return true
+      }
     }
     const inventory = yield* world.inventory.snapshot
     const selected = inventory.slots[selectedHotbarIndex]
@@ -3158,6 +3237,26 @@ const bootGame = async (
     const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
     if (Option.isNone(site)) return false
     const center = endPortalCenterForStronghold(site.value)
+    const isNearPortal = Math.hypot(
+      center.x - pose.feetPosition.x,
+      center.y - pose.feetPosition.y,
+      center.z - pose.feetPosition.z,
+    ) <= DEFAULT_BLOCK_REACH + 4
+    const target = isNearPortal ? yield* targetedBlock() : undefined
+    if (isNearPortal) {
+      for (const frameOffset of END_PORTAL_FRAME_OFFSETS) {
+        const position = { x: center.x + frameOffset.dx, y: center.y, z: center.z + frameOffset.dz }
+        const reading = yield* currentChunkStore.getBlock(position)
+        if (reading._tag === 'Block'
+          && (reading.block === END_PORTAL_BLOCK.FRAME_EMPTY || reading.block === END_PORTAL_BLOCK.FRAME_FILLED)) {
+          endPortalFrames.set(endPortalFrameKey(position), {
+            position,
+            facing: frameOffset.facing,
+            eye: reading.block === END_PORTAL_BLOCK.FRAME_FILLED,
+          })
+        }
+      }
+    }
     const offset = target === undefined ? undefined : END_PORTAL_FRAME_OFFSETS.find((candidate) =>
       center.x + candidate.dx === target.position.x
       && center.y === target.position.y
@@ -3171,10 +3270,17 @@ const bootGame = async (
       })
       if (!isCreativeMode) yield* world.inventory.removeAt(selectedHotbarIndex, 'eye_of_ender', 1)
       queueEndAudio('frameInsert', target.position)
-      canvas.setAttribute('data-end-portal-progress', String(endPortalFrames.size))
+      canvas.setAttribute('data-end-portal-progress', String(
+        [...endPortalFrames.values()].filter((frame) => frame.eye).length,
+      ))
       const completed = detectCompletedEndPortal((x, y, z) => {
         const frame = endPortalFrames.get(endPortalFrameKey({ x, y, z }))
-        return frame === undefined ? undefined : { block: END_PORTAL_BLOCK.FRAME_FILLED, facing: frame.facing }
+        return frame === undefined
+          ? undefined
+          : {
+              block: frame.eye ? END_PORTAL_BLOCK.FRAME_FILLED : END_PORTAL_BLOCK.FRAME_EMPTY,
+              facing: frame.facing,
+            }
       }, dimension, center)
       if (Option.isSome(completed)) {
         for (const mutation of completed.value.materialization) {
@@ -4080,18 +4186,11 @@ const bootGame = async (
   // 4a. Durable session publication
   // -------------------------------------------------------------------------
 
-  let dirtyGeneration = 0
-  let savedGeneration = 0
-  let debounceTimer: number | undefined
-
-  const requestFlush = (): Promise<void> => {
-    const requestedGeneration = dirtyGeneration
-    return saveCoordinator.requestSave().then(() => {
-      savedGeneration = Math.max(savedGeneration, requestedGeneration)
-      if (savedGeneration === dirtyGeneration) {
-        document.body.setAttribute('data-session-persistence', 'saved')
-      }
-    })
+  const requestFlush = async (): Promise<void> => {
+    const targetGeneration = dirtyGeneration
+    do {
+      await saveCoordinator.requestSave()
+    } while (savedGeneration < targetGeneration)
   }
 
   const requestBackgroundFlush = (): void => {
@@ -4998,6 +5097,121 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const spawnFullHealthHostile = (kind: typeof ENDERMAN_KIND | typeof BLAZE_KIND, healthPoints: number) => {
+    respawnPlayer()
+    const inventory = Effect.runSync(world.inventory.snapshot)
+    let swordSlot = inventory.slots.findIndex((slot) => slot?.item === 'diamond_sword')
+    if (swordSlot < 0) {
+      Effect.runSync(world.inventory.add('diamond_sword', 1))
+      swordSlot = Effect.runSync(world.inventory.snapshot).slots.findIndex((slot) => slot?.item === 'diamond_sword')
+    }
+    if (swordSlot >= 0 && swordSlot < 9) selectedHotbarIndex = swordSlot
+    for (const entity of Effect.runSync(world.entities.snapshot).entities) {
+      if (entity.kind === kind) Effect.runSync(world.entities.despawn(entity.id))
+    }
+    const pose = Effect.runSync(playerApi.pose)
+    const target = {
+      x: pose.feetPosition.x,
+      y: pose.feetPosition.y,
+      z: pose.feetPosition.z - 3,
+    }
+    Effect.runSync(world.entities.spawn({ kind, feetPosition: target, healthPoints, behaviour: undefined }))
+    Effect.runSync(playerApi.restore(poseLookingAt(target, 2), Effect.runSync(playerApi.dimension)))
+    resetSimState(true)
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
+  const targetNearestHostile = () => {
+    const pose = Effect.runSync(playerApi.pose)
+    const hostile = Effect.runSync(world.entities.snapshot).entities
+      .filter((entity) => entity.kind === ENDERMAN_KIND || entity.kind === BLAZE_KIND)
+      .sort((left, right) => {
+        const distance = (position: typeof left.feetPosition) => Math.hypot(
+          position.x - pose.feetPosition.x,
+          position.y - pose.feetPosition.y,
+          position.z - pose.feetPosition.z,
+        )
+        return distance(left.feetPosition) - distance(right.feetPosition)
+      })[0]
+    if (hostile === undefined) throw new Error('no hostile found')
+    Effect.runSync(playerApi.restore(
+      poseLookingAt(hostile.feetPosition, 2),
+      Effect.runSync(playerApi.dimension),
+    ))
+    resetSimState(true)
+    return gameplaySnapshot()
+  }
+
+  const targetNearestDroppedItem = () => {
+    const pose = Effect.runSync(playerApi.pose)
+    const dropped = Effect.runSync(world.entities.snapshot).entities
+      .filter((entity) => isDroppedItemBehaviour(entity.behaviour))
+      .sort((left, right) => {
+        const distance = (position: typeof left.feetPosition) => Math.hypot(
+          position.x - pose.feetPosition.x,
+          position.y - pose.feetPosition.y,
+          position.z - pose.feetPosition.z,
+        )
+        return distance(left.feetPosition) - distance(right.feetPosition)
+      })[0]
+    if (dropped === undefined) throw new Error('no dropped item found')
+    Effect.runSync(playerApi.moveTo(dropped.feetPosition))
+    resetSimState(true)
+    return gameplaySnapshot()
+  }
+
+  const targetNearestStrongholdFrame = async () => {
+    const pose = Effect.runSync(playerApi.pose)
+    const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
+    if (Option.isNone(site)) throw new Error('no stronghold found near the QA player')
+    const center = endPortalCenterForStronghold(site.value)
+    alignActiveDimension('overworld')
+    Effect.runSync(streamAround(currentChunkContext, center.x, center.z))
+    const targetOffset = END_PORTAL_FRAME_OFFSETS.find((offset) => {
+      const position = { x: center.x + offset.dx, y: center.y, z: center.z + offset.dz }
+      const reading = Effect.runSync(currentChunkStore.getBlock(position))
+      return reading._tag === 'Block' && reading.block === END_PORTAL_BLOCK.FRAME_EMPTY
+    })
+    if (targetOffset === undefined) throw new Error('no empty stronghold frame found')
+    const target = { x: center.x + targetOffset.dx, y: center.y, z: center.z + targetOffset.dz }
+    Effect.runSync(playerApi.restore({
+      feetPosition: { x: target.x + 0.5, y: target.y + 2, z: target.z + 0.5 },
+      yawRadians: 0,
+      pitchRadians: -Math.PI / 2 + 0.01,
+    }, 'overworld'))
+    resetSimState(true)
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    })
+    const normalizedPose = Effect.runSync(playerApi.pose)
+    const dx = target.x + 0.5 - normalizedPose.feetPosition.x
+    const dy = target.y + 0.5 - (normalizedPose.feetPosition.y + EYE_LEVEL_OFFSET)
+    const dz = target.z + 0.5 - normalizedPose.feetPosition.z
+    const horizontalDistance = Math.hypot(dx, dz)
+    resetSimState(false)
+    Effect.runSync(playerApi.restore({
+      ...normalizedPose,
+      yawRadians: Math.atan2(-dx, -dz),
+      pitchRadians: Math.atan2(dy, horizontalDistance),
+    }, 'overworld'))
+    const aimedTarget = await Effect.runPromise(targetedBlock())
+    if (aimedTarget?.block !== END_PORTAL_BLOCK.FRAME_EMPTY
+      || aimedTarget.position.x !== target.x
+      || aimedTarget.position.y !== target.y
+      || aimedTarget.position.z !== target.z) {
+      throw new Error(`failed to target empty stronghold frame: ${JSON.stringify(aimedTarget)}`)
+    }
+    return gameplaySnapshot()
+  }
+
+  const targetEndDragon = () => {
+    Effect.runSync(playerApi.restore(poseLookingAt(endDragonPosition(), 5), 'end'))
+    alignActiveDimension('end')
+    resetSimState(true)
+    return gameplaySnapshot()
+  }
+
   const seedEndDragonFinalHit = () => {
     Effect.runSync(gameplayState.enderDragonEncounter.restore({
       phase: 'circling',
@@ -5061,6 +5275,26 @@ const bootGame = async (
           if (targetBlock !== undefined) {
             Effect.runSync(currentChunkStore.setBlock(KNOWN_TARGET_BLOCK, targetBlock))
           }
+          resetSimState(true)
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
+        seedSmokeGroundingEncounter: () => {
+          const dimension = Effect.runSync(playerApi.dimension)
+          Effect.runSync(streamAround(currentChunkContext, QA_POSE.feetPosition.x, QA_POSE.feetPosition.z))
+          for (let x = -16; x <= 32; x += 1) {
+            for (let z = -16; z <= 32; z += 1) {
+              Effect.runSync(currentChunkStore.setBlock({ x, y: 62, z }, blockIdOf('stone')))
+              Effect.runSync(currentChunkStore.setBlock({ x, y: 63, z }, blockIdOf('stone')))
+              for (let y = 64; y <= 68; y += 1) {
+                Effect.runSync(currentChunkStore.setBlock({ x, y, z }, blockIdOf('air')))
+              }
+            }
+          }
+          Effect.runSync(playerApi.restore({
+            ...QA_POSE,
+            feetPosition: { ...QA_POSE.feetPosition, y: 66 },
+          }, dimension))
           resetSimState(true)
           markSessionDirty()
           return gameplaySnapshot()
@@ -5243,6 +5477,11 @@ const bootGame = async (
         },
         seedZombiePursuitEncounter: () => {
           respawnPlayer()
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
+          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
+          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
+          Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
           const currentPose = Effect.runSync(playerApi.pose)
           Effect.runSync(requestMobSpawn(gameplayState, {
             kind: ZOMBIE_KIND,
@@ -5265,6 +5504,11 @@ const bootGame = async (
         },
         seedLethalZombieEncounter: () => {
           respawnPlayer()
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
+          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
+          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
+          Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
           applyPlayerDamage({ amount: 18, cause: 'generic' })
           const currentPose = Effect.runSync(playerApi.pose)
           Effect.runSync(requestMobSpawn(gameplayState, {
@@ -5369,9 +5613,15 @@ const bootGame = async (
         },
         seedBrewingEncounter,
         seedEndEyeCrafting,
+        spawnFullHealthEnderman: () => spawnFullHealthHostile(ENDERMAN_KIND, 40),
+        spawnFullHealthBlaze: () => spawnFullHealthHostile(BLAZE_KIND, 20),
+        targetNearestHostile,
+        targetNearestDroppedItem,
+        targetNearestStrongholdFrame,
         seedEndPortalFinalFrame,
         targetCompletedEndPortal,
         seedEndDragonFinalHit,
+        targetEndDragon,
         targetEndExitPortal,
       },
     },
@@ -5382,6 +5632,7 @@ const bootGame = async (
     {
       namespace: 'audio',
       commands: {
+        report: () => Effect.runSync(audioBackend.report),
         snapshot: () => audio.snapshot(Effect.runSync(browserClock.monotonicSecs)),
       },
     },
@@ -5431,7 +5682,9 @@ const bootGame = async (
     weatherAudio.dispose()
     for (const timeout of pendingThunder.values()) window.clearTimeout(timeout)
     pendingThunder.clear()
+    window.removeEventListener('mousedown', queueNativeUse, true)
     Effect.runSync(worldRenderer.dispose)
+    atlasTexture.dispose()
     audio.close()
   }
   // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
@@ -5550,18 +5803,22 @@ const bootGame = async (
       !dead && !inventoryOpen && !tradeOpen && !brewingOpen
         && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
 
+    const queuedNativeAttack = nativeAttackQueued > 0
+    if (queuedNativeAttack) resetPrimaryAttackGesture()
     const attackTriggered =
       !dead && !inventoryOpen && !tradeOpen && !brewingOpen
-      && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
+      && (Effect.runSync(inputApi.wasActionJustTriggered('attack')) || queuedNativeAttack)
     if (attackTriggered && !isCreativeMode) {
       if (multiplayer === undefined) survivalHunger.submit({ _tag: 'attack', count: 1 })
       else sendVitalsCommand({ _tag: 'activity', activity: 'attack', amount: 1 })
     }
-    const attackHeld = held('attack') > 0
+    const attackHeld = held('attack') > 0 || queuedNativeAttack
+    if (queuedNativeAttack) nativeAttackQueued -= 1
     if (!attackHeld) resetPrimaryAttackGesture()
-    const useTriggered =
-      !dead && !inventoryOpen && !tradeOpen && !brewingOpen
-      && Effect.runSync(inputApi.wasActionJustTriggered('use'))
+    const canUse = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+    const useTriggered = canUse
+      && (Effect.runSync(inputApi.wasActionJustTriggered('use')) || nativeUseQueued)
+    if (useTriggered) nativeUseQueued = false
     const useHeld = held('use') > 0
     const lookDelta = {
       x: walk.pointerDelta.x + consumedTouchLook.delta.x,
@@ -6480,10 +6737,15 @@ const bootGame = async (
       resetPrimaryAttackGesture()
     }
 
-    const nearbyVillager = !deadAfterFrame && !dimensionChanged && useTriggered
-      ? nearestVillagerForTrade(postFramePose.feetPosition, currentChunkContext.dimension)
-      : undefined
-    if (nearbyVillager !== undefined && !bowAdvance.capturedUse && pendingBowShots.size === 0) {
+    let nearbyVillager: PersistedVillager | undefined
+    try {
+      nearbyVillager = !deadAfterFrame && !dimensionChanged && useTriggered
+        ? nearestVillagerForTrade(postFramePose.feetPosition, currentChunkContext.dimension)
+        : undefined
+    } catch (error) {
+      console.warn('Unable to resolve nearby villager for interaction', error)
+    }
+    if (nearbyVillager !== undefined && !bowAdvance.capturedUse) {
       setTradeOpen(true, nearbyVillager.id)
     }
 
@@ -6492,7 +6754,6 @@ const bootGame = async (
       && !deadAfterFrame
       && useTriggered
       && !bowAdvance.capturedUse
-      && pendingBowShots.size === 0
     ) {
       let usedSpecialItem = false
       const fishingStorage = Effect.runSync(world.inventory.storageSnapshot)
@@ -6569,6 +6830,39 @@ const bootGame = async (
       }
       const specialInventory = Effect.runSync(world.inventory.snapshot)
       const specialSelected = specialInventory.slots[selectedHotbarIndex]
+      if (!usedSpecialItem && specialSelected?.item === 'ender_pearl') {
+        const pose = Effect.runSync(playerApi.pose)
+        const horizontal = Math.cos(pose.pitchRadians)
+        const origin = {
+          x: pose.feetPosition.x,
+          y: pose.feetPosition.y + EYE_LEVEL_OFFSET,
+          z: pose.feetPosition.z,
+        }
+        const target = Effect.runSync(targetedBlock())
+        const hitDistance = target === undefined
+          ? undefined
+          : Math.hypot(
+              target.position.x + 0.5 - origin.x,
+              target.position.y + 0.5 - origin.y,
+              target.position.z + 0.5 - origin.z,
+            )
+        Effect.runSync(Ref.update(gameplayState.pendingPearlThrows, (requests) => [
+          ...requests,
+          {
+            origin,
+            dirX: -Math.sin(pose.yawRadians) * horizontal,
+            dirY: Math.sin(pose.pitchRadians),
+            dirZ: -Math.cos(pose.yawRadians) * horizontal,
+            ...(hitDistance === undefined ? {} : { hitDistance }),
+          },
+        ]))
+        if (!isCreativeMode) {
+          Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, 'ender_pearl', 1))
+        }
+        markSessionDirty()
+        renderPlayerUi()
+        usedSpecialItem = true
+      }
       if (!usedSpecialItem && specialSelected !== undefined && isBucketItem(specialSelected.item)) {
         const target = Effect.runSync(targetedBlock())
         if (target !== undefined) {
@@ -6618,7 +6912,11 @@ const bootGame = async (
           usedSpecialItem = true
         }
       }
-      const usedEndFeature = usedSpecialItem || Effect.runSync(useEndFeature())
+      const shouldAttemptEndFeature = currentChunkContext.dimension === 'end'
+        || endPortalComplete
+        || specialSelected?.item === 'eye_of_ender'
+      const usedEndFeature = usedSpecialItem
+        || (shouldAttemptEndFeature && Effect.runSync(useEndFeature()))
       const opensBrewing = usedEndFeature ? false : Effect.runSync(targetedBrewingStand())
       const route = usedEndFeature || opensBrewing
         ? undefined
@@ -6713,7 +7011,8 @@ const bootGame = async (
       } else {
         const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
         const selected = inventoryBeforeUse.slots[selectedHotbarIndex]
-        let shouldAttemptPlacement = selected === undefined
+        let shouldAttemptPlacement = selected !== undefined
+          && !isGameplayUseItemType(selected.item)
 
         if (selected !== undefined && isGameplayUseItemType(selected.item)) {
           nextItemUseRequestId += 1
@@ -6831,13 +7130,6 @@ const bootGame = async (
                 ),
               )
               if (Option.isSome(target)) {
-                if (heldItem === 'wither_skeleton_skull') {
-                  pendingWitherSummonChecks.push({
-                    dimension: currentChunkContext.dimension,
-                    item: heldItem,
-                    position: target.value.adjacentPosition,
-                  })
-                }
                 const reading = Effect.runSync(currentChunkStore.getBlock(target.value.position))
                 if (reading._tag === 'Block' && reading.block === 76) {
                   pendingBlockUses.set(requestId, {
@@ -6860,6 +7152,20 @@ const bootGame = async (
                   )
                   redstoneDirty = true
                 } else {
+                  Effect.runSync(Ref.set(gameplayState.pendingPlacements, []))
+                  nextBlockPlacementRequestId += 1
+                  const placementRequestId = `block-placement-${String(nextBlockPlacementRequestId)}`
+                  Effect.runSync(requestBlockPlacementCommand(gameplayState, {
+                    requestId: placementRequestId,
+                    positionKey: `${target.value.adjacentPosition.x},${target.value.adjacentPosition.y},${target.value.adjacentPosition.z}` as Parameters<typeof requestBlockPlacementCommand>[1]['positionKey'],
+                    heldItem,
+                    mode: isCreativeMode ? 'creative' : 'survival',
+                  }))
+                  pendingBlockPlacements.set(placementRequestId, {
+                    dimension: currentChunkContext.dimension,
+                    item: heldItem,
+                    position: target.value.adjacentPosition,
+                  })
                   placementsRequested += 1
                   placementAudio.request(target.value.adjacentPosition)
                   canvas.setAttribute('data-placements-requested', String(placementsRequested))
@@ -6871,11 +7177,40 @@ const bootGame = async (
         }
       }
     }
+    for (const outcome of Effect.runSync(Ref.getAndSet(gameplayState.enderPearlOutcomes, []))) {
+      const pose = Effect.runSync(playerApi.pose)
+      Effect.runSync(playerApi.moveTo({
+        x: pose.feetPosition.x + outcome.displacement.x,
+        y: pose.feetPosition.y + outcome.displacement.y,
+        z: pose.feetPosition.z + outcome.displacement.z,
+      }))
+      applyPlayerDamage(outcome.damage)
+      markSessionDirty()
+    }
+    const confirmedPlacementItems: GameplayItemType[] = []
+    const reservedPlacementItems: GameplayItemType[] = []
+    for (const result of Effect.runSync(drainBlockPlacementResults(gameplayState))) {
+      const pending = pendingBlockPlacements.get(result.requestId)
+      pendingBlockPlacements.delete(result.requestId)
+      if (pending === undefined || !result.success) continue
+      confirmedPlacementItems.push(pending.item)
+      if (result.consumed) reservedPlacementItems.push(pending.item)
+      markSessionDirty()
+      if (REDSTONE_PLACEMENT_ITEMS.has(pending.item)) redstoneDirty = true
+      if (pending.item === 'wither_skeleton_skull') {
+        pendingWitherSummonChecks.push(pending as {
+          readonly dimension: Dimension
+          readonly item: 'wither_skeleton_skull'
+          readonly position: { readonly x: number; readonly y: number; readonly z: number }
+        })
+      }
+    }
 
     // Placement requests are serviced after the frame-start redstone sync.
     // Only the success outbox proves that a component now exists in the store.
-    const consumedPlacements = Effect.runSync(
-      Ref.getAndSet(gameplayState.consumedItems, []),
+    const consumedPlacements = excludeReservedPlacementConsumptions(
+      Effect.runSync(Ref.getAndSet(gameplayState.consumedItems, [])),
+      reservedPlacementItems,
     )
     for (const item of consumedPlacements) {
       if (isCreativeMode) {
@@ -6923,7 +7258,7 @@ const bootGame = async (
         }
       }
     }
-    placementAudio.confirm(consumedPlacements)
+    placementAudio.confirm([...consumedPlacements, ...confirmedPlacementItems])
     if (consumedPlacements.some((item) => REDSTONE_PLACEMENT_ITEMS.has(item))) {
       redstoneDirty = true
     }
@@ -7184,7 +7519,11 @@ const bootGame = async (
         }
         case 'DragonEggRewarded':
           if (!dragonEggRewarded) {
-            Effect.runSync(world.inventory.add(event.item, event.count))
+            Effect.runSync(spawnDroppedItems(world.entities, [{
+              item: event.item,
+              count: event.count,
+              at: endDragonPosition(),
+            }]))
             dragonEggRewarded = true
           }
           break
@@ -7218,6 +7557,13 @@ const bootGame = async (
       events: pendingEndAudioEvents.splice(0),
     })
 
+    if ('advanceFrame' in worldRenderer) {
+      Effect.runSync(worldRenderer.advanceFrame({
+        elapsedSecs: simulationElapsedSecs,
+        deltaSecs,
+        cameraPosition: postFramePose.feetPosition,
+      }))
+    }
     Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
     if (brewingOpen) renderBrewingUi()
     renderPlayerUi()

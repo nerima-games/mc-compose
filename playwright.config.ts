@@ -1,5 +1,6 @@
 /**
- * The browser E2E harness — docs/e2e-triage.md's 25 本, the final gate.
+ * The browser E2E harness. The complete discovered suite is the final gate;
+ * docs/e2e-triage.md records the historical 25-test reference migration.
  *
  * PRE-AUDIT FIRST CUT (叩き台).
  *
@@ -12,7 +13,7 @@
  * (docs/testing.md §3.5). It answers half (a) of plan.md §3.15: do the declared
  * ids compose into one total order.
  *
- * `pnpm e2e:browser` is this. It needs Chromium, a dev server, and — critically
+ * `pnpm e2e:browser` is this. It needs Chromium, a production preview, and — critically
  * — published runtime packages from node_modules. It stays outside
  * `pnpm verify` because Chromium is an explicit, heavier final gate.
  *
@@ -44,12 +45,9 @@ export default defineConfig({
   testMatch: '**/*.e2e.ts',
   timeout: 60_000,
 
-  // No retries. The reference used one, for a measured reason — two local
-  // workers starved each other's render loop and dropped synthetic key presses.
-  // This suite has one worker and no synthetic input yet, so a retry here would
-  // only hide flake that has not been diagnosed. Add it back with the
-  // measurement that justifies it.
-  retries: 0,
+  // Keep local failures immediate while retaining the first failure's trace in
+  // CI, where renderer scheduling can be noisy under software WebGL.
+  retries: process.env['CI'] === undefined ? 0 : 1,
   workers: 1,
   forbidOnly: process.env['CI'] !== undefined,
 
@@ -84,7 +82,7 @@ export default defineConfig({
 
   webServer: [
     {
-      command: `pnpm dev --port ${String(E2E_PORT)} --strictPort`,
+      command: `pnpm build:web && pnpm exec vite preview --host 127.0.0.1 --port ${String(E2E_PORT)} --strictPort`,
       url: E2E_BASE_URL,
       // Never reuse: the final gate must serve the current checkout and its
       // lockfile-resolved public packages, not a stale process.

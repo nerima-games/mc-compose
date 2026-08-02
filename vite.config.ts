@@ -1,4 +1,5 @@
 /** The browser final gate resolves the same published packages consumers use. */
+import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
 
 export default defineConfig({
@@ -15,6 +16,13 @@ export default defineConfig({
     target: 'es2024',
     outDir: 'dist',
     sourcemap: true,
+    rollupOptions: {
+      input: {
+        main: resolve(import.meta.dirname, 'index.html'),
+        renderPreview: resolve(import.meta.dirname, 'apps/render-preview/index.html'),
+        shaderProbe: resolve(import.meta.dirname, 'apps/shader-probe/index.html'),
+      },
+    },
   },
   clearScreen: false,
 })

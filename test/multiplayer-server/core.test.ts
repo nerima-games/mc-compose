@@ -50,17 +50,32 @@ const join = (player: string, name = player): NetworkMessage => ({
   at: { x: 0, y: 64, z: 0 },
 })
 
+const witherStructureAt = ({ x, y, z }: { x: number; y: number; z: number }): string | null => {
+  const blocks = new Map([
+    ['0,64,0', 'soul_sand'],
+    ['-1,65,0', 'soul_sand'],
+    ['0,65,0', 'soul_sand'],
+    ['1,65,0', 'soul_sand'],
+    ['-1,66,0', 'wither_skeleton_skull'],
+    ['0,66,0', 'wither_skeleton_skull'],
+    ['1,66,0', 'wither_skeleton_skull'],
+  ])
+  return blocks.get(`${String(x)},${String(y)},${String(z)}`) ?? null
+}
+
 const makeFixture = (
   generatedBlockAt: (at: { x: number; y: number; z: number }) => string | null = () => null,
   timeOfDay = 6_000,
 ) => {
   const sent = new Map<string, Array<WireText>>()
+  let nowMs = 0
   const server = makeMultiplayerServerCore({
     worldId: 'world-1',
     seed: 42,
     allowedBlocks: new Set(['stone', 'dirt']),
     bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
     generatedBlockAt,
+    now: () => nowMs,
     initialState: {
       revision: 0,
       blocks: [],
@@ -84,7 +99,8 @@ const makeFixture = (
     server.receive(clientId, JSON.stringify(message) as WireText)
   const receiveWither = (clientId: string, message: WitherWireMessage): ReceiveResult =>
     server.receive(clientId, JSON.stringify(message) as WireText)
-  return { server, sent, connect, receive, receiveSleep, receiveWither }
+  const advanceTime = (elapsedMs: number): void => { nowMs += elapsedMs }
+  return { server, sent, connect, receive, receiveSleep, receiveWither, advanceTime }
 }
 
 describe('authoritative multiplayer server core', () => {
@@ -342,7 +358,7 @@ describe('authoritative multiplayer server core', () => {
   })
 
   it('synchronizes authoritative Wither state to two clients and a rejoining session', () => {
-    const fixture = makeFixture()
+    const fixture = makeFixture(witherStructureAt)
     const aliceFrames = fixture.connect('socket-a')
     const bobFrames = fixture.connect('socket-b')
     fixture.receive('socket-a', join('alice'))
@@ -354,7 +370,7 @@ describe('authoritative multiplayer server core', () => {
       _tag: 'WitherCommand',
       command: {
         _tag: 'SummonWither', actor: 'alice', requestId: 'summon-1', expectedRevision: 0,
-        dimension: 'world-1', position: { x: 2, y: 64, z: 3 },
+        dimension: 'world-1', position: { x: 1, y: 66, z: 0 },
       },
     })).toEqual(expect.objectContaining({ accepted: true }))
     expect(witherMessages(aliceFrames)).toContainEqual(expect.objectContaining({
@@ -374,5 +390,164 @@ describe('authoritative multiplayer server core', () => {
       _tag: 'WitherSnapshot', revision: 1,
       snapshot: expect.objectContaining({ withers: [expect.objectContaining({ id: 'wither-1' })] }),
     }))
+  })
+
+  it('advances Withers and commits a lethal competing hit and nether star drop once', () => {
+    const fixture = makeFixture(witherStructureAt)
+    const aliceFrames = fixture.connect('socket-a')
+    const bobFrames = fixture.connect('socket-b')
+    fixture.receive('socket-a', join('alice'))
+    fixture.receive('socket-b', join('bob'))
+    fixture.receiveWither('socket-a', {
+      _tag: 'WitherCommand',
+      command: {
+        _tag: 'SummonWither', actor: 'alice', requestId: 'summon', expectedRevision: 0,
+        dimension: 'world-1', position: { x: 1, y: 66, z: 0 },
+      },
+    })
+
+    for (const [socket, player] of [['socket-a', 'alice'], ['socket-b', 'bob']] as const) {
+      fixture.receive(socket, {
+        _tag: 'PlayerMove', player: playerId(player), at: { x: 8, y: 64, z: 0 },
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      })
+    }
+    fixture.server.tick(10_000)
+    for (const [socket, player] of [['socket-a', 'alice'], ['socket-b', 'bob']] as const) {
+      fixture.receive(socket, {
+        _tag: 'PlayerMove', player: playerId(player), at: { x: 0, y: 64, z: 0 },
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      })
+    }
+    aliceFrames.length = 0
+    bobFrames.length = 0
+    for (let hit = 0; hit < 74; hit += 1) {
+      if (hit > 0) fixture.advanceTime(500)
+      expect(fixture.receiveWither('socket-a', {
+        _tag: 'WitherCommand',
+        command: {
+          _tag: 'DamageWither', actor: 'alice', requestId: `setup-${String(hit)}`, expectedRevision: hit + 2,
+          id: 'wither-1', amount: 300, kind: 'melee',
+        },
+      })).toEqual(expect.objectContaining({ accepted: true }))
+    }
+    aliceFrames.length = 0
+    bobFrames.length = 0
+    fixture.advanceTime(500)
+    const lethal = (actor: string, requestId: string): WitherWireMessage => ({
+      _tag: 'WitherCommand',
+      command: {
+        _tag: 'DamageWither', actor, requestId, expectedRevision: 76,
+        id: 'wither-1', amount: 300, kind: 'melee',
+      },
+    })
+
+    expect(fixture.receiveWither('socket-a', lethal('alice', 'hit-a'))).toEqual(expect.objectContaining({ accepted: true }))
+    expect(fixture.receiveWither('socket-b', lethal('bob', 'hit-b'))).toEqual(expect.objectContaining({ accepted: false }))
+    expect(witherMessages(aliceFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'WitherCommandResult', requestId: 'hit-a', accepted: true, revision: 77,
+    }))
+    expect(witherMessages(bobFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'WitherCommandResult', requestId: 'hit-b', accepted: false, revision: 77, reason: 'stale-revision',
+    }))
+    for (const frames of [aliceFrames, bobFrames]) {
+      expect(witherMessages(frames)).toContainEqual(expect.objectContaining({
+        _tag: 'WitherSnapshot', revision: 77,
+        snapshot: expect.objectContaining({ withers: [] }),
+      }))
+      expect(messages(frames).filter((message) => message._tag === 'EntitySpawnDelta')).toEqual([
+        expect.objectContaining({
+          entity: expect.objectContaining({ _tag: 'item-drop', stack: { item: 'nether_star', count: 1 } }),
+        }),
+      ])
+    }
+
+    fixture.server.disconnect('socket-b')
+    const rejoinedFrames = fixture.connect('socket-b2')
+    fixture.receive('socket-b2', join('bob'))
+    expect(witherMessages(rejoinedFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'WitherSnapshot', revision: 77,
+      snapshot: expect.objectContaining({ withers: [] }),
+    }))
+    expect(messages(rejoinedFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeSnapshot',
+      entities: [expect.objectContaining({ _tag: 'item-drop', stack: { item: 'nether_star', count: 1 } })],
+    }))
+  })
+
+  it('rejects Wither summons without a valid structure and ignores forged damage amounts', () => {
+    const invalid = makeFixture()
+    invalid.connect('socket-a')
+    invalid.receive('socket-a', join('alice'))
+    expect(invalid.receiveWither('socket-a', {
+      _tag: 'WitherCommand',
+      command: {
+        _tag: 'SummonWither', actor: 'alice', requestId: 'invalid', expectedRevision: 0,
+        dimension: 'world-1', position: { x: 1, y: 66, z: 0 },
+      },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+
+    const valid = makeFixture(witherStructureAt)
+    const frames = valid.connect('socket-a')
+    valid.receive('socket-a', join('alice'))
+    valid.receiveWither('socket-a', {
+      _tag: 'WitherCommand',
+      command: {
+        _tag: 'SummonWither', actor: 'alice', requestId: 'summon', expectedRevision: 0,
+        dimension: 'world-1', position: { x: 1, y: 66, z: 0 },
+      },
+    })
+    valid.receive('socket-a', {
+      _tag: 'PlayerMove', player: playerId('alice'), at: { x: 8, y: 64, z: 0 },
+      facing: { yawRadians: 0, pitchRadians: 0 },
+    })
+    valid.server.tick(10_000)
+    valid.receive('socket-a', {
+      _tag: 'PlayerMove', player: playerId('alice'), at: { x: 0, y: 64, z: 0 },
+      facing: { yawRadians: 0, pitchRadians: 0 },
+    })
+    valid.receiveWither('socket-a', {
+      _tag: 'WitherCommand',
+      command: {
+        _tag: 'DamageWither', actor: 'alice', requestId: 'forged', expectedRevision: 2,
+        id: 'wither-1', amount: 300, kind: 'melee',
+      },
+    })
+    expect(witherMessages(frames).at(-1)).toMatchObject({
+      _tag: 'WitherSnapshot', snapshot: { withers: [expect.objectContaining({
+        snapshot: expect.objectContaining({ state: expect.objectContaining({ healthPoints: 296 }) }),
+      })] },
+    })
+
+    const revision = (witherMessages(frames).at(-1) as Extract<WitherWireMessage, { _tag: 'WitherSnapshot' }>).revision
+    const rapid = {
+      _tag: 'WitherCommand',
+      command: {
+        _tag: 'DamageWither', actor: 'alice', requestId: 'rapid', expectedRevision: revision,
+        id: 'wither-1', amount: 4, kind: 'melee',
+      },
+    } as const satisfies WitherWireMessage
+    expect(valid.receiveWither('socket-a', rapid)).toEqual({ accepted: false, reason: 'invalid-command' })
+    const rapidResult = witherMessages(frames).at(-1)
+    expect(rapidResult).toMatchObject({ _tag: 'WitherCommandResult', requestId: 'rapid', accepted: false, reason: 'invalid-command' })
+    valid.advanceTime(500)
+    expect(valid.receiveWither('socket-a', rapid)).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(witherMessages(frames).at(-1)).toEqual(rapidResult)
+
+    expect(valid.receiveWither('socket-a', {
+      _tag: 'WitherCommand',
+      command: {
+        _tag: 'DamageWither', actor: 'alice', requestId: 'ranged', expectedRevision: revision,
+        id: 'wither-1', amount: 4, kind: 'ranged',
+      },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+
+    expect(valid.receiveWither('socket-a', {
+      _tag: 'WitherCommand',
+      command: {
+        _tag: 'DamageWither', actor: 'alice', requestId: 'after-cooldown', expectedRevision: revision,
+        id: 'wither-1', amount: 999, kind: 'melee',
+      },
+    })).toEqual(expect.objectContaining({ accepted: true }))
   })
 })

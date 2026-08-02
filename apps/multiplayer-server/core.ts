@@ -9,7 +9,6 @@ import {
   type AuthoritativeSnapshot,
   type BlockMutationRejected,
   type BlockPos,
-  type CommandId,
   type CommandRejectionReason,
   type NetworkMessage,
   type Orientation,
@@ -20,6 +19,14 @@ import {
   type WorldSnapshot,
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
+import { planExplosion } from '@nerima-games/mc-sim'
+import {
+  CREEPER_KIND,
+  ENDERMAN_KIND,
+  ZOMBIE_KIND,
+  dropRollsNeeded,
+  rollDropsOfKind,
+} from '@nerima-games/mx-gameplay'
 import { Either } from 'effect'
 import {
   SleepAuthority,
@@ -27,7 +34,9 @@ import {
   type SleepWireMessage,
 } from '../web/sleep-network'
 import {
+  advanceWitherRuntime,
   damageRuntimeWither,
+  matchRuntimeWitherSummon,
   restoreWitherRuntime,
   snapshotWitherRuntime,
   summonRuntimeWither,
@@ -57,6 +66,7 @@ export interface MultiplayerServerOptions {
   readonly maxMoveDistance?: number
   readonly passableBlocks?: ReadonlySet<string>
   readonly sleepPercentage?: number
+  readonly now?: () => number
 }
 
 export interface MultiplayerServerState {
@@ -96,6 +106,22 @@ type TimeWeatherState = AuthoritativeSnapshot['timeWeather']
 type ContainerState = AuthoritativeSnapshot['containers'][number]
 type FurnaceState = AuthoritativeSnapshot['furnaces'][number]
 type ItemStack = NonNullable<InventoryState['slots'][number]>
+
+const supportedMobKind = (entityType: string) => {
+  if (entityType === ZOMBIE_KIND) return ZOMBIE_KIND
+  if (entityType === CREEPER_KIND) return CREEPER_KIND
+  if (entityType === ENDERMAN_KIND) return ENDERMAN_KIND
+  return undefined
+}
+
+const deterministicRoll = (input: string): number => {
+  let hash = 2_166_136_261
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index)
+    hash = Math.imul(hash, 16_777_619)
+  }
+  return (hash >>> 0) / 0x1_0000_0000
+}
 
 interface MutableInventoryState {
   readonly slots: Array<ItemStack | null>
@@ -137,12 +163,17 @@ const DEFAULT_BOUNDS = {
 
 const DEFAULT_FACING: Orientation = { yawRadians: 0, pitchRadians: 0 }
 const DEFAULT_MAX_MOVE_DISTANCE = 8
+const DEFAULT_MAX_VEHICLE_MOVE_DISTANCE = 4
 const DEFAULT_INVENTORY_SLOTS = 36
 const DEFAULT_VITALS: VitalsState = { health: 20, hunger: 20, experience: 0 }
 const DEFAULT_TIME_WEATHER: TimeWeatherState = { timeOfDay: 6_000, weather: 'clear' }
 const PLAYER_HALF_WIDTH = 0.3
 const PLAYER_HEIGHT = 1.8
 const COLLISION_EPSILON = 1e-9
+const WITHER_INTERACTION_RANGE = 5
+const WITHER_ATTACK_DAMAGE = 4
+const WITHER_ATTACK_COOLDOWN_MS = 500
+const WITHER_TARGET_RANGE = 64
 const positionKey = ({ x, y, z }: BlockPos): string => `${String(x)},${String(y)},${String(z)}`
 
 const cloneStack = (stack: ItemStack | null): ItemStack | null => stack === null ? null : { ...stack }
@@ -247,10 +278,14 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       output: { ...offer.output },
     })),
   }))
-  const commandResults = new Map<CommandId, AuthoritativeCommandResult>()
+  const commandResults = new Map<string, AuthoritativeCommandResult>()
+  const commandResultKey = (message: AuthoritativeCommand): string =>
+    `${String(message.player)}\0${String(message.commandId)}`
   let revision = options.initialState?.revision ?? 0
   let witherRevision = options.initialState?.witherRevision ?? 0
   let witherState: WitherRuntimeState = restoreWitherRuntime(options.initialState?.wither)
+  const witherCommandResults = new Map<string, Extract<WitherWireMessage, { readonly _tag: 'WitherCommandResult' }>>()
+  const lastWitherAttackMs = new Map<PlayerId, number>()
   const hungerActors = new Map<PlayerId, HungerActor>()
   let hungerTickRemainderMs = 0
   const sleepAuthority = new SleepAuthority({
@@ -350,6 +385,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     furnaces: [...furnaces.values()].map(furnaceSnapshot),
     villagerTrades,
     entities: [...entities.values()],
+    wither: snapshotWitherRuntime(witherState),
+    witherRevision,
   })
 
   const notifyStateChanged = (): void => options.onStateChanged?.(persistentState())
@@ -452,16 +489,24 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           return { accepted: true, deltas: (nextRevision) => [{ _tag: 'EntityUpdateDelta', world: worldId, revision: nextRevision, entity: updated }] }
         }
         entities.delete(entity.entityId)
-        const drop: AuthoritativeEntityState = {
+        const kind = supportedMobKind(entity.entityType)
+        const loot = kind === undefined ? [] : rollDropsOfKind(
+          kind,
+          { _tag: 'Slain', lootingLevel: 0 },
+          Array.from({ length: dropRollsNeeded(kind) }, (_, index) => deterministicRoll(
+            `${String(options.seed)}:${String(message.player)}:${String(message.commandId)}:${String(entity.entityId)}:${String(index)}`,
+          )),
+        )
+        const drops: ReadonlyArray<AuthoritativeEntityState> = loot.map((stack, index) => ({
           _tag: 'item-drop',
-          entityId: `${entity.entityId}:drop:${String(revision + 1)}` as AuthoritativeEntityState['entityId'],
+          entityId: `${entity.entityId}:drop:${String(revision + 1)}:${String(index)}` as AuthoritativeEntityState['entityId'],
           at: entity.at,
-          stack: { item: entity.entityType, count: 1 },
-        }
-        entities.set(drop.entityId, drop)
+          stack,
+        }))
+        for (const drop of drops) entities.set(drop.entityId, drop)
         return { accepted: true, deltas: (nextRevision) => [
           { _tag: 'EntityDespawnDelta', world: worldId, revision: nextRevision, entityId: entity.entityId },
-          { _tag: 'EntitySpawnDelta', world: worldId, revision: nextRevision, entity: drop },
+          ...drops.map((entity) => ({ _tag: 'EntitySpawnDelta' as const, world: worldId, revision: nextRevision, entity })),
         ] }
       }
       case 'EntityPickupCommand': {
@@ -500,7 +545,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           updated = { ...entity, occupant: null }
         } else {
           if (entity.occupant !== message.player) return { accepted: false, reason: 'not-mounted' }
-          if ((message.action.at.x - entity.at.x) ** 2 + (message.action.at.y - entity.at.y) ** 2 + (message.action.at.z - entity.at.z) ** 2 > 64) return { accepted: false, reason: 'out-of-range' }
+          if (!isValidVehicleMovement(entity.at, message.action.at)) return { accepted: false, reason: 'out-of-range' }
           updated = { ...entity, at: message.action.at }
           actor.at = message.action.at
         }
@@ -647,13 +692,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       reason,
       resyncRequired: reason === 'stale-revision' || reason === 'snapshot-required',
     }
-    commandResults.set(message.commandId, result)
+    commandResults.set(commandResultKey(message), result)
     sendMessage(client, result)
     return { accepted: false, reason: reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command' }
   }
 
   const handleCommand = (client: ConnectedClient, message: AuthoritativeCommand): ReceiveResult => {
-    const cached = commandResults.get(message.commandId)
+    const cached = commandResults.get(commandResultKey(message))
     if (cached !== undefined) {
       sendMessage(client, cached)
       return cached._tag === 'AuthoritativeCommandAccepted'
@@ -674,7 +719,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       world: worldId,
       revision,
     }
-    commandResults.set(message.commandId, result)
+    commandResults.set(commandResultKey(message), result)
     notifyStateChanged()
     sendMessage(client, result)
     for (const delta of decision.deltas(revision)) broadcast(delta)
@@ -706,6 +751,23 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       }
     }
     return true
+  }
+
+  const isValidVehicleMovement = (
+    from: PlayerSnapshot['at'],
+    at: PlayerSnapshot['at'],
+  ): boolean => {
+    if (![at.x, at.y, at.z].every(Number.isFinite)) return false
+    const dx = at.x - from.x
+    const dy = at.y - from.y
+    const dz = at.z - from.z
+    const maximum = Math.min(options.maxMoveDistance ?? DEFAULT_MAX_MOVE_DISTANCE, DEFAULT_MAX_VEHICLE_MOVE_DISTANCE)
+    if (dx * dx + dy * dy + dz * dz > maximum * maximum) return false
+
+    const position = { x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) }
+    if (!isInBounds(position)) return false
+    const block = blockAt(position)
+    return block === null || options.passableBlocks?.has(block) === true
   }
 
   const rejectMutation = (
@@ -748,23 +810,78 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       if (client.playerId === null) return { accepted: false, reason: 'join-required' }
       const command = witherMessage.command
       if (command.actor !== client.playerId) return { accepted: false, reason: 'identity-spoof' }
-      if (command.expectedRevision !== witherRevision) {
-        sendWither(client, { _tag: 'WitherCommandResult', requestId: command.requestId, accepted: false, revision: witherRevision, reason: 'stale-revision' })
+      const resultKey = `${String(command.actor)}\u0000${command.requestId}`
+      const cachedResult = witherCommandResults.get(resultKey)
+      if (cachedResult !== undefined) {
+        sendWither(client, cachedResult)
+        return cachedResult.accepted
+          ? { accepted: true, message: witherMessage }
+          : { accepted: false, reason: 'invalid-command' }
+      }
+      const rejectWither = (reason: 'stale-revision' | 'invalid-command'): ReceiveResult => {
+        const result = { _tag: 'WitherCommandResult', requestId: command.requestId, accepted: false, revision: witherRevision, reason } as const
+        witherCommandResults.set(resultKey, result)
+        sendWither(client, result)
         return { accepted: false, reason: 'invalid-command' }
+      }
+      if (command.expectedRevision !== witherRevision) {
+        return rejectWither('stale-revision')
       }
       if (command._tag === 'SummonWither') {
         if (command.dimension !== worldId) return { accepted: false, reason: 'wrong-world' }
-        witherState = summonRuntimeWither(witherState, command.dimension, command.position)
-      } else {
-        if (command.amount <= 0 || !witherState.withers.some(({ id }) => id === command.id)) {
-          sendWither(client, { _tag: 'WitherCommandResult', requestId: command.requestId, accepted: false, revision: witherRevision, reason: 'invalid-command' })
-          return { accepted: false, reason: 'invalid-command' }
+        const actor = players.get(command.actor as PlayerId)
+        const hasIntegerPosition = Number.isInteger(command.position.x)
+          && Number.isInteger(command.position.y)
+          && Number.isInteger(command.position.z)
+        const summon = matchRuntimeWitherSummon(
+          { x: Math.floor(command.position.x), y: Math.floor(command.position.y), z: Math.floor(command.position.z) },
+          (position) => blockAt(position) ?? undefined,
+        )
+        if (!hasIntegerPosition || actor === undefined || summon === undefined || Math.hypot(
+          actor.at.x - command.position.x,
+          actor.at.y - command.position.y,
+          actor.at.z - command.position.z,
+        ) > WITHER_INTERACTION_RANGE) {
+          return rejectWither('invalid-command')
         }
-        witherState = damageRuntimeWither(witherState, command.id, command.amount, command.kind).state
+        for (const position of summon.consumedBlocks) blocks.set(positionKey(position), { at: position, block: null })
+        revision += 1
+        broadcast(snapshot())
+        witherState = summonRuntimeWither(witherState, command.dimension, summon.spawnPosition)
+      } else {
+        const actor = players.get(command.actor as PlayerId)
+        const actorVitals = vitals.get(command.actor as PlayerId)
+        const target = witherState.withers.find(({ id }) => id === command.id)
+        const lastAttackMs = lastWitherAttackMs.get(command.actor as PlayerId)
+        if (command.kind !== 'melee' || command.amount <= 0 || actor === undefined || actorVitals === undefined
+          || actorVitals.health <= 0 || target === undefined || actor.world !== target.dimension
+          || target.dimension !== worldId || (lastAttackMs !== undefined && (options.now?.() ?? Date.now()) - lastAttackMs < WITHER_ATTACK_COOLDOWN_MS) || Math.hypot(
+          actor.at.x - target.state.feetPosition.x,
+          actor.at.y - target.state.feetPosition.y,
+          actor.at.z - target.state.feetPosition.z,
+        ) > WITHER_INTERACTION_RANGE) {
+          return rejectWither('invalid-command')
+        }
+        lastWitherAttackMs.set(command.actor as PlayerId, options.now?.() ?? Date.now())
+        const damage = damageRuntimeWither(witherState, command.id, WITHER_ATTACK_DAMAGE, 'melee')
+        witherState = damage.state
+        if (damage.death !== undefined) {
+          const drop: AuthoritativeEntityState = {
+            _tag: 'item-drop',
+            entityId: `${command.id}:drop:${String(witherRevision + 1)}` as AuthoritativeEntityState['entityId'],
+            at: damage.death.drop.position,
+            stack: { item: damage.death.drop.item, count: damage.death.drop.count },
+          }
+          entities.set(drop.entityId, drop)
+          revision += 1
+          broadcast({ _tag: 'EntitySpawnDelta', world: worldId, revision, entity: drop })
+        }
       }
       witherRevision += 1
       notifyStateChanged()
-      sendWither(client, { _tag: 'WitherCommandResult', requestId: command.requestId, accepted: true, revision: witherRevision })
+      const acceptedResult = { _tag: 'WitherCommandResult', requestId: command.requestId, accepted: true, revision: witherRevision } as const
+      witherCommandResults.set(resultKey, acceptedResult)
+      sendWither(client, acceptedResult)
       broadcastWither(witherSnapshot())
       return { accepted: true, message: witherMessage }
     }
@@ -925,18 +1042,112 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   }
 
   const tick = (elapsedMs: number): void => {
-    if (hungerActors.size === 0) return
-    const authority = createHungerAuthority({ world: worldId, revision, difficulty: 'normal', actors: [...hungerActors.values()], tickRemainderMs: hungerTickRemainderMs })
-    const events = authority.tick(elapsedMs)
-    hungerTickRemainderMs = authority.snapshot().tickRemainderMs
-    if (events.length === 0) return
-    hungerActors.clear()
-    for (const actor of authority.snapshot().actors) hungerActors.set(actor.player, actor)
-    const changed = applyHungerEvents(events)
-    if (changed.length === 0) return
-    revision += 1
-    notifyStateChanged()
-    for (const player of changed) broadcast({ _tag: 'PlayerVitalsDelta', world: worldId, revision, player, state: vitalsSnapshot(vitals.get(player) as MutableVitalsState) })
+    let stateChanged = false
+    if (hungerActors.size > 0) {
+      const authority = createHungerAuthority({ world: worldId, revision, difficulty: 'normal', actors: [...hungerActors.values()], tickRemainderMs: hungerTickRemainderMs })
+      const events = authority.tick(elapsedMs)
+      hungerTickRemainderMs = authority.snapshot().tickRemainderMs
+      hungerActors.clear()
+      for (const actor of authority.snapshot().actors) hungerActors.set(actor.player, actor)
+      const changed = applyHungerEvents(events)
+      if (changed.length > 0) {
+        revision += 1
+        stateChanged = true
+        for (const player of changed) broadcast({ _tag: 'PlayerVitalsDelta', world: worldId, revision, player, state: vitalsSnapshot(vitals.get(player) as MutableVitalsState) })
+      }
+    }
+
+    if (witherState.withers.length > 0 || witherState.skulls.length > 0) {
+      const previousSnapshot = snapshotWitherRuntime(witherState)
+      const dimensions = new Set([
+        ...witherState.withers.map((wither) => wither.dimension),
+        ...witherState.skulls.map((skull) => skull.dimension),
+      ])
+      let advanced = witherState
+      const damagedPlayers = new Set<PlayerId>()
+      let worldChanged = false
+      for (const dimension of dimensions) {
+        const dimensionWithers = advanced.withers.filter((wither) => wither.dimension === dimension)
+        const targetEntry = [...players.entries()]
+          .filter(([player, presence]) => presence.world === dimension && (vitals.get(player)?.health ?? 0) > 0)
+          .map(([player, presence]) => [player, presence, Math.min(...dimensionWithers.map((wither) => Math.hypot(
+            presence.at.x - wither.state.feetPosition.x,
+            presence.at.y - wither.state.feetPosition.y,
+            presence.at.z - wither.state.feetPosition.z,
+          )))] as const)
+          .filter((entry) => entry[2] <= WITHER_TARGET_RANGE)
+          .sort((left, right) => left[2] - right[2])[0]
+        const target = targetEntry?.[1].at ?? dimensionWithers[0]?.state.feetPosition ?? { x: 0, y: 64, z: 0 }
+        const result = advanceWitherRuntime(
+          advanced,
+          dimension,
+          target,
+          elapsedMs / 1_000,
+          (_skull, position) => blockAt({ x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }) !== null,
+        )
+        advanced = result.state
+        if (result.meleeDamage > 0 && targetEntry !== undefined) {
+          const playerVitals = vitals.get(targetEntry[0])
+          if (playerVitals !== undefined) {
+            playerVitals.health = Math.max(0, playerVitals.health - result.meleeDamage)
+            const hungerActor = hungerActors.get(targetEntry[0])
+            if (hungerActor !== undefined) hungerActors.set(targetEntry[0], {
+              ...hungerActor,
+              state: { ...hungerActor.state, health: playerVitals.health },
+            })
+            damagedPlayers.add(targetEntry[0])
+          }
+        }
+        for (const explosion of result.explosions) {
+          const blockReader = (position: BlockPos) => {
+            if (!isInBounds(position)) return undefined
+            const block = blockAt(position)
+            return block === null ? { resistance: 0, destructible: false } : {
+              resistance: explosion.destroysResistantBlocks ? 0 : 1,
+              destructible: block !== 'bedrock',
+            }
+          }
+          const plan = planExplosion({ center: explosion.position, radius: explosion.power, seed: revision + witherRevision, blocks: blockReader, entities: [] })
+          for (const position of plan.destroyedBlocks) {
+            blocks.set(positionKey(position), { at: position, block: null })
+            worldChanged = true
+          }
+          for (const [player, presence] of players) {
+            const distance = Math.hypot(
+              presence.at.x - explosion.position.x,
+              presence.at.y + 0.9 - explosion.position.y,
+              presence.at.z - explosion.position.z,
+            )
+            if (distance >= explosion.power) continue
+            const exposure = 1 - distance / explosion.power
+            const playerVitals = vitals.get(player)
+            if (playerVitals === undefined) continue
+            playerVitals.health = Math.max(0, playerVitals.health - (((exposure * exposure + exposure) / 2) * 7 * explosion.power + 1))
+            const hungerActor = hungerActors.get(player)
+            if (hungerActor !== undefined) hungerActors.set(player, {
+              ...hungerActor,
+              state: { ...hungerActor.state, health: playerVitals.health },
+            })
+            damagedPlayers.add(player)
+          }
+        }
+      }
+      if (worldChanged || damagedPlayers.size > 0) {
+        revision += 1
+        stateChanged = true
+        if (worldChanged) broadcast(snapshot())
+        for (const player of damagedPlayers) broadcast({ _tag: 'PlayerVitalsDelta', world: worldId, revision, player, state: vitalsSnapshot(vitals.get(player) as MutableVitalsState) })
+      }
+      const nextSnapshot = snapshotWitherRuntime(advanced)
+      if (JSON.stringify(nextSnapshot) !== JSON.stringify(previousSnapshot)) {
+        witherState = advanced
+        witherRevision += 1
+        stateChanged = true
+        broadcastWither(witherSnapshot())
+      }
+    }
+
+    if (stateChanged) notifyStateChanged()
   }
 
   const spawnEntity = (entity: AuthoritativeEntityState): boolean => {

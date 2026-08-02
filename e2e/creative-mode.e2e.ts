@@ -79,6 +79,7 @@ test('creates, plays, saves, and resumes a Creative world', async ({ page }) => 
   const placementSeed = await callQa<GameplaySnapshot>(page, 'gameplay.seedCreativePlacementEncounter')
   const stoneBefore = inventoryCount(placementSeed, 'stone')
   const placementsBefore = Number(await canvas.getAttribute('data-placements-requested'))
+  await canvas.hover()
   await page.mouse.down({ button: 'right' })
   try {
     await expect.poll(async () => {
@@ -88,7 +89,11 @@ test('creates, plays, saves, and resumes a Creative world', async ({ page }) => 
         placed: current.ignitionTarget.block !== null && current.ignitionTarget.block !== 0,
         stone: inventoryCount(current, 'stone'),
       }
-    }).toEqual({ requests: placementsBefore + 1, placed: true, stone: stoneBefore })
+    }).toEqual({
+      requests: placementsBefore + 1,
+      placed: true,
+      stone: stoneBefore,
+    })
   } finally {
     await page.mouse.up({ button: 'right' })
   }

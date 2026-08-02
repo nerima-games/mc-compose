@@ -136,13 +136,15 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
 | `pnpm e2e` | E2E だけを走らせる(`vitest run test/e2e`)。純粋なので `pnpm test` も `pnpm verify` も既に拾っている |
 | `pnpm check:roster` | `test/e2e/roster.ts` の転記が兄弟リポジトリの実ソースと一致するかを照合。**`verify` に入っていない** — 兄弟のチェックアウトが要り、CI には無いため([docs/testing.md](./docs/testing.md) §3.5) |
 | `pnpm typecheck:preview` | 公開済みパッケージ境界で `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) |
-| `pnpm e2e:browser` | Chromiumで公開パッケージ群の起動、フレーム、QA、停止と既存の採掘・inventory経路を検証 |
+| `pnpm e2e:browser` | Chromium で全 Playwright E2E を実行 |
 | `pnpm changeset` | ユーザー向け変更に `.changeset/*.md` を追加する(RELEASE_STANDARD.md §1) |
 | `pnpm verify` | `typecheck && lint && test`。CI と同じ内容 |
 
 ## 現状
 
-**このリポジトリはまだ叩き台(pre-audit first cut)である。**
+このリポジトリには、公開済み sibling package を実際に合成するブラウザ composition root がある。
+`apps/web/main.ts` が DOM、WebGL、音声、保存、ネットワーク adapter を構築し、
+`startBrowserSession` を通して各 `GameModule` の起動・合成・停止を管理する。
 
 確定している **仕組み**:
 
@@ -171,18 +173,19 @@ Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)
   これは **plan.md §4.2 の拡張であって転記ではない** — §4.2 はネットワークに触れていない
   ([docs/architecture.md](./docs/architecture.md) §4.5、DN-15)
 
-確定していない:
+実装済みの体験と検証:
 
-- **4 つの体験モジュールの実合成**(全モジュール未公開)
-- **mc-kernel の契約型への切り替え**。現在 `StageId` / `DeltaTimeSecs` / `GameModule` /
-  `StageRegistration` / `WorldId` はローカル宣言のミラーである
-- ブラウザE2Eで未採用の振る舞い経路。現在は起動、RAF、QA観測、teardownに加え、
-  採掘からinventory更新までを公開package境界で検証する
-- `ModuleLayer` の精密な型(現在 `Layer<any, any, any>`)
-- **mc-sim の `GameModule` を誰がホストに渡すのか**。mc-sim は `sim:physics` を登録したが、
-  mc-compose は mc-sim を import できない(rule 3)。stage を登録することと import 可能で
-  あることは別の性質である([docs/design-notes.md](./docs/design-notes.md) DN-14)
-- ビルド / publish。`package.json` の `exports` は TypeScript ソースを直接指している
+- survival / creative の両モード、チャンク生成と描画、original terrain atlas と audio bank、
+  inventory / crafting / furnace / storage / farming / redstone、保存と再開をブラウザホストで合成する
+- Nether / End と dragon progression、multiplayer の authoritative entity と combat、
+  drop / vehicle / Wither / reconnect 経路を Playwright E2E で検証する
+- `pnpm e2e:browser` は全ブラウザ E2E を実行する。main への push と pull request では
+  `.github/workflows/browser-regression.yml` が代表的な機能回帰を必須チェックとして実行する
+- frame-time budget は機能回帰と混ぜず、`.github/workflows/browser-performance.yml` が独立して検証する
+
+mc-compose が所有するのはホスト配線、stage 順序、セッションライフサイクルであり、
+各ゲーム規則や adapter 実装そのものではない。公開 API の境界は
+[docs/public-api.md](./docs/public-api.md) を参照する。
 
 確定している **仕組み(org 標準への移行)**:
 

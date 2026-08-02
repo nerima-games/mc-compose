@@ -5,6 +5,7 @@ import { startGameSession } from './helpers/session'
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const DATABASE_NAME = 'nerima-games-minecraft'
 const AIR_BLOCK_ID = 0
+const STONE_BLOCK_ID = 2
 const OBSIDIAN_BLOCK_ID = 40
 const NETHER_PORTAL_BLOCK_ID = 118
 
@@ -25,6 +26,12 @@ type GameplaySnapshot = {
     readonly feetPosition: Position
     readonly healthPoints: number
     readonly behaviour: unknown
+  }>
+  readonly renderedEntities: ReadonlyArray<{
+    readonly id: string
+    readonly kind: string
+    readonly category: string
+    readonly feetPosition: Position
   }>
   readonly weather: {
     readonly weather: 'clear' | 'rain' | 'thunder'
@@ -76,17 +83,21 @@ const watchForFaults = (page: Page): PageFaults => {
   return { consoleErrors, pageErrors }
 }
 
-const callQa = <A>(page: Page, command: string): Promise<A> =>
+const callQa = <A>(
+  page: Page,
+  command: string,
+  ...arguments_: ReadonlyArray<unknown>
+): Promise<A> =>
   page.evaluate(
-    async ({ key, commandName }) => {
+    async ({ key, commandName, commandArguments }) => {
       const surface = (globalThis as unknown as Record<string, unknown>)[key] as
         | Record<string, (...arguments_: ReadonlyArray<unknown>) => unknown>
         | undefined
       const operation = surface?.[commandName]
       if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
-      return await operation()
+      return await operation(...commandArguments)
     },
-    { key: QA_GLOBAL_KEY, commandName: command },
+    { key: QA_GLOBAL_KEY, commandName: command, commandArguments: arguments_ },
   ) as Promise<A>
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
@@ -94,6 +105,12 @@ const snapshot = (page: Page): Promise<GameplaySnapshot> =>
 
 const hotbarText = (page: Page): Promise<ReadonlyArray<string | null>> =>
   page.locator('[data-mx-ui="hotbar"] [data-mx-ui="slot"]').allTextContents()
+
+const seedGroundedMiningEncounter = async (page: Page): Promise<void> => {
+  await callQa(page, 'gameplay.seedSmokeGroundingEncounter')
+  await callQa(page, 'gameplay.setPose', STONE_BLOCK_ID)
+  await expect(page.locator('#game-canvas')).toHaveAttribute('data-player-grounded', 'true')
+}
 
 const deleteSessionDatabase = async (page: Page): Promise<void> => {
   // Use a same-origin document that does not start the game, so no open session
@@ -118,6 +135,11 @@ test('restores a dynamic entity with stable identity and state', async ({ page }
   await startGameSession(page)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await callQa(page, 'gameplay.seedMeleeDropEncounter')
+  await callQa(page, 'gameplay.seedSmokeGroundingEncounter')
+  await expect(page.locator('#game-canvas')).toHaveAttribute(
+    'data-player-grounded',
+    'true',
+  )
   const published = await snapshot(page)
   expect(published.entities).toHaveLength(1)
 
@@ -142,7 +164,7 @@ test('publishes a mined world, inventory, and exact pose across reload', async (
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather-audio-mode', 'clear')
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-weather-particles', '0')
 
-  await callQa(page, 'gameplay.setPose')
+  await seedGroundedMiningEncounter(page)
   const beforeBreak = await snapshot(page)
   expect(beforeBreak.target.reading).toBe('Block')
   expect(beforeBreak.target.block).not.toBe(AIR_BLOCK_ID)
@@ -194,7 +216,7 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
   await startGameSession(page)
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
-  await callQa(page, 'gameplay.setPose')
+  await seedGroundedMiningEncounter(page)
   expect(await callQa<unknown>(page, 'gameplay.breakTarget')).not.toBeNull()
   await expect.poll(async () => (await snapshot(page)).target.block).toBe(AIR_BLOCK_ID)
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-player-grounded', 'true')
@@ -210,6 +232,9 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
   const restored = await snapshot(page)
   expect(restored).toEqual({
     ...published,
+    // Autonomous entities resume immediately after boot, so compare their durable roster below.
+    entities: restored.entities,
+    renderedEntities: restored.renderedEntities,
     environmentalContact: {
       ...published.environmentalContact,
       simulationElapsedSecs: expect.any(Number),
@@ -227,6 +252,12 @@ test('debounces dirty gameplay into a durable save without an explicit flush', a
       restockElapsedSecs: expect.any(Number),
     },
   })
+  const durableEntityRoster = (value: GameplaySnapshot) => value.entities.map((entity) => ({
+    id: entity.id,
+    kind: entity.kind,
+    healthPoints: entity.healthPoints,
+  }))
+  expect(durableEntityRoster(restored)).toEqual(durableEntityRoster(published))
   expect(Math.abs(restored.weather.remainingSecs - published.weather.remainingSecs)).toBeLessThan(5)
   expect(restored.vitals.foodTimerSecs).toBeGreaterThanOrEqual(0)
   expect(restored.vitals.foodTimerSecs).toBeLessThan(4)

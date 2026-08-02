@@ -248,6 +248,34 @@ const controlledStorage = (): ControlledStorage => {
         entries.delete(key)
         return Effect.void
       }),
+    commitBatch: (mutations) =>
+      Effect.suspend(() => {
+        const next = new Map(entries)
+        for (const mutation of mutations) {
+          const key = mutation.key
+          if (mutation._tag === 'Put') {
+            if (String(key).includes('/chunk/')) state.chunkWriteCount += 1
+            if (state.failChunkKey === String(key)) {
+              return Effect.fail(new StorageError({ operation: 'commitBatch', key }))
+            }
+            if (state.failNextHeadWrite && String(key).endsWith('/head')) {
+              state.failNextHeadWrite = false
+              return Effect.fail(new StorageError({ operation: 'commitBatch', key }))
+            }
+            next.set(key, mutation.envelope)
+          } else {
+            if (state.failChunkRemoves && String(key).includes('/chunk/')) {
+              return Effect.fail(new StorageError({ operation: 'commitBatch', key }))
+            }
+            next.delete(key)
+          }
+        }
+        entries.clear()
+        for (const [key, envelope] of next) entries.set(key, envelope)
+        return Effect.void
+      }),
+    readBatch: (keys) =>
+      Effect.sync(() => keys.map((key) => Option.fromNullable(entries.get(key)))),
     keys: Effect.sync(() => [...entries.keys()].map(SaveKey)),
   }
   return {

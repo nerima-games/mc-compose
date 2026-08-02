@@ -69,6 +69,29 @@ const framesDrawn = async (page: Page): Promise<number> => {
   return raw === null ? 0 : Number(raw)
 }
 
+const settleOnSmokeTerrain = async (page: Page): Promise<void> => {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          ([key, command]) =>
+            typeof (globalThis as Record<string, Record<string, unknown>>)[key]?.[command],
+          [QA_GLOBAL_KEY, 'gameplay.seedSmokeGroundingEncounter'] as const,
+        ),
+      { timeout: 15_000 },
+    )
+    .toBe('function')
+  await page.evaluate(async (key) => {
+    const qa = (globalThis as Record<string, unknown>)[key] as Record<string, () => unknown>
+    await qa['gameplay.seedSmokeGroundingEncounter']()
+  }, QA_GLOBAL_KEY)
+  await expect
+    .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
+      timeout: 15_000,
+    })
+    .toBe('true')
+}
+
 test.describe('smoke — the composed frame in a real browser', () => {
   /**
    * #1 `WebGL2 canvas is present and active`.
@@ -142,6 +165,8 @@ test.describe('smoke — the composed frame in a real browser', () => {
         bufferHeight: canvas.height,
         layoutWidth: canvas.clientWidth,
         layoutHeight: canvas.clientHeight,
+        audioSamples: Number(canvas.dataset.audioSamples),
+        atlasSize: canvas.dataset.atlasSize,
         hasWebgl2: gl !== null,
         lost: gl === null || gl.isContextLost(),
       }
@@ -153,6 +178,8 @@ test.describe('smoke — the composed frame in a real browser', () => {
     expect(probe?.bufferWidth).toBe(probe?.layoutWidth)
     expect(probe?.bufferHeight).toBe(probe?.layoutHeight)
     expect(probe?.layoutWidth).toBeGreaterThan(0)
+    expect(probe?.audioSamples).toBeGreaterThan(0)
+    expect(probe?.atlasSize).toBe('512x512')
     // The naive pair, kept because they are what the row is named after — but
     // they are a postscript to the two above, not the claim.
     expect(probe?.hasWebgl2).toBe(true)
@@ -217,6 +244,8 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'render:input',
       'sim:physics',
       'gameplay:interactions',
+      'gameplay:fire',
+      'gameplay:survival-hunger',
       'gameplay:entities',
       'gameplay:ender-dragon',
       'gameplay:fluids',
@@ -283,6 +312,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
     )
 
     expect(surface?.sort()).toEqual([
+      'audio.report',
       'audio.snapshot',
       'gameplay.breakTarget',
       'gameplay.damage',
@@ -292,7 +322,11 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.grantNearestVillagerTradeInput',
       'gameplay.harvestFarmingCrop',
       'gameplay.heal',
+      'gameplay.mutateObserverInput',
       'gameplay.preparePotatoEating',
+      'gameplay.pressRedstoneBranchButton',
+      'gameplay.redstoneFixturesSnapshot',
+      'gameplay.requestMultiplayerBlockBreak',
       'gameplay.requestMultiplayerBlockPlacement',
       'gameplay.respawn',
       'gameplay.returnToCraftingTable',
@@ -310,6 +344,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.seedEndPortalFinalFrame',
       'gameplay.seedFarmingEncounter',
       'gameplay.seedFireChargeIgnition',
+      'gameplay.seedFishingEncounter',
       'gameplay.seedFlintAndSteelIgnition',
       'gameplay.seedFoodUseEncounter',
       'gameplay.seedIronArmor',
@@ -318,8 +353,10 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.seedLethalZombieEncounter',
       'gameplay.seedMeleeDropEncounter',
       'gameplay.seedPortalEncounter',
+      'gameplay.seedRedstoneFixtures',
       'gameplay.seedRefusedFireChargeIgnition',
       'gameplay.seedSafeFall',
+      'gameplay.seedSmokeGroundingEncounter',
       'gameplay.seedStickyPistonEncounter',
       'gameplay.seedVillageTradingEncounter',
       'gameplay.seedWoodenPickaxeProgression',
@@ -329,9 +366,15 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.setWeather',
       'gameplay.shoot',
       'gameplay.snapshot',
+      'gameplay.spawnFullHealthBlaze',
+      'gameplay.spawnFullHealthEnderman',
       'gameplay.stickyPistonSnapshot',
       'gameplay.targetCompletedEndPortal',
+      'gameplay.targetEndDragon',
       'gameplay.targetEndExitPortal',
+      'gameplay.targetNearestDroppedItem',
+      'gameplay.targetNearestHostile',
+      'gameplay.targetNearestStrongholdFrame',
       'lifecycle.stop',
       'persistence.flush',
       'render.snapshotLighting',
@@ -504,12 +547,7 @@ test.describe('the player', () => {
     // forever; neither is visible in a screenshot of the first frame.
     await startGameSession(page)
     await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'generated')
-
-    await expect
-      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
-        timeout: 15_000,
-      })
-      .toBe('true')
+    await settleOnSmokeTerrain(page)
 
     const feet = await page.locator('#game-canvas').getAttribute('data-player-feet')
     const y = Number(feet?.split(',')[1])
@@ -521,11 +559,7 @@ test.describe('the player', () => {
 
   test('#9 holding W moves the player, and the ground still holds', async ({ page }) => {
     await startGameSession(page)
-    await expect
-      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
-        timeout: 15_000,
-      })
-      .toBe('true')
+    await settleOnSmokeTerrain(page)
 
     const before = await page.locator('#game-canvas').getAttribute('data-player-feet')
 
@@ -578,11 +612,7 @@ test.describe('sustained play', () => {
     // the world by what fits in memory at once and never releases anything.
     // What this asserts is `syncWorld`'s ADD and its REMOVE.
     await startGameSession(page)
-    await expect
-      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
-        timeout: 15_000,
-      })
-      .toBe('true')
+    await settleOnSmokeTerrain(page)
 
     const residentAtSpawn = Number(
       await page.locator('#game-canvas').getAttribute('data-chunks-meshed'),
@@ -633,11 +663,7 @@ test.describe('sustained play', () => {
     page.on('pageerror', (error) => fatal.push(String(error)))
 
     await startGameSession(page)
-    await expect
-      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
-        timeout: 15_000,
-      })
-      .toBe('true')
+    await settleOnSmokeTerrain(page)
 
     const framesAtStart = Number(await page.locator('body').getAttribute('data-frames'))
 

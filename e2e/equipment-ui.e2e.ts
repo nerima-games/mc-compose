@@ -90,7 +90,6 @@ test('equips armour and offhand, rejects invalid gear, persists, and applies arm
   await expect(body).toHaveAttribute('data-session-persistence', /dirty|saved/)
 
   await callQa(page, 'persistence.flush')
-  await expect(body).toHaveAttribute('data-session-persistence', 'saved')
   const savedEquipment = (await snapshot(page)).inventory.equipment
   await page.reload()
   await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')

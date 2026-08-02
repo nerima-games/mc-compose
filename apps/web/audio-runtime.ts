@@ -3,6 +3,7 @@ import {
   CAPTION_DISPLAY_SECS,
   DEFAULT_VOLUME_SETTINGS,
   makeSoundCueService,
+  makeGameAudioHost,
   recordingCaptionLayer,
   visibleCaptions,
   type AudioBackend,
@@ -11,6 +12,7 @@ import {
   type SoundCueId,
   type Vec3,
   type WebAudioBackend,
+  type GameAudioHost,
 } from '@nerima-games/mc-audio'
 import { Effect, Layer, Ref } from 'effect'
 
@@ -38,6 +40,7 @@ export type AudioRuntimeSettings = {
 }
 
 export type AudioRuntime = {
+  readonly game: GameAudioHost
   readonly play: (cueId: SoundCueId, options?: CuePlayOptions) => void
   readonly unlock: () => void
   readonly visible: (nowSecs: number) => ReadonlyArray<CaptionEvent>
@@ -117,6 +120,7 @@ export const makeAudioRuntime = (input: {
       }))
 
     return {
+      game: makeGameAudioHost(service),
       play: (cueId, options) => {
         if (closed) return
         cueIds.push(cueId)

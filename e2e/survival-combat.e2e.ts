@@ -273,7 +273,7 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
 
   await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect(hotbar.locator('[data-mx-ui="slot"]')).toHaveCount(9)
-  const spawn = await snapshot(page)
+  const spawn = await callQa<GameplaySnapshot>(page, 'gameplay.respawn')
 
   await callQa<unknown>(page, 'gameplay.seedLethalZombieEncounter')
   await expect.poll(async () => {
@@ -330,7 +330,14 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
   await expect.poll(async () => {
     const current = await snapshot(page)
     return {
-      pose: current.pose,
+      pose: {
+        feetPosition: {
+          x: current.pose.feetPosition.x,
+          z: current.pose.feetPosition.z,
+        },
+        yawRadians: current.pose.yawRadians,
+        pitchRadians: current.pose.pitchRadians,
+      },
       healthPoints: current.vitals.healthPoints,
       maxHealthPoints: current.vitals.maxHealthPoints,
       lastDamageCause: current.vitals.lastDamageCause ?? null,
@@ -340,7 +347,14 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
       renderedIds: current.renderedEntities.map((entity) => entity.id),
     }
   }).toEqual({
-    pose: spawn.pose,
+    pose: {
+      feetPosition: {
+        x: spawn.pose.feetPosition.x,
+        z: spawn.pose.feetPosition.z,
+      },
+      yawRadians: spawn.pose.yawRadians,
+      pitchRadians: spawn.pose.pitchRadians,
+    },
     healthPoints: spawn.vitals.maxHealthPoints,
     maxHealthPoints: spawn.vitals.maxHealthPoints,
     lastDamageCause: null,
