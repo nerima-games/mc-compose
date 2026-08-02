@@ -1,6 +1,8 @@
 import {
   decodeFrame,
   encodeFrame,
+  type CommandId,
+  type EntityId,
   type NetworkMessage,
   type PlayerId,
   type PlayerName,
@@ -636,5 +638,39 @@ describe('authoritative multiplayer server core', () => {
         id: 'wither-1', amount: 999, kind: 'melee',
       },
     })).toEqual(expect.objectContaining({ accepted: true }))
+  })
+  it('authoritatively drops Blaze loot when a Blaze dies', () => {
+    const fixture = makeFixture()
+    const frames = fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+    expect(fixture.server.spawnEntity({
+      _tag: 'living',
+      entityId: 'blaze-1' as EntityId,
+      entityType: 'blaze',
+      at: { x: 1, y: 64, z: 0 },
+      health: 4,
+      maxHealth: 20,
+    })).toBe(true)
+    frames.length = 0
+
+    expect(fixture.receive('socket-a', {
+      _tag: 'EntityAttackCommand',
+      commandId: 'blaze-kill' as CommandId,
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: fixture.server.snapshot().revision,
+      entityId: 'blaze-1' as EntityId,
+    })).toEqual(expect.objectContaining({ accepted: true }))
+
+    expect(messages(frames)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'blaze-1' }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({
+          _tag: 'item-drop',
+          stack: { item: 'blaze_powder', count: 1 },
+        }),
+      }),
+    ]))
   })
 })

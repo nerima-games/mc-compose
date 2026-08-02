@@ -22,6 +22,7 @@ import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-m
 import { blockIdOf, isBlockType, isItemType } from '@nerima-games/mc-kernel'
 import { planExplosion, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
+  BLAZE_KIND,
   CREEPER_KIND,
   ENDERMAN_KIND,
   ZOMBIE_KIND,
@@ -123,6 +124,7 @@ const supportedMobKind = (entityType: string) => {
   if (entityType === ZOMBIE_KIND) return ZOMBIE_KIND
   if (entityType === CREEPER_KIND) return CREEPER_KIND
   if (entityType === ENDERMAN_KIND) return ENDERMAN_KIND
+  if (entityType === BLAZE_KIND) return BLAZE_KIND
   return undefined
 }
 
