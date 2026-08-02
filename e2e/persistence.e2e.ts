@@ -171,6 +171,7 @@ test('publishes a mined world, inventory, and exact pose across reload', async (
 
   expect(await callQa<unknown>(page, 'gameplay.breakTarget')).not.toBeNull()
   await expect.poll(async () => (await snapshot(page)).target.block).toBe(AIR_BLOCK_ID)
+  await expect.poll(async () => (await snapshot(page)).pose.feetPosition.y).toBe(63)
   await expect(page.locator('#game-canvas')).toHaveAttribute('data-player-grounded', 'true')
 
   await callQa(page, 'gameplay.setWeather')

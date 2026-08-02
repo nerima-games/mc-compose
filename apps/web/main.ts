@@ -222,13 +222,15 @@ import {
   boardVehicle,
   bowCharge,
   bowDamage,
+  bowDamageWithEnchantments,
   canFireBow,
   cancelFishing,
   castFishing,
   applyEnchantmentOffer,
-  applyArmorToDamage,
+  armorDamageWithEnchantments,
   armorPointsForEquipment,
   armorDurabilityWearFromPreMitigationDamage,
+  durabilityWearWithEnchantments,
   CREEPER_KIND,
   BLAZE_KIND,
   ENDERMAN_KIND,
@@ -242,6 +244,7 @@ import {
   drainPlayerHeals,
   drainVillagerTradeResults,
   enchantmentOffers,
+  enchantmentLevel,
   DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
   emptyBrewingStandState,
@@ -258,6 +261,7 @@ import {
   makeVillager,
   makeGeneratedWorld,
   meleeDamageForItem,
+  meleeDamageWithEnchantments,
   isDroppedItemBehaviour,
   isHoeItem,
   isIgnitionItem,
@@ -341,6 +345,10 @@ import {
   IDLE_BOW_USE,
   type BowUseState,
 } from './bow-use'
+import {
+  decodeProjectedEnchantedItem,
+  projectEnchantedItem,
+} from './enchanted-item-state'
 import {
   advanceProjectileRuntime,
   initialProjectileRuntimeState,
@@ -441,7 +449,6 @@ import {
   type PersistedPortalState,
   type PersistedEndPortalFrameState,
   type PersistedVillager,
-  type SessionMetadata,
   type SessionState,
 } from './session-persistence'
 import {
@@ -449,6 +456,7 @@ import {
   createUniqueSessionId,
   readSessionRoute,
   sessionHref,
+  type SessionRoute,
 } from './session-navigation'
 
 /**
@@ -489,6 +497,9 @@ const WORLD_SEED = 20260728
 const FARMLAND_BLOCK_ID = 49
 const POTATO_CROP_BLOCK_ID = 72
 const DATABASE_NAME = 'nerima-games-minecraft'
+const MISSING_SESSION_ERROR = 'The requested saved world could not be found.'
+
+class RequestedSessionNotFoundError extends Error {}
 const AUTOSAVE_INTERVAL_MS = 5_000
 const SAVE_DEBOUNCE_MS = 500
 const KNOWN_TARGET_BLOCK = { x: 8, y: 63, z: 8 } as const
@@ -755,6 +766,9 @@ const bootTitle = async (): Promise<void> => {
   }
   titleScreen.hidden = false
   document.body.setAttribute('data-mc-compose-route', 'title')
+  if (new URLSearchParams(window.location.search).get('loadError') === 'missing-session') {
+    titleStatus.textContent = MISSING_SESSION_ERROR
+  }
 
   const scope = Effect.runSync(Scope.make())
   const storageContext = await Effect.runPromise(
@@ -945,9 +959,10 @@ type MultiplayerRuntime = {
 }
 
 const bootGame = async (
-  sessionId: string,
-  creationMetadata?: SessionMetadata,
+  route: SessionRoute,
 ): Promise<void> => {
+  const { sessionId } = route
+  const creationMetadata = route.kind === 'create' ? route.metadata : undefined
   const gameShell = requireElement('game-shell')
   const pauseOverlay = requireElement('pause-overlay')
   const resumeButton = requireElement('resume-button')
@@ -992,6 +1007,49 @@ const bootGame = async (
   let enchantmentSeed = WORLD_SEED
   const customNames = new Map<string, string>()
   const enchantedItems = new Map<string, EnchantedItem>()
+  type DroppedItemMetadata = {
+    readonly customName?: string
+    readonly enchantedItem?: EnchantedItem
+  }
+  const droppedItemMetadata = new Map<string, DroppedItemMetadata>()
+  const equipmentMetadataKey = (slot: EquipmentSlotId): string => `equipment:${slot}`
+  const containerMetadataKey = (containerId: string, slot: number): string =>
+    `container:${containerId}:${String(slot)}`
+  const containerMetadataLocation = (
+    key: string,
+  ): { readonly containerId: string; readonly slot: number } | undefined => {
+    if (!key.startsWith('container:')) return undefined
+    const separator = key.lastIndexOf(':')
+    const slot = Number(key.slice(separator + 1))
+    if (separator <= 'container:'.length || !Number.isInteger(slot) || slot < 0) return undefined
+    return { containerId: key.slice('container:'.length, separator), slot }
+  }
+  const sameItemMetadata = (left: string, right: string): boolean =>
+    customNames.get(left) === customNames.get(right)
+    && JSON.stringify(enchantedItems.get(left) ?? null)
+      === JSON.stringify(enchantedItems.get(right) ?? null)
+  const copyItemMetadata = (source: string, target: string): void => {
+    const enchantedItem = enchantedItems.get(source)
+    const customName = customNames.get(source)
+    if (enchantedItem === undefined) enchantedItems.delete(target)
+    else enchantedItems.set(target, enchantedItem)
+    if (customName === undefined) customNames.delete(target)
+    else customNames.set(target, customName)
+  }
+  const deleteItemMetadata = (key: string): void => {
+    enchantedItems.delete(key)
+    customNames.delete(key)
+  }
+  const deleteContainerMetadata = (containerId: string): void => {
+    const prefix = `container:${containerId}:`
+    for (const key of [...customNames.keys(), ...enchantedItems.keys()]) {
+      if (key.startsWith(prefix)) deleteItemMetadata(key)
+    }
+  }
+  const moveItemMetadata = (source: string, target: string): void => {
+    copyItemMetadata(source, target)
+    deleteItemMetadata(source)
+  }
   let respawnLocation: SleepLocation | null = null
   let sleepRuntimeState = initialSleepRuntimeState()
   let anvilName = ''
@@ -1147,6 +1205,14 @@ const bootGame = async (
   const loadedSession = await runStorage(
     Effect.provide(loadSession(sessionId), storageContext),
   )
+  if (route.kind === 'load' && Option.isNone(loadedSession)) {
+    throw new RequestedSessionNotFoundError(MISSING_SESSION_ERROR)
+  }
+  if (route.kind === 'create') {
+    const canonicalUrl = new URL(window.location.href)
+    canonicalUrl.search = new URLSearchParams({ session: sessionId }).toString()
+    window.history.replaceState(null, '', canonicalUrl)
+  }
   const sessionMetadata = Option.isSome(loadedSession)
     ? loadedSession.value.metadata
     : creationMetadata ?? { name: sessionId, mode: 'survival' }
@@ -1286,15 +1352,40 @@ const bootGame = async (
   const restoredWorkstations = Option.isSome(loadedSession)
     ? loadedSession.value.state.workstations
     : undefined
+  const resolveMetadataStack = (key: string) => {
+    if (!Option.isSome(loadedSession)) return undefined
+    const storage = loadedSession.value.state.storage
+    if (/^\d+$/.test(key)) {
+      const slot = Number(key)
+      const stack = storage.inventory.slots[slot]
+      if (stack === undefined) return undefined
+      return { stack, durability: storage.inventoryDurability[slot] ?? undefined }
+    }
+    if (key.startsWith('equipment:')) {
+      const slot = key.slice('equipment:'.length)
+      if (!(slot in storage.equipment.slots)) return undefined
+      const item = storage.equipment.slots[slot as EquipmentSlotId]
+      if (item === null || item === undefined) return undefined
+      return { stack: itemStack(item.item, item.count), durability: item.durability }
+    }
+    const location = containerMetadataLocation(key)
+    if (location === undefined) return undefined
+    const stack = loadedSession.value.state.containerStorage.containers
+      .find((container) => container.id === location.containerId)
+      ?.slots[location.slot]
+    return stack === null || stack === undefined
+      ? undefined
+      : { stack: itemStack(stack.item, stack.count), durability: stack.durability ?? undefined }
+  }
   for (const [slot, name] of Object.entries(restoredWorkstations?.customNames ?? {})) {
+    if (resolveMetadataStack(slot) === undefined) continue
     customNames.set(slot, name)
   }
   for (const [slot, encoded] of Object.entries(restoredWorkstations?.enchantedItems ?? {})) {
-    try {
-      enchantedItems.set(slot, JSON.parse(encoded) as EnchantedItem)
-    } catch {
-      // Ignore a malformed optional workstation entry without losing the world save.
-    }
+    const resolved = resolveMetadataStack(slot)
+    if (resolved === undefined) continue
+    const restored = decodeProjectedEnchantedItem(encoded, resolved.stack, resolved.durability)
+    if (restored !== null) enchantedItems.set(slot, restored)
   }
   const restoredRespawn = restoredWorkstations?.respawn
   respawnLocation = restoredRespawn == null
@@ -1583,7 +1674,6 @@ const bootGame = async (
 
   let dirtyGeneration = 0
   let savedGeneration = 0
-  let publishingGeneration = 0
   let debounceTimer: number | undefined
 
   const reportPersistenceFailure = (error: unknown): void => {
@@ -1602,54 +1692,52 @@ const bootGame = async (
       )
       return residents.flat()
     },
-    snapshotState: () => {
-      publishingGeneration = dirtyGeneration
-      return {
-        seed: activeSeed,
-        dimension: Effect.runSync(world.player.dimension),
-        player: Effect.runSync(world.player.pose),
-        storage: Effect.runSync(world.inventory.storageSnapshot),
-        containerStorage: Effect.runSync(world.inventory.containerStorageSnapshot),
-        vitals: Effect.runSync(world.vitals.snapshot),
-        time: Effect.runSync(time.snapshot),
-        weather: Effect.runSync(weather.snapshot),
-        redstone: { levers: [...leverStates.values()] },
-        furnaces: [...furnaceStates.values()],
-        portals: [...portalStates.values()],
-        crops: Effect.runSync(crops.snapshot),
-        entities: Effect.runSync(world.entities.snapshot),
-        villagers: {
-          residents: [...villagerResidents.values()],
-          trades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
-        },
-        brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
-        statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
-        wither: snapshotWitherRuntime(witherRuntimeState),
-        fishing: {
-          result: fishingResult,
-          phase: fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
-          water: fishingWater ?? null,
-        },
-        vehicles: [...vehicles.values()],
-        mountedVehicleId: mountedVehicleId ?? null,
-        end: {
-          frames: [...endPortalFrames.values()],
-          portalComplete: endPortalComplete,
-          dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
-          exitPortalMaterialized,
-          dragonEggRewarded,
-        },
-        workstations: {
-          enchantmentSeed,
-          customNames: Object.fromEntries(customNames),
-          enchantedItems: Object.fromEntries(
-            [...enchantedItems].map(([slot, item]) => [slot, JSON.stringify(item)]),
-          ),
-          deathDropDimension,
-          respawn: respawnLocation,
-        },
-      }
-    },
+    currentGeneration: () => dirtyGeneration,
+    snapshotState: () => ({
+      seed: activeSeed,
+      dimension: Effect.runSync(world.player.dimension),
+      player: Effect.runSync(world.player.pose),
+      storage: Effect.runSync(world.inventory.storageSnapshot),
+      containerStorage: Effect.runSync(world.inventory.containerStorageSnapshot),
+      vitals: Effect.runSync(world.vitals.snapshot),
+      time: Effect.runSync(time.snapshot),
+      weather: Effect.runSync(weather.snapshot),
+      redstone: { levers: [...leverStates.values()] },
+      furnaces: [...furnaceStates.values()],
+      portals: [...portalStates.values()],
+      crops: Effect.runSync(crops.snapshot),
+      entities: Effect.runSync(world.entities.snapshot),
+      villagers: {
+        residents: [...villagerResidents.values()],
+        trades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
+      },
+      brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
+      statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
+      wither: snapshotWitherRuntime(witherRuntimeState),
+      fishing: {
+        result: fishingResult,
+        phase: fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
+        water: fishingWater ?? null,
+      },
+      vehicles: [...vehicles.values()],
+      mountedVehicleId: mountedVehicleId ?? null,
+      end: {
+        frames: [...endPortalFrames.values()],
+        portalComplete: endPortalComplete,
+        dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
+        exitPortalMaterialized,
+        dragonEggRewarded,
+      },
+      workstations: {
+        enchantmentSeed,
+        customNames: Object.fromEntries(customNames),
+        enchantedItems: Object.fromEntries(
+          [...enchantedItems].map(([slot, item]) => [slot, JSON.stringify(item)]),
+        ),
+        deathDropDimension,
+        respawn: respawnLocation,
+      },
+    }),
     publish: ({ state, chunks }) =>
       runStorage(
         Effect.provide(
@@ -1663,8 +1751,8 @@ const bootGame = async (
           storageContext,
         ),
       ).then(() => undefined),
-    onPublished: () => {
-      savedGeneration = Math.max(savedGeneration, publishingGeneration)
+    onPublished: (publishedGeneration) => {
+      savedGeneration = Math.max(savedGeneration, publishedGeneration)
       if (savedGeneration === dirtyGeneration) {
         document.body.setAttribute('data-session-persistence', 'saved')
       }
@@ -2363,12 +2451,21 @@ const bootGame = async (
         .slots[pending.slotIndex]?.item ?? null
       if (currentItem !== pending.item) continue
 
+      const enchantedItem = projectedInventoryEnchantedItem(pending.slotIndex)
+      const appliedWear = enchantedItem === null
+        ? 1
+        : durabilityWearWithEnchantments(1, enchantedItem, [Math.random()])
+      if (appliedWear === 0) continue
       const damageResult = Effect.runSync(
         world.inventory.damageAt(
           { _tag: 'Inventory', slotIndex: pending.slotIndex },
-          1,
+          appliedWear,
         ),
       )
+      if (damageResult._tag === 'Broken') {
+        enchantedItems.delete(String(pending.slotIndex))
+        customNames.delete(String(pending.slotIndex))
+      }
       if (damageResult._tag === 'Damaged' || damageResult._tag === 'Broken') {
         markSessionDirty()
       }
@@ -3073,10 +3170,81 @@ const bootGame = async (
   let chestFocus: ChestStorageSlotTarget = { region: 'chest', slot: 0 }
   let chestSelected: ChestStorageSlotTarget | undefined
   let chestStatus = ''
+  let carriedEnchantedItem: EnchantedItem | undefined
+  let carriedCustomName: string | undefined
+  const metadataMatches = (slotIndex: number): boolean => {
+    const slotKey = String(slotIndex)
+    return JSON.stringify(enchantedItems.get(slotKey)) === JSON.stringify(carriedEnchantedItem)
+      && customNames.get(slotKey) === carriedCustomName
+  }
   const inventoryInteraction = createInventoryInteraction(world.inventory, {
+    canInventoryClick: ({ slotIndex, slotBefore, carriedBefore }) =>
+      carriedBefore === undefined || slotBefore === undefined || carriedBefore.item !== slotBefore.item
+      || metadataMatches(slotIndex),
     onCrafted: () => markSessionDirty(),
     onInventoryChanged: () => markSessionDirty(),
+    onInventoryReset: () => {
+      carriedEnchantedItem = undefined
+      carriedCustomName = undefined
+    },
+    onInventoryTransition: ({ slotIndex, slotBefore, carriedBefore, result }) => {
+      const slotKey = String(slotIndex)
+      const slotEnchantment = enchantedItems.get(slotKey)
+      const slotCustomName = customNames.get(slotKey)
+      if (result._tag === 'PickedUp') {
+        carriedEnchantedItem = slotEnchantment
+        carriedCustomName = slotCustomName
+        if (slotBefore === undefined || result.carried === undefined
+          || result.carried.count >= slotBefore.count) {
+          enchantedItems.delete(slotKey)
+          customNames.delete(slotKey)
+        }
+        return
+      }
+      if (result._tag === 'Placed' || result._tag === 'Merged') {
+        if (carriedEnchantedItem === undefined) enchantedItems.delete(slotKey)
+        else enchantedItems.set(slotKey, carriedEnchantedItem)
+        if (carriedCustomName === undefined) customNames.delete(slotKey)
+        else customNames.set(slotKey, carriedCustomName)
+        if (result.carried === undefined) {
+          carriedEnchantedItem = undefined
+          carriedCustomName = undefined
+        }
+        return
+      }
+      if (result._tag === 'Swapped' && carriedBefore !== undefined) {
+        if (carriedEnchantedItem === undefined) enchantedItems.delete(slotKey)
+        else enchantedItems.set(slotKey, carriedEnchantedItem)
+        if (carriedCustomName === undefined) customNames.delete(slotKey)
+        else customNames.set(slotKey, carriedCustomName)
+        carriedEnchantedItem = slotEnchantment
+        carriedCustomName = slotCustomName
+      }
+    },
   })
+  const projectedInventoryEnchantedItem = (slotIndex: number): EnchantedItem | null => {
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    return projectEnchantedItem(
+      storage.inventory.slots[slotIndex],
+      storage.inventoryDurability[slotIndex],
+      enchantedItems.get(String(slotIndex)),
+    )
+  }
+  const inventoryMeleeDamage = (slotIndex: number): number => {
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const selectedItem = storage.inventory.slots[slotIndex]?.item ?? null
+    const baseDamage = meleeDamageForItem(
+      selectedItem === null ? null : gameplayModuleItem(selectedItem),
+    )
+    const enchantedItem = projectEnchantedItem(
+      storage.inventory.slots[slotIndex],
+      storage.inventoryDurability[slotIndex],
+      enchantedItems.get(String(slotIndex)),
+    )
+    return enchantedItem === null
+      ? baseDamage
+      : meleeDamageWithEnchantments(baseDamage, enchantedItem)
+  }
   const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
   const coordinateKey = (x: number, y: number, z: number): string => `${x},${y},${z}`
   const targetedBrewingStand = (): Effect.Effect<boolean> => Effect.gen(function* () {
@@ -3346,9 +3514,23 @@ const bootGame = async (
   ): void => {
     if (isCreativeMode) return
     const equipment = Effect.runSync(world.inventory.equipmentSnapshot)
-    const reducedDamage = applyArmorToDamage(damage, armorPointsForEquipment(equipment))
+    const enchantedArmor = (['head', 'chest', 'legs', 'feet'] as const).flatMap((slot) => {
+      const equippedItem = equipment.slots[slot]
+      if (equippedItem === null) return []
+      const projected = projectEnchantedItem(
+        itemStack(equippedItem.item, equippedItem.count),
+        equippedItem.durability ?? undefined,
+        enchantedItems.get(equipmentMetadataKey(slot)),
+      )
+      return projected === null ? [] : [projected]
+    })
+    const reducedDamage = armorDamageWithEnchantments(
+      damage,
+      armorPointsForEquipment(equipment),
+      enchantedArmor,
+    )
     const healthBefore = Effect.runSync(world.vitals.view).healthPoints
-    const damageOutcome = Effect.runSync(world.vitals.damage(reducedDamage))
+    Effect.runSync(world.vitals.damage(reducedDamage))
     const damagedVitals = Effect.runSync(world.vitals.snapshot)
     if (damagedVitals.healthPoints < minimumHealthPoints) {
       Effect.runSync(world.vitals.restore({
@@ -3362,15 +3544,30 @@ const bootGame = async (
       if (wear > 0) {
         for (const slot of ['head', 'chest', 'legs', 'feet'] as const) {
           if (equipment.slots[slot] !== null) {
-            Effect.runSync(
-              world.inventory.damageAt({ _tag: 'Equipment', slot }, wear),
+            const enchantedItem = enchantedArmor.find(
+              (item) => item.item === equipment.slots[slot]?.item,
             )
+            const appliedWear = enchantedItem === undefined
+              ? wear
+              : durabilityWearWithEnchantments(
+                  wear,
+                  enchantedItem,
+                  Array.from({ length: wear }, () => Math.random()),
+                )
+            if (appliedWear === 0) continue
+            const result = Effect.runSync(
+              world.inventory.damageAt({ _tag: 'Equipment', slot }, appliedWear),
+            )
+            if (result._tag === 'Broken') {
+              enchantedItems.delete(equipmentMetadataKey(slot))
+              customNames.delete(equipmentMetadataKey(slot))
+            }
           }
         }
       }
       audio.play('playerHurt')
     }
-    if (damageOutcome.died && playerIsDead() && multiplayer === undefined) {
+    if (healthBefore > 0 && playerIsDead() && multiplayer === undefined) {
       handleLocalPlayerDeath()
     }
     if (playerIsDead()) {
@@ -3385,10 +3582,16 @@ const bootGame = async (
   let deathDropDimension: SessionState['dimension'] | undefined =
     restoredWorkstations?.deathDropDimension
   const handleLocalPlayerDeath = (): void => {
-    const deathPosition = Effect.runSync(world.player.pose).at
+    const deathPosition = Effect.runSync(world.player.pose).feetPosition
     const storage = Effect.runSync(world.inventory.storageSnapshot)
     const drops = deathDropsFromPlayerStorage(storage, deathPosition)
-    if (drops.length > 0) Effect.runSync(spawnDroppedItems(world.entities, drops))
+    if (drops.length > 0) {
+      const dropped = Effect.runSync(spawnDroppedItems(
+        world.entities,
+        drops.map((drop) => ({ ...drop, eligibleFromFrame: Number.MAX_SAFE_INTEGER })),
+      ))
+      dropped.forEach((entity) => droppedItemMetadata.set(String(entity.id), {}))
+    }
     Effect.runSync(world.inventory.restoreStorage(emptyPlayerStorage()))
     const vitals = Effect.runSync(world.vitals.snapshot)
     Effect.runSync(world.vitals.restore(addVitalsExperience(vitals, -vitals.totalExperience)))
@@ -3483,13 +3686,11 @@ const bootGame = async (
         (count, slot) => count + (slot?.item === 'lapis_lazuli' ? slot.count : 0),
         0,
       )
-      const item = selectedStack == null
-        ? null
-        : enchantedItems.get(selectedSlotKey) ?? {
-            item: selectedStack.item,
-            durability: null,
-            enchantments: [],
-          }
+      const item = projectEnchantedItem(
+        selectedStack,
+        storage.inventoryDurability[selectedHotbarIndex],
+        enchantedItems.get(selectedSlotKey),
+      )
       const playerLevel = Effect.runSync(world.vitals.view).experienceLevel
       const offers = enchantmentOffers(enchantmentSeed, 15)
       enchantingView.render(enchantingTableViewModel({
@@ -3668,6 +3869,23 @@ const bootGame = async (
       renderPlayerUi()
       return
     }
+    const destinationStack = target.region === 'chest'
+      ? container?.slots[target.slot]
+      : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[target.slot]
+    const sourceMetadataKey = source.region === 'chest'
+      ? containerMetadataKey(activeChestId, source.slot)
+      : String(source.slot)
+    const destinationMetadataKey = target.region === 'chest'
+      ? containerMetadataKey(activeChestId, target.slot)
+      : String(target.slot)
+    if (
+      destinationStack?.item === sourceStack.item
+      && !sameItemMetadata(sourceMetadataKey, destinationMetadataKey)
+    ) {
+      chestStatus = 'Destination contains different item metadata'
+      renderPlayerUi()
+      return
+    }
     const result = Effect.runSync(world.inventory.transferContainerItem({
       direction: source.region === 'chest' ? 'ContainerToPlayer' : 'PlayerToContainer',
       containerId: activeChestId,
@@ -3676,6 +3894,11 @@ const bootGame = async (
       count: sourceStack.count,
     }))
     if (result._tag === 'Transferred') {
+      const remainingSource = source.region === 'chest'
+        ? Effect.runSync(world.inventory.containerSnapshot(activeChestId))?.slots[source.slot]
+        : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[source.slot]
+      copyItemMetadata(sourceMetadataKey, destinationMetadataKey)
+      if (remainingSource == null) deleteItemMetadata(sourceMetadataKey)
       chestSelected = undefined
       chestStatus = `Moved ${String(result.count)} ${result.item}`
       markSessionDirty()
@@ -3820,7 +4043,6 @@ const bootGame = async (
   const completeInventoryAction = (): void => {
     equipmentActionStatus = ''
     document.body.setAttribute('data-equipment-action', 'accepted')
-    inventoryInteraction.reset()
     markSessionDirty()
     renderPlayerUi()
   }
@@ -3831,7 +4053,10 @@ const bootGame = async (
     inventorySlot?: number,
   ): void => {
     const result = Effect.runSync(world.inventory.unequipToInventory(slot, inventorySlot))
-    if (result._tag === 'Unequipped') completeInventoryAction()
+    if (result._tag === 'Unequipped') {
+      moveItemMetadata(equipmentMetadataKey(slot), String(result.slotIndex))
+      completeInventoryAction()
+    }
     else rejectInventoryAction(action, result._tag === 'Empty'
       ? 'Equipment slot is empty'
       : result._tag === 'OccupiedInventorySlot'
@@ -3847,7 +4072,10 @@ const bootGame = async (
     equipmentSlot: EquipmentSlotId,
   ): void => {
     const result = Effect.runSync(world.inventory.equipFromInventory(inventorySlot, equipmentSlot))
-    if (result._tag === 'Equipped') completeInventoryAction()
+    if (result._tag === 'Equipped') {
+      moveItemMetadata(String(inventorySlot), equipmentMetadataKey(equipmentSlot))
+      completeInventoryAction()
+    }
     else rejectInventoryAction(action, result._tag === 'Empty'
       ? 'Inventory slot is empty'
       : result._tag === 'Occupied'
@@ -3896,8 +4124,15 @@ const bootGame = async (
   }
 
   const removeInventoryItem = (item: ItemStack['item'], count: number): boolean => {
+    if (!Number.isSafeInteger(count) || count < 0) return false
+    if (count === 0) return true
     let remaining = count
     const slots = Effect.runSync(world.inventory.snapshot).slots
+    const available = slots.reduce(
+      (total, stack) => total + (stack?.item === item ? stack.count : 0),
+      0,
+    )
+    if (available < count) return false
     for (let index = 0; index < slots.length && remaining > 0; index += 1) {
       const stack = slots[index]
       if (stack?.item !== item) continue
@@ -3930,9 +4165,9 @@ const bootGame = async (
   }
 
   const activateEnchantingOffer = (slot: 0 | 1 | 2): void => {
-    const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
-    if (selected === undefined) return
     const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const selected = storage.inventory.slots[selectedHotbarIndex]
+    if (selected === undefined) return
     const lapis = storage.inventory.slots.reduce(
       (count, stack) => count + (stack?.item === 'lapis_lazuli' ? stack.count : 0),
       0,
@@ -3945,14 +4180,22 @@ const bootGame = async (
       bookshelfCount: 15,
       playerLevel,
       lapis,
-      item: enchantedItems.get(key) ?? { item: selected.item, durability: null, enchantments: [] },
+      item: projectEnchantedItem(
+        selected,
+        storage.inventoryDurability[selectedHotbarIndex],
+        enchantedItems.get(key),
+      ),
     }, enchantmentOffers(enchantmentSeed, 15)[slot])
     if (!result.ok || result.state.item === null) {
       enchantingStatus = result.ok ? 'No item selected' : result.reason
       renderPlayerUi()
       return
     }
-    removeInventoryItem('lapis_lazuli', lapis - result.state.lapis)
+    if (!removeInventoryItem('lapis_lazuli', lapis - result.state.lapis)) {
+      enchantingStatus = 'Lapis cost could not be consumed'
+      renderPlayerUi()
+      return
+    }
     enchantedItems.set(key, result.state.item)
     enchantmentSeed = result.state.seed
     Effect.runSync(world.vitals.restore(addVitalsExperience(
@@ -4196,10 +4439,11 @@ const bootGame = async (
     Effect.runSync(world.player.restore(respawnPose, respawnDimension))
     alignActiveDimension(respawnDimension)
     resetSimState(true)
-    setInventoryOpen(false)
-    syncTouchControls()
-    markSessionDirty()
-  }
+	setInventoryOpen(false)
+	syncTouchControls()
+	renderPlayerUi()
+	markSessionDirty()
+}
 
   hudParent.addEventListener('click', (event) => {
     if (!(event.target instanceof Element)) return
@@ -4495,6 +4739,10 @@ const bootGame = async (
         equipment: storage.equipment.slots,
       },
       containerStorage,
+      itemMetadata: {
+        customNames: Object.fromEntries(customNames),
+        enchantedItems: Object.fromEntries(enchantedItems),
+      },
       chestUi: {
         open: inventoryOpen && inventoryMode === 'chest',
         activeChestId: activeChestId ?? null,
@@ -5293,6 +5541,49 @@ const bootGame = async (
       namespace: 'gameplay',
       commands: {
         snapshot: gameplaySnapshot,
+        seedChestTransferMetadata: () => {
+          Effect.runSync(world.inventory.reset)
+          for (const key of [...customNames.keys(), ...enchantedItems.keys()]) {
+            if (/^\d+$/.test(key)) deleteItemMetadata(key)
+          }
+          Effect.runSync(world.inventory.add('diamond_pickaxe', 1))
+          const durability = Effect.runSync(world.inventory.storageSnapshot).inventoryDurability[0]
+          if (durability === null || durability === undefined) {
+            throw new Error('seeded diamond pickaxe has no durability')
+          }
+          customNames.set('0', 'Silk Runner')
+          enchantedItems.set('0', {
+            item: 'diamond_pickaxe',
+            durability,
+            enchantments: [{ id: 'efficiency', level: 5 }],
+          })
+          markSessionDirty()
+          renderPlayerUi()
+          return gameplaySnapshot()
+        },
+        seedChestTransferMetadataConflict: () => {
+          Effect.runSync(world.inventory.add('diamond_pickaxe', 1))
+          const durability = Effect.runSync(world.inventory.storageSnapshot).inventoryDurability[0]
+          if (durability === null || durability === undefined) {
+            throw new Error('seeded diamond pickaxe has no durability')
+          }
+          customNames.set('0', 'Fortune Runner')
+          enchantedItems.set('0', {
+            item: 'diamond_pickaxe',
+            durability,
+            enchantments: [{ id: 'fortune', level: 3 }],
+          })
+          markSessionDirty()
+          renderPlayerUi()
+          return gameplaySnapshot()
+        },
+        seedStaleCustomNames: () => {
+          customNames.set('35', 'Stale inventory name')
+          customNames.set('equipment:head', 'Stale equipment name')
+          customNames.set('unknown:slot', 'Stale unknown name')
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
         setWeather: () => {
           const qaWeather: WeatherState = { weather: 'thunder', remainingSecs: 300 }
           Effect.runSync(weather.applyTransition(qaWeather))
@@ -5534,12 +5825,16 @@ const bootGame = async (
         },
         seedLethalZombieEncounter: () => {
           respawnPlayer()
+          Effect.runSync(world.inventory.reset)
+          Effect.runSync(world.inventory.add('stone_pickaxe', 1))
+          Effect.runSync(world.inventory.add('potato', 2))
+          Effect.runSync(world.inventory.add('torch', 8))
+          Effect.runSync(world.inventory.add('oak_planks', 4))
           Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
           Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
           Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
-          applyPlayerDamage({ amount: 18, cause: 'generic' })
           const currentPose = Effect.runSync(playerApi.pose)
           Effect.runSync(requestMobSpawn(gameplayState, {
             kind: ZOMBIE_KIND,
@@ -5557,7 +5852,9 @@ const bootGame = async (
               distanceToPlayerBlocksXZ: 16,
             },
           }))
+          applyPlayerDamage({ amount: 20, cause: 'mob' })
           markSessionDirty()
+          renderPlayerUi()
           return gameplaySnapshot()
         },
         seedFoodUseEncounter: () => {
@@ -5809,6 +6106,7 @@ const bootGame = async (
     simulationElapsedSecs += deltaSecs
 
     const dead = playerIsDead()
+    let deadAfterFrame = dead
     syncTouchControls()
     if (dead) {
       if (inventoryOpen) setInventoryOpen(false)
@@ -6092,6 +6390,82 @@ const bootGame = async (
       return
     }
 
+    const playerPosition = Effect.runSync(playerApi.pose).feetPosition
+    for (const entity of Effect.runSync(world.entities.entities)) {
+      if (deadAfterFrame) break
+      const metadata = droppedItemMetadata.get(String(entity.id))
+      if (metadata === undefined || !isDroppedItemBehaviour(entity.behaviour)) continue
+      const dx = entity.feetPosition.x - playerPosition.x
+      const dy = entity.feetPosition.y - playerPosition.y
+      const dz = entity.feetPosition.z - playerPosition.z
+      if (dx * dx + dy * dy + dz * dz > 1.5 * 1.5) continue
+
+      const storage = Effect.runSync(world.inventory.storageSnapshot)
+      const slots = [...storage.inventory.slots]
+      const durability = [...storage.inventoryDurability]
+      const destinations: number[] = []
+      const maxCount = maxStackCountForItem(entity.behaviour.item)
+      let remaining = entity.behaviour.count
+      const sameDurability = (slot: number): boolean =>
+        JSON.stringify(durability[slot] ?? null)
+          === JSON.stringify(entity.behaviour.durability ?? null)
+      const metadataMatches = (slot: number): boolean => {
+        const key = String(slot)
+        return customNames.get(key) === metadata.customName
+          && JSON.stringify(enchantedItems.get(key) ?? null)
+            === JSON.stringify(metadata.enchantedItem ?? null)
+      }
+
+      for (let slot = 0; slot < slots.length && remaining > 0; slot += 1) {
+        const current = slots[slot]
+        if (current === undefined || current.item !== entity.behaviour.item
+          || current.count >= maxCount || !sameDurability(slot) || !metadataMatches(slot)) continue
+        const accepted = Math.min(maxCount - current.count, remaining)
+        slots[slot] = itemStack(current.item, current.count + accepted)
+        destinations.push(slot)
+        remaining -= accepted
+      }
+      for (let slot = 0; slot < slots.length && remaining > 0; slot += 1) {
+        if (slots[slot] !== undefined) continue
+        const accepted = Math.min(maxCount, remaining)
+        slots[slot] = itemStack(entity.behaviour.item, accepted)
+        durability[slot] = entity.behaviour.durability ?? null
+        destinations.push(slot)
+        remaining -= accepted
+      }
+      if (remaining === entity.behaviour.count) continue
+
+      Effect.runSync(world.inventory.restoreStorage({
+        ...storage,
+        inventory: { slots },
+        inventoryDurability: durability,
+      }))
+      for (const slot of destinations) {
+        const key = String(slot)
+        if (metadata.customName === undefined) customNames.delete(key)
+        else customNames.set(key, metadata.customName)
+        if (metadata.enchantedItem === undefined) enchantedItems.delete(key)
+        else enchantedItems.set(key, metadata.enchantedItem)
+      }
+      if (remaining === 0) {
+        Effect.runSync(world.entities.despawn(entity.id))
+        droppedItemMetadata.delete(String(entity.id))
+      } else {
+        Effect.runSync(world.entities.sweep((candidate) => ({
+          transition: candidate.id === entity.id && isDroppedItemBehaviour(candidate.behaviour)
+            ? changed({
+                feetPosition: candidate.feetPosition,
+                healthPoints: candidate.healthPoints,
+                behaviour: { ...candidate.behaviour, count: remaining },
+              })
+            : UNCHANGED,
+          emit: undefined,
+        })))
+      }
+      markSessionDirty()
+      renderPlayerUi()
+    }
+
     const villagerTradeResults = Effect.runSync(drainVillagerTradeResults(gameplayState))
     for (const result of villagerTradeResults) {
       if (result.villagerId !== activeVillagerId) continue
@@ -6138,6 +6512,14 @@ const bootGame = async (
       if (reading._tag !== 'Block' || reading.block === pending.blockId) continue
       if (pending.blockId === blockIdOf('chest')) {
         const id = containerIdAt(pending.dimension, pending.position)
+        const container = Effect.runSync(world.inventory.containerStorageSnapshot).containers
+          .find((candidate) => candidate.id === id)
+        const slotMetadata = container?.slots.flatMap((stack, slot) => stack === null
+          ? []
+          : [{
+              customName: customNames.get(containerMetadataKey(id, slot)),
+              enchantedItem: enchantedItems.get(containerMetadataKey(id, slot)),
+            }]) ?? []
         const drained = Effect.runSync(world.inventory.drainContainer(id))
         if (drained._tag === 'Drained') {
           const at = {
@@ -6146,11 +6528,24 @@ const bootGame = async (
             z: pending.position.z + 0.5,
           }
           if (drained.items.length > 0) {
-            Effect.runSync(spawnDroppedItems(
+            const dropped = Effect.runSync(spawnDroppedItems(
               world.entities,
-              drained.items.map((stack) => ({ ...stack, at })),
+              drained.items.map((stack, index) => ({
+                ...stack,
+                at,
+                ...(slotMetadata[index]?.customName === undefined
+                    && slotMetadata[index]?.enchantedItem === undefined
+                  ? {}
+                  : { eligibleFromFrame: Number.MAX_SAFE_INTEGER }),
+              })),
             ))
+            dropped.forEach((entity, index) => {
+              const metadata = slotMetadata[index]
+              if (metadata?.customName === undefined && metadata?.enchantedItem === undefined) return
+              droppedItemMetadata.set(String(entity.id), metadata)
+            })
           }
+          deleteContainerMetadata(id)
           markSessionDirty()
         }
         if (activeChestId === id && inventoryOpen && inventoryMode === 'chest') {
@@ -6195,13 +6590,24 @@ const bootGame = async (
       const selected = Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]
       if (selected?.item !== pending.item) continue
 
-      Effect.runSync(
+      const enchantedItem = projectedInventoryEnchantedItem(pending.slotIndex)
+      const appliedWear = enchantedItem === null
+        ? 1
+        : durabilityWearWithEnchantments(1, enchantedItem, [Math.random()])
+      if (appliedWear === 0) continue
+      const damageResult = Effect.runSync(
         world.inventory.damageAt(
           { _tag: 'Inventory', slotIndex: pending.slotIndex },
-          1,
+          appliedWear,
         ),
       )
-      markSessionDirty()
+      if (damageResult._tag === 'Broken') {
+        enchantedItems.delete(String(pending.slotIndex))
+        customNames.delete(String(pending.slotIndex))
+      }
+      if (damageResult._tag === 'Damaged' || damageResult._tag === 'Broken') {
+        markSessionDirty()
+      }
     }
 
     const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
@@ -6227,7 +6633,7 @@ const bootGame = async (
         if (document.pointerLockElement === canvas) document.exitPointerLock()
       }
     }
-    let deadAfterFrame = playerIsDead()
+    deadAfterFrame = playerIsDead()
 
     // A portal may change dimension in the same frame that gameplay confirms a
     // attack. Settle confirmations before dimension reset clears the outboxes.
@@ -6507,17 +6913,39 @@ const bootGame = async (
       deltaSecs,
     })
     bowUseState = bowAdvance.state
-    if (bowAdvance.release !== null && canFireBow(bowAdvance.release.chargeSecs)) {
-      const settlement = Effect.runSync(world.inventory.consumeAndDamageAt({
-        consume: { item: 'arrow', count: 1 },
-        damage: {
-          location: { _tag: 'Inventory', slotIndex: bowAdvance.release.bowSlotIndex },
-          expectedItem: 'bow',
-          amount: 1,
-        },
-      }))
+    if (
+      bowAdvance.release !== null &&
+      canFireBow(bowAdvance.release.chargeSecs) &&
+      bowInventory.slots[bowAdvance.release.bowSlotIndex]?.item === 'bow'
+    ) {
+      const enchantedBow = projectedInventoryEnchantedItem(bowAdvance.release.bowSlotIndex)
+      const appliedWear = enchantedBow === null
+        ? 1
+        : durabilityWearWithEnchantments(1, enchantedBow, [Math.random()])
+      const settlement = appliedWear === 0
+        ? (() => {
+            const arrowSlotIndex = bowInventory.slots.findIndex((slot) => slot?.item === 'arrow')
+            if (arrowSlotIndex < 0) return { _tag: 'MissingConsumable' } as const
+            const result = Effect.runSync(world.inventory.removeAt(arrowSlotIndex, 'arrow', 1))
+            return result._tag === 'Removed'
+              ? { _tag: 'Applied' } as const
+              : { _tag: 'MissingConsumable' } as const
+          })()
+        : Effect.runSync(world.inventory.consumeAndDamageAt({
+            consume: { item: 'arrow', count: 1 },
+            damage: {
+              location: { _tag: 'Inventory', slotIndex: bowAdvance.release.bowSlotIndex },
+              expectedItem: 'bow',
+              amount: appliedWear,
+            },
+          }))
       if (settlement._tag === 'Applied') {
+        if ('damage' in settlement && settlement.damage._tag === 'Broken') {
+          enchantedItems.delete(String(bowAdvance.release.bowSlotIndex))
+          customNames.delete(String(bowAdvance.release.bowSlotIndex))
+        }
         const charge = bowCharge(bowAdvance.release.chargeSecs)
+        const baseDamage = bowDamage(charge)
         projectileRuntimeState = launchRuntimeProjectile(projectileRuntimeState, {
           dimension: dimensionAfterFrame,
           position: {
@@ -6528,7 +6956,9 @@ const bootGame = async (
           yawRadians: postFramePose.yawRadians,
           pitchRadians: -postFramePose.pitchRadians,
           speed: 8 + 24 * charge,
-          damage: bowDamage(charge),
+          damage: enchantedBow === null
+            ? baseDamage
+            : bowDamageWithEnchantments(baseDamage, enchantedBow),
           knockback: 0.35 + 0.65 * charge,
           shooterId: 'player',
         })
@@ -6586,11 +7016,10 @@ const bootGame = async (
         .filter(({ distance, alignment }) => distance <= DEFAULT_BLOCK_REACH && alignment >= 0.8)
         .sort((left, right) => left.distance - right.distance)[0]
       if (target !== undefined) {
-        const selectedItem = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]?.item ?? null
         const result = damageRuntimeWither(
           witherRuntimeState,
           target.wither.id,
-          Math.max(1, meleeDamageForItem(selectedItem === null ? null : gameplayModuleItem(selectedItem))),
+          Math.max(1, inventoryMeleeDamage(selectedHotbarIndex)),
           'melee',
         )
         witherRuntimeState = result.state
@@ -6624,10 +7053,7 @@ const bootGame = async (
       }
       const alignment = distance === 0 ? 1 : (dx * forward.x + dy * forward.y + dz * forward.z) / distance
       if (distance <= DEFAULT_BLOCK_REACH + 3 && alignment >= 0.8) {
-        const selectedItem = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]?.item ?? null
-        const damage = meleeDamageForItem(
-          selectedItem === null ? null : gameplayModuleItem(selectedItem),
-        )
+        const damage = inventoryMeleeDamage(selectedHotbarIndex)
         Effect.runSync(gameplayState.enderDragonEncounter.damageByPlayer(Math.max(1, damage)))
         primaryAttackGestureConsumed = true
         markSessionDirty()
@@ -6640,18 +7066,22 @@ const bootGame = async (
       if (primaryAttackGestureConsumed) {
         miningProgress = null
       } else {
-        const inventorySnapshot = Effect.runSync(world.inventory.snapshot)
+        const inventoryStorage = Effect.runSync(world.inventory.storageSnapshot)
+        const inventorySnapshot = inventoryStorage.inventory
         const selectedSlotIndex = selectedHotbarIndex
         const selectedItem = inventorySnapshot.slots[selectedSlotIndex]?.item ?? null
+        const enchantedMiningItem = projectEnchantedItem(
+          inventorySnapshot.slots[selectedSlotIndex],
+          inventoryStorage.inventoryDurability[selectedSlotIndex],
+          enchantedItems.get(String(selectedSlotIndex)),
+        )
         const resolution = Effect.runSync(
           resolveTargetedPrimaryAttack(
             currentChunkStore,
             world.entities,
             playerApi,
             {
-              meleeDamage: meleeDamageForItem(
-                selectedItem === null ? null : gameplayModuleItem(selectedItem),
-              ),
+              meleeDamage: inventoryMeleeDamage(selectedSlotIndex),
             },
           ),
         )
@@ -6696,6 +7126,9 @@ const bootGame = async (
             target,
             isMining: true,
             selectedItem: miningItem,
+            efficiencyLevel: enchantedMiningItem === null
+              ? 0
+              : enchantmentLevel(enchantedMiningItem, 'efficiency'),
             deltaSecs,
           })
           miningProgress = isCreativeMode ? null : advancement.nextProgress
@@ -6733,7 +7166,12 @@ const bootGame = async (
                 requestBlockBreak(
                   gameplayState,
                   target.position,
-                  miningLootContextForItem(miningItem),
+                  {
+                    ...miningLootContextForItem(miningItem),
+                    fortuneLevel: enchantedMiningItem === null
+                      ? 0
+                      : enchantmentLevel(enchantedMiningItem, 'fortune'),
+                  },
                 ),
               )
               pendingBlockBreakConfirmations.push({
@@ -7677,9 +8115,13 @@ const bootGame = async (
 const boot = (): Promise<void> => {
   const route = readSessionRoute(window.location.search)
   if (route === undefined) return bootTitle()
-  return bootGame(route.sessionId, route.kind === 'create' ? route.metadata : undefined)
+  return bootGame(route)
 }
 
 boot().catch((error: unknown) => {
+  if (error instanceof RequestedSessionNotFoundError) {
+    window.location.replace('/?loadError=missing-session')
+    return
+  }
   failBoot('boot threw', error)
 })

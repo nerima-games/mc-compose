@@ -278,40 +278,73 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
   await callQa<unknown>(page, 'gameplay.seedLethalZombieEncounter')
   await expect.poll(async () => {
     const current = await snapshot(page)
-    const simulated = current.entities[0]
-    const rendered = current.renderedEntities[0]
-    return current.entities.length === 1
-      && current.renderedEntities.length === 1
-      && simulated?.kind === 'zombie'
-      && rendered?.kind === 'zombie'
-      && rendered.category === 'hostile'
+    const simulated = current.entities.find((entity) => entity.kind === 'zombie')
+    const rendered = current.renderedEntities.find((entity) => entity.kind === 'zombie')
+    return simulated !== undefined
+      && rendered?.category === 'hostile'
       && simulated.id === rendered.id
   }).toBe(true)
-  const zombieId = (await snapshot(page)).entities[0]?.id
+  const zombieId = (await snapshot(page)).entities
+    .find((entity) => entity.kind === 'zombie')?.id
   expect(zombieId).toBeDefined()
 
   await expect.poll(async () => {
     const current = await snapshot(page)
+    const simulatedZombie = current.entities.find((entity) => entity.kind === 'zombie')
+    const simulatedDrops = current.entities.filter((entity) => entity.kind === 'dropped_item')
+    const renderedZombie = current.renderedEntities.find((entity) => entity.kind === 'zombie')
+    const renderedDrops = current.renderedEntities.filter(
+      (entity) => entity.kind === 'dropped_item',
+    )
     return {
-      simulationIds: current.entities.map((entity) => entity.id),
-      simulationKinds: current.entities.map((entity) => entity.kind),
-      renderedIds: current.renderedEntities.map((entity) => entity.id),
-      renderedKinds: current.renderedEntities.map((entity) => entity.kind),
-      renderedCategories: current.renderedEntities.map((entity) => entity.category),
+      simulationEntityCount: current.entities.length,
+      simulationZombieId: simulatedZombie?.id,
+      simulationDropIds: simulatedDrops.map((entity) => entity.id).sort(),
+      renderedEntityCount: current.renderedEntities.length,
+      renderedZombieId: renderedZombie?.id,
+      renderedZombieCategory: renderedZombie?.category,
+      renderedDropIds: renderedDrops.map((entity) => entity.id).sort(),
+      renderedDropCategories: renderedDrops.map((entity) => entity.category),
       healthPoints: current.vitals.healthPoints,
       dead: current.dead,
       lastDamageCause: current.vitals.lastDamageCause,
     }
   }).toEqual({
-    simulationIds: [zombieId],
-    simulationKinds: ['zombie'],
-    renderedIds: [zombieId],
-    renderedKinds: ['zombie'],
-    renderedCategories: ['hostile'],
+    simulationEntityCount: 5,
+    simulationZombieId: zombieId,
+    simulationDropIds: expect.arrayContaining([
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    ]),
+    renderedEntityCount: 5,
+    renderedZombieId: zombieId,
+    renderedZombieCategory: 'hostile',
+    renderedDropIds: expect.arrayContaining([
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    ]),
+    renderedDropCategories: ['item', 'item', 'item', 'item'],
     healthPoints: 0,
     dead: true,
     lastDamageCause: 'mob',
   })
+
+  const deathSnapshot = await snapshot(page)
+  const dropIds = deathSnapshot.entities
+    .filter((entity) => entity.kind === 'dropped_item')
+    .map((entity) => entity.id)
+    .sort()
+  expect(dropIds).toHaveLength(4)
+  expect(
+    deathSnapshot.renderedEntities
+      .filter((entity) => entity.kind === 'dropped_item')
+      .map((entity) => entity.id)
+      .sort(),
+  ).toEqual(dropIds)
 
   await expect(deathOverlay).toBeVisible()
   await expect(respawn).toBeVisible()
@@ -343,8 +376,23 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
       lastDamageCause: current.vitals.lastDamageCause ?? null,
       dead: current.dead,
       entityCount: current.entityCount,
-      simulationIds: current.entities.map((entity) => entity.id),
-      renderedIds: current.renderedEntities.map((entity) => entity.id),
+      simulationZombieIds: current.entities
+        .filter((entity) => entity.kind === 'zombie')
+        .map((entity) => entity.id),
+      simulationDropIds: current.entities
+        .filter((entity) => entity.kind === 'dropped_item')
+        .map((entity) => entity.id)
+        .sort(),
+      renderedZombieIds: current.renderedEntities
+        .filter((entity) => entity.kind === 'zombie')
+        .map((entity) => entity.id),
+      renderedDropIds: current.renderedEntities
+        .filter((entity) => entity.kind === 'dropped_item')
+        .map((entity) => entity.id)
+        .sort(),
+      renderedDropCategories: current.renderedEntities
+        .filter((entity) => entity.kind === 'dropped_item')
+        .map((entity) => entity.category),
     }
   }).toEqual({
     pose: {
@@ -359,9 +407,12 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
     maxHealthPoints: spawn.vitals.maxHealthPoints,
     lastDamageCause: null,
     dead: false,
-    entityCount: 0,
-    simulationIds: [],
-    renderedIds: [],
+    entityCount: 4,
+    simulationZombieIds: [],
+    simulationDropIds: dropIds,
+    renderedZombieIds: [],
+    renderedDropIds: dropIds,
+    renderedDropCategories: ['item', 'item', 'item', 'item'],
   })
 
   await expect(deathOverlay).toBeHidden()

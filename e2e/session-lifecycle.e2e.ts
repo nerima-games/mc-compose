@@ -1,5 +1,16 @@
 import { expect, test } from '@playwright/test'
 
+test('returns to the title screen when the requested saved world is missing', async ({ page }) => {
+  await page.goto('/?session=missing-e2e-session')
+
+  await expect(page).toHaveURL('/?loadError=missing-session')
+  await expect(page.getByTestId('title-screen')).toBeVisible()
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-route', 'title')
+  await expect(page.locator('#title-status')).toHaveText(
+    'The requested saved world could not be found.',
+  )
+})
+
 test('creates, saves, and reloads a session from the title screen', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByTestId('title-screen')).toBeVisible()
@@ -9,7 +20,7 @@ test('creates, saves, and reloads a session from the title screen', async ({ pag
   await page.locator('[data-mx-ui="menu-world-name"]').fill('E2E Lifecycle')
   await page.locator('[data-menu-action="confirm"]').click()
 
-  await expect(page).toHaveURL(/\?session=e2e-lifecycle-[^&]+&create=1&name=E2E\+Lifecycle&mode=survival$/u)
+  await expect(page).toHaveURL(/\?session=e2e-lifecycle-[^&]+$/u)
   const sessionId = new URL(page.url()).searchParams.get('session')
   expect(sessionId).not.toBeNull()
   await expect(page.getByTestId('game-shell')).toBeVisible()
