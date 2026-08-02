@@ -19,15 +19,17 @@ import {
   type WorldSnapshot,
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
-import { isItemType } from '@nerima-games/mc-kernel'
+import { blockIdOf, isBlockType, isItemType } from '@nerima-games/mc-kernel'
 import { planExplosion, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   CREEPER_KIND,
   ENDERMAN_KIND,
   ZOMBIE_KIND,
   applyFurnaceAdvance,
+  blockLoot,
   dropRollsNeeded,
   furnaceAdvanceChanged,
+  miningLootContextForItem,
   planFurnaceAdvance,
   rollDropsOfKind,
 } from '@nerima-games/mx-gameplay'
@@ -1124,6 +1126,15 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (player === undefined || !isBlockWithinReach(player, message.at)) return rejectMutation(client, message, 'unauthorized-player')
         if (message.block === 'air' || !options.allowedBlocks.has(message.block)) return rejectMutation(client, message, 'unknown-block')
         if (blockAt(message.at) !== null) return rejectMutation(client, message, 'occupied')
+        const inventory = inventories.get(message.player)
+        const sourceSlot = inventory?.selectedSlot ?? -1
+        const sourceStack = sourceSlot >= 0 ? inventory?.slots[sourceSlot] : undefined
+        if (inventory === undefined || sourceStack == null || sourceStack.item !== message.block) {
+          return rejectMutation(client, message, 'unknown-block')
+        }
+        inventory.slots[sourceSlot] = sourceStack.count === 1
+          ? null
+          : { ...sourceStack, count: sourceStack.count - 1 }
         blocks.set(positionKey(message.at), { at: message.at, block: message.block })
         if (message.block === 'chest') {
           const containerId = containerIdAt(message.at)
@@ -1142,6 +1153,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         revision += 1
         notifyStateChanged()
         broadcast({ ...message, world: worldId })
+        broadcast({
+          _tag: 'PlayerInventoryDelta',
+          world: worldId,
+          revision,
+          player: message.player,
+          state: inventorySnapshot(inventory),
+        })
         if (message.block === 'chest' || message.block === 'furnace') broadcast(authoritativeSnapshot())
         return { accepted: true, message }
       }
@@ -1156,8 +1174,26 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (brokenBlock === 'chest') containers.delete(containerIdAt(message.at))
         else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
         revision += 1
+        const inventory = inventories.get(message.player)
+        const heldItem = inventory?.slots[inventory.selectedSlot]?.item
+        const drops = isBlockType(brokenBlock)
+          ? blockLoot(
+              blockIdOf(brokenBlock),
+              miningLootContextForItem(typeof heldItem === 'string' && isItemType(heldItem) ? heldItem : null),
+              Array.from({ length: 4 }, (_, index) => deterministicRoll(
+                `block:${positionKey(message.at)}:${String(revision)}:${String(index)}`,
+              )),
+            ).map((stack, index): AuthoritativeEntityState => ({
+              _tag: 'item-drop',
+              entityId: `block:${positionKey(message.at)}:drop:${String(revision)}:${String(index)}` as AuthoritativeEntityState['entityId'],
+              at: { x: message.at.x + 0.5, y: message.at.y + 0.5, z: message.at.z + 0.5 },
+              stack,
+            }))
+          : []
+        for (const drop of drops) entities.set(drop.entityId, drop)
         notifyStateChanged()
         broadcast({ ...message, world: worldId })
+        for (const drop of drops) broadcast({ _tag: 'EntitySpawnDelta', world: worldId, revision, entity: drop })
         if (brokenBlock === 'chest' || brokenBlock === 'furnace') broadcast(authoritativeSnapshot())
         {
           const events = sleepAuthority.reconcile()

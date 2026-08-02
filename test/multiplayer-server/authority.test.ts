@@ -797,11 +797,16 @@ describe('multiplayer server authoritative state', () => {
   })
 
   it('registers and removes facility state across block placement and break', () => {
+    const state = initialState()
     const fixture = makeFixture({
-      ...initialState(),
+      ...state,
       blocks: [],
       containers: [],
       furnaces: [],
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'chest', count: 1 }, { item: 'furnace', count: 1 }], selectedSlot: 0 },
+      }],
     })
     fixture.sent.length = 0
 
@@ -813,6 +818,14 @@ describe('multiplayer server authoritative state', () => {
       block: 'chest',
     }).accepted).toBe(true)
     expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('select-furnace'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 5,
+      action: { _tag: 'select-slot', slot: 1 },
+    }).accepted).toBe(true)
+    expect(fixture.receive({
       _tag: 'BlockPlace',
       player: playerId('alice'),
       world: worldId('world-1'),
@@ -821,7 +834,8 @@ describe('multiplayer server authoritative state', () => {
     }).accepted).toBe(true)
 
     expect(fixture.persisted.at(-1)).toMatchObject({
-      revision: 6,
+      revision: 7,
+      inventories: [{ player: 'alice', state: { slots: [null, null] } }],
       containers: [{ containerId: 'world-1:1,64,0', slots: [] }],
       furnaces: [{
         furnaceId: '["world-1",2,64,0]',
@@ -833,6 +847,7 @@ describe('multiplayer server authoritative state', () => {
       }],
     })
     expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'PlayerInventoryDelta', revision: 5, state: expect.objectContaining({ slots: expect.arrayContaining([null]) }) }),
       expect.objectContaining({
         _tag: 'AuthoritativeSnapshot',
         revision: 5,
@@ -840,7 +855,7 @@ describe('multiplayer server authoritative state', () => {
       }),
       expect.objectContaining({
         _tag: 'AuthoritativeSnapshot',
-        revision: 6,
+        revision: 7,
         furnaces: [expect.objectContaining({ furnaceId: '["world-1",2,64,0]' })],
       }),
     ]))
@@ -860,13 +875,76 @@ describe('multiplayer server authoritative state', () => {
     }).accepted).toBe(true)
 
     expect(fixture.persisted.at(-1)).toMatchObject({
-      revision: 8,
+      revision: 9,
       containers: [],
       furnaces: [],
     })
     expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 7, containers: [] }),
-      expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 8, containers: [], furnaces: [] }),
+      expect.objectContaining({ _tag: 'EntitySpawnDelta', revision: 8, entity: expect.objectContaining({ _tag: 'item-drop', stack: { item: 'chest', count: 1 } }) }),
+      expect.objectContaining({ _tag: 'EntitySpawnDelta', revision: 9, entity: expect.objectContaining({ _tag: 'item-drop', stack: { item: 'furnace', count: 1 } }) }),
+      expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 8, containers: [] }),
+      expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 9, containers: [], furnaces: [] }),
     ]))
+  })
+
+  it('consumes placed blocks and rejects placement without inventory', () => {
+    const fixture = makeFixture({ ...initialState(), blocks: [], containers: [], furnaces: [] })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BlockPlace',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 1, y: 64, z: 0 },
+      block: 'stone',
+    })).toEqual({
+      accepted: true,
+      message: expect.objectContaining({ _tag: 'BlockPlace', block: 'stone' }),
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        revision: 5,
+        state: expect.objectContaining({ slots: expect.arrayContaining([{ item: 'stone', count: 4 }]) }),
+      }),
+    ]))
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'BlockPlace',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 2, y: 64, z: 0 },
+      block: 'stone',
+    }).accepted).toBe(true)
+    expect(fixture.receive({
+      _tag: 'BlockPlace',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 0, y: 64, z: 1 },
+      block: 'stone',
+    }).accepted).toBe(true)
+    expect(fixture.receive({
+      _tag: 'BlockPlace',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 3, y: 64, z: 0 },
+      block: 'stone',
+    }).accepted).toBe(true)
+    expect(fixture.receive({
+      _tag: 'BlockPlace',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 4, y: 64, z: 0 },
+      block: 'stone',
+    }).accepted).toBe(true)
+    expect(fixture.receive({
+      _tag: 'BlockPlace',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 0, y: 64, z: 2 },
+      block: 'stone',
+    })).toEqual({ accepted: false, reason: 'invalid-mutation' })
+    expect(fixture.persisted.at(-1)).toMatchObject({ revision: 9 })
   })
 })

@@ -81,7 +81,10 @@ const makeFixture = (
     initialState: {
       revision: 0,
       blocks: [],
-      inventories: [],
+      inventories: [
+        { player: playerId('alice'), state: { slots: [{ item: 'stone', count: 16 }, { item: 'dirt', count: 16 }], selectedSlot: 0 } },
+        { player: playerId('bob'), state: { slots: [{ item: 'stone', count: 16 }, { item: 'dirt', count: 16 }], selectedSlot: 0 } },
+      ],
       vitals: [],
       timeWeather: { timeOfDay, weather: 'clear' },
       containers: [],
@@ -339,7 +342,7 @@ describe('authoritative multiplayer server core', () => {
     fixture.receive('socket-a', join('alice'))
     fixture.receive('socket-b', join('bob'))
     fixture.receive('socket-a', {
-      _tag: 'BlockPlace', player: playerId('alice'), at: { x: 3, y: 64, z: 0 }, block: 'dirt',
+      _tag: 'BlockPlace', player: playerId('alice'), at: { x: 3, y: 64, z: 0 }, block: 'stone',
     })
     aliceFrames.length = 0
 
@@ -352,7 +355,7 @@ describe('authoritative multiplayer server core', () => {
       _tag: 'WorldSnapshot',
       revision: 1,
       players: [{ player: 'alice' }, { player: 'bob' }],
-      blocks: [{ at: { x: 3, y: 64, z: 0 }, block: 'dirt' }],
+      blocks: [{ at: { x: 3, y: 64, z: 0 }, block: 'stone' }],
     })
   })
 
