@@ -100,6 +100,7 @@ import {
   addExperience as addVitalsExperience,
   containerIdAt,
   emptyFurnaceState,
+  emptyPlayerStorage,
   equipmentDefinitionFor,
   itemStack,
   makeCropService,
@@ -166,6 +167,7 @@ import {
   initialPlayerSwimmingRuntimeState,
   MAX_SWIMMING_OXYGEN_SECS,
 } from './player-swimming-runtime'
+import { deathDropsFromPlayerStorage } from './player-death'
 import {
   chestStorageCloseIntent,
   chestStorageSlotClickIntent,
@@ -3345,7 +3347,7 @@ const bootGame = async (
     const equipment = Effect.runSync(world.inventory.equipmentSnapshot)
     const reducedDamage = applyArmorToDamage(damage, armorPointsForEquipment(equipment))
     const healthBefore = Effect.runSync(world.vitals.view).healthPoints
-    Effect.runSync(world.vitals.damage(reducedDamage))
+    const damageOutcome = Effect.runSync(world.vitals.damage(reducedDamage))
     const damagedVitals = Effect.runSync(world.vitals.snapshot)
     if (damagedVitals.healthPoints < minimumHealthPoints) {
       Effect.runSync(world.vitals.restore({
@@ -3367,6 +3369,9 @@ const bootGame = async (
       }
       audio.play('playerHurt')
     }
+    if (damageOutcome.died && playerIsDead() && multiplayer === undefined) {
+      handleLocalPlayerDeath()
+    }
     if (playerIsDead()) {
       swimmingState = initialPlayerSwimmingRuntimeState()
       presentSwimmingState()
@@ -3374,6 +3379,19 @@ const bootGame = async (
       resetSimState(false)
     }
     syncTouchControls()
+  }
+
+  let deathDropDimension: string | undefined
+  const handleLocalPlayerDeath = (): void => {
+    const deathPosition = Effect.runSync(world.player.pose).at
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const drops = deathDropsFromPlayerStorage(storage, deathPosition)
+    if (drops.length > 0) Effect.runSync(spawnDroppedItems(world.entities, drops))
+    Effect.runSync(world.inventory.restoreStorage(emptyPlayerStorage()))
+    const vitals = Effect.runSync(world.vitals.snapshot)
+    Effect.runSync(world.vitals.restore(addVitalsExperience(vitals, -vitals.totalExperience)))
+    deathDropDimension = Effect.runSync(world.player.dimension)
+    markSessionDirty()
   }
 
   const interactionStatus = (): string => {
@@ -4149,7 +4167,6 @@ const bootGame = async (
     presentSwimmingState()
     if (multiplayer === undefined) survivalHunger.respawn()
     else sendVitalsCommand('respawn')
-    Effect.runSync(world.entities.reset)
     Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
     Effect.runSync(Ref.set(gameplayState.playerDamages, []))
     Effect.runSync(Ref.set(gameplayState.spawnAttempts, []))
@@ -4163,6 +4180,14 @@ const bootGame = async (
     if (validRespawn === null) respawnLocation = null
     sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
     const respawnDimension = validRespawn?.dimension ?? initialSpawnDimension
+    const preserveDrops = deathDropDimension === undefined || deathDropDimension === respawnDimension
+    const entities = Effect.runSync(world.entities.entities)
+    for (const entity of entities) {
+      if (!preserveDrops || !isDroppedItemBehaviour(entity.behaviour)) {
+        Effect.runSync(world.entities.despawn(entity.id))
+      }
+    }
+    deathDropDimension = undefined
     const respawnPose = validRespawn === null
       ? initialSpawnPose
       : { ...initialSpawnPose, feetPosition: validRespawn.position }
@@ -5764,9 +5789,13 @@ const bootGame = async (
     // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, which keeps a
     // backgrounded tab from returning with a multi-second physics step.
     const walk = frameInput
+    const healthBeforeHungerTick = Effect.runSync(world.vitals.view).healthPoints
     const hungerOutcome = isCreativeMode || multiplayer !== undefined
       ? undefined
       : survivalHunger.tick(deltaSecs)
+    if (healthBeforeHungerTick > 0 && playerIsDead() && multiplayer === undefined) {
+      handleLocalPlayerDeath()
+    }
     if (
       hungerOutcome !== undefined && (
         hungerOutcome.exhaustionAdded > 0 ||
