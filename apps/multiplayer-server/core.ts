@@ -19,12 +19,16 @@ import {
   type WorldSnapshot,
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
-import { planExplosion } from '@nerima-games/mc-sim'
+import { isItemType } from '@nerima-games/mc-kernel'
+import { planExplosion, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   CREEPER_KIND,
   ENDERMAN_KIND,
   ZOMBIE_KIND,
+  applyFurnaceAdvance,
   dropRollsNeeded,
+  furnaceAdvanceChanged,
+  planFurnaceAdvance,
   rollDropsOfKind,
 } from '@nerima-games/mx-gameplay'
 import { Either } from 'effect'
@@ -203,6 +207,25 @@ const furnaceSnapshot = (state: MutableFurnaceState): FurnaceState => ({
   fuel: cloneStack(state.fuel),
   output: cloneStack(state.output),
 })
+
+const furnaceSimulationState = (state: MutableFurnaceState): SimFurnaceState | null => {
+  if ([state.input, state.fuel, state.output].some((stack) => stack !== null && !isItemType(stack.item))) return null
+  return {
+    input: cloneStack(state.input) as SimFurnaceState['input'],
+    fuel: cloneStack(state.fuel) as SimFurnaceState['fuel'],
+    output: cloneStack(state.output) as SimFurnaceState['output'],
+    burnRemainingSecs: state.burnTicksRemaining / 20,
+    cookElapsedSecs: state.cookTicks / 20,
+  }
+}
+
+const applyFurnaceSimulationState = (target: MutableFurnaceState, state: SimFurnaceState): void => {
+  target.input = cloneStack(state.input as ItemStack | null)
+  target.fuel = cloneStack(state.fuel as ItemStack | null)
+  target.output = cloneStack(state.output as ItemStack | null)
+  target.burnTicksRemaining = Math.round(state.burnRemainingSecs * 20)
+  target.cookTicks = Math.round(state.cookElapsedSecs * 20)
+}
 
 const isAuthoritativeCommand = (message: NetworkMessage): message is AuthoritativeCommand =>
   message._tag === 'PlayerInventoryCommand' ||
@@ -1181,6 +1204,35 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
   const tick = (elapsedMs: number): void => {
     let stateChanged = false
+    const changedFurnaces: MutableFurnaceState[] = []
+    const elapsedSecs = Number.isFinite(elapsedMs) && elapsedMs > 0 ? elapsedMs / 1_000 : 0
+    if (elapsedSecs > 0) {
+      for (const furnace of furnaces.values()) {
+        let current = furnaceSimulationState(furnace)
+        if (current === null) continue
+        let remainingSecs = elapsedSecs
+        let changed = false
+        while (remainingSecs > 0) {
+          const plan = planFurnaceAdvance(current, remainingSecs)
+          const applied = applyFurnaceAdvance(current, plan)
+          if (applied._tag !== 'Applied') break
+          changed ||= furnaceAdvanceChanged(plan)
+          current = applied.state
+          remainingSecs = plan.deferredSecs
+        }
+        if (!changed) continue
+        applyFurnaceSimulationState(furnace, current)
+        changedFurnaces.push(furnace)
+      }
+      if (changedFurnaces.length > 0) {
+        revision += 1
+        stateChanged = true
+        for (const furnace of changedFurnaces) {
+          broadcast({ _tag: 'FurnaceDelta', world: worldId, revision, state: furnaceSnapshot(furnace) })
+        }
+      }
+    }
+
     if (hungerActors.size > 0) {
       const authority = createHungerAuthority({ world: worldId, revision, difficulty: 'normal', actors: [...hungerActors.values()], tickRemainderMs: hungerTickRemainderMs })
       const events = authority.tick(elapsedMs)

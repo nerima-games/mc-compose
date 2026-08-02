@@ -452,6 +452,49 @@ describe('multiplayer server authoritative state', () => {
     })
   })
 
+  it('authoritatively advances and persists furnace smelting on server ticks', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      furnaces: [{
+        furnaceId: '["world-1",2,64,0]',
+        input: { item: 'raw_iron', count: 1 },
+        fuel: { item: 'coal', count: 1 },
+        output: null,
+        burnTicksRemaining: 0,
+        cookTicks: 0,
+      }],
+    })
+    fixture.sent.length = 0
+
+    fixture.server.tick(10_000)
+
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'FurnaceDelta',
+        revision: 5,
+        state: expect.objectContaining({
+          input: null,
+          fuel: null,
+          output: { item: 'iron_ingot', count: 1 },
+          burnTicksRemaining: 1_400,
+          cookTicks: 0,
+        }),
+      }),
+    ])
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      furnaces: [{
+        input: null,
+        fuel: null,
+        output: { item: 'iron_ingot', count: 1 },
+        burnTicksRemaining: 1_400,
+        cookTicks: 0,
+      }],
+    })
+  })
+
   it('rejects unauthorized and missing-resource commands without advancing revision', () => {
     const fixture = makeFixture()
     fixture.sent.length = 0
