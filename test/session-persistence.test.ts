@@ -316,11 +316,21 @@ describe('session persistence', () => {
   it.effect('round-trips session state and its revision manifest', () => {
     const storage = controlledStorage()
     return Effect.gen(function* () {
+      const state = {
+        ...sessionState(42),
+        workstations: {
+          enchantmentSeed: 7,
+          customNames: {},
+          enchantedItems: {},
+          deathDropDimension: 'nether' as const,
+          respawn: null,
+        },
+      }
       const saved = yield* saveSession({
         sessionId: 'primary world',
         revision: 'r1',
         metadata: { name: 'Primary / 世界', mode: 'creative' },
-        state: sessionState(42),
+        state,
         chunks: [dimensionChunk('overworld', 0, 0, 3), dimensionChunk('overworld', -1, 2, 7)],
       })
       const loaded = yield* loadSession('primary world')
@@ -334,6 +344,7 @@ describe('session persistence', () => {
       expect(saved.state.containerStorage).toEqual(sessionState(42).containerStorage)
       expect(saved.state.portals).toEqual(sessionState(42).portals)
       expect(saved.state.crops).toEqual(sessionState(42).crops)
+      expect(saved.state.workstations?.deathDropDimension).toBe('nether')
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,

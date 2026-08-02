@@ -230,6 +230,7 @@ export type SessionState = {
     readonly enchantmentSeed: number
     readonly customNames: Readonly<Record<string, string>>
     readonly enchantedItems: Readonly<Record<string, string>>
+    readonly deathDropDimension?: Dimension | undefined
     readonly respawn: {
       readonly dimension: 'overworld'
       readonly position: SessionPosition
@@ -419,6 +420,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
     enchantmentSeed: Schema.Number,
     customNames: Schema.Record({ key: Schema.String, value: Schema.String }),
     enchantedItems: Schema.Record({ key: Schema.String, value: Schema.String }),
+    deathDropDimension: Schema.optional(DimensionSchema),
     respawn: Schema.NullOr(Schema.Struct({
       dimension: Schema.Literal('overworld'),
       position: PositionSchema,

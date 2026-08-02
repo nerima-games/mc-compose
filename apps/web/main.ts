@@ -1645,6 +1645,7 @@ const bootGame = async (
           enchantedItems: Object.fromEntries(
             [...enchantedItems].map(([slot, item]) => [slot, JSON.stringify(item)]),
           ),
+          deathDropDimension,
           respawn: respawnLocation,
         },
       }
@@ -3381,7 +3382,8 @@ const bootGame = async (
     syncTouchControls()
   }
 
-  let deathDropDimension: string | undefined
+  let deathDropDimension: SessionState['dimension'] | undefined =
+    restoredWorkstations?.deathDropDimension
   const handleLocalPlayerDeath = (): void => {
     const deathPosition = Effect.runSync(world.player.pose).at
     const storage = Effect.runSync(world.inventory.storageSnapshot)
