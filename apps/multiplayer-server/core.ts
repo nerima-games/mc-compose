@@ -61,6 +61,7 @@ export interface MultiplayerServerOptions {
     maxZ: number
   }>
   readonly generatedBlockAt?: (position: BlockPos) => string | null
+  readonly spawnAt?: BlockPos
   readonly initialState?: MultiplayerServerState
   readonly onStateChanged?: (state: MultiplayerServerState) => void
   readonly maxMoveDistance?: number
@@ -79,6 +80,11 @@ export interface MultiplayerServerState {
   readonly furnaces: AuthoritativeSnapshot['furnaces']
   readonly villagerTrades: AuthoritativeSnapshot['villagerTrades']
   readonly entities?: ReadonlyArray<AuthoritativeEntityState>
+  readonly playerPositions?: ReadonlyArray<Readonly<{
+    player: PlayerId
+    at: BlockPos
+    facing: Orientation
+  }>>
   readonly wither?: WitherRuntimeSnapshot
   readonly witherRevision?: number
 }
@@ -243,6 +249,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const bounds = options.bounds ?? DEFAULT_BOUNDS
   const clients = new Map<ClientId, ConnectedClient>()
   const players = new Map<PlayerId, MutablePlayer>()
+  const playerPositions = new Map<PlayerId, Readonly<{ at: BlockPos; facing: Orientation }>>(
+    (options.initialState?.playerPositions ?? []).map(({ player, at, facing }) => [player, {
+      at: { ...at },
+      facing: { ...facing },
+    }]),
+  )
   const playerClients = new Map<PlayerId, ClientId>()
   const blocks = new Map<string, Readonly<{ at: BlockPos; block: string | null }>>(
     (options.initialState?.blocks ?? []).map((mutation) => [positionKey(mutation.at), mutation]),
@@ -279,12 +291,16 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       output: { ...offer.output },
     })),
   }))
-  const commandResults = new Map<string, AuthoritativeCommandResult>()
+  const commandResults = new Map<string, {
+    readonly fingerprint: string
+    readonly result: AuthoritativeCommandResult
+  }>()
   const commandResultLimit = 1_024
   const commandResultKey = (message: AuthoritativeCommand): string =>
     `${String(message.player)}\0${String(message.commandId)}`
+  const commandFingerprint = (message: AuthoritativeCommand): string => JSON.stringify(message)
   const cacheCommandResult = (message: AuthoritativeCommand, result: AuthoritativeCommandResult): void => {
-    commandResults.set(commandResultKey(message), result)
+    commandResults.set(commandResultKey(message), { fingerprint: commandFingerprint(message), result })
     if (commandResults.size <= commandResultLimit) return
     const oldestKey = commandResults.keys().next().value
     if (oldestKey !== undefined) commandResults.delete(oldestKey)
@@ -392,6 +408,50 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return override === undefined ? (options.generatedBlockAt?.(at) ?? null) : override.block
   }
 
+  const containerIdAt = (at: BlockPos): string =>
+    `${String(worldId)}:${String(at.x)},${String(at.y)},${String(at.z)}`
+
+  const furnaceIdAt = (at: BlockPos): string =>
+    JSON.stringify([worldId, at.x, at.y, at.z])
+
+  const parseContainerId = (containerId: string): BlockPos | null => {
+    const match = /^([^:]+):(-?\d+),(-?\d+),(-?\d+)$/.exec(containerId)
+    if (match === null || match[1] !== worldId) return null
+    const at = { x: Number(match[2]), y: Number(match[3]), z: Number(match[4]) }
+    if (!Number.isSafeInteger(at.x) || !Number.isSafeInteger(at.y) || !Number.isSafeInteger(at.z)) return null
+    return isInBounds(at) && containerIdAt(at) === containerId ? at : null
+  }
+
+  const parseFurnaceId = (furnaceId: string): BlockPos | null => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(furnaceId)
+    } catch {
+      return null
+    }
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 4 ||
+      parsed[0] !== worldId ||
+      !Number.isSafeInteger(parsed[1]) ||
+      !Number.isSafeInteger(parsed[2]) ||
+      !Number.isSafeInteger(parsed[3])
+    ) return null
+    const at = { x: parsed[1] as number, y: parsed[2] as number, z: parsed[3] as number }
+    return isInBounds(at) && furnaceIdAt(at) === furnaceId ? at : null
+  }
+
+  const facilityIsAccessible = (
+    player: PlayerId,
+    at: BlockPos,
+    expectedBlock: 'chest' | 'furnace',
+  ): CommandRejectionReason | null => {
+    const actor = players.get(player)
+    if (actor === undefined) return 'resource-not-found'
+    if (actor.world !== worldId || blockAt(at) !== expectedBlock) return 'invalid-command'
+    return isBlockWithinReach(actor, at) ? null : 'out-of-range'
+  }
+
   const persistentState = (): MultiplayerServerState => ({
     revision,
     blocks: [...blocks.values()].map((mutation) => ({ ...mutation, at: { ...mutation.at } })),
@@ -402,6 +462,11 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     furnaces: [...furnaces.values()].map(furnaceSnapshot),
     villagerTrades,
     entities: [...entities.values()],
+    playerPositions: [...playerPositions].map(([player, position]) => ({
+      player,
+      at: { ...position.at },
+      facing: { ...position.facing },
+    })),
     wither: snapshotWitherRuntime(witherState),
     witherRevision,
   })
@@ -620,6 +685,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
       }
       case 'ContainerCommand': {
+        const at = parseContainerId(message.containerId)
+        if (at === null) return { accepted: false, reason: 'invalid-command' }
+        const inaccessibleReason = facilityIsAccessible(message.player, at, 'chest')
+        if (inaccessibleReason !== null) return { accepted: false, reason: inaccessibleReason }
         const container = containers.get(message.containerId)
         if (container === undefined) return { accepted: false, reason: 'resource-not-found' }
         if (message.action._tag === 'move-item') {
@@ -652,6 +721,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
       }
       case 'FurnaceCommand': {
+        const at = parseFurnaceId(message.furnaceId)
+        if (at === null) return { accepted: false, reason: 'invalid-command' }
+        const inaccessibleReason = facilityIsAccessible(message.player, at, 'furnace')
+        if (inaccessibleReason !== null) return { accepted: false, reason: inaccessibleReason }
         const furnace = furnaces.get(message.furnaceId)
         if (furnace === undefined) return { accepted: false, reason: 'resource-not-found' }
         const source = message.action.source
@@ -700,6 +773,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     client: ConnectedClient,
     message: AuthoritativeCommand,
     reason: CommandRejectionReason,
+    cache = true,
   ): ReceiveResult => {
     const result: AuthoritativeCommandResult = {
       _tag: 'AuthoritativeCommandRejected',
@@ -709,7 +783,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       reason,
       resyncRequired: reason === 'stale-revision' || reason === 'snapshot-required',
     }
-    cacheCommandResult(message, result)
+    if (cache) cacheCommandResult(message, result)
     sendMessage(client, result)
     return { accepted: false, reason: reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command' }
   }
@@ -717,8 +791,11 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const handleCommand = (client: ConnectedClient, message: AuthoritativeCommand): ReceiveResult => {
     const cached = commandResults.get(commandResultKey(message))
     if (cached !== undefined) {
-      sendMessage(client, cached)
-      return cached._tag === 'AuthoritativeCommandAccepted'
+      if (cached.fingerprint !== commandFingerprint(message)) {
+        return rejectCommand(client, message, 'invalid-command', false)
+      }
+      sendMessage(client, cached.result)
+      return cached.result._tag === 'AuthoritativeCommandAccepted'
         ? { accepted: true, message }
         : { accepted: false, reason: 'invalid-command' }
     }
@@ -922,32 +999,48 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         return { accepted: false, reason: 'identity-spoof' }
       }
       if (playerClients.has(message.player)) return { accepted: false, reason: 'duplicate-player' }
+      const persistedPosition = playerPositions.get(message.player)
+      const authoritativeAt = persistedPosition?.at ?? options.spawnAt ?? message.at
+      const authoritativeFacing = persistedPosition?.facing ?? DEFAULT_FACING
       client.playerId = message.player
       players.set(message.player, {
         player: message.player,
         name: message.name,
         world: worldId,
-        at: message.at,
-        facing: DEFAULT_FACING,
+        at: { ...authoritativeAt },
+        facing: { ...authoritativeFacing },
+      })
+      playerPositions.set(message.player, {
+        at: { ...authoritativeAt },
+        facing: { ...authoritativeFacing },
       })
       playerClients.set(message.player, clientId)
       const sleepSnapshot = sleepAuthority.addActor({
         player: message.player,
         session: String(message.player),
-        position: message.at,
+        position: authoritativeAt,
         gameMode: 'survival',
         inventory: [],
         health: 20,
-        spawn: message.at,
+        spawn: authoritativeAt,
         lastActionTick: 0,
       })
       ensurePlayerState(message.player)
+      notifyStateChanged()
       sendMessage(client, snapshot())
+      sendMessage(client, {
+        _tag: 'PlayerMove',
+        player: message.player,
+        world: worldId,
+        at: authoritativeAt,
+        facing: authoritativeFacing,
+      })
       sendMessage(client, authoritativeSnapshot())
       sendSleep(client, { _tag: 'SleepSnapshot', snapshot: sleepSnapshot })
-      broadcast(message, clientId)
+      const authoritativeJoin = { ...message, at: authoritativeAt }
+      broadcast(authoritativeJoin, clientId)
       sendWither(client, witherSnapshot())
-      return { accepted: true, message }
+      return { accepted: true, message: authoritativeJoin }
     }
 
     if (message._tag === 'Ping') {
@@ -990,6 +1083,11 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
         player.at = message.at
         player.facing = message.facing
+        playerPositions.set(message.player, {
+          at: { ...message.at },
+          facing: { ...message.facing },
+        })
+        notifyStateChanged()
         broadcast({ ...message, world: worldId })
         return { accepted: true, message }
       }
@@ -1004,9 +1102,24 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (message.block === 'air' || !options.allowedBlocks.has(message.block)) return rejectMutation(client, message, 'unknown-block')
         if (blockAt(message.at) !== null) return rejectMutation(client, message, 'occupied')
         blocks.set(positionKey(message.at), { at: message.at, block: message.block })
+        if (message.block === 'chest') {
+          const containerId = containerIdAt(message.at)
+          containers.set(containerId, { containerId, slots: [] })
+        } else if (message.block === 'furnace') {
+          const furnaceId = furnaceIdAt(message.at)
+          furnaces.set(furnaceId, {
+            furnaceId,
+            input: null,
+            fuel: null,
+            output: null,
+            burnTicksRemaining: 0,
+            cookTicks: 0,
+          })
+        }
         revision += 1
         notifyStateChanged()
         broadcast({ ...message, world: worldId })
+        if (message.block === 'chest' || message.block === 'furnace') broadcast(authoritativeSnapshot())
         return { accepted: true, message }
       }
       case 'BlockBreak': {
@@ -1014,11 +1127,15 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (!isInBounds(message.at)) return rejectMutation(client, message, 'out-of-bounds')
         const player = players.get(message.player)
         if (player === undefined || !isBlockWithinReach(player, message.at)) return rejectMutation(client, message, 'unauthorized-player')
-        if (blockAt(message.at) === null) return rejectMutation(client, message, 'missing-block')
+        const brokenBlock = blockAt(message.at)
+        if (brokenBlock === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })
+        if (brokenBlock === 'chest') containers.delete(containerIdAt(message.at))
+        else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
         revision += 1
         notifyStateChanged()
         broadcast({ ...message, world: worldId })
+        if (brokenBlock === 'chest' || brokenBlock === 'furnace') broadcast(authoritativeSnapshot())
         {
           const events = sleepAuthority.reconcile()
           if (events.length > 0) broadcastSleep({ _tag: 'SleepEvents', revision: sleepAuthority.snapshot().revision, events })

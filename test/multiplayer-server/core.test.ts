@@ -43,7 +43,7 @@ const witherMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<WitherWi
     return message === undefined ? [] : [message]
   })
 
-const join = (player: string, name = player): NetworkMessage => ({
+const join = (player: string, name = player): Extract<NetworkMessage, { readonly _tag: 'PlayerJoin' }> => ({
   _tag: 'PlayerJoin',
   player: playerId(player),
   name: playerName(name),
@@ -66,6 +66,7 @@ const witherStructureAt = ({ x, y, z }: { x: number; y: number; z: number }): st
 const makeFixture = (
   generatedBlockAt: (at: { x: number; y: number; z: number }) => string | null = () => null,
   timeOfDay = 6_000,
+  spawnAt?: { x: number; y: number; z: number },
 ) => {
   const sent = new Map<string, Array<WireText>>()
   let nowMs = 0
@@ -75,6 +76,7 @@ const makeFixture = (
     allowedBlocks: new Set(['stone', 'dirt']),
     bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
     generatedBlockAt,
+    ...(spawnAt === undefined ? {} : { spawnAt }),
     now: () => nowMs,
     initialState: {
       revision: 0,
@@ -104,6 +106,31 @@ const makeFixture = (
 }
 
 describe('authoritative multiplayer server core', () => {
+  it('overrides the client-reported join position with spawn and self-corrects the player', () => {
+    const spawnAt = { x: 3, y: 70, z: -4 }
+    const fixture = makeFixture(() => null, 6_000, spawnAt)
+    const aliceFrames = fixture.connect('socket-a')
+
+    const reportedJoin = join('alice', 'Alice')
+    expect(fixture.receive('socket-a', {
+      ...reportedJoin,
+      at: { x: 9, y: 99, z: 9 },
+    }).accepted).toBe(true)
+
+    expect(messages(aliceFrames).slice(0, 2)).toEqual([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        players: [expect.objectContaining({ player: 'alice', at: spawnAt })],
+      }),
+      expect.objectContaining({
+        _tag: 'PlayerMove',
+        player: 'alice',
+        at: spawnAt,
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      }),
+    ])
+  })
+
   it('binds identity on join and snapshots the mutual roster', () => {
     const fixture = makeFixture()
     const aliceFrames = fixture.connect('socket-a')
@@ -327,6 +354,35 @@ describe('authoritative multiplayer server core', () => {
       players: [{ player: 'alice' }, { player: 'bob' }],
       blocks: [{ at: { x: 3, y: 64, z: 0 }, block: 'dirt' }],
     })
+  })
+
+  it('restores the last authoritative position after disconnect and reconnect', () => {
+    const fixture = makeFixture()
+    fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice', 'Alice'))
+    const restoredAt = { x: 4, y: 65, z: -2 }
+    const restoredFacing = { yawRadians: 1.25, pitchRadians: -0.5 }
+    expect(fixture.receive('socket-a', {
+      _tag: 'PlayerMove', player: playerId('alice'), at: restoredAt, facing: restoredFacing,
+    }).accepted).toBe(true)
+    fixture.server.disconnect('socket-a')
+
+    const reconnectFrames = fixture.connect('socket-a2')
+    const reconnectJoin = join('alice', 'Alice')
+    expect(fixture.receive('socket-a2', {
+      ...reconnectJoin,
+      at: { x: -8, y: 80, z: 8 },
+    }).accepted).toBe(true)
+
+    expect(messages(reconnectFrames).slice(0, 2)).toEqual([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        players: [expect.objectContaining({ player: 'alice', at: restoredAt, facing: restoredFacing })],
+      }),
+      expect.objectContaining({
+        _tag: 'PlayerMove', player: 'alice', at: restoredAt, facing: restoredFacing,
+      }),
+    ])
   })
 
   it('handles an explicit leave with the same authoritative cleanup', () => {

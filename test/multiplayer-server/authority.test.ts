@@ -41,7 +41,10 @@ const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage
 
 const initialState = (): MultiplayerServerState => ({
   revision: 4,
-  blocks: [],
+  blocks: [
+    { at: { x: 1, y: 64, z: 0 }, block: 'chest' },
+    { at: { x: 2, y: 64, z: 0 }, block: 'furnace' },
+  ],
   inventories: [{
     player: playerId('alice'),
     state: {
@@ -55,9 +58,9 @@ const initialState = (): MultiplayerServerState => ({
   }],
   vitals: [{ player: playerId('alice'), state: { health: 3, hunger: 2, experience: 7 } }],
   timeWeather: { timeOfDay: 6_000, weather: 'clear' },
-  containers: [{ containerId: 'chest-1', slots: [null, { item: 'apple', count: 2 }] }],
+  containers: [{ containerId: 'world-1:1,64,0', slots: [null, { item: 'apple', count: 2 }] }],
   furnaces: [{
-    furnaceId: 'furnace-1',
+    furnaceId: '["world-1",2,64,0]',
     input: null,
     fuel: null,
     output: { item: 'iron-ingot', count: 2 },
@@ -73,7 +76,7 @@ const makeFixture = (state: MultiplayerServerState = initialState()) => {
   const server = makeMultiplayerServerCore({
     worldId: 'world-1',
     seed: 42,
-    allowedBlocks: new Set(['stone']),
+    allowedBlocks: new Set(['stone', 'chest', 'furnace']),
     initialState: state,
     onStateChanged: (state) => persisted.push(state),
   })
@@ -85,21 +88,22 @@ const makeFixture = (state: MultiplayerServerState = initialState()) => {
     name: playerName('Alice'),
     at: { x: 0, y: 64, z: 0 },
   }).accepted).toBe(true)
+  persisted.length = 0
   return { sent, persisted, receive, server }
 }
 
 describe('multiplayer server authoritative state', () => {
   it('sends authoritative state on join and explicit resync', () => {
     const fixture = makeFixture()
-    expect(messages(fixture.sent)[1]).toMatchObject({
+    expect(messages(fixture.sent).find((message) => message._tag === 'AuthoritativeSnapshot')).toMatchObject({
       _tag: 'AuthoritativeSnapshot',
       world: 'world-1',
       revision: 4,
       inventories: [{ player: 'alice', state: { selectedSlot: 0 } }],
       vitals: [{ player: 'alice', state: { health: 3, hunger: 2, experience: 7 } }],
       timeWeather: { timeOfDay: 6_000, weather: 'clear' },
-      containers: [{ containerId: 'chest-1' }],
-      furnaces: [{ furnaceId: 'furnace-1' }],
+      containers: [{ containerId: 'world-1:1,64,0' }],
+      furnaces: [{ furnaceId: '["world-1",2,64,0]' }],
     })
 
     fixture.sent.length = 0
@@ -142,6 +146,22 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.receive(inventoryCommand).accepted).toBe(true)
     expect(messages(fixture.sent)).toEqual([
       expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'inventory-1', revision: 5 }),
+    ])
+    expect(fixture.persisted).toHaveLength(1)
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      ...inventoryCommand,
+      action: { _tag: 'move-item', source: 2, destination: 0, count: 1 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'AuthoritativeCommandRejected',
+        commandId: 'inventory-1',
+        revision: 5,
+        reason: 'invalid-command',
+        resyncRequired: false,
+      }),
     ])
     expect(fixture.persisted).toHaveLength(1)
 
@@ -372,7 +392,7 @@ describe('multiplayer server authoritative state', () => {
       player: playerId('alice'),
       world: worldId('world-1'),
       expectedRevision: 5,
-      containerId: 'chest-1',
+      containerId: 'world-1:1,64,0',
       action: {
         _tag: 'move-item',
         source: { _tag: 'player-slot', slot: 0 },
@@ -386,7 +406,7 @@ describe('multiplayer server authoritative state', () => {
       player: playerId('alice'),
       world: worldId('world-1'),
       expectedRevision: 6,
-      furnaceId: 'furnace-1',
+      furnaceId: '["world-1",2,64,0]',
       action: {
         _tag: 'move-item',
         source: { _tag: 'player-slot', slot: 1 },
@@ -400,7 +420,7 @@ describe('multiplayer server authoritative state', () => {
       player: playerId('alice'),
       world: worldId('world-1'),
       expectedRevision: 7,
-      furnaceId: 'furnace-1',
+      furnaceId: '["world-1",2,64,0]',
       action: {
         _tag: 'take-output',
         source: { _tag: 'furnace-slot', slot: 'output' },
@@ -413,7 +433,7 @@ describe('multiplayer server authoritative state', () => {
     expect(output).toContainEqual(expect.objectContaining({
       _tag: 'ContainerDelta',
       revision: 6,
-      state: { containerId: 'chest-1', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] },
+      state: { containerId: 'world-1:1,64,0', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] },
     }))
     expect(output).toContainEqual(expect.objectContaining({
       _tag: 'FurnaceDelta',
@@ -427,8 +447,8 @@ describe('multiplayer server authoritative state', () => {
         player: 'alice',
         state: { slots: [{ item: 'stone', count: 3 }, { item: 'coal', count: 2 }, { item: 'iron-ingot', count: 1 }] },
       }],
-      containers: [{ containerId: 'chest-1', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] }],
-      furnaces: [{ furnaceId: 'furnace-1', fuel: { item: 'coal', count: 1 }, output: { item: 'iron-ingot', count: 1 } }],
+      containers: [{ containerId: 'world-1:1,64,0', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] }],
+      furnaces: [{ furnaceId: '["world-1",2,64,0]', fuel: { item: 'coal', count: 1 }, output: { item: 'iron-ingot', count: 1 } }],
     })
   })
 
@@ -462,7 +482,7 @@ describe('multiplayer server authoritative state', () => {
       }),
       expect.objectContaining({
         _tag: 'AuthoritativeCommandRejected',
-        reason: 'resource-not-found',
+        reason: 'invalid-command',
         revision: 4,
         resyncRequired: false,
       }),
@@ -498,7 +518,7 @@ describe('multiplayer server authoritative state', () => {
     const reconnect: Array<WireText> = []
     fixture.server.connect('socket-a2', (wire) => reconnect.push(wire))
     fixture.server.receive('socket-a2', frame({ _tag: 'PlayerJoin', player: playerId('alice'), name: playerName('Alice'), at: { x: 3, y: 64, z: 1 } }))
-    expect(messages(reconnect)[1]).toMatchObject({ _tag: 'AuthoritativeSnapshot', revision: 10, entities: [{ entityId: 'boat-1', at: { x: 3, y: 64, z: 1 }, occupant: null }] })
+    expect(messages(reconnect).find((message) => message._tag === 'AuthoritativeSnapshot')).toMatchObject({ _tag: 'AuthoritativeSnapshot', revision: 10, entities: [{ entityId: 'boat-1', at: { x: 3, y: 64, z: 1 }, occupant: null }] })
   })
 
   it('does not turn an unknown living entity type into an invalid inventory item', () => {
@@ -585,6 +605,225 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', reason: 'not-mounted', revision: 4 }),
       expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', reason: 'stale-revision', revision: 4, resyncRequired: true }),
       expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', commandId: 'vehicle-teleport', reason: 'out-of-range', revision: 5 }),
+    ]))
+  })
+
+  it('rejects facility commands beyond authoritative reach', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [
+        { at: { x: 20, y: 64, z: 0 }, block: 'chest' },
+        { at: { x: 21, y: 64, z: 0 }, block: 'furnace' },
+      ],
+      containers: [{ containerId: 'world-1:20,64,0', slots: [] }],
+      furnaces: [{
+        furnaceId: '["world-1",21,64,0]',
+        input: null,
+        fuel: null,
+        output: null,
+        burnTicksRemaining: 0,
+        cookTicks: 0,
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'ContainerCommand',
+      commandId: commandId('far-container'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      containerId: 'world-1:20,64,0',
+      action: { _tag: 'open' },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(fixture.receive({
+      _tag: 'FurnaceCommand',
+      commandId: commandId('far-furnace'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      furnaceId: '["world-1",21,64,0]',
+      action: {
+        _tag: 'move-item',
+        source: { _tag: 'player-slot', slot: 1 },
+        destination: { _tag: 'furnace-slot', slot: 'fuel' },
+        count: 1,
+      },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', commandId: 'far-container', reason: 'out-of-range' }),
+      expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', commandId: 'far-furnace', reason: 'out-of-range' }),
+    ])
+  })
+
+  it('rejects malformed, noncanonical, wrong-world, unsafe, and out-of-bounds facility ids', () => {
+    const fixture = makeFixture()
+    fixture.sent.length = 0
+    const containerIds = [
+      'legacy-container',
+      'world-1:01,64,0',
+      'world-2:1,64,0',
+      'world-1:9007199254740992,64,0',
+      'world-1:999999999,64,0',
+    ]
+    const furnaceIds = [
+      'legacy-furnace',
+      ' ["world-1",2,64,0]',
+      '["world-2",2,64,0]',
+      '["world-1",2e0,64,0]',
+      '["world-1",9007199254740992,64,0]',
+      '["world-1",999999999,64,0]',
+    ]
+
+    for (const [index, containerId] of containerIds.entries()) {
+      expect(fixture.receive({
+        _tag: 'ContainerCommand',
+        commandId: commandId(`invalid-container-${String(index)}`),
+        player: playerId('alice'),
+        world: worldId('world-1'),
+        expectedRevision: 4,
+        containerId,
+        action: { _tag: 'open' },
+      })).toEqual({ accepted: false, reason: 'invalid-command' })
+    }
+    for (const [index, furnaceId] of furnaceIds.entries()) {
+      expect(fixture.receive({
+        _tag: 'FurnaceCommand',
+        commandId: commandId(`invalid-furnace-${String(index)}`),
+        player: playerId('alice'),
+        world: worldId('world-1'),
+        expectedRevision: 4,
+        furnaceId,
+        action: {
+          _tag: 'move-item',
+          source: { _tag: 'player-slot', slot: 1 },
+          destination: { _tag: 'furnace-slot', slot: 'fuel' },
+          count: 1,
+        },
+      })).toEqual({ accepted: false, reason: 'invalid-command' })
+    }
+
+    expect(messages(fixture.sent)).toHaveLength(containerIds.length + furnaceIds.length)
+    expect(messages(fixture.sent).every((message) =>
+      message._tag === 'AuthoritativeCommandRejected' && message.reason === 'invalid-command',
+    )).toBe(true)
+    expect(fixture.persisted).toEqual([])
+  })
+
+  it('rejects facility commands when the authoritative block has the wrong type', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [
+        { at: { x: 1, y: 64, z: 0 }, block: 'stone' },
+        { at: { x: 2, y: 64, z: 0 }, block: 'stone' },
+      ],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'ContainerCommand',
+      commandId: commandId('wrong-container-block'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      containerId: 'world-1:1,64,0',
+      action: { _tag: 'open' },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(fixture.receive({
+      _tag: 'FurnaceCommand',
+      commandId: commandId('wrong-furnace-block'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      furnaceId: '["world-1",2,64,0]',
+      action: {
+        _tag: 'move-item',
+        source: { _tag: 'player-slot', slot: 1 },
+        destination: { _tag: 'furnace-slot', slot: 'fuel' },
+        count: 1,
+      },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', commandId: 'wrong-container-block', reason: 'invalid-command' }),
+      expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', commandId: 'wrong-furnace-block', reason: 'invalid-command' }),
+    ])
+  })
+
+  it('registers and removes facility state across block placement and break', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BlockPlace',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 1, y: 64, z: 0 },
+      block: 'chest',
+    }).accepted).toBe(true)
+    expect(fixture.receive({
+      _tag: 'BlockPlace',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 2, y: 64, z: 0 },
+      block: 'furnace',
+    }).accepted).toBe(true)
+
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      revision: 6,
+      containers: [{ containerId: 'world-1:1,64,0', slots: [] }],
+      furnaces: [{
+        furnaceId: '["world-1",2,64,0]',
+        input: null,
+        fuel: null,
+        output: null,
+        burnTicksRemaining: 0,
+        cookTicks: 0,
+      }],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'AuthoritativeSnapshot',
+        revision: 5,
+        containers: [{ containerId: 'world-1:1,64,0', slots: [] }],
+      }),
+      expect.objectContaining({
+        _tag: 'AuthoritativeSnapshot',
+        revision: 6,
+        furnaces: [expect.objectContaining({ furnaceId: '["world-1",2,64,0]' })],
+      }),
+    ]))
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'BlockBreak',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 1, y: 64, z: 0 },
+    }).accepted).toBe(true)
+    expect(fixture.receive({
+      _tag: 'BlockBreak',
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      at: { x: 2, y: 64, z: 0 },
+    }).accepted).toBe(true)
+
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      revision: 8,
+      containers: [],
+      furnaces: [],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 7, containers: [] }),
+      expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 8, containers: [], furnaces: [] }),
     ]))
   })
 })

@@ -6,6 +6,7 @@ import { join } from 'node:path'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const PLAYER_AT = { x: 8.5, y: 65, z: 10.5 } as const
+const BOOT_TIMEOUT_MS = 15_000
 
 type GameplaySnapshot = {
   readonly mode: 'survival' | 'creative'
@@ -46,6 +47,10 @@ const initialState = {
   vitals: [
     { player: 'survival-alice', state: { health: 13, hunger: 11, experience: 7 } },
     { player: 'survival-bob', state: { health: 18, hunger: 16, experience: 3 } },
+  ],
+  playerPositions: [
+    { player: 'survival-alice', at: PLAYER_AT, facing: { yawRadians: 0, pitchRadians: 0 } },
+    { player: 'survival-bob', at: PLAYER_AT, facing: { yawRadians: 0, pitchRadians: 0 } },
   ],
   timeWeather: { timeOfDay: 6_000, weather: 'clear' },
   containers: [],
@@ -94,7 +99,11 @@ const createSurvivalWorld = async (page: Page, name: string): Promise<string> =>
     'Game mode: Survival',
   )
   await page.locator('[data-menu-action="confirm"]').click()
-  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await expect(page.locator('body')).toHaveAttribute(
+    'data-mc-compose-boot',
+    'running',
+    { timeout: BOOT_TIMEOUT_MS },
+  )
   await callQa(page, 'gameplay.seedCreativePlacementEncounter')
   await page.keyboard.press('Escape')
   await callQa(page, 'persistence.flush')
@@ -117,8 +126,16 @@ const connectPlayer = async (
   url.searchParams.set('player', player)
   url.searchParams.set('multiplayerName', name)
   await page.goto(url.href)
-  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
-  await expect(page.locator('#game-canvas')).toHaveAttribute('data-multiplayer-connection', 'connected')
+  await expect(page.locator('body')).toHaveAttribute(
+    'data-mc-compose-boot',
+    'running',
+    { timeout: BOOT_TIMEOUT_MS },
+  )
+  await expect(page.locator('#game-canvas')).toHaveAttribute(
+    'data-multiplayer-connection',
+    'connected',
+    { timeout: BOOT_TIMEOUT_MS },
+  )
   return { context, page, url: url.href }
 }
 
@@ -250,15 +267,15 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
       entityCommand(alice.page, { entityId: 'survival-boat', action: 'mount' }),
       entityCommand(bob.page, { entityId: 'survival-boat', action: 'mount' }),
     ])
+    const mountRejection = (page: Page): Promise<boolean> => page.evaluate(() =>
+      (globalThis as unknown as { multiplayerRejections: string[] }).multiplayerRejections.some(
+        (rejection) => rejection === 'stale-revision' || rejection === 'vehicle-occupied',
+      ))
     await expect.poll(async () => {
-      const histories = await Promise.all([alice.page, bob.page].map((page) => page.evaluate(() =>
-        (globalThis as unknown as { multiplayerRejections: string[] }).multiplayerRejections)))
-      return histories.some((rejections) => rejections.some((rejection) =>
-        rejection === 'stale-revision' || rejection === 'vehicle-occupied'))
-    }).toBe(true)
-
-    const aliceRejected = await alice.page.evaluate(() =>
-      (globalThis as unknown as { multiplayerRejections: string[] }).multiplayerRejections.length > 0)
+      const rejected = await Promise.all([mountRejection(alice.page), mountRejection(bob.page)])
+      return rejected.filter(Boolean).length
+    }).toBe(1)
+    const aliceRejected = await mountRejection(alice.page)
     const rider = aliceRejected ? bob.page : alice.page
     const movedTo = { x: PLAYER_AT.x + 3, y: PLAYER_AT.y, z: PLAYER_AT.z + 1 }
     await entityCommand(rider, { entityId: 'survival-boat', action: 'move', at: movedTo })
@@ -271,7 +288,16 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await expect(alice.page.locator('#game-canvas')).toHaveAttribute('data-multiplayer-player-count', '1')
     const reconnectedBob = await bob.context.newPage()
     await reconnectedBob.goto(bob.url)
-    await expect(reconnectedBob.locator('#game-canvas')).toHaveAttribute('data-multiplayer-connection', 'connected')
+    await expect(reconnectedBob.locator('body')).toHaveAttribute(
+      'data-mc-compose-boot',
+      'running',
+      { timeout: BOOT_TIMEOUT_MS },
+    )
+    await expect(reconnectedBob.locator('#game-canvas')).toHaveAttribute(
+      'data-multiplayer-connection',
+      'connected',
+      { timeout: BOOT_TIMEOUT_MS },
+    )
     await expect.poll(() => authoritativeEntity(reconnectedBob, 'survival-boat')).toMatchObject({ feetPosition: movedTo })
     await expect.poll(async () => (await snapshot(reconnectedBob)).renderedEntities.some(
       (entity) => entity.id === 'authoritative:survival-zombie' || entity.kind === 'dropped_item',

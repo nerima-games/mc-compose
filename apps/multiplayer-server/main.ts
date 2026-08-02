@@ -14,7 +14,7 @@ import {
   localCoordOfBlock,
   type Chunk,
 } from '@nerima-games/mc-worldgen'
-import { AuthoritativeSnapshot, type BlockPos, type WireText } from '@nerima-games/mx-multiplayer'
+import { AuthoritativeSnapshot, type BlockPos, type Orientation, type PlayerId, type WireText } from '@nerima-games/mx-multiplayer'
 import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
 
@@ -96,6 +96,21 @@ const isBlockPos = (value: unknown): value is BlockPos => {
   return Number.isInteger(position['x']) && Number.isInteger(position['y']) && Number.isInteger(position['z'])
 }
 
+const isPlayerPosition = (value: unknown): value is BlockPos => {
+  if (typeof value !== 'object' || value === null) return false
+  const position = value as Record<string, unknown>
+  return typeof position['x'] === 'number' && Number.isFinite(position['x'])
+    && typeof position['y'] === 'number' && Number.isFinite(position['y'])
+    && typeof position['z'] === 'number' && Number.isFinite(position['z'])
+}
+
+const isOrientation = (value: unknown): value is Orientation => {
+  if (typeof value !== 'object' || value === null) return false
+  const orientation = value as Record<string, unknown>
+  return typeof orientation['yawRadians'] === 'number' && Number.isFinite(orientation['yawRadians'])
+    && typeof orientation['pitchRadians'] === 'number' && Number.isFinite(orientation['pitchRadians'])
+}
+
 const decodeServerState = (value: unknown, worldId: string): MultiplayerServerState | undefined => {
   if (typeof value !== 'object' || value === null) return undefined
   const state = value as Record<string, unknown>
@@ -105,6 +120,13 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     const mutation = entry as Record<string, unknown>
     return isBlockPos(mutation['at']) && (mutation['block'] === null || typeof mutation['block'] === 'string')
   })) return undefined
+  if (state['playerPositions'] !== undefined && (
+    !Array.isArray(state['playerPositions']) || !state['playerPositions'].every((entry: unknown) => {
+      if (typeof entry !== 'object' || entry === null) return false
+      const position = entry as Record<string, unknown>
+      return typeof position['player'] === 'string' && isPlayerPosition(position['at']) && isOrientation(position['facing'])
+    })
+  )) return undefined
 
   const decoded = Schema.decodeUnknownEither(AuthoritativeSnapshot)({
     _tag: 'AuthoritativeSnapshot',
@@ -130,6 +152,11 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     furnaces: snapshot.furnaces,
     villagerTrades: snapshot.villagerTrades,
     entities: snapshot.entities ?? [],
+    playerPositions: (state['playerPositions'] as ReadonlyArray<Readonly<{
+      player: PlayerId
+      at: BlockPos
+      facing: Orientation
+    }>> | undefined) ?? [],
     ...(state['wither'] === undefined ? {} : { wither: state['wither'] as NonNullable<MultiplayerServerState['wither']> }),
     ...(Number.isInteger(state['witherRevision']) ? { witherRevision: state['witherRevision'] as number } : {}),
   }
@@ -252,6 +279,17 @@ export const makeGeneratedBlockAt = (seed: number): ((position: BlockPos) => str
   }
 }
 
+const findSpawnAt = (generatedBlockAt: (position: BlockPos) => string | null): BlockPos => {
+  for (let y = CHUNK_HEIGHT - 2; y >= 0; y -= 1) {
+    if (
+      generatedBlockAt({ x: 0, y, z: 0 }) !== null
+      && generatedBlockAt({ x: 0, y: y + 1, z: 0 }) === null
+      && generatedBlockAt({ x: 0, y: y + 2, z: 0 }) === null
+    ) return { x: 0, y: y + 1, z: 0 }
+  }
+  return { x: 0, y: 64, z: 0 }
+}
+
 const listen = (server: HttpServer, port: number, host: string): Promise<number> =>
   new Promise((resolve, reject) => {
     const onError = (error: Error): void => reject(error)
@@ -276,11 +314,13 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     : createLatestStatePersistence((state: MultiplayerServerState) =>
         writeServerState(options.stateFile as string, options.worldId, options.seed, state),
       )
+  const generatedBlockAt = makeGeneratedBlockAt(options.seed)
   const core = makeMultiplayerServerCore({
     worldId: options.worldId,
     seed: options.seed,
     allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
-    generatedBlockAt: makeGeneratedBlockAt(options.seed),
+    generatedBlockAt,
+    spawnAt: findSpawnAt(generatedBlockAt),
     ...(initialState === undefined ? {} : { initialState }),
     ...(persistence === undefined ? {} : { onStateChanged: persistence.request }),
     passableBlocks: new Set(['water']),

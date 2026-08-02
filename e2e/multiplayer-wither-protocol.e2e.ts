@@ -1,4 +1,7 @@
 import { type ChildProcess, spawn } from 'node:child_process'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { expect, test } from '@playwright/test'
 import { WebSocket } from 'ws'
@@ -9,6 +12,22 @@ const encodeProtocol = (message: WireMessage): string =>
   JSON.stringify({ protocolVersion: 1, message })
 
 const encodeWither = (message: WireMessage): string => JSON.stringify(message)
+
+const fixture = {
+  revision: 0,
+  blocks: [],
+  inventories: [],
+  vitals: [],
+  playerPositions: [
+    { player: 'wither-alice', at: { x: 0, y: 88, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 } },
+    { player: 'wither-bob', at: { x: 0, y: 88, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 } },
+  ],
+  timeWeather: { timeOfDay: 0, weather: 'clear' },
+  containers: [],
+  furnaces: [],
+  villagerTrades: [],
+  entities: [],
+}
 
 const decodeMessage = (data: WebSocket.RawData): WireMessage => {
   const decoded = JSON.parse(data.toString()) as WireMessage & {
@@ -66,13 +85,25 @@ const withers = (message: WireMessage): ReadonlyArray<WireMessage> => {
   return snapshot.withers ?? []
 }
 
-const startWitherServer = async (): Promise<{ process: ChildProcess; url: string }> => {
+const startWitherServer = async (): Promise<{
+  process: ChildProcess
+  stateDirectory: string
+  url: string
+}> => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-wither-e2e-'))
+  const stateFile = join(stateDirectory, 'state.json')
+  await writeFile(stateFile, `${JSON.stringify({
+    format: 1,
+    worldId: 'overworld',
+    seed: 0,
+    state: fixture,
+  })}\n`, 'utf8')
   const script = [
     'const nativeSetInterval = globalThis.setInterval',
     'let multiplayerTicks = 0',
     "globalThis.setInterval = (handler, timeout, ...args) => nativeSetInterval(() => { if (timeout !== 4000 || multiplayerTicks++ < 3) handler(...args) }, timeout)",
     "const { startMultiplayerServer } = await import('./apps/multiplayer-server/main.ts')",
-    "const runtime = await startMultiplayerServer({ host: '127.0.0.1', port: 0, worldId: 'overworld', seed: 0, allowedBlocks: new Set(['soul_sand', 'wither_skeleton_skull']), installSignalHandlers: true })",
+    `const runtime = await startMultiplayerServer({ host: '127.0.0.1', port: 0, worldId: 'overworld', seed: 0, allowedBlocks: new Set(['soul_sand', 'wither_skeleton_skull']), installSignalHandlers: true, stateFile: ${JSON.stringify(stateFile)} })`,
     "process.stdout.write('READY:' + runtime.port + '\\n')",
   ].join(';')
   const child = spawn(process.execPath, [
@@ -91,13 +122,15 @@ const startWitherServer = async (): Promise<{ process: ChildProcess; url: string
   await expect.poll(() => /READY:(\d+)/.exec(output)?.[1], { timeout: 15_000 }).toBeDefined()
   const port = /READY:(\d+)/.exec(output)?.[1]
   if (port === undefined) throw new Error(`Wither server failed to start: ${output}`)
-  return { process: child, url: `ws://127.0.0.1:${port}/ws` }
+  return { process: child, stateDirectory, url: `ws://127.0.0.1:${port}/ws` }
 }
 
-const stopServer = async (child: ChildProcess): Promise<void> => {
-  if (child.exitCode !== null) return
-  child.kill('SIGTERM')
-  await new Promise<void>((resolve) => child.once('exit', () => resolve()))
+const stopServer = async (child: ChildProcess, stateDirectory: string): Promise<void> => {
+  if (child.exitCode === null) {
+    child.kill('SIGTERM')
+    await new Promise<void>((resolve) => child.once('exit', () => resolve()))
+  }
+  await rm(stateDirectory, { recursive: true, force: true })
 }
 
 const delay = (milliseconds: number): Promise<void> =>
@@ -284,6 +317,6 @@ test('serializes competing Wither damage and restores the canonical state on rej
     alice.socket.close()
     bob.socket.close()
     rejoined?.close()
-    await stopServer(server.process)
+    await stopServer(server.process, server.stateDirectory)
   }
 })

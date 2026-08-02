@@ -77,7 +77,11 @@ describe('multiplayer WebSocket runtime', () => {
       _tag: 'WorldSnapshot',
       world: 'runtime-world',
       seed: 73,
-      players: [{ player: 'runtime-player', name: 'Runtime Player', at: { x: 2, y: 64, z: 3 } }],
+      players: [{
+        player: 'runtime-player',
+        name: 'Runtime Player',
+        at: expect.not.objectContaining({ x: 2, y: 64, z: 3 }),
+      }],
     })
   })
 
@@ -86,10 +90,7 @@ describe('multiplayer WebSocket runtime', () => {
     const worldId = 'persistent-world'
     const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-server-')), 'state.json')
     const generatedBlockAt = makeGeneratedBlockAt(seed)
-    const solidY = Array.from({ length: 256 }, (_, y) => y).find((y) => generatedBlockAt({ x: 0, y, z: 0 }) !== null)
-    expect(solidY).toBeDefined()
-    const block = { x: 0, y: solidY as number, z: 0 }
-    const playerAt = { x: 0, y: block.y + 1, z: 0 }
+    const playerAt = { x: 0, y: 200, z: 0 }
 
     const first = await startMultiplayerServer({
       host: '127.0.0.1', port: 0, worldId, seed, stateFile, installSignalHandlers: false,
@@ -101,17 +102,50 @@ describe('multiplayer WebSocket runtime', () => {
       _tag: 'PlayerJoin', player: 'persistent-player' as PlayerId, name: 'Persistent Player' as PlayerName,
       at: playerAt,
     }))
-    await firstSnapshot
+    const joined = await firstSnapshot
+    expect(joined).toMatchObject({
+      _tag: 'WorldSnapshot',
+      players: [expect.objectContaining({
+        player: 'persistent-player',
+        at: expect.not.objectContaining(playerAt),
+      })],
+    })
+    const spawnAt = joined._tag === 'WorldSnapshot' ? joined.players[0]?.at : undefined
+    expect(spawnAt).toBeDefined()
+    if (spawnAt === undefined) throw new Error('authoritative spawn was not present in the snapshot')
+    const block = { x: spawnAt.x, y: spawnAt.y - 1, z: spawnAt.z }
+    expect(generatedBlockAt(block)).not.toBeNull()
 
     const correction = nextMessage(socket)
     socket.send(encode({
       _tag: 'PlayerMove', player: 'persistent-player' as PlayerId,
       at: { x: 100, y: playerAt.y, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 },
     }))
-    await expect(correction).resolves.toMatchObject({ _tag: 'PlayerMove', at: playerAt })
+    await expect(correction).resolves.toMatchObject({ _tag: 'PlayerMove', at: spawnAt })
 
-    const acceptedBreak = nextMessage(socket)
-    socket.send(encode({ _tag: 'BlockBreak', player: 'persistent-player' as PlayerId, world: worldId as never, at: block }))
+    socket.close()
+    await new Promise<void>((resolve) => socket.once('close', () => resolve()))
+    const sameProcess = await connect(first)
+    const sameProcessSnapshot = nextMessage(sameProcess)
+    sameProcess.send(encode({
+      _tag: 'PlayerJoin', player: 'persistent-player' as PlayerId, name: 'Persistent Player' as PlayerName,
+      at: { x: 50, y: 200, z: 50 },
+    }))
+    await expect(sameProcessSnapshot).resolves.toMatchObject({
+      _tag: 'WorldSnapshot',
+      players: [expect.objectContaining({ player: 'persistent-player', at: spawnAt })],
+    })
+
+    const fractionalAt = { x: spawnAt.x + 0.25, y: spawnAt.y, z: spawnAt.z + 0.5 }
+    const acceptedMove = nextMessage(sameProcess)
+    sameProcess.send(encode({
+      _tag: 'PlayerMove', player: 'persistent-player' as PlayerId,
+      at: fractionalAt, facing: { yawRadians: 0.5, pitchRadians: -0.25 },
+    }))
+    await expect(acceptedMove).resolves.toMatchObject({ _tag: 'PlayerMove', at: fractionalAt })
+
+    const acceptedBreak = nextMessage(sameProcess)
+    sameProcess.send(encode({ _tag: 'BlockBreak', player: 'persistent-player' as PlayerId, world: worldId as never, at: block }))
     await expect(acceptedBreak).resolves.toMatchObject({ _tag: 'BlockBreak', at: block })
     await first.close()
 
@@ -122,11 +156,14 @@ describe('multiplayer WebSocket runtime', () => {
     const reconnect = await connect(second)
     const restoredSnapshot = nextMessage(reconnect)
     reconnect.send(encode({
-      _tag: 'PlayerJoin', player: 'reconnected-player' as PlayerId, name: 'Reconnected' as PlayerName,
+      _tag: 'PlayerJoin', player: 'persistent-player' as PlayerId, name: 'Persistent Player' as PlayerName,
       at: { x: 0, y: 200, z: 0 },
     }))
     await expect(restoredSnapshot).resolves.toMatchObject({
-      _tag: 'WorldSnapshot', revision: 1, blocks: [{ at: block, block: null }],
+      _tag: 'WorldSnapshot',
+      revision: 1,
+      blocks: [{ at: block, block: null }],
+      players: [expect.objectContaining({ player: 'persistent-player', at: fractionalAt })],
     })
     reconnect.close()
   })

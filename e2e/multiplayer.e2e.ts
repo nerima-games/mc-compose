@@ -1,3 +1,8 @@
+import { spawn, type ChildProcess } from 'node:child_process'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test'
 import { WebSocket } from 'ws'
 
@@ -48,9 +53,14 @@ const createCreativeWorld = async (page: Page, name: string): Promise<string> =>
   return page.url()
 }
 
-const multiplayerUrl = (sessionUrl: string, player: string, name: string): string => {
+const multiplayerUrl = (
+  sessionUrl: string,
+  player: string,
+  name: string,
+  serverUrl = E2E_MULTIPLAYER_URL,
+): string => {
   const url = new URL(sessionUrl)
-  url.searchParams.set('multiplayer', E2E_MULTIPLAYER_URL)
+  url.searchParams.set('multiplayer', serverUrl)
   url.searchParams.set('player', player)
   url.searchParams.set('multiplayerName', name)
   return url.href
@@ -81,8 +91,11 @@ const receiveMessageWithTag = async (socket: WebSocket, tag: string): Promise<Wi
   throw new Error(`did not receive ${tag} within three messages`)
 }
 
-const expectOutOfBoundsPlacementRejection = async (revision: number): Promise<void> => {
-  const socket = new WebSocket(E2E_MULTIPLAYER_URL)
+const expectOutOfBoundsPlacementRejection = async (
+  revision: number,
+  serverUrl = E2E_MULTIPLAYER_URL,
+): Promise<void> => {
+  const socket = new WebSocket(serverUrl)
   try {
     await new Promise<void>((resolve, reject) => {
       socket.once('open', resolve)
@@ -120,11 +133,44 @@ const connectPage = async (page: Page, url: string): Promise<void> => {
   await expect(canvas).toHaveAttribute('data-multiplayer-connection', 'connected')
 }
 
+const startServer = (stateFile: string): Promise<{ process: ChildProcess; url: string }> =>
+  new Promise((resolve, reject) => {
+    const child = spawn(join(process.cwd(), 'node_modules/.bin/tsx'), [
+      'apps/multiplayer-server/main.ts',
+      '--host', '127.0.0.1',
+      '--port', '0',
+      '--state-file', stateFile,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stderr = ''
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM')
+      reject(new Error(`multiplayer server start timed out: ${stderr}`))
+    }, 10_000)
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    child.once('error', (error) => {
+      clearTimeout(timeout)
+      reject(error)
+    })
+    child.once('exit', (code) => {
+      clearTimeout(timeout)
+      reject(new Error(`multiplayer server exited with ${String(code)}: ${stderr}`))
+    })
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const match = /multiplayer server listening on (ws:\/\/[^\s]+)/.exec(chunk.toString())
+      if (match?.[1] === undefined) return
+      clearTimeout(timeout)
+      resolve({ process: child, url: match[1] })
+    })
+  })
+
 const openPlayer = async (
   browser: Browser,
   worldName: string,
   player: string,
   name: string,
+  serverUrl = E2E_MULTIPLAYER_URL,
 ): Promise<{ readonly context: BrowserContext; readonly page: Page; readonly url: string }> => {
   const context = await browser.newContext()
   const page = await context.newPage()
@@ -133,7 +179,7 @@ const openPlayer = async (
   await page.keyboard.press('Escape')
   await callQa(page, 'persistence.flush')
   await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
-  const url = multiplayerUrl(sessionUrl, player, name)
+  const url = multiplayerUrl(sessionUrl, player, name, serverUrl)
   await connectPage(page, url)
   return { context, page, url }
 }
@@ -158,12 +204,30 @@ test('joins a saved world from the title screen multiplayer form', async ({ page
     'data-multiplayer-connection',
     'connected',
   )
-  await expect(page.locator('#multiplayer-status')).toContainText('Connected')
+  await expect(page.locator('#multiplayer-status')).toContainText('Movement corrected')
   expect(new URL(page.url()).searchParams.get('player')).toBe('title-player-e2e')
 })
 
 test('synchronizes two Creative browser sessions through the authoritative server', async ({ browser }) => {
-  const alice = await openPlayer(browser, 'Alice Multiplayer E2E', 'alice-e2e', 'Alice')
+  const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
+  const stateFile = join(stateDirectory, 'state.json')
+  const placementPose = { x: 8.5, y: 65, z: 10.5 }
+  await writeFile(stateFile, `${JSON.stringify({
+    format: 1,
+    worldId: 'overworld',
+    seed: 0,
+    state: {
+      revision: 0,
+      blocks: [],
+      playerPositions: ['alice-e2e', 'bob-e2e'].map((player) => ({
+        player,
+        at: placementPose,
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      })),
+    },
+  })}\n`, 'utf8')
+  const server = await startServer(stateFile)
+  const alice = await openPlayer(browser, 'Alice Multiplayer E2E', 'alice-e2e', 'Alice', server.url)
   await alice.page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
@@ -171,7 +235,7 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     })
     document.dispatchEvent(new Event('visibilitychange'))
   })
-  const bob = await openPlayer(browser, 'Bob Multiplayer E2E', 'bob-e2e', 'Bob')
+  const bob = await openPlayer(browser, 'Bob Multiplayer E2E', 'bob-e2e', 'Bob', server.url)
 
   try {
     const aliceCanvas = alice.page.locator('#game-canvas')
@@ -234,7 +298,7 @@ test('synchronizes two Creative browser sessions through the authoritative serve
       (await snapshot(alice.page)).pose.feetPosition.x - authoritativeX,
     )).toBeLessThan(2)
 
-    await expectOutOfBoundsPlacementRejection(revisionAfterBreak)
+    await expectOutOfBoundsPlacementRejection(revisionAfterBreak, server.url)
     await expect(aliceCanvas).toHaveAttribute('data-multiplayer-player-count', '2')
     expect(await canvasRevision(alice.page)).toBe(revisionAfterBreak)
 
@@ -252,5 +316,7 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     await expect.poll(async () => (await snapshot(reconnectedBob)).ignitionTarget.block).toBe(0)
   } finally {
     await Promise.all([alice.context.close(), bob.context.close()])
+    server.process.kill('SIGTERM')
+    await rm(stateDirectory, { recursive: true, force: true })
   }
 })

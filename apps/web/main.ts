@@ -2529,7 +2529,17 @@ const bootGame = async (
   const multiplayerEntities = new Map<string, AuthoritativeEntityState>()
   let nextVitalsCommand = 0
   let nextEntityCommand = 0
+  let nextFacilityCommand = 0
   let pendingVitalsCommand: CommandId | null = null
+  let pendingFacilityCommand: {
+    readonly commandId: CommandId
+    readonly facility: 'container' | 'furnace'
+    readonly facilityId: string
+    readonly expectsDelta: boolean
+    acceptedRevision: number | null
+    facilityDeltaRevision: number | null
+    inventoryDeltaRevision: number | null
+  } | null = null
   let networkSleepState: SleepClientState = initialSleepClientState()
   let nextSleepRequest = 1
   let appliedNightSkipRevision: number | null = null
@@ -2618,6 +2628,31 @@ const bootGame = async (
       expectedRevision: multiplayerRevision,
     } as NetworkMessage))
   }
+
+  const sendFacilityCommand = (
+    command: Omit<Extract<NetworkMessage, { readonly _tag: 'ContainerCommand' | 'FurnaceCommand' }>, 'commandId' | 'player' | 'world' | 'expectedRevision'>,
+  ): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingFacilityCommand !== null) return false
+    nextFacilityCommand += 1
+    const commandId = CommandId.make(`facility-${String(nextFacilityCommand)}`)
+    pendingFacilityCommand = {
+      commandId,
+      facility: command._tag === 'ContainerCommand' ? 'container' : 'furnace',
+      facilityId: command._tag === 'ContainerCommand' ? command.containerId : command.furnaceId,
+      expectsDelta: command.action._tag !== 'open' && command.action._tag !== 'close',
+      acceptedRevision: null,
+      facilityDeltaRevision: null,
+      inventoryDeltaRevision: null,
+    }
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      ...command,
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+    } as NetworkMessage))
+    return true
+  }
   document.addEventListener('mc-entity-command', (event) => {
     const detail = (event as CustomEvent<{ readonly entityId: string; readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'; readonly at?: { readonly x: number; readonly y: number; readonly z: number } }>).detail
     if (detail === undefined) return
@@ -2651,6 +2686,71 @@ const bootGame = async (
     selectedHotbarIndex = state.selectedSlot
   }
 
+  type NetworkContainerState = Extract<NetworkMessage, { readonly _tag: 'ContainerDelta' }>['state']
+  type NetworkFurnaceState = Extract<NetworkMessage, { readonly _tag: 'FurnaceDelta' }>['state']
+
+  const applyNetworkContainers = (states: ReadonlyArray<NetworkContainerState>): void => {
+    Effect.runSync(world.inventory.restoreContainerStorage({
+      version: 1,
+      containers: states.map((state) => ({
+        id: state.containerId,
+        slots: Array.from({ length: 27 }, (_, index) => {
+          const stack = state.slots[index]
+          return stack == null
+            ? null
+            : { item: stack.item as ItemStack['item'], count: stack.count, durability: null }
+        }),
+      })),
+    }))
+  }
+
+  const applyNetworkContainer = (state: NetworkContainerState): void => {
+    const snapshot = Effect.runSync(world.inventory.containerStorageSnapshot)
+    applyNetworkContainers([
+      ...snapshot.containers
+        .filter((container) => container.id !== state.containerId)
+        .map((container) => ({ containerId: container.id, slots: container.slots })),
+      state,
+    ])
+  }
+
+  const applyNetworkFurnace = (state: NetworkFurnaceState): void => {
+    const existing = furnaceStates.get(state.furnaceId)
+    let location: Pick<PersistedFurnaceState, 'dimension' | 'position'> | undefined = existing
+    if (location === undefined) {
+      try {
+        const parsed: unknown = JSON.parse(state.furnaceId)
+        if (
+          Array.isArray(parsed)
+          && parsed.length === 4
+          && (parsed[0] === 'overworld' || parsed[0] === 'nether' || parsed[0] === 'end')
+          && parsed.slice(1).every(Number.isFinite)
+        ) {
+          location = {
+            dimension: parsed[0],
+            position: { x: parsed[1] as number, y: parsed[2] as number, z: parsed[3] as number },
+          }
+        }
+      } catch {
+        return
+      }
+    }
+    if (location === undefined) return
+    const networkStack = (stack: NetworkFurnaceState['input']): ItemStack | null => stack === null
+      ? null
+      : itemStack(stack.item as ItemStack['item'], stack.count)
+    furnaceStates.set(state.furnaceId, {
+      ...location,
+      state: {
+        input: networkStack(state.input),
+        fuel: networkStack(state.fuel),
+        output: networkStack(state.output),
+        burnRemainingSecs: state.burnTicksRemaining / 20,
+        cookElapsedSecs: state.cookTicks / 20,
+      },
+    })
+  }
+
   const applyNetworkMessage = (message: NetworkMessage): void => {
     if (multiplayer === undefined) return
     switch (message._tag) {
@@ -2670,6 +2770,27 @@ const bootGame = async (
         if (local !== undefined) applyNetworkVitals(local.state)
         const localInventory = message.inventories.find(({ player }) => player === multiplayer.query.player)
         if (localInventory !== undefined) applyNetworkInventory(localInventory.state)
+        applyNetworkContainers(message.containers)
+        furnaceStates.clear()
+        for (const furnace of message.furnaces) applyNetworkFurnace(furnace)
+        if (
+          inventoryOpen
+          && inventoryMode === 'chest'
+          && activeChestId !== undefined
+          && !message.containers.some(({ containerId }) => containerId === activeChestId)
+        ) {
+          activeChestId = undefined
+          setInventoryOpen(false)
+        }
+        if (
+          inventoryOpen
+          && inventoryMode === 'furnace'
+          && activeFurnaceKey !== undefined
+          && !furnaceStates.has(activeFurnaceKey)
+        ) {
+          activeFurnaceKey = undefined
+          setInventoryOpen(false)
+        }
         multiplayerEntities.clear()
         for (const entity of message.entities ?? []) multiplayerEntities.set(entity.entityId, entity)
         break
@@ -2689,20 +2810,68 @@ const bootGame = async (
         if (message.revision < multiplayerRevision) return
         multiplayerRevision = message.revision
         if (message.player === multiplayer.query.player) applyNetworkInventory(message.state)
+        if (
+          message.player === multiplayer.query.player
+          && pendingFacilityCommand !== null
+        ) {
+          pendingFacilityCommand.inventoryDeltaRevision = message.revision
+          if (
+            pendingFacilityCommand.acceptedRevision !== null
+            && pendingFacilityCommand.facilityDeltaRevision !== null
+            && message.revision >= pendingFacilityCommand.acceptedRevision
+            && pendingFacilityCommand.facilityDeltaRevision >= pendingFacilityCommand.acceptedRevision
+          ) pendingFacilityCommand = null
+        }
         break
       case 'PlayerVitalsDelta':
         if (message.revision < multiplayerRevision) return
         multiplayerRevision = message.revision
         if (message.player === multiplayer.query.player) applyNetworkVitals(message.state)
         break
+      case 'ContainerDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        applyNetworkContainer(message.state)
+        if (
+          pendingFacilityCommand?.facility === 'container'
+          && pendingFacilityCommand.facilityId === message.state.containerId
+        ) pendingFacilityCommand.facilityDeltaRevision = message.revision
+        if (inventoryOpen && inventoryMode === 'chest' && activeChestId === message.state.containerId) renderPlayerUi()
+        break
+      case 'FurnaceDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        applyNetworkFurnace(message.state)
+        if (
+          pendingFacilityCommand?.facility === 'furnace'
+          && pendingFacilityCommand.facilityId === message.state.furnaceId
+        ) pendingFacilityCommand.facilityDeltaRevision = message.revision
+        if (inventoryOpen && inventoryMode === 'furnace' && activeFurnaceKey === message.state.furnaceId) renderPlayerUi()
+        break
       case 'AuthoritativeCommandAccepted':
         multiplayerRevision = Math.max(multiplayerRevision, message.revision)
         if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
+        if (message.commandId === pendingFacilityCommand?.commandId) {
+          if (!pendingFacilityCommand.expectsDelta) pendingFacilityCommand = null
+          else if (
+            pendingFacilityCommand.facilityDeltaRevision !== null
+            && pendingFacilityCommand.inventoryDeltaRevision !== null
+            && pendingFacilityCommand.facilityDeltaRevision >= message.revision
+            && pendingFacilityCommand.inventoryDeltaRevision >= message.revision
+          ) pendingFacilityCommand = null
+          else pendingFacilityCommand.acceptedRevision = message.revision
+        }
         break
       case 'AuthoritativeCommandRejected':
         multiplayerRevision = Math.max(multiplayerRevision, message.revision)
         multiplayerRejection = message.reason
         if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
+        if (message.commandId === pendingFacilityCommand?.commandId) {
+          pendingFacilityCommand = null
+          chestStatus = message.reason
+          furnaceStatus = message.reason
+          if (inventoryOpen) renderPlayerUi()
+        }
         if (message.resyncRequired) Effect.runSync(multiplayer.host.enqueueOutbound({ _tag: 'AuthoritativeResyncRequest', world: message.world, lastKnownRevision: multiplayerRevision }))
         break
       case 'PlayerJoin':
@@ -3886,6 +4055,26 @@ const bootGame = async (
       renderPlayerUi()
       return
     }
+    if (multiplayer !== undefined) {
+      const sent = sendFacilityCommand({
+        _tag: 'ContainerCommand',
+        containerId: activeChestId,
+        action: {
+          _tag: 'move-item',
+          source: source.region === 'chest'
+            ? { _tag: 'container-slot', slot: source.slot }
+            : { _tag: 'player-slot', slot: source.slot },
+          destination: target.region === 'chest'
+            ? { _tag: 'container-slot', slot: target.slot }
+            : { _tag: 'player-slot', slot: target.slot },
+          count: sourceStack.count,
+        },
+      })
+      chestStatus = sent ? 'Move pending server approval' : 'Another facility action is pending'
+      if (sent) chestSelected = undefined
+      renderPlayerUi()
+      return
+    }
     const result = Effect.runSync(world.inventory.transferContainerItem({
       direction: source.region === 'chest' ? 'ContainerToPlayer' : 'PlayerToContainer',
       containerId: activeChestId,
@@ -3931,6 +4120,39 @@ const bootGame = async (
     furnaceStatus = ''
     const furnace = furnaceStates.get(activeFurnaceKey)
     if (furnace === undefined) return
+    if (multiplayer !== undefined) {
+      const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
+      const stack = slot === 'output' ? furnace.state.output : selected
+      if (stack === null || stack === undefined) {
+        furnaceStatus = 'Slot is empty'
+        renderPlayerUi()
+        return
+      }
+      const sent = sendFacilityCommand(slot === 'output'
+        ? {
+            _tag: 'FurnaceCommand',
+            furnaceId: activeFurnaceKey,
+            action: {
+              _tag: 'take-output',
+              source: { _tag: 'furnace-slot', slot: 'output' },
+              destination: { _tag: 'player-slot', slot: selectedHotbarIndex },
+              count: stack.count,
+            },
+          }
+        : {
+            _tag: 'FurnaceCommand',
+            furnaceId: activeFurnaceKey,
+            action: {
+              _tag: 'move-item',
+              source: { _tag: 'player-slot', slot: selectedHotbarIndex },
+              destination: { _tag: 'furnace-slot', slot },
+              count: 1,
+            },
+          })
+      furnaceStatus = sent ? 'Transfer pending server approval' : 'Another facility action is pending'
+      renderPlayerUi()
+      return
+    }
     if (slot === 'output') {
       const output = furnace.state.output
       if (output !== null) {
@@ -4338,6 +4560,17 @@ const bootGame = async (
   const setInventoryOpen = (open: boolean, mode: InventoryMode = 'player'): void => {
     if (open && playerIsDead()) return
     if (open && bowInteractionLocked()) return
+    if (!open && multiplayer !== undefined && inventoryOpen && inventoryMode === 'chest' && activeChestId !== undefined) {
+      if (!sendFacilityCommand({
+        _tag: 'ContainerCommand',
+        containerId: activeChestId,
+        action: { _tag: 'close' },
+      })) {
+        chestStatus = 'Wait for the pending facility action before closing'
+        renderPlayerUi()
+        return
+      }
+    }
     if (open && tradeOpen) setTradeOpen(false)
     if (open && brewingOpen) setBrewingOpen(false)
     const previousOpen = inventoryOpen
@@ -6289,18 +6522,20 @@ const bootGame = async (
       multiplayerStatus.hidden = false
     }
 
-    for (const [key, furnace] of furnaceStates) {
-      nextItemUseRequestId += 1
-      const requestId = `furnace-advance-${String(nextItemUseRequestId)}`
-      pendingFurnaceAdvances.set(requestId, key)
-      const deferredSecs = deferredFurnaceAdvanceSecs.get(key) ?? 0
-      deferredFurnaceAdvanceSecs.delete(key)
-      Effect.runSync(requestFurnaceAdvance(
-        gameplayState,
-        requestId,
-        furnace.state,
-        deltaSecs + deferredSecs,
-      ))
+    if (multiplayer === undefined) {
+      for (const [key, furnace] of furnaceStates) {
+        nextItemUseRequestId += 1
+        const requestId = `furnace-advance-${String(nextItemUseRequestId)}`
+        pendingFurnaceAdvances.set(requestId, key)
+        const deferredSecs = deferredFurnaceAdvanceSecs.get(key) ?? 0
+        deferredFurnaceAdvanceSecs.delete(key)
+        Effect.runSync(requestFurnaceAdvance(
+          gameplayState,
+          requestId,
+          furnace.state,
+          deltaSecs + deferredSecs,
+        ))
+      }
     }
 
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
@@ -7461,12 +7696,16 @@ const bootGame = async (
           z: Math.floor(route.at.z),
         }
         const key = furnaceKeyOf({ dimension, position })
-        if (!furnaceStates.has(key)) {
+        if (multiplayer === undefined && !furnaceStates.has(key)) {
           furnaceStates.set(key, { dimension, position, state: emptyFurnaceState() })
           markSessionDirty()
         }
-        activeFurnaceKey = key
-        setInventoryOpen(true, 'furnace')
+        if (multiplayer === undefined || furnaceStates.has(key)) {
+          activeFurnaceKey = key
+          setInventoryOpen(true, 'furnace')
+        } else {
+          multiplayerRejection = 'Furnace is not present in the authoritative snapshot.'
+        }
       } else if (route?.kind === 'storage') {
         const dimension = Effect.runSync(playerApi.dimension)
         const position = {
@@ -7475,11 +7714,23 @@ const bootGame = async (
           z: Math.floor(route.at.z),
         }
         const id = containerIdAt(dimension, position)
-        const created = Effect.runSync(world.inventory.createContainer(id))
-        if (created._tag === 'Created') markSessionDirty()
-        if (created._tag !== 'InvalidContainerId') {
-          activeChestId = id
-          setInventoryOpen(true, 'chest')
+        if (multiplayer !== undefined) {
+          const container = Effect.runSync(world.inventory.containerSnapshot(id))
+          if (container !== undefined && sendFacilityCommand({
+            _tag: 'ContainerCommand',
+            containerId: id,
+            action: { _tag: 'open' },
+          })) {
+            activeChestId = id
+            setInventoryOpen(true, 'chest')
+          }
+        } else {
+          const created = Effect.runSync(world.inventory.createContainer(id))
+          if (created._tag === 'Created') markSessionDirty()
+          if (created._tag !== 'InvalidContainerId') {
+            activeChestId = id
+            setInventoryOpen(true, 'chest')
+          }
         }
       } else {
         const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
