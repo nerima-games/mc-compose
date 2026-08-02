@@ -43,6 +43,15 @@ const isValidIdentifier = (value: unknown): value is string =>
   && value.length <= PLAYER_DAMAGE_MAX_IDENTIFIER_LENGTH
   && !/\p{Cc}/u.test(value)
 
+const isNonNegativeSafeInteger = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+
+const isValidMinimumHealthPoints = (value: unknown): value is number =>
+  typeof value === 'number'
+  && Number.isFinite(value)
+  && value >= 0
+  && value <= PLAYER_DAMAGE_MAX_MINIMUM_HEALTH_POINTS
+
 const isPlayerDamageRejectionReason = (
   value: unknown,
 ): value is Extract<PlayerDamageCommandResult, { accepted: false }>['reason'] =>
@@ -64,36 +73,68 @@ export const decodePlayerDamageWireMessage = (wire: WireText): PlayerDamageWireM
   }
   if (!isRecord(value)) return undefined
   if (value['_tag'] === 'PlayerDamageCommandResult') {
-    if (!isValidIdentifier(value['commandId'])
-      || !Number.isSafeInteger(value['revision'])
-      || (value['revision'] as number) < 0) return undefined
+    const commandId = value['commandId']
+    const revision = value['revision']
+    if (!isValidIdentifier(commandId) || !isNonNegativeSafeInteger(revision)) return undefined
     if (value['accepted'] === true
       && hasExactlyKeys(value, ['_tag', 'commandId', 'accepted', 'revision'])) {
-      return value as unknown as PlayerDamageCommandResult
+      return {
+        _tag: 'PlayerDamageCommandResult',
+        commandId,
+        accepted: true,
+        revision,
+      }
     }
     if (value['accepted'] === false
       && isPlayerDamageRejectionReason(value['reason'])
       && hasExactlyKeys(value, ['_tag', 'commandId', 'accepted', 'revision', 'reason'])) {
-      return value as unknown as PlayerDamageCommandResult
+      return {
+        _tag: 'PlayerDamageCommandResult',
+        commandId,
+        accepted: false,
+        revision,
+        reason: value['reason'],
+      }
     }
     return undefined
   }
-  if (value['_tag'] !== 'PlayerDamageCommand'
-    || (!hasExactlyKeys(value, ['_tag', 'commandId', 'player', 'world', 'expectedRevision', 'amount'])
+  if (value['_tag'] !== 'PlayerDamageCommand') return undefined
+  const commandId = value['commandId']
+  const player = value['player']
+  const world = value['world']
+  const expectedRevision = value['expectedRevision']
+  const amount = value['amount']
+  const minimumHealthPoints = value['minimumHealthPoints']
+  const hasMinimumHealthPoints = Object.hasOwn(value, 'minimumHealthPoints')
+  if ((!hasExactlyKeys(value, ['_tag', 'commandId', 'player', 'world', 'expectedRevision', 'amount'])
       && !hasExactlyKeys(value, ['_tag', 'commandId', 'player', 'world', 'expectedRevision', 'amount', 'minimumHealthPoints']))
-    || !isValidIdentifier(value['commandId'])
-    || !isValidIdentifier(value['player'])
-    || !isValidIdentifier(value['world'])
-    || !Number.isSafeInteger(value['expectedRevision'])
-    || (value['expectedRevision'] as number) < 0
-    || typeof value['amount'] !== 'number'
-    || !Number.isFinite(value['amount'])
-    || (value['amount'] as number) <= 0
-    || (value['amount'] as number) > PLAYER_DAMAGE_MAX_AMOUNT
-    || (Object.hasOwn(value, 'minimumHealthPoints')
-      && (typeof value['minimumHealthPoints'] !== 'number'
-        || !Number.isFinite(value['minimumHealthPoints'])
-        || (value['minimumHealthPoints'] as number) < 0
-        || (value['minimumHealthPoints'] as number) > PLAYER_DAMAGE_MAX_MINIMUM_HEALTH_POINTS))) return undefined
-  return value as unknown as PlayerDamageCommand
+    || !isValidIdentifier(commandId)
+    || !isValidIdentifier(player)
+    || !isValidIdentifier(world)
+    || !isNonNegativeSafeInteger(expectedRevision)
+    || typeof amount !== 'number'
+    || !Number.isFinite(amount)
+    || amount <= 0
+    || amount > PLAYER_DAMAGE_MAX_AMOUNT
+    || (hasMinimumHealthPoints && !isValidMinimumHealthPoints(minimumHealthPoints))) return undefined
+  if (hasMinimumHealthPoints) {
+    if (!isValidMinimumHealthPoints(minimumHealthPoints)) return undefined
+    return {
+      _tag: 'PlayerDamageCommand',
+      commandId,
+      player,
+      world,
+      expectedRevision,
+      amount,
+      minimumHealthPoints,
+    }
+  }
+  return {
+    _tag: 'PlayerDamageCommand',
+    commandId,
+    player,
+    world,
+    expectedRevision,
+    amount,
+  }
 }
