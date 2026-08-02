@@ -1466,7 +1466,7 @@ const bootGame = async (
       world.player.restore(loadedSession.value.state.player, loadedSession.value.state.dimension),
     )
     await Effect.runPromise(world.vitals.restore(loadedSession.value.state.vitals))
-  } else {
+  } else if (isCreativeMode) {
     await Effect.runPromise(world.inventory.add('redstone_dust', 16))
     await Effect.runPromise(world.inventory.add('lever', 4))
     await Effect.runPromise(world.inventory.add('redstone_lamp', 8))
@@ -4658,13 +4658,6 @@ const bootGame = async (
     if (validRespawn === null) respawnLocation = null
     sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
     const respawnDimension = validRespawn?.dimension ?? initialSpawnDimension
-    const preserveDrops = deathDropDimension === undefined || deathDropDimension === respawnDimension
-    const entities = Effect.runSync(world.entities.entities)
-    for (const entity of entities) {
-      if (!preserveDrops && isDroppedItemBehaviour(entity.behaviour)) {
-        Effect.runSync(world.entities.despawn(entity.id))
-      }
-    }
     deathDropDimension = undefined
     const respawnPose = validRespawn === null
       ? initialSpawnPose

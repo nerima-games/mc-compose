@@ -31,6 +31,7 @@ type EquipmentSnapshotEntry = {
   } | null
 }
 type GameplaySnapshot = {
+  readonly dimension: 'overworld' | 'nether' | 'end'
   readonly pose: Pose
   readonly vitals: {
     readonly healthPoints: number
@@ -418,6 +419,72 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
   await expect(deathOverlay).toBeHidden()
   await expect(respawn).toBeHidden()
   await expect.poll(() => framesDrawn(page)).toBeGreaterThan(framesAtDeath)
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('preserves Nether death drops and unrelated drops across respawn', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await startGameSession(page)
+  const canvas = page.locator('#game-canvas')
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await canvas.hover()
+  await callQa<unknown>(page, 'gameplay.seedMeleeDropEncounter')
+  await grantPointerLock(page)
+  await page.mouse.down({ button: 'left' })
+  await page.waitForTimeout(250)
+  await page.mouse.up({ button: 'left' })
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return current.entities.filter((entity) => entity.kind === 'dropped_item').length
+  }).toBe(1)
+  const unrelatedDropId = (await snapshot(page)).entities.find(
+    (entity) => entity.kind === 'dropped_item',
+  )?.id
+  expect(unrelatedDropId).toBeDefined()
+
+  await callQa<unknown>(page, 'gameplay.seedFoodUseEncounter')
+  await callQa<unknown>(page, 'gameplay.enterNether')
+  for (let hit = 0; hit < 5; hit += 1) {
+    await callQa<unknown>(page, 'gameplay.damage')
+  }
+  const death = await snapshot(page)
+  expect(death.dimension).toBe('nether')
+  expect(death.dead).toBe(true)
+  const deathDropIds = death.entities
+    .filter((entity) => entity.kind === 'dropped_item' && entity.id !== unrelatedDropId)
+    .map((entity) => entity.id)
+    .sort()
+  expect(deathDropIds).toHaveLength(1)
+
+  const respawned = await callQa<GameplaySnapshot>(page, 'gameplay.respawn')
+  expect(respawned.dimension).toBe('overworld')
+  expect(
+    respawned.entities
+      .filter((entity) => entity.kind === 'dropped_item')
+      .map((entity) => entity.id)
+      .sort(),
+  ).toEqual([unrelatedDropId!, ...deathDropIds].sort())
+
+  await callQa<unknown>(page, 'gameplay.enterNether')
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const countBeforePickup = (await snapshot(page)).entities.filter(
+      (entity) => entity.kind === 'dropped_item',
+    ).length
+    if (countBeforePickup === 0) break
+    await callQa<unknown>(page, 'gameplay.targetNearestDroppedItem')
+    await expect.poll(async () => {
+      const current = await snapshot(page)
+      return current.entities.filter((entity) => entity.kind === 'dropped_item').length
+    }).toBeLessThan(countBeforePickup)
+  }
+  const recovered = await snapshot(page)
+  expect(recovered.entities.filter((entity) => entity.kind === 'dropped_item')).toEqual([])
+  expect(inventoryCount(recovered, 'potato')).toBe(2)
+
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })

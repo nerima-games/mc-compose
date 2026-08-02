@@ -89,20 +89,45 @@ describe('browser websocket transport', () => {
     expect(socket.listenerCount()).toBe(4)
   })
 
-  it('queues only string messages and drops new frames at capacity', async () => {
+  it('preserves ordered frames for every inbound queue beyond configured capacity', async () => {
     const socket = new SocketDouble()
     const transport = await makeTransport(socket, 2)
     socket.emit('open', undefined)
 
+    const sleepFrames = [1, 2, 3].map((revision) => ({
+      _tag: 'SleepEvents',
+      revision,
+      events: [],
+    }))
+    const witherFrames = [1, 2, 3].map((revision) => ({
+      _tag: 'WitherCommandResult',
+      requestId: `request-${revision}`,
+      accepted: true,
+      revision,
+    }))
+
     socket.emit('message', { data: 'first' })
+    socket.emit('message', { data: JSON.stringify(sleepFrames[0]) })
+    socket.emit('message', { data: JSON.stringify(witherFrames[0]) })
     socket.emit('message', { data: new Uint8Array([1, 2]) })
     socket.emit('message', { data: 'second' })
-    socket.emit('message', { data: 'dropped' })
+    socket.emit('message', { data: JSON.stringify(sleepFrames[1]) })
+    socket.emit('message', { data: JSON.stringify(witherFrames[1]) })
+    socket.emit('message', { data: 'third' })
+    socket.emit('message', { data: JSON.stringify(sleepFrames[2]) })
+    socket.emit('message', { data: JSON.stringify(witherFrames[2]) })
 
     expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.inbound)))).toEqual([
       'first',
       'second',
+      'third',
     ])
+    expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.sleepInbound)))).toEqual(
+      sleepFrames,
+    )
+    expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.witherInbound)))).toEqual(
+      witherFrames,
+    )
   })
 
   it('fails a pending and subsequent send when the peer closes', async () => {

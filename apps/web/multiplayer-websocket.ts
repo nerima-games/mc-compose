@@ -75,12 +75,11 @@ export const makeBrowserWebSocketTransport = (
       )
     }
 
-    // A dropping queue bounds memory without starting a suspended Effect fiber
-    // from the browser's synchronous message callback. New frames are dropped
-    // while the consumer is behind; protocol parsing remains the consumer's job.
-    const inbound = yield* Queue.dropping<WireText>(capacity)
-    const sleepInbound = yield* Queue.dropping<SleepWireMessage>(capacity)
-    const witherInbound = yield* Queue.dropping<WitherWireMessage>(capacity)
+    // Browser message events cannot be backpressured. Unbounded queues preserve every
+    // frame in arrival order until the consumer drains its inbound stream.
+    const inbound = yield* Queue.unbounded<WireText>()
+    const sleepInbound = yield* Queue.unbounded<SleepWireMessage>()
+    const witherInbound = yield* Queue.unbounded<WitherWireMessage>()
     const opened = yield* Deferred.make<void, TransportError>()
     const socket = yield* Effect.try({
       try: () => (options.socketFactory ?? defaultSocketFactory)(options.url),

@@ -26,6 +26,18 @@ test('creates, saves, and reloads a session from the title screen', async ({ pag
   await expect(page.getByTestId('game-shell')).toBeVisible()
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
+  const initialInventory = await page.evaluate(async () => {
+    const qa = (globalThis as unknown as Record<string, unknown>)['__NERIMA_GAMES_QA__'] as
+      | Record<string, () => unknown>
+      | undefined
+    const snapshot = await qa?.['gameplay.snapshot']?.() as {
+      readonly inventory: { readonly slots: ReadonlyArray<unknown> }
+    } | undefined
+    return snapshot?.inventory.slots
+  })
+  expect(initialInventory).toHaveLength(36)
+  expect(initialInventory?.every((slot) => slot === null)).toBe(true)
+
   await page.keyboard.press('Escape')
   await expect(page.getByTestId('pause-overlay')).toBeVisible()
   await page.getByTestId('save-quit-button').click()
