@@ -4428,7 +4428,7 @@ const bootGame = async (
     const preserveDrops = deathDropDimension === undefined || deathDropDimension === respawnDimension
     const entities = Effect.runSync(world.entities.entities)
     for (const entity of entities) {
-      if (!preserveDrops || !isDroppedItemBehaviour(entity.behaviour)) {
+      if (!preserveDrops && isDroppedItemBehaviour(entity.behaviour)) {
         Effect.runSync(world.entities.despawn(entity.id))
       }
     }

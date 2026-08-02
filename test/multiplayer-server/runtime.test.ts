@@ -89,6 +89,7 @@ describe('multiplayer WebSocket runtime', () => {
     const solidY = Array.from({ length: 256 }, (_, y) => y).find((y) => generatedBlockAt({ x: 0, y, z: 0 }) !== null)
     expect(solidY).toBeDefined()
     const block = { x: 0, y: solidY as number, z: 0 }
+    const playerAt = { x: 0, y: block.y + 1, z: 0 }
 
     const first = await startMultiplayerServer({
       host: '127.0.0.1', port: 0, worldId, seed, stateFile, installSignalHandlers: false,
@@ -98,16 +99,16 @@ describe('multiplayer WebSocket runtime', () => {
     const firstSnapshot = nextMessage(socket)
     socket.send(encode({
       _tag: 'PlayerJoin', player: 'persistent-player' as PlayerId, name: 'Persistent Player' as PlayerName,
-      at: { x: 0, y: 200, z: 0 },
+      at: playerAt,
     }))
     await firstSnapshot
 
     const correction = nextMessage(socket)
     socket.send(encode({
       _tag: 'PlayerMove', player: 'persistent-player' as PlayerId,
-      at: { x: 100, y: 200, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 },
+      at: { x: 100, y: playerAt.y, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 },
     }))
-    await expect(correction).resolves.toMatchObject({ _tag: 'PlayerMove', at: { x: 0, y: 200, z: 0 } })
+    await expect(correction).resolves.toMatchObject({ _tag: 'PlayerMove', at: playerAt })
 
     const acceptedBreak = nextMessage(socket)
     socket.send(encode({ _tag: 'BlockBreak', player: 'persistent-player' as PlayerId, world: worldId as never, at: block }))

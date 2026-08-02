@@ -170,6 +170,7 @@ const DEFAULT_TIME_WEATHER: TimeWeatherState = { timeOfDay: 6_000, weather: 'cle
 const PLAYER_HALF_WIDTH = 0.3
 const PLAYER_HEIGHT = 1.8
 const COLLISION_EPSILON = 1e-9
+const BLOCK_INTERACTION_RANGE = 5
 const WITHER_INTERACTION_RANGE = 5
 const WITHER_ATTACK_DAMAGE = 4
 const WITHER_ATTACK_COOLDOWN_MS = 500
@@ -369,6 +370,15 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     x >= bounds.minX && x <= bounds.maxX &&
     y >= bounds.minY && y <= bounds.maxY &&
     z >= bounds.minZ && z <= bounds.maxZ
+
+  const isBlockWithinReach = (player: MutablePlayer, at: BlockPos): boolean => {
+    const distance = Math.hypot(
+      player.at.x - (at.x + 0.5),
+      player.at.y - (at.y + 0.5),
+      player.at.z - (at.z + 0.5),
+    )
+    return Number.isFinite(distance) && distance <= BLOCK_INTERACTION_RANGE
+  }
 
   const blockAt = (at: BlockPos): string | null => {
     const override = blocks.get(positionKey(at))
@@ -982,6 +992,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       case 'BlockPlace': {
         if (message.world !== undefined && message.world !== worldId) return rejectMutation(client, message, 'unauthorized-player')
         if (!isInBounds(message.at)) return rejectMutation(client, message, 'out-of-bounds')
+        const player = players.get(message.player)
+        if (player === undefined || !isBlockWithinReach(player, message.at)) return rejectMutation(client, message, 'unauthorized-player')
         if (message.block === 'air' || !options.allowedBlocks.has(message.block)) return rejectMutation(client, message, 'unknown-block')
         if (blockAt(message.at) !== null) return rejectMutation(client, message, 'occupied')
         blocks.set(positionKey(message.at), { at: message.at, block: message.block })
@@ -993,6 +1005,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       case 'BlockBreak': {
         if (message.world !== undefined && message.world !== worldId) return rejectMutation(client, message, 'unauthorized-player')
         if (!isInBounds(message.at)) return rejectMutation(client, message, 'out-of-bounds')
+        const player = players.get(message.player)
+        if (player === undefined || !isBlockWithinReach(player, message.at)) return rejectMutation(client, message, 'unauthorized-player')
         if (blockAt(message.at) === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })
         revision += 1

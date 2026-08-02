@@ -407,10 +407,10 @@ test('renders a lethal zombie encounter and recovers through the Respawn control
     maxHealthPoints: spawn.vitals.maxHealthPoints,
     lastDamageCause: null,
     dead: false,
-    entityCount: 4,
-    simulationZombieIds: [],
+    entityCount: 5,
+    simulationZombieIds: [zombieId],
     simulationDropIds: dropIds,
-    renderedZombieIds: [],
+    renderedZombieIds: [zombieId],
     renderedDropIds: dropIds,
     renderedDropCategories: ['item', 'item', 'item', 'item'],
   })
