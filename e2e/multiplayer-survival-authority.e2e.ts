@@ -1,5 +1,6 @@
 import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +8,18 @@ import { join } from 'node:path'
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const PLAYER_AT = { x: 8.5, y: 65, z: 10.5 } as const
 const BOOT_TIMEOUT_MS = 15_000
+const LEGACY_SECRETS = {
+  'survival-alice': 'survival-alice-registration-secret',
+  'survival-bob': 'survival-bob-registration-secret',
+} as const
+
+const claimsFor = (players: Record<string, string>) => ({
+  format: 1,
+  players: Object.fromEntries(Object.entries(players).map(([player, secret]) => [
+    player,
+    createHash('sha256').update(secret).digest('hex'),
+  ])),
+})
 
 type GameplaySnapshot = {
   readonly mode: 'survival' | 'creative'
@@ -27,6 +40,7 @@ type PlayerSession = {
   readonly context: BrowserContext
   readonly page: Page
   readonly url: string
+  readonly sessionId: string
 }
 
 const emptySlots = (): ReadonlyArray<null> => Array.from({ length: 36 }, () => null)
@@ -117,6 +131,7 @@ const connectPlayer = async (
   serverUrl: string,
   player: string,
   name: string,
+  registrationToken: string,
 ): Promise<PlayerSession> => {
   const context = await browser.newContext()
   const page = await context.newPage()
@@ -125,6 +140,12 @@ const connectPlayer = async (
   url.searchParams.set('multiplayer', serverUrl)
   url.searchParams.set('player', player)
   url.searchParams.set('multiplayerName', name)
+  const sessionId = await page.locator('body').getAttribute('data-session-id')
+  if (sessionId === null) throw new Error('multiplayer session lacks an id')
+  const registrationTokenKey = `mc-compose:multiplayer-registration:${JSON.stringify([serverUrl, sessionId, player])}`
+  await page.evaluate(({ key, token }) => {
+    window.sessionStorage.setItem(key, token)
+  }, { key: registrationTokenKey, token: registrationToken })
   await page.goto(url.href)
   await expect(page.locator('body')).toHaveAttribute(
     'data-mc-compose-boot',
@@ -136,7 +157,7 @@ const connectPlayer = async (
     'connected',
     { timeout: BOOT_TIMEOUT_MS },
   )
-  return { context, page, url: url.href }
+  return { context, page, url: url.href, sessionId }
 }
 
 const entityCommand = (
@@ -159,13 +180,14 @@ let serverProcess: ChildProcess | undefined
 let serverUrl: string
 let stateDirectory: string | undefined
 
-const startServer = (stateFile: string): Promise<{ process: ChildProcess; url: string }> =>
+const startServer = (stateFile: string, claimsFile: string): Promise<{ process: ChildProcess; url: string }> =>
   new Promise((resolve, reject) => {
     const child = spawn(join(process.cwd(), 'node_modules/.bin/tsx'), [
       'apps/multiplayer-server/main.ts',
       '--host', '127.0.0.1',
       '--port', '0',
       '--state-file', stateFile,
+      '--legacy-player-claims-file', claimsFile,
     ], { stdio: ['ignore', 'pipe', 'pipe'] })
     let stderr = ''
     const timeout = setTimeout(() => {
@@ -194,13 +216,15 @@ const startServer = (stateFile: string): Promise<{ process: ChildProcess; url: s
 test.beforeAll(async () => {
   stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-survival-e2e-'))
   const stateFile = join(stateDirectory, 'state.json')
+  const claimsFile = join(stateDirectory, 'claims.json')
   await writeFile(stateFile, `${JSON.stringify({
     format: 1,
     worldId: 'overworld',
     seed: 0,
     state: initialState,
   })}\n`, 'utf8')
-  const started = await startServer(stateFile)
+  await writeFile(claimsFile, `${JSON.stringify(claimsFor(LEGACY_SECRETS))}\n`, 'utf8')
+  const started = await startServer(stateFile, claimsFile)
   serverProcess = started.process
   serverUrl = started.url
 })
@@ -213,8 +237,8 @@ test.afterAll(async () => {
 })
 
 test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state authoritative', async ({ browser }) => {
-  const alice = await connectPlayer(browser, serverUrl, 'survival-alice', 'Alice')
-  const bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob')
+  const alice = await connectPlayer(browser, serverUrl, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
+  const bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
 
   try {
     await expect(alice.page.locator('#game-canvas')).toHaveAttribute('data-multiplayer-player-count', '2')
@@ -287,7 +311,13 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await bob.page.close()
     await expect(alice.page.locator('#game-canvas')).toHaveAttribute('data-multiplayer-player-count', '1')
     const reconnectedBob = await bob.context.newPage()
-    await reconnectedBob.goto(bob.url)
+    const bobUrl = new URL(bob.url)
+    const bobRegistrationTokenKey = `mc-compose:multiplayer-registration:${JSON.stringify([serverUrl, bob.sessionId, 'survival-bob'])}`
+    await reconnectedBob.goto(bobUrl.origin)
+    await reconnectedBob.evaluate(({ key, token }) => {
+      window.sessionStorage.setItem(key, token)
+    }, { key: bobRegistrationTokenKey, token: LEGACY_SECRETS['survival-bob'] })
+    await reconnectedBob.goto(bobUrl.href)
     await expect(reconnectedBob.locator('body')).toHaveAttribute(
       'data-mc-compose-boot',
       'running',

@@ -36,6 +36,28 @@ describe('projectile runtime', () => {
     })
   })
 
+  it('advances only the active dimension and preserves other dimension projectiles', () => {
+    const overworld = launched()
+    const state = launchRuntimeProjectile(overworld, {
+      dimension: 'nether',
+      position: { x: 4, y: 1, z: 0 },
+      yawRadians: 0,
+      pitchRadians: 0,
+      speed: 10,
+      damage: 4,
+      knockback: 0,
+      shooterId: 'player',
+    })
+    const netherProjectile = state.projectiles.find(({ dimension }) => dimension === 'nether')
+
+    const result = advanceProjectileRuntime(state, world(), 'overworld', 0.05)
+
+    expect(result.state.projectiles.find(({ dimension }) => dimension === 'nether')).toStrictEqual(netherProjectile)
+    expect(result.state.projectiles.find(({ dimension }) => dimension === 'overworld')).not.toStrictEqual(
+      state.projectiles.find(({ dimension }) => dimension === 'overworld'),
+    )
+  })
+
   it('continuously collides with a block, remains stuck, and can be recovered', () => {
     const result = advanceProjectileRuntime(launched(), world({
       blockBounds: () => [{ minX: 2, minY: 0, minZ: -1, maxX: 3, maxY: 2, maxZ: 1 }],

@@ -48,10 +48,12 @@ import {
   emptyBrewingStandState,
   emptyStatusEffectState,
   isValidPlayerVitals,
+  decodeEnchantedItem,
   SPAWN_PLAYER_VITALS,
   EnderDragonEncounterSnapshotSchema,
   initialEnderDragonEncounter,
   type EnderDragonEncounterSnapshot,
+  type Enchantment,
   type PlayerVitals,
   type BrewingStandState,
   type StatusEffectState,
@@ -60,7 +62,7 @@ import {
 } from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
-export const SESSION_FORMAT_VERSION = 16
+export const SESSION_FORMAT_VERSION = 17
 
 export type SessionPosition = {
   readonly x: number
@@ -76,12 +78,64 @@ export type PersistedEntity = {
   readonly behaviour: unknown
 }
 
+export type PersistedItemDropLifetime = {
+  readonly elapsedSecs: number
+}
+
+export type PersistedItemDropMetadata = {
+  readonly customName?: string
+  readonly enchantments?: ReadonlyArray<Enchantment>
+}
+
+export const persistedItemDropMetadata = (behaviour: unknown): PersistedItemDropMetadata => {
+  const drop = asRecord(behaviour)
+  if (drop === undefined) return {}
+
+  const customName = drop['customName']
+  const enchantedItem = decodeEnchantedItem({
+    item: drop['item'],
+    durability: drop['durability'] ?? null,
+    enchantments: drop['enchantments'],
+  })
+  return {
+    ...(typeof customName === 'string' && customName.trim().length > 0 ? { customName } : {}),
+    ...(enchantedItem.ok
+      ? { enchantments: enchantedItem.value.enchantments.map((enchantment) => ({ ...enchantment })) }
+      : {}),
+  }
+}
+
+const normalizePersistedEntityBehaviour = (kind: string, behaviour: unknown): unknown => {
+  if (kind !== 'dropped_item') return behaviour
+  const drop = asRecord(behaviour)
+  if (drop === undefined) return behaviour
+  const { customName: _customName, enchantments: _enchantments, ...base } = drop
+  return { ...base, ...persistedItemDropMetadata(drop) }
+}
+
+export const persistedItemDropLifetime = (behaviour: unknown): PersistedItemDropLifetime => {
+  const elapsedSecs = asRecord(behaviour)?.['elapsedSecs']
+  return {
+    elapsedSecs: typeof elapsedSecs === 'number' && Number.isFinite(elapsedSecs)
+      ? Math.max(0, elapsedSecs)
+      : 0,
+  }
+}
+
 export type PersistedEntityRoster = {
   readonly entities: ReadonlyArray<PersistedEntity>
   readonly nextSerial: number
 }
 
+export type PersistedEntityRosters = Readonly<Record<Dimension, PersistedEntityRoster>>
+
 export const EMPTY_ENTITY_ROSTER: PersistedEntityRoster = { entities: [], nextSerial: 0 }
+
+export const EMPTY_ENTITY_ROSTERS: PersistedEntityRosters = {
+  overworld: EMPTY_ENTITY_ROSTER,
+  nether: EMPTY_ENTITY_ROSTER,
+  end: EMPTY_ENTITY_ROSTER,
+}
 
 export type PersistedVillager = {
   readonly id: string
@@ -133,7 +187,7 @@ export const normalizePersistedEntityRoster = (value: unknown): PersistedEntityR
       kind,
       feetPosition: { x, y, z },
       healthPoints,
-      behaviour: entity['behaviour'],
+      behaviour: normalizePersistedEntityBehaviour(kind, entity['behaviour']),
     })
   }
 
@@ -143,6 +197,15 @@ export const normalizePersistedEntityRoster = (value: unknown): PersistedEntityR
     nextSerial: typeof nextSerial === 'number' && Number.isFinite(nextSerial)
       ? Math.max(0, Math.floor(nextSerial))
       : 0,
+  }
+}
+
+export const normalizePersistedEntityRosters = (value: unknown): PersistedEntityRosters => {
+  const rosters = asRecord(value)
+  return {
+    overworld: normalizePersistedEntityRoster(rosters?.['overworld']),
+    nether: normalizePersistedEntityRoster(rosters?.['nether']),
+    end: normalizePersistedEntityRoster(rosters?.['end']),
   }
 }
 
@@ -221,7 +284,7 @@ export type SessionState = {
   readonly furnaces: ReadonlyArray<PersistedFurnaceState>
   readonly portals: ReadonlyArray<PersistedPortalState>
   readonly crops: CropSnapshot
-  readonly entities: PersistedEntityRoster
+  readonly entities: PersistedEntityRosters
   readonly villagers: PersistedVillagerState
   readonly brewing: BrewingStandState
   readonly statusEffects: StatusEffectState
@@ -411,7 +474,7 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   furnaces: PersistedFurnacesSchema,
   portals: PersistedPortalsSchema,
   crops: CropSnapshotSchema,
-  entities: Schema.Unknown as unknown as Schema.Schema<PersistedEntityRoster>,
+  entities: Schema.Unknown as unknown as Schema.Schema<PersistedEntityRosters>,
   villagers: Schema.Unknown as unknown as Schema.Schema<PersistedVillagerState>,
   brewing: Schema.Unknown as unknown as Schema.Schema<BrewingStandState>,
   statusEffects: Schema.Unknown as unknown as Schema.Schema<StatusEffectState>,
@@ -804,6 +867,32 @@ const migrateSessionV15ToV16: Migration = {
   },
 }
 
+const migrateSessionV16ToV17: Migration = {
+  from: 16,
+  describe: 'scope dynamic entity rosters by dimension',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v16 payload must contain an object state')
+    }
+    const dimension = state['dimension']
+    const activeDimension: Dimension = dimension === 'nether' || dimension === 'end'
+      ? dimension
+      : 'overworld'
+    return Effect.succeed({
+      ...head,
+      state: {
+        ...state,
+        entities: {
+          ...EMPTY_ENTITY_ROSTERS,
+          [activeDimension]: normalizePersistedEntityRoster(state['entities']),
+        },
+      },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
   version: SESSION_FORMAT_VERSION,
@@ -824,6 +913,7 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV13ToV14,
     migrateSessionV14ToV15,
     migrateSessionV15ToV16,
+    migrateSessionV16ToV17,
   ],
 })
 
@@ -856,7 +946,15 @@ export const sessionChunkKey = (
 export const loadSession = (
   sessionId: string,
 ): Effect.Effect<Option.Option<SessionHead>, SessionPersistenceError, StoragePort> =>
-  loadFrom(SESSION_FORMAT, sessionHeadKey(sessionId))
+  loadFrom(SESSION_FORMAT, sessionHeadKey(sessionId)).pipe(
+    Effect.map(Option.map((head) => ({
+      ...head,
+      state: {
+        ...head.state,
+        entities: normalizePersistedEntityRosters(head.state.entities),
+      },
+    }))),
+  )
 
 const SESSION_KEY_PREFIX = 'mc-compose/session/'
 const SESSION_HEAD_KEY_PATTERN = /^mc-compose\/session\/([^/]+)\/head$/u

@@ -443,10 +443,10 @@ discharge は `ComposedGame.runFrameWith(services: Layer<FrameServices>)` であ
 
 ---
 
-## DN-12: `ModuleLayer` の `RIn` を締める。`ROut` は締められない
+## DN-12: `ModuleLayer` の `RIn` を締め、合成時に `ROut` の union を保持する
 
 **回帰テスト名**: `rejects a module whose Layer still needs a service, at compile time` /
-`KNOWN LIMIT: ROut stays erased, so a missing service still fails at runtime, not at tsc`
+`does not claim that a composed layer provides erased services`
 **実装**: `test/composition.test.ts`(実装済み)
 
 `ModuleLayer = Layer<any, any, any>` だと `Effect.provide(game.layer)` は要求を
@@ -454,14 +454,14 @@ discharge は `ComposedGame.runFrameWith(services: Layer<FrameServices>)` であ
 型検査を通り、実行時に `Service not found` で落ちる。
 `tsc` はこれを `exactOptionalPropertyTypes` 経由で偶発的にしか捕まえない。
 
-**本実装での対処**: `Layer<any, any, never>`。`Layer` の `RIn` は共変(`out RIn`)なので、
+**本実装での対処**: `Layer<never, unknown, never>`。`Layer` の `RIn` は共変(`out RIn`)なので、
 これは「モジュールは自己完結して届かなければならない」を型で言うことになる。
 新しい規則ではない — モジュールは対等であり(`Layer.merge`、`Layer.provide` ではない)、
 他モジュールのサービスを構築に要求するモジュールは plan.md §2.3-1 が禁じるエッジそのものである。
 
-**`ROut` は締められない。** 異種配列の提供サービス和を正確に書くには可変長タプル型が要る。
-したがって `game.layer` 経由の `Effect.provide` は「そのサービスを誰かが提供しているか」を
-検査できない。**ただしこの穴はフレームの経路には無い**(DN-11)。既知の穴として上の 2 本目が固定している。
+**`ROut` は合成時に締める。** const generic の異種配列から提供サービスの union を推論し、
+`game.layer` 経由の `Effect.provide` がその union を要求から除去する。明示的に `GameModule` として
+消去された配列だけは `never` となる。**フレームの経路にも穴は無い**(DN-11)。
 
 ---
 
@@ -611,7 +611,7 @@ mod がそのフェーズになれる**ことを意味する。
 | 項目 | 状態 |
 | --- | --- |
 | `FrameServices` の実体 | **確定**。`ClockPort` のみ(mc-kernel `docs/freeze-checklist.md` (b))。DN-11 |
-| `ModuleLayer` の `ROut` 消去(`Layer<any,any,never>` の第 1 引数) | 可変長タプル型で精密化できる。`RIn` は締めた。DN-12 |
+| `ModuleLayer` の `ROut` union | `composeGame` の const generic で保持。明示的消去時のみ `never`。DN-12 |
 | stage の障害処理(`Effect.catchAllCause` を誰が張るか) | 未決。plan.md §3.8 は sim に対して defect のログ出力を求めている |
 | 自動保存の `Schedule.spaced`(plan.md §3.8) | mc-sim 側。compose は stage 順序だけ |
 | フレーム予算 / adaptive quality | 参照実装は `frame-adaptive-quality.ts` を持つ。**compose には置かない** |

@@ -37,6 +37,7 @@ import {
 import {
   EMPTY_END_STATE,
   EMPTY_ENTITY_ROSTER,
+  EMPTY_ENTITY_ROSTERS,
   EMPTY_VILLAGER_STATE,
   SESSION_FORMAT_NAME,
   deleteSession,
@@ -44,6 +45,9 @@ import {
   loadSession,
   makeSessionChunkSource,
   normalizePersistedEntityRoster,
+  normalizePersistedEntityRosters,
+  persistedItemDropLifetime,
+  persistedItemDropMetadata,
   saveSession as persistSession,
   sessionChunkKey,
   sessionHeadKey,
@@ -114,7 +118,7 @@ const sessionState = (seed: number): SessionState => {
         growthSecs: 123,
       }],
     },
-    entities: { entities: [], nextSerial: 0 },
+    entities: EMPTY_ENTITY_ROSTERS,
     villagers: EMPTY_VILLAGER_STATE,
     brewing: emptyBrewingStandState(),
     statusEffects: emptyStatusEffectState(),
@@ -159,6 +163,46 @@ const dimensionChunk = (
 ): DimensionChunk => ({ dimension, chunk: chunk(cx, cz, marker) })
 
 describe('dynamic entity persistence', () => {
+  it('reads item-drop elapsed time and defaults legacy saves to zero', () => {
+    const roster = normalizePersistedEntityRoster({
+      entities: [{
+        id: 'drop-3',
+        kind: 'dropped_item',
+        feetPosition: { x: 1.5, y: 64, z: -2.5 },
+        healthPoints: 1,
+        behaviour: { item: 'stone', count: 2, elapsedSecs: 123.5 },
+      }],
+      nextSerial: 4,
+    })
+
+    expect(persistedItemDropLifetime(roster.entities[0]?.behaviour)).toEqual({
+      elapsedSecs: 123.5,
+    })
+    expect(persistedItemDropLifetime({ item: 'stone', count: 2 })).toEqual({ elapsedSecs: 0 })
+    expect(persistedItemDropLifetime({ elapsedSecs: Number.POSITIVE_INFINITY })).toEqual({
+      elapsedSecs: 0,
+    })
+  })
+
+  it('validates item-drop metadata and omits malformed persisted values', () => {
+    expect(persistedItemDropMetadata({
+      item: 'diamond_pickaxe',
+      durability: { current: 1500, max: 1561 },
+      customName: 'Fortune Miner',
+      enchantments: [{ id: 'fortune', level: 3 }],
+    })).toEqual({
+      customName: 'Fortune Miner',
+      enchantments: [{ id: 'fortune', level: 3 }],
+    })
+    expect(persistedItemDropMetadata({
+      item: 'stone',
+      durability: null,
+      customName: ' ',
+      enchantments: [{ id: 'fortune', level: 99 }],
+    })).toEqual({})
+    expect(persistedItemDropMetadata({ item: 'stone', durability: null })).toEqual({})
+  })
+
   it('keeps valid entity rows and sanitizes invalid roster data', () => {
     expect(normalizePersistedEntityRoster({
       entities: [
@@ -196,6 +240,18 @@ describe('dynamic entity persistence', () => {
       nextSerial: 8,
     })
     expect(normalizePersistedEntityRoster(null)).toEqual(EMPTY_ENTITY_ROSTER)
+  })
+
+  it('normalizes each dimension roster independently', () => {
+    expect(normalizePersistedEntityRosters({
+      overworld: { entities: [], nextSerial: 3 },
+      nether: { entities: [], nextSerial: 7.8 },
+      end: null,
+    })).toEqual({
+      overworld: { entities: [], nextSerial: 3 },
+      nether: { entities: [], nextSerial: 7 },
+      end: EMPTY_ENTITY_ROSTER,
+    })
   })
 })
 
@@ -318,6 +374,26 @@ describe('session persistence', () => {
     return Effect.gen(function* () {
       const state = {
         ...sessionState(42),
+        entities: {
+          ...EMPTY_ENTITY_ROSTERS,
+          overworld: {
+            entities: [{
+              id: 'drop-3',
+              kind: 'dropped_item',
+              feetPosition: { x: 1.5, y: 64, z: -2.5 },
+              healthPoints: 1,
+              behaviour: {
+                item: 'diamond_pickaxe',
+                count: 1,
+                durability: { current: 1500, max: 1561 },
+                elapsedSecs: 123.5,
+                customName: 'Fortune Miner',
+                enchantments: [{ id: 'fortune', level: 3 }],
+              },
+            }],
+            nextSerial: 4,
+          },
+        },
         workstations: {
           enchantmentSeed: 7,
           customNames: {},
@@ -344,11 +420,14 @@ describe('session persistence', () => {
       expect(saved.state.containerStorage).toEqual(sessionState(42).containerStorage)
       expect(saved.state.portals).toEqual(sessionState(42).portals)
       expect(saved.state.crops).toEqual(sessionState(42).crops)
+      expect(persistedItemDropLifetime(
+        Option.getOrThrow(loaded).state.entities.overworld.entities[0]?.behaviour,
+      )).toEqual({ elapsedSecs: 123.5 })
       expect(saved.state.workstations?.deathDropDimension).toBe('nether')
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,
-        version: 16,
+        version: 17,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -468,8 +547,45 @@ describe('session persistence', () => {
     return Effect.gen(function* () {
       const loaded = Option.getOrThrow(yield* loadSession('legacy-v12'))
 
-      expect(loaded.state.entities).toEqual(EMPTY_ENTITY_ROSTER)
+      expect(loaded.state.entities).toEqual(EMPTY_ENTITY_ROSTERS)
       expect(storage.envelope(key)?.version).toBe(12)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('migrates a v16 entity roster into its active dimension', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('legacy-v16-entities')
+    const entityRoster = {
+      entities: [{
+        id: 'blaze-3',
+        kind: 'blaze',
+        feetPosition: { x: 2.5, y: 70, z: -4.5 },
+        healthPoints: 20,
+        behaviour: { phase: 'idle' },
+      }],
+      nextSerial: 4,
+    }
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: 16,
+      payload: {
+        sessionId: 'legacy-v16-entities',
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: { ...sessionState(42), dimension: 'nether', entities: entityRoster },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('legacy-v16-entities'))
+
+      expect(loaded.state.entities).toEqual({
+        overworld: EMPTY_ENTITY_ROSTER,
+        nether: entityRoster,
+        end: EMPTY_ENTITY_ROSTER,
+      })
+      expect(storage.envelope(key)?.version).toBe(16)
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -644,7 +760,7 @@ describe('session persistence', () => {
     const sessionId = 'future-version'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 17,
+      version: 18,
       payload: {
         sessionId,
         revision: 'r1',
@@ -659,7 +775,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 17,
+        version: 18,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -1151,7 +1267,7 @@ describe('session persistence', () => {
       })
 
       expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(16)
+      expect(storage.envelope(headKey)?.version).toBe(17)
       expect(storage.keys).toContain(
         sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
       )

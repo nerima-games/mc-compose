@@ -4,6 +4,12 @@ import {
   type WireText,
 } from '@nerima-games/mx-multiplayer'
 import { Deferred, Effect, Queue } from 'effect'
+import {
+  decodePlayerDamageWireMessage,
+  encodePlayerDamageCommand,
+  type PlayerDamageCommand,
+  type PlayerDamageWireMessage,
+} from './player-damage-network'
 import { decodeSleepWireMessage, type SleepWireMessage } from './sleep-network'
 import { decodeWitherWireMessage, type WitherWireMessage } from './wither-network'
 
@@ -43,7 +49,9 @@ export interface BrowserWebSocketTransport extends TransportService {
   readonly close: Effect.Effect<void>
   readonly sleepInbound: Queue.Dequeue<SleepWireMessage>
   readonly witherInbound: Queue.Dequeue<WitherWireMessage>
+  readonly playerDamageInbound: Queue.Dequeue<PlayerDamageWireMessage>
   readonly sendSleep: (message: SleepWireMessage) => Effect.Effect<void, TransportError>
+  readonly sendPlayerDamage: (command: PlayerDamageCommand) => Effect.Effect<void, TransportError>
   readonly state: () => WebSocketTransportState
 }
 
@@ -51,6 +59,47 @@ export type BrowserWebSocketTransportOptions = {
   readonly url: string
   readonly socketFactory?: (url: string) => BrowserWebSocketLike
   readonly inboundCapacity?: number
+  readonly reconnectAuth?: {
+    readonly playerId: string
+    readonly loadToken: () => string | undefined
+    readonly saveToken: (token: string) => void
+    readonly loadRegistrationToken?: () => string | undefined
+    readonly clearRegistrationToken?: () => void
+  }
+}
+
+type PlayerResumeAccepted = {
+  readonly _tag: 'PlayerResumeAccepted'
+  readonly player: string
+  readonly token: string
+}
+
+const decodePlayerResumeAccepted = (frame: string): PlayerResumeAccepted | undefined => {
+  let value: unknown
+  try {
+    value = JSON.parse(frame)
+  } catch {
+    return undefined
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const keys = Object.keys(record)
+  if (
+    keys.length !== 3 ||
+    !keys.includes('_tag') ||
+    !keys.includes('player') ||
+    !keys.includes('token') ||
+    record['_tag'] !== 'PlayerResumeAccepted' ||
+    typeof record['player'] !== 'string' ||
+    typeof record['token'] !== 'string'
+  ) {
+    return undefined
+  }
+  return {
+    _tag: 'PlayerResumeAccepted',
+    player: record['player'],
+    token: record['token'],
+  }
 }
 
 const defaultSocketFactory = (url: string): BrowserWebSocketLike => new WebSocket(url)
@@ -80,6 +129,7 @@ export const makeBrowserWebSocketTransport = (
     const inbound = yield* Queue.unbounded<WireText>()
     const sleepInbound = yield* Queue.unbounded<SleepWireMessage>()
     const witherInbound = yield* Queue.unbounded<WitherWireMessage>()
+    const playerDamageInbound = yield* Queue.unbounded<PlayerDamageWireMessage>()
     const opened = yield* Deferred.make<void, TransportError>()
     const socket = yield* Effect.try({
       try: () => (options.socketFactory ?? defaultSocketFactory)(options.url),
@@ -93,6 +143,8 @@ export const makeBrowserWebSocketTransport = (
     let currentState: WebSocketTransportState = 'connecting'
     let listenersAttached = true
     let disposed = false
+    let awaitingResume = options.reconnectAuth !== undefined
+    let sentRegistrationToken = false
 
     const detachListeners = (): void => {
       if (!listenersAttached) return
@@ -111,16 +163,85 @@ export const makeBrowserWebSocketTransport = (
       if (shutdownInbound) Effect.runSync(Queue.shutdown(inbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(sleepInbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(witherInbound))
+      if (shutdownInbound) Effect.runSync(Queue.shutdown(playerDamageInbound))
     }
 
     function handleOpen(): void {
       if (currentState !== 'connecting') return
       currentState = 'open'
-      Effect.runSync(Deferred.succeed(opened, undefined))
+      if (options.reconnectAuth === undefined) {
+        Effect.runSync(Deferred.succeed(opened, undefined))
+        return
+      }
+      try {
+        const token = options.reconnectAuth.loadToken()
+        const registrationToken =
+          token === undefined ? options.reconnectAuth.loadRegistrationToken?.() : undefined
+        sentRegistrationToken = registrationToken !== undefined
+        socket.send(
+          JSON.stringify({
+            _tag: 'PlayerResume',
+            player: options.reconnectAuth.playerId,
+            token,
+            registrationToken,
+          }),
+        )
+      } catch (cause) {
+        terminate(
+          new TransportError({
+            reason: 'send-failed',
+            detail: `websocket resume authentication failed: ${String(cause)}`,
+          }),
+          false,
+        )
+      }
     }
 
     function handleMessage(event: WebSocketMessageEvent): void {
       if (currentState !== 'open' || typeof event.data !== 'string') return
+      if (options.reconnectAuth !== undefined) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(event.data)
+        } catch {
+          parsed = undefined
+        }
+        if (
+          typeof parsed === 'object' &&
+          parsed !== null &&
+          !Array.isArray(parsed) &&
+          (parsed as Record<string, unknown>)['_tag'] === 'PlayerResumeAccepted'
+        ) {
+          if (!awaitingResume) return
+          const accepted = decodePlayerResumeAccepted(event.data)
+          if (accepted === undefined || accepted.player !== options.reconnectAuth.playerId) {
+            terminate(
+              new TransportError({
+                reason: 'not-connected',
+                detail: 'invalid websocket resume authentication response',
+              }),
+              false,
+            )
+            return
+          }
+          try {
+            options.reconnectAuth.saveToken(accepted.token)
+            if (sentRegistrationToken) options.reconnectAuth.clearRegistrationToken?.()
+          } catch (cause) {
+            terminate(
+              new TransportError({
+                reason: 'not-connected',
+                detail: `failed to persist websocket resume token: ${String(cause)}`,
+              }),
+              false,
+            )
+            return
+          }
+          awaitingResume = false
+          Effect.runSync(Deferred.succeed(opened, undefined))
+          return
+        }
+      }
       const sleepMessage = decodeSleepWireMessage(event.data)
       if (sleepMessage !== undefined) {
         Queue.unsafeOffer(sleepInbound, sleepMessage)
@@ -129,6 +250,11 @@ export const makeBrowserWebSocketTransport = (
       const witherMessage = decodeWitherWireMessage(event.data as WireText)
       if (witherMessage !== undefined) {
         Queue.unsafeOffer(witherInbound, witherMessage)
+        return
+      }
+      const playerDamageMessage = decodePlayerDamageWireMessage(event.data as WireText)
+      if (playerDamageMessage !== undefined) {
+        Queue.unsafeOffer(playerDamageInbound, playerDamageMessage)
         return
       }
       Queue.unsafeOffer(inbound, event.data as WireText)
@@ -192,10 +318,23 @@ export const makeBrowserWebSocketTransport = (
       Effect.runSync(Queue.shutdown(inbound))
       Effect.runSync(Queue.shutdown(sleepInbound))
       Effect.runSync(Queue.shutdown(witherInbound))
+      Effect.runSync(Queue.shutdown(playerDamageInbound))
       if (shouldCloseSocket) socket.close(1000, 'transport disposed')
     })
 
     const sendSleep = (message: SleepWireMessage): Effect.Effect<void, TransportError> =>
       send(JSON.stringify(message) as WireText)
-    return { send, inbound, sleepInbound, witherInbound, sendSleep, close, state: () => currentState }
+    const sendPlayerDamage = (command: PlayerDamageCommand): Effect.Effect<void, TransportError> =>
+      send(encodePlayerDamageCommand(command))
+    return {
+      send,
+      inbound,
+      sleepInbound,
+      witherInbound,
+      playerDamageInbound,
+      sendSleep,
+      sendPlayerDamage,
+      close,
+      state: () => currentState,
+    }
   })

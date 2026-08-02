@@ -82,7 +82,7 @@ export default defineConfig({
 
   webServer: [
     {
-      command: `pnpm build:web && pnpm exec vite preview --host 127.0.0.1 --port ${String(E2E_PORT)} --strictPort`,
+      command: `corepack pnpm build:web && corepack pnpm exec vite preview --host 127.0.0.1 --port ${String(E2E_PORT)} --strictPort`,
       url: E2E_BASE_URL,
       // Never reuse: the final gate must serve the current checkout and its
       // lockfile-resolved public packages, not a stale process.
@@ -92,7 +92,7 @@ export default defineConfig({
       stderr: 'pipe',
     },
     {
-      command: `pnpm tsx apps/multiplayer-server/main.ts --port ${String(E2E_MULTIPLAYER_PORT)}`,
+      command: `corepack pnpm tsx apps/multiplayer-server/main.ts --port ${String(E2E_MULTIPLAYER_PORT)}`,
       url: `http://127.0.0.1:${String(E2E_MULTIPLAYER_PORT)}/health`,
       reuseExistingServer: false,
       timeout: 60_000,

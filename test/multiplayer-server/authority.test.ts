@@ -14,9 +14,19 @@ import { describe, expect, it } from 'vitest'
 
 import {
   makeMultiplayerServerCore,
+  playerDamageResultKey,
   type MultiplayerServerState,
   type ReceiveResult,
 } from '../../apps/multiplayer-server/core'
+import {
+  decodePlayerDamageWireMessage,
+  encodePlayerDamageCommand,
+  PLAYER_DAMAGE_MAX_AMOUNT,
+  PLAYER_DAMAGE_MAX_IDENTIFIER_LENGTH,
+  PLAYER_DAMAGE_MAX_MINIMUM_HEALTH_POINTS,
+  PLAYER_DAMAGE_MAX_WIRE_LENGTH,
+  type PlayerDamageCommand,
+} from '../../apps/web/player-damage-network'
 import { decodeSleepWireMessage } from '../../apps/web/sleep-network'
 import { decodeWitherWireMessage } from '../../apps/web/wither-network'
 
@@ -26,6 +36,9 @@ const worldId = (value: string): WorldId => value as WorldId
 const commandId = (value: string): CommandId => value as CommandId
 const entityId = (value: string): EntityId => value as EntityId
 
+const sleepResult = (frames: ReadonlyArray<WireText>) =>
+  frames.map(decodeSleepWireMessage).find((message) => message?._tag === 'SleepCommandResult')
+
 const frame = (message: NetworkMessage): WireText => {
   const encoded = encodeFrame(message)
   if (Either.isLeft(encoded)) throw encoded.left
@@ -33,7 +46,9 @@ const frame = (message: NetworkMessage): WireText => {
 }
 
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
-  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined && decodeWitherWireMessage(wire) === undefined).map((wire) => {
+  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined
+    && decodeWitherWireMessage(wire) === undefined
+    && decodePlayerDamageWireMessage(wire) === undefined).map((wire) => {
     const decoded = decodeFrame(wire)
     if (Either.isLeft(decoded)) throw decoded.left
     return decoded.right
@@ -70,29 +85,163 @@ const initialState = (): MultiplayerServerState => ({
   villagerTrades: [],
 })
 
-const makeFixture = (state: MultiplayerServerState = initialState()) => {
+const witherState = (
+  dimension: string,
+  phase: 'charging' | 'airborne',
+): NonNullable<MultiplayerServerState['wither']> => ({
+  nextWitherId: 1,
+  nextSkullId: 0,
+  withers: [{
+    id: 'wither-1',
+    dimension,
+    snapshot: {
+      kind: 'wither',
+      version: 1,
+      state: {
+        phase,
+        healthPoints: 300,
+        chargeRemainingSecs: phase === 'charging' ? 0.1 : 0,
+        feetPosition: { x: 0, y: 64, z: 0 },
+        velocity: { x: 0, y: 0, z: 0 },
+      },
+    },
+    rangedCooldownSecs: 100,
+    meleeCooldownSecs: 0,
+    shotsFired: 0,
+  }],
+  skulls: [],
+})
+
+const makeFixture = (
+  state: MultiplayerServerState = initialState(),
+  joinAt: Readonly<{ x: number; y: number; z: number }> = { x: 0, y: 64, z: 0 },
+  difficulty: 'peaceful' | 'easy' | 'normal' | 'hard' = 'normal',
+) => {
   const sent: Array<WireText> = []
   const persisted: Array<MultiplayerServerState> = []
+  const timeline: Array<'persist' | 'send'> = []
   const server = makeMultiplayerServerCore({
     worldId: 'world-1',
     seed: 42,
     allowedBlocks: new Set(['stone', 'chest', 'furnace']),
     initialState: state,
-    onStateChanged: (state) => persisted.push(state),
+    difficulty,
+    onStateChanged: (state) => {
+      timeline.push('persist')
+      persisted.push(state)
+    },
   })
-  expect(server.connect('socket-a', (wire) => sent.push(wire))).toBe(true)
+  expect(server.connect('socket-a', (wire) => {
+    timeline.push('send')
+    sent.push(wire)
+  })).toBe(true)
   const receive = (message: NetworkMessage): ReceiveResult => server.receive('socket-a', frame(message))
+  const receiveDamage = (command: PlayerDamageCommand): ReceiveResult =>
+    server.receive('socket-a', encodePlayerDamageCommand(command))
   expect(receive({
     _tag: 'PlayerJoin',
     player: playerId('alice'),
     name: playerName('Alice'),
-    at: { x: 0, y: 64, z: 0 },
+    at: joinAt,
   }).accepted).toBe(true)
   persisted.length = 0
-  return { sent, persisted, receive, server }
+  timeline.length = 0
+  return { sent, persisted, timeline, receive, receiveDamage, server }
 }
 
 describe('multiplayer server authoritative state', () => {
+  it.each([
+    ['horizontal boundary', 'zombie', { x: 8, y: 64, z: 8 }],
+    ['vertical boundary', 'blaze', { x: 0, y: 69, z: 0 }],
+  ] as const)('rejects sleep when a hostile mob is at the %s', (_case, entityType, at) => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [...state.blocks, { at: { x: 0, y: 64, z: 0 }, block: 'bed' }],
+      timeWeather: { timeOfDay: 13_000, weather: 'clear' },
+      entities: [{
+        _tag: 'living', entityId: entityId(`hostile-${_case}`), entityType,
+        at, health: 20, maxHealth: 20,
+      }],
+    })
+    fixture.sent.length = 0
+
+    fixture.server.receive('socket-a', JSON.stringify({
+      _tag: 'SleepCommand',
+      command: {
+        _tag: 'EnterSleep', actor: 'alice', session: 'alice', requestId: `sleep-${_case}`,
+        expectedRevision: 0, clientTick: 20, bed: { x: 0, y: 64, z: 0 },
+      },
+    }) as WireText)
+
+    expect(sleepResult(fixture.sent)).toMatchObject({
+      _tag: 'SleepCommandResult', result: { accepted: false, reason: 'sleep-unsafe' },
+    })
+  })
+
+  it.each([
+    ['horizontal outside', 'creeper', { x: 8.01, y: 64, z: 0 }, 20],
+    ['vertical outside', 'enderman', { x: 0, y: 69.01, z: 0 }, 20],
+    ['nearby but dead', 'zombie', { x: 0, y: 64, z: 0 }, 0],
+    ['nearby with invalid negative health', 'zombie', { x: 0, y: 64, z: 0 }, -1],
+  ] as const)('allows sleep when a hostile mob is %s', (_case, entityType, at, health) => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [...state.blocks, { at: { x: 0, y: 64, z: 0 }, block: 'bed' }],
+      timeWeather: { timeOfDay: 13_000, weather: 'clear' },
+      entities: [{
+        _tag: 'living', entityId: entityId(`hostile-${_case}`), entityType,
+        at, health, maxHealth: 20,
+      }],
+    })
+    fixture.sent.length = 0
+
+    fixture.server.receive('socket-a', JSON.stringify({
+      _tag: 'SleepCommand',
+      command: {
+        _tag: 'EnterSleep', actor: 'alice', session: 'alice', requestId: `sleep-${_case}`,
+        expectedRevision: 0, clientTick: 20, bed: { x: 0, y: 64, z: 0 },
+      },
+    }) as WireText)
+
+    expect(sleepResult(fixture.sent)).toMatchObject({
+      _tag: 'SleepCommandResult', result: { accepted: true },
+    })
+  })
+
+  it('allows sleep near dropped items and non-hostile living entities', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [...state.blocks, { at: { x: 0, y: 64, z: 0 }, block: 'bed' }],
+      timeWeather: { timeOfDay: 13_000, weather: 'clear' },
+      entities: [
+        {
+          _tag: 'item-drop', entityId: entityId('drop-1'), at: { x: 0, y: 64, z: 0 },
+          stack: { item: 'stone', count: 1 },
+        },
+        {
+          _tag: 'living', entityId: entityId('cow-1'), entityType: 'cow', at: { x: 0, y: 64, z: 0 },
+          health: 10, maxHealth: 10,
+        },
+      ],
+    })
+    fixture.sent.length = 0
+
+    fixture.server.receive('socket-a', JSON.stringify({
+      _tag: 'SleepCommand',
+      command: {
+        _tag: 'EnterSleep', actor: 'alice', session: 'alice', requestId: 'sleep-non-hostile',
+        expectedRevision: 0, clientTick: 20, bed: { x: 0, y: 64, z: 0 },
+      },
+    }) as WireText)
+
+    expect(sleepResult(fixture.sent)).toMatchObject({
+      _tag: 'SleepCommandResult', result: { accepted: true },
+    })
+  })
+
   it('sends authoritative state on join and explicit resync', () => {
     const fixture = makeFixture()
     expect(messages(fixture.sent).find((message) => message._tag === 'AuthoritativeSnapshot')).toMatchObject({
@@ -196,6 +345,132 @@ describe('multiplayer server authoritative state', () => {
         state: { health: 20, hunger: 20, experience: 0 },
       }),
     ])
+  })
+
+  it('drops inventory items at the authoritative player position exactly once', () => {
+    const fixture = makeFixture(initialState(), { x: 7, y: 70, z: -3 })
+    fixture.sent.length = 0
+    const command: NetworkMessage = {
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('drop-inventory-1'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'drop-item', source: 0, destination: 'world', count: 2 },
+    }
+
+    expect(fixture.receive(command).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'drop-inventory-1', revision: 5 }),
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        revision: 5,
+        state: expect.objectContaining({ slots: [{ item: 'stone', count: 3 }, { item: 'coal', count: 3 }, null] }),
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        revision: 5,
+        entity: expect.objectContaining({
+          _tag: 'item-drop',
+          at: { x: 7, y: 70, z: -3 },
+          stack: { item: 'stone', count: 2 },
+        }),
+      }),
+    ])
+    expect(fixture.persisted).toHaveLength(1)
+
+    fixture.sent.length = 0
+    expect(fixture.receive(command).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'drop-inventory-1', revision: 5 }),
+    ])
+    expect(fixture.persisted).toHaveLength(1)
+  })
+
+  it('splits a partial entity pickup across stacks and keeps the remainder in the world', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'stone', count: 63 }, null], selectedSlot: 0 },
+      }],
+      entities: [{
+        _tag: 'item-drop', entityId: entityId('large-drop'), at: { x: 1, y: 64, z: 0 },
+        stack: { item: 'stone', count: 66 },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'EntityPickupCommand',
+      commandId: commandId('partial-pickup'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      entityId: entityId('large-drop'),
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'partial-pickup', revision: 5 }),
+      expect.objectContaining({
+        _tag: 'EntityUpdateDelta',
+        revision: 5,
+        entity: expect.objectContaining({ entityId: 'large-drop', stack: { item: 'stone', count: 1 } }),
+      }),
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        revision: 5,
+        state: expect.objectContaining({ slots: [{ item: 'stone', count: 64 }, { item: 'stone', count: 64 }] }),
+      }),
+    ])
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      entities: [expect.objectContaining({ entityId: 'large-drop', stack: { item: 'stone', count: 1 } })],
+    })
+  })
+
+  it('rejects an entity pickup when the inventory has no capacity and preserves the entity', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'stone', count: 64 }, { item: 'coal', count: 64 }], selectedSlot: 0 },
+      }],
+      entities: [{
+        _tag: 'item-drop', entityId: entityId('blocked-drop'), at: { x: 1, y: 64, z: 0 },
+        stack: { item: 'stone', count: 2 },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'EntityPickupCommand',
+      commandId: commandId('blocked-pickup'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      entityId: entityId('blocked-drop'),
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'AuthoritativeCommandRejected',
+        commandId: 'blocked-pickup',
+        reason: 'invalid-command',
+        revision: 4,
+      }),
+    ])
+    expect(fixture.persisted).toEqual([])
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'EntityPickupCommand',
+      commandId: commandId('blocked-pickup-retry'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      entityId: entityId('blocked-drop'),
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
   })
 
   it('evicts the oldest command result when the FIFO cache reaches its limit', () => {
@@ -343,6 +618,304 @@ describe('multiplayer server authoritative state', () => {
       revision: 6,
       vitals: [{ player: 'alice', state: { health: 3, hunger: 2, experience: 7 } }],
     }))
+  })
+
+  it('drops and clears inventory exactly once when starvation kills a player', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      vitals: [{ player: playerId('alice'), state: { health: 1, hunger: 0, experience: 7 } }],
+    }, { x: 7, y: 70, z: -3 }, 'hard')
+    fixture.sent.length = 0
+
+    for (let tick = 0; tick < 100; tick += 1) {
+      fixture.server.tick(4_000)
+      if (messages(fixture.sent).some((message) => message._tag === 'PlayerVitalsDelta' && message.state.health === 0)) break
+    }
+
+    const output = messages(fixture.sent)
+    const deathVitals = output.find((message) => message._tag === 'PlayerVitalsDelta' && message.state.health === 0)
+    expect(deathVitals).toBeDefined()
+    if (deathVitals?._tag !== 'PlayerVitalsDelta') throw new Error('missing death vitals')
+    expect(output.filter((message) => message._tag === 'EntitySpawnDelta')).toEqual([
+      expect.objectContaining({ revision: deathVitals.revision, entity: expect.objectContaining({ at: { x: 7, y: 70, z: -3 }, stack: { item: 'stone', count: 5 } }) }),
+      expect.objectContaining({ revision: deathVitals.revision, entity: expect.objectContaining({ at: { x: 7, y: 70, z: -3 }, stack: { item: 'coal', count: 3 } }) }),
+    ])
+    expect(output).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: deathVitals.revision,
+      state: expect.objectContaining({ slots: [null, null, null] }),
+    }))
+    expect(deathVitals.state.experience).toBe(0)
+    expect(fixture.timeline[0]).toBe('persist')
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      revision: deathVitals.revision,
+      inventories: [{ player: 'alice', state: { slots: [null, null, null], selectedSlot: 0 } }],
+      vitals: [{ player: 'alice', state: { health: 0, hunger: 0, experience: 0 } }],
+      entities: [
+        { _tag: 'item-drop', at: { x: 7, y: 70, z: -3 }, stack: { item: 'stone', count: 5 } },
+        { _tag: 'item-drop', at: { x: 7, y: 70, z: -3 }, stack: { item: 'coal', count: 3 } },
+      ],
+    })
+
+    fixture.sent.length = 0
+    fixture.server.tick(40_000)
+    expect(messages(fixture.sent).some((message) => message._tag === 'EntitySpawnDelta')).toBe(false)
+  })
+
+  it('applies self damage and reuses atomic player death handling exactly once', () => {
+    const fixture = makeFixture(initialState(), { x: 7, y: 70, z: -3 })
+    fixture.sent.length = 0
+
+    const first: PlayerDamageCommand = {
+      _tag: 'PlayerDamageCommand',
+      commandId: 'damage-1',
+      player: 'alice',
+      world: 'world-1',
+      expectedRevision: 4,
+      amount: 2,
+    }
+    expect(fixture.receiveDamage(first).accepted).toBe(true)
+    expect(decodePlayerDamageWireMessage(fixture.sent[0]!)).toEqual({
+      _tag: 'PlayerDamageCommandResult',
+      commandId: 'damage-1',
+      accepted: true,
+      revision: 5,
+    })
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'PlayerVitalsDelta',
+        revision: 5,
+        player: 'alice',
+        state: { health: 1, hunger: 2, experience: 7 },
+      }),
+    ])
+
+    fixture.sent.length = 0
+    const lethal: PlayerDamageCommand = { ...first, commandId: 'damage-2', expectedRevision: 5, amount: 1 }
+    expect(fixture.receiveDamage(lethal).accepted).toBe(true)
+    const output = messages(fixture.sent)
+    expect(output.filter((message) => message._tag === 'EntitySpawnDelta')).toEqual([
+      expect.objectContaining({ revision: 6, entity: expect.objectContaining({ at: { x: 7, y: 70, z: -3 }, stack: { item: 'stone', count: 5 } }) }),
+      expect.objectContaining({ revision: 6, entity: expect.objectContaining({ at: { x: 7, y: 70, z: -3 }, stack: { item: 'coal', count: 3 } }) }),
+    ])
+    expect(output).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: 6,
+      state: expect.objectContaining({ slots: [null, null, null] }),
+    }))
+    expect(output).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta',
+      revision: 6,
+      state: { health: 0, hunger: 2, experience: 0 },
+    }))
+    expect(fixture.timeline[0]).toBe('persist')
+
+    fixture.sent.length = 0
+    expect(fixture.receiveDamage(lethal).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual([])
+    expect(decodePlayerDamageWireMessage(fixture.sent[0]!)).toMatchObject({
+      _tag: 'PlayerDamageCommandResult', accepted: true, revision: 6,
+    })
+  })
+
+  it('rejects player damage targeting another identity', () => {
+    const fixture = makeFixture()
+    fixture.sent.length = 0
+
+    expect(fixture.receiveDamage({
+      _tag: 'PlayerDamageCommand',
+      commandId: 'damage-spoof',
+      player: 'bob',
+      world: 'world-1',
+      expectedRevision: 4,
+      amount: 1,
+    })).toEqual({ accepted: false, reason: 'identity-spoof' })
+    expect(decodePlayerDamageWireMessage(fixture.sent[0]!)).toMatchObject({
+      _tag: 'PlayerDamageCommandResult',
+      accepted: false,
+      revision: 4,
+      reason: 'unauthorized-player',
+    })
+    expect(fixture.persisted).toEqual([])
+  })
+
+  it.each([
+    ['wrong world', { world: 'world-2' }, 'wrong-world'],
+    ['stale revision', { expectedRevision: 3 }, 'stale-revision'],
+  ] as const)('rejects player damage with %s', (_case, override, resultReason) => {
+    const fixture = makeFixture()
+    fixture.sent.length = 0
+    const result = fixture.receiveDamage({
+      _tag: 'PlayerDamageCommand', commandId: `damage-${resultReason}`, player: 'alice',
+      world: 'world-1', expectedRevision: 4, amount: 1, ...override,
+    })
+    expect(result.accepted).toBe(false)
+    expect(decodePlayerDamageWireMessage(fixture.sent[0]!)).toMatchObject({
+      _tag: 'PlayerDamageCommandResult', accepted: false, revision: 4, reason: resultReason,
+    })
+    expect(fixture.persisted).toEqual([])
+  })
+
+  it('applies an idempotent player damage command only once', () => {
+    const fixture = makeFixture()
+    const command: PlayerDamageCommand = {
+      _tag: 'PlayerDamageCommand', commandId: 'damage-idempotent', player: 'alice',
+      world: 'world-1', expectedRevision: 4, amount: 1,
+    }
+    expect(fixture.receiveDamage(command).accepted).toBe(true)
+    expect(fixture.receiveDamage(command).accepted).toBe(true)
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5, vitals: [{ player: 'alice', state: { health: 2 } }],
+    })
+  })
+
+  it('uses canonical player damage fingerprints across wire key order', () => {
+    const fixture = makeFixture()
+    const first = JSON.stringify({
+      _tag: 'PlayerDamageCommand', commandId: 'damage-canonical', player: 'alice',
+      world: 'world-1', expectedRevision: 4, amount: 1,
+    }) as WireText
+    const reordered = JSON.stringify({
+      amount: 1, expectedRevision: 4, world: 'world-1', player: 'alice',
+      commandId: 'damage-canonical', _tag: 'PlayerDamageCommand',
+    }) as WireText
+
+    expect(fixture.server.receive('socket-a', first).accepted).toBe(true)
+    expect(fixture.server.receive('socket-a', reordered).accepted).toBe(true)
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5, vitals: [{ player: 'alice', state: { health: 2 } }],
+    })
+
+    const changed = JSON.stringify({
+      amount: 2, expectedRevision: 4, world: 'world-1', player: 'alice',
+      commandId: 'damage-canonical', _tag: 'PlayerDamageCommand',
+    }) as WireText
+    expect(fixture.server.receive('socket-a', changed)).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(fixture.persisted).toHaveLength(1)
+  })
+
+  it('keeps NUL-boundary player damage cache keys distinct', () => {
+    expect(playerDamageResultKey(playerId('alice'), commandId('part\u0000tail')))
+      .not.toBe(playerDamageResultKey(playerId('alice\u0000part'), commandId('tail')))
+  })
+
+  it('accepts fractional player damage produced by armor mitigation', () => {
+    const wire = JSON.stringify({
+      _tag: 'PlayerDamageCommand', commandId: 'damage-fractional', player: 'alice',
+      world: 'world-1', expectedRevision: 4, amount: 0.5,
+    }) as WireText
+    expect(decodePlayerDamageWireMessage(wire)).toMatchObject({ amount: 0.5 })
+  })
+
+  it('preserves the requested minimum health point floor when applying damage', () => {
+    const fixture = makeFixture()
+    expect(fixture.receiveDamage({
+      _tag: 'PlayerDamageCommand', commandId: 'damage-floor', player: 'alice',
+      world: 'world-1', expectedRevision: 4, amount: 3, minimumHealthPoints: 1,
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta',
+      revision: 5,
+      player: 'alice',
+      state: { health: 1, hunger: 2, experience: 7 },
+    }))
+    expect(fixture.persisted).toHaveLength(1)
+  })
+
+  it.each([
+    ['negative', -0.1],
+    ['too large', PLAYER_DAMAGE_MAX_MINIMUM_HEALTH_POINTS + 0.1],
+  ] as const)('rejects %s minimum health point floor at the codec boundary', (_case, minimumHealthPoints) => {
+    const wire = JSON.stringify({
+      _tag: 'PlayerDamageCommand', commandId: 'damage-invalid-floor', player: 'alice',
+      world: 'world-1', expectedRevision: 4, amount: 1, minimumHealthPoints,
+    }) as WireText
+    expect(decodePlayerDamageWireMessage(wire)).toBeUndefined()
+    const fixture = makeFixture()
+    expect(fixture.server.receive('socket-a', wire)).toEqual({ accepted: false, reason: 'malformed-frame' })
+    expect(fixture.persisted).toEqual([])
+  })
+
+  it('includes minimum health point floors in the idempotency fingerprint', () => {
+    const fixture = makeFixture()
+    const first: PlayerDamageCommand = {
+      _tag: 'PlayerDamageCommand', commandId: 'damage-floor-fingerprint', player: 'alice',
+      world: 'world-1', expectedRevision: 4, amount: 1, minimumHealthPoints: 1,
+    }
+    expect(fixture.receiveDamage(first).accepted).toBe(true)
+    expect(fixture.receiveDamage({ ...first, minimumHealthPoints: 0 })).toEqual({
+      accepted: false, reason: 'invalid-command',
+    })
+    expect(fixture.persisted).toHaveLength(1)
+  })
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['out of range', PLAYER_DAMAGE_MAX_AMOUNT + 1],
+  ] as const)('rejects %s player damage amounts at the codec boundary', (_case, amount) => {
+    const wire = JSON.stringify({
+      _tag: 'PlayerDamageCommand', commandId: 'damage-invalid', player: 'alice',
+      world: 'world-1', expectedRevision: 4, amount,
+    }) as WireText
+    expect(decodePlayerDamageWireMessage(wire)).toBeUndefined()
+    const fixture = makeFixture()
+    expect(fixture.server.receive('socket-a', wire)).toEqual({ accepted: false, reason: 'malformed-frame' })
+    expect(fixture.persisted).toEqual([])
+  })
+
+  it('rejects oversized player damage wires and identifiers', () => {
+    const base = {
+      _tag: 'PlayerDamageCommand', commandId: 'damage-size', player: 'alice',
+      world: 'world-1', expectedRevision: 4, amount: 1,
+    }
+    for (const key of ['commandId', 'player', 'world'] as const) {
+      const wire = JSON.stringify({ ...base, [key]: 'x'.repeat(PLAYER_DAMAGE_MAX_IDENTIFIER_LENGTH + 1) }) as WireText
+      expect(decodePlayerDamageWireMessage(wire)).toBeUndefined()
+    }
+    const oversized = JSON.stringify({ ...base, padding: 'x'.repeat(PLAYER_DAMAGE_MAX_WIRE_LENGTH) }) as WireText
+    expect(oversized.length).toBeGreaterThan(PLAYER_DAMAGE_MAX_WIRE_LENGTH)
+    expect(decodePlayerDamageWireMessage(oversized)).toBeUndefined()
+    const fixture = makeFixture()
+    expect(fixture.server.receive('socket-a', oversized)).toEqual({ accepted: false, reason: 'malformed-frame' })
+    expect(fixture.persisted).toEqual([])
+  })
+
+  it.each([
+    ['melee', witherState('world-1', 'airborne'), 1_000],
+    ['explosion', witherState('world-1', 'charging'), 100],
+  ] as const)('applies atomic player death handling to Wither %s damage', (_kind, wither, elapsedMs) => {
+    const fixture = makeFixture({ ...initialState(), wither })
+    fixture.sent.length = 0
+
+    fixture.server.tick(elapsedMs)
+
+    const output = messages(fixture.sent)
+    const deathVitals = output.find((message) => message._tag === 'PlayerVitalsDelta' && message.state.health === 0)
+    expect(deathVitals).toBeDefined()
+    if (deathVitals?._tag !== 'PlayerVitalsDelta') throw new Error('missing death vitals')
+    expect(output.filter((message) => message._tag === 'EntitySpawnDelta')).toHaveLength(2)
+    expect(output.filter((message) => message._tag === 'EntitySpawnDelta').every((message) => message.revision === deathVitals.revision)).toBe(true)
+    expect(output.filter((message) => message._tag === 'EntitySpawnDelta').every((message) => message.world === 'world-1')).toBe(true)
+    expect(output).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta', revision: deathVitals.revision, state: expect.objectContaining({ slots: [null, null, null] }),
+    }))
+    expect(deathVitals.state.experience).toBe(0)
+    fixture.sent.length = 0
+    fixture.server.tick(elapsedMs)
+    expect(messages(fixture.sent).some((message) => message._tag === 'EntitySpawnDelta')).toBe(false)
+    expect(fixture.persisted.at(-1)?.entities).toHaveLength(2)
+  })
+
+  it('filters Wither explosion player damage by dimension', () => {
+    const fixture = makeFixture({ ...initialState(), wither: witherState('nether', 'charging') })
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    expect(messages(fixture.sent).some((message) => message._tag === 'PlayerVitalsDelta' || message._tag === 'EntitySpawnDelta')).toBe(false)
   })
 
   it('consumes food and broadcasts inventory and vitals deltas atomically', () => {

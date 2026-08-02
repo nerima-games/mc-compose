@@ -62,7 +62,8 @@
       }
 
       #multiplayer-join label:first-child,
-      #multiplayer-join label:last-of-type {
+      #multiplayer-join label[for="multiplayer-url"],
+      #multiplayer-join label[for="multiplayer-registration-token"] {
         grid-column: 1 / -1;
       }
 
@@ -598,7 +599,8 @@
           <label>World<select id="multiplayer-world" required></select></label>
           <label>Player name<input id="multiplayer-name" maxlength="64" required /></label>
           <label>Player ID<input id="multiplayer-player" maxlength="64" required /></label>
-          <label>WebSocket URL<input id="multiplayer-url" type="url" value="ws://localhost:8787" required /></label>
+          <label for="multiplayer-url">WebSocket URL<input id="multiplayer-url" type="url" value="ws://localhost:8787" required /></label>
+          <label for="multiplayer-registration-token">Legacy registration token (optional)<input id="multiplayer-registration-token" type="password" autocomplete="off" /></label>
           <button id="multiplayer-join-button" type="submit">Join selected world</button>
         </div>
       </form>

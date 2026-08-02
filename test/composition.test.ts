@@ -54,10 +54,10 @@ const moduleOf = (name: string, frameStages: ReadonlyArray<StageRegistration>): 
   frameStages,
 })
 
-const composed = (
-  modules: ReadonlyArray<GameModule>,
+const composed = <const Modules extends ReadonlyArray<GameModule<never, unknown>>>(
+  modules: Modules,
   skeleton: ReadonlyArray<StagePhase> = [],
-): ComposedGame => Either.getOrThrow(composeGame(modules, { skeleton }))
+) => Either.getOrThrow(composeGame(modules, { skeleton }))
 
 const failure = (
   result: Either.Either<ComposedGame, StageOrderError>,
@@ -354,16 +354,16 @@ describe('Layer merge', () => {
   class Alpha extends Context.Tag('test/Alpha')<Alpha, { readonly value: string }>() {}
   class Beta extends Context.Tag('test/Beta')<Beta, { readonly value: number }>() {}
 
-  const alphaModule: GameModule = {
+  const alphaModule = {
     name: 'alpha',
     layers: Layer.succeed(Alpha, { value: 'a' }),
     frameStages: [],
-  }
-  const betaModule: GameModule = {
+  } satisfies GameModule<Alpha>
+  const betaModule = {
     name: 'beta',
     layers: Layer.succeed(Beta, { value: 2 }),
     frameStages: [],
-  }
+  } satisfies GameModule<Beta>
 
   it.effect('makes every module service available from the merged Layer', () =>
     Effect.gen(function* () {
@@ -387,7 +387,7 @@ describe('Layer merge', () => {
       const forwards = mergeModuleLayers([alphaModule, betaModule])
       const backwards = mergeModuleLayers([betaModule, alphaModule])
 
-      const read = (layer: Layer.Layer<any, any, any>) =>
+      const read = <ROut>(layer: Layer.Layer<ROut, unknown, never>) =>
         Effect.map(Alpha, (alpha) => alpha.value).pipe(Effect.provide(layer))
 
       expect(yield* read(forwards)).toBe('a')
@@ -452,26 +452,13 @@ describe('ModuleLayer — what it now checks, and what it still cannot', () => {
     }),
   )
 
-  // KNOWN LIMIT, pinned so it is a documented hole rather than a surprise.
-  //
-  // `ROut` is still `any`, because `composeGame` takes a heterogeneous array
-  // and typing that union needs a variadic tuple. So `Effect.provide(game.layer)`
-  // ERASES the service an effect asks for instead of checking it, and the
-  // failure only shows up at runtime. Note that this hole is NOT on the frame's
-  // path: `runFrame` states `FrameServices` in its own type and `runFrameWith`
-  // discharges it against a precisely typed Layer.
-  it.effect('KNOWN LIMIT: ROut stays erased, so a missing service still fails at runtime, not at tsc', () =>
-    Effect.gen(function* () {
-      const game = composed([moduleOf('provides-nothing', [])])
-
-      // This COMPILES — `game.layer` claims to provide `any` — and dies when run.
-      const outcome = yield* Effect.exit(
-        Effect.map(Missing, (missing) => missing.value).pipe(Effect.provide(game.layer)),
-      )
-
-      expect(outcome._tag).toBe('Failure')
-    }),
-  )
+  it('does not claim that a composed layer provides erased services', () => {
+    const game = composed([moduleOf('provides-nothing', [])])
+    const missing: Effect.Effect<number, never, Missing> = Effect.map(Missing, (service) => service.value)
+    // @ts-expect-error An empty composed layer cannot discharge Missing.
+    const runnable: Effect.Effect<number, never, never> = Effect.provide(game.layer)(missing)
+    expect(runnable).toBeDefined()
+  })
 })
 
 describe('warnings — what the resolver used to swallow', () => {

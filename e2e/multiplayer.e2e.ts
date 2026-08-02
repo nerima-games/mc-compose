@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +10,18 @@ import { WebSocket } from 'ws'
 import { E2E_MULTIPLAYER_URL } from '../playwright.config'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
+const LEGACY_SECRETS = {
+  'alice-e2e': 'alice-e2e-registration-secret',
+  'bob-e2e': 'bob-e2e-registration-secret',
+} as const
+
+const claimsFor = (players: Record<string, string>) => ({
+  format: 1,
+  players: Object.fromEntries(Object.entries(players).map(([player, secret]) => [
+    player,
+    createHash('sha256').update(secret).digest('hex'),
+  ])),
+})
 
 type GameplaySnapshot = {
   readonly mode: 'survival' | 'creative'
@@ -77,9 +90,8 @@ const receiveMessage = (socket: WebSocket): Promise<WireMessage> =>
   new Promise((resolve, reject) => {
     socket.once('error', reject)
     socket.once('message', (data) => {
-      const frame = JSON.parse(data.toString()) as { readonly message?: WireMessage }
-      if (frame.message === undefined) reject(new Error('received frame without a message'))
-      else resolve(frame.message)
+      const frame = JSON.parse(data.toString()) as WireMessage & { readonly message?: WireMessage }
+      resolve(frame.message ?? frame)
     })
   })
 
@@ -101,6 +113,12 @@ const expectOutOfBoundsPlacementRejection = async (
       socket.once('open', resolve)
       socket.once('error', reject)
     })
+    socket.send(JSON.stringify({
+      _tag: 'PlayerResume',
+      player: 'invalid-mutation-e2e',
+    }))
+    expect(await receiveMessage(socket)).toMatchObject({ _tag: 'PlayerResumeAccepted' })
+
     socket.send(encode({
       _tag: 'PlayerJoin',
       player: 'invalid-mutation-e2e',
@@ -126,20 +144,33 @@ const expectOutOfBoundsPlacementRejection = async (
   }
 }
 
-const connectPage = async (page: Page, url: string): Promise<void> => {
+const connectPage = async (page: Page, url: string, registrationToken?: string): Promise<void> => {
+  if (registrationToken !== undefined) {
+    const parsed = new URL(url)
+    const serverUrl = parsed.searchParams.get('multiplayer')
+    const player = parsed.searchParams.get('player')
+    if (serverUrl === null || player === null) throw new Error('multiplayer URL lacks auth fields')
+    const sessionId = await page.locator('body').getAttribute('data-session-id')
+    if (sessionId === null) throw new Error('multiplayer session lacks an id')
+    const key = `mc-compose:multiplayer-registration:${JSON.stringify([serverUrl, sessionId, player])}`
+    await page.evaluate(({ key: storageKey, token }) => {
+      window.sessionStorage.setItem(storageKey, token)
+    }, { key, token: registrationToken })
+  }
   await page.goto(url)
   const canvas = page.locator('#game-canvas')
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect(canvas).toHaveAttribute('data-multiplayer-connection', 'connected')
 }
 
-const startServer = (stateFile: string): Promise<{ process: ChildProcess; url: string }> =>
+const startServer = (stateFile: string, claimsFile: string): Promise<{ process: ChildProcess; url: string }> =>
   new Promise((resolve, reject) => {
     const child = spawn(join(process.cwd(), 'node_modules/.bin/tsx'), [
       'apps/multiplayer-server/main.ts',
       '--host', '127.0.0.1',
       '--port', '0',
       '--state-file', stateFile,
+      '--legacy-player-claims-file', claimsFile,
     ], { stdio: ['ignore', 'pipe', 'pipe'] })
     let stderr = ''
     const timeout = setTimeout(() => {
@@ -171,6 +202,7 @@ const openPlayer = async (
   player: string,
   name: string,
   serverUrl = E2E_MULTIPLAYER_URL,
+  registrationToken?: string,
 ): Promise<{ readonly context: BrowserContext; readonly page: Page; readonly url: string }> => {
   const context = await browser.newContext()
   const page = await context.newPage()
@@ -180,7 +212,7 @@ const openPlayer = async (
   await callQa(page, 'persistence.flush')
   await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
   const url = multiplayerUrl(sessionUrl, player, name, serverUrl)
-  await connectPage(page, url)
+  await connectPage(page, url, registrationToken)
   return { context, page, url }
 }
 
@@ -211,6 +243,7 @@ test('joins a saved world from the title screen multiplayer form', async ({ page
 test('synchronizes two Creative browser sessions through the authoritative server', async ({ browser }) => {
   const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
   const stateFile = join(stateDirectory, 'state.json')
+  const claimsFile = join(stateDirectory, 'claims.json')
   const placementPose = { x: 8.5, y: 65, z: 10.5 }
   await writeFile(stateFile, `${JSON.stringify({
     format: 1,
@@ -219,6 +252,10 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     state: {
       revision: 0,
       blocks: [],
+      inventories: [{
+        player: 'alice-e2e',
+        state: { slots: [{ item: 'stone', count: 2 }], selectedSlot: 0 },
+      }],
       playerPositions: ['alice-e2e', 'bob-e2e'].map((player) => ({
         player,
         at: placementPose,
@@ -226,8 +263,9 @@ test('synchronizes two Creative browser sessions through the authoritative serve
       })),
     },
   })}\n`, 'utf8')
-  const server = await startServer(stateFile)
-  const alice = await openPlayer(browser, 'Alice Multiplayer E2E', 'alice-e2e', 'Alice', server.url)
+  await writeFile(claimsFile, `${JSON.stringify(claimsFor(LEGACY_SECRETS))}\n`, 'utf8')
+  const server = await startServer(stateFile, claimsFile)
+  const alice = await openPlayer(browser, 'Alice Multiplayer E2E', 'alice-e2e', 'Alice', server.url, LEGACY_SECRETS['alice-e2e'])
   await alice.page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
@@ -235,7 +273,7 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     })
     document.dispatchEvent(new Event('visibilitychange'))
   })
-  const bob = await openPlayer(browser, 'Bob Multiplayer E2E', 'bob-e2e', 'Bob', server.url)
+  const bob = await openPlayer(browser, 'Bob Multiplayer E2E', 'bob-e2e', 'Bob', server.url, LEGACY_SECRETS['bob-e2e'])
 
   try {
     const aliceCanvas = alice.page.locator('#game-canvas')

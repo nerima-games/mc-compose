@@ -72,7 +72,7 @@ plan.md §3.15 が compose に割り当てた残りの責務である。
 - mc-kernel の契約型への切り替え(現在はローカル宣言のミラー)
 - ブラウザE2Eで未採用の振る舞い経路。現在は起動、RAF、QA観測、teardownに加え、
   採掘からinventory更新までを公開package境界で検証する
-- `ModuleLayer` の精密な型(現在 `Layer<any, any, any>`)
+- `ModuleLayer` の精密な型。`RIn` は `never`、`composeGame` は推論した提供サービスの union を返す
 - **`sim:physics` を誰が登録するのか**([design-notes.md](./design-notes.md) DN-14)
 - **ネットワーク同期のフェーズを骨格のどこに置くか**(同 DN-15)
 - **`InventoryService` のインスタンスを誰が構築するのか**([e2e-triage.md](./e2e-triage.md) §4.3)

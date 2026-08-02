@@ -69,6 +69,7 @@ const makeFixture = (
   generatedBlockAt: (at: { x: number; y: number; z: number }) => string | null = () => null,
   timeOfDay = 6_000,
   spawnAt?: { x: number; y: number; z: number },
+  initialWeather: 'clear' | 'rain' | 'thunder' = 'clear',
 ) => {
   const sent = new Map<string, Array<WireText>>()
   let nowMs = 0
@@ -88,7 +89,7 @@ const makeFixture = (
         { player: playerId('bob'), state: { slots: [{ item: 'stone', count: 16 }, { item: 'dirt', count: 16 }], selectedSlot: 0 } },
       ],
       vitals: [],
-      timeWeather: { timeOfDay, weather: 'clear' },
+      timeWeather: { timeOfDay, weather: initialWeather },
       containers: [],
       furnaces: [],
       villagerTrades: [],
@@ -444,6 +445,34 @@ describe('authoritative multiplayer server core', () => {
       _tag: 'SleepEvents',
       events: expect.arrayContaining([expect.objectContaining({ _tag: 'ActorSleepChanged', sleeping: null })]),
     }))
+  })
+
+  it('authoritatively advances morning and clears weather when all players sleep', () => {
+    const fixture = makeFixture(
+      ({ x, y, z }) => x === 0 && y === 64 && z === 1 ? 'bed' : null,
+      13_000,
+      undefined,
+      'thunder',
+    )
+    const aliceFrames = fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+    aliceFrames.length = 0
+
+    expect(fixture.receiveSleep('socket-a', {
+      _tag: 'SleepCommand',
+      command: {
+        _tag: 'EnterSleep', actor: playerId('alice'), session: 'alice', requestId: 'sleep-a',
+        expectedRevision: 0, clientTick: 20, bed: { x: 0, y: 64, z: 1 },
+      },
+    }).accepted).toBe(true)
+
+    expect(messages(aliceFrames)).toContainEqual({
+      _tag: 'WorldTimeWeatherDelta',
+      world: 'world-1',
+      revision: 1,
+      state: { timeOfDay: 6_000, weather: 'clear' },
+    })
+    expect(fixture.server.snapshot().revision).toBe(1)
   })
 
   it('synchronizes authoritative Wither state to two clients and a rejoining session', () => {

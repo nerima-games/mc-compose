@@ -126,6 +126,7 @@ export type InventoryInteractionOptions<Item, Count extends number = number> = {
   readonly canInventoryClick?: (
     transition: Omit<InventoryInteractionTransition<Item, Count>, 'result'>,
   ) => boolean
+  readonly consumeCraftingGrid?: boolean
   readonly onCrafted?: () => void
   readonly onInventoryChanged?: () => void
   readonly onInventoryReset?: () => void
@@ -161,6 +162,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
   service: InventoryInteractionService<Item, Recipe, Count>,
   options: InventoryInteractionOptions<Item, Count> = {},
 ): InventoryInteractionController<Item, Recipe, Count> => {
+  let crafting = false
   let current: InventoryInteractionState<Item, Recipe, Count> = {
     inventoryCarried: undefined,
     carried: undefined,
@@ -175,6 +177,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     width: number,
     height: number,
   ): InventoryInteractionState<Item, Recipe, Count> => {
+    if (crafting) return state()
     if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
       throw new RangeError('Crafting grid dimensions must be positive integers')
     }
@@ -201,6 +204,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
   }
 
   const reset = (): InventoryInteractionState<Item, Recipe, Count> => {
+    if (crafting) return state()
     current = {
       inventoryCarried: undefined,
       carried: undefined,
@@ -279,6 +283,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     inventoryIndex: number,
   ): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> =>
     Effect.map(service.snapshot, (inventory) => {
+      if (crafting) return state()
       const selected = inventory.slots[inventoryIndex]
       if (selected === undefined || selected.count <= 0) return state()
       return replaceDraft({ carried: oneItem(selected), grid: current.grid })
@@ -288,30 +293,36 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     inventoryIndex: number,
     button: 'left' | 'right',
   ): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> =>
-    Effect.flatMap(service.snapshot, (inventory) => {
-      const carriedBefore = current.inventoryCarried
-      const slotBefore = inventory.slots[inventoryIndex]
-      if (options.canInventoryClick?.({
-        slotIndex: inventoryIndex,
-        slotBefore,
-        carriedBefore,
-      }) === false) return Effect.succeed(state())
-      return Effect.map(
-        service.click({
-          _tag: button === 'left' ? 'LeftClick' : 'RightClick',
+    Effect.suspend(() => {
+      if (crafting) return Effect.succeed(state())
+      return Effect.flatMap(service.snapshot, (inventory) => {
+        if (crafting) return Effect.succeed(state())
+        const carriedBefore = current.inventoryCarried
+        const slotBefore = inventory.slots[inventoryIndex]
+        if (options.canInventoryClick?.({
           slotIndex: inventoryIndex,
-          carried: carriedBefore,
-        }),
-        (result) => {
-          applyInventoryClickResult(inventoryIndex, slotBefore, carriedBefore, result)
-          return state()
-        },
-      )
+          slotBefore,
+          carriedBefore,
+        }) === false) return Effect.succeed(state())
+        return Effect.map(
+          service.click({
+            _tag: button === 'left' ? 'LeftClick' : 'RightClick',
+            slotIndex: inventoryIndex,
+            carried: carriedBefore,
+          }),
+          (result) => {
+            if (crafting) return state()
+            applyInventoryClickResult(inventoryIndex, slotBefore, carriedBefore, result)
+            return state()
+          },
+        )
+      })
     })
 
   const interactCraftingCell = (
     cellIndex: number,
   ): InventoryInteractionState<Item, Recipe, Count> => {
+    if (crafting) return state()
     if (!Number.isInteger(cellIndex) || cellIndex < 0 || cellIndex >= current.grid.cells.length) {
       return state()
     }
@@ -327,7 +338,8 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
 
   const interactCraftingCellFromInventory = (
     cellIndex: number,
-  ): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => {
+  ): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => Effect.suspend(() => {
+    if (crafting) return Effect.succeed(state())
     const inventoryCarried = current.inventoryCarried
     if (inventoryCarried === undefined) {
       return Effect.succeed(interactCraftingCell(cellIndex))
@@ -337,46 +349,75 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     }
 
     return Effect.map(returnInventoryCarried(), () => {
-      if (current.inventoryCarried !== undefined) return state()
+      if (crafting || current.inventoryCarried !== undefined) return state()
       current = { ...current, carried: oneItem(inventoryCarried) }
       options.onInventoryChanged?.()
       return interactCraftingCell(cellIndex)
     })
-  }
+  })
 
-  const preview = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => {
+  const preview = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => Effect.suspend(() => {
+    if (crafting) return Effect.succeed(state())
     const grid = current.grid
     return Effect.map(service.previewCraft(grid), (match) => {
+      if (crafting) return state()
       current = { ...current, preview: match, status: undefined }
       return state()
     })
-  }
+  })
 
-  const craftOnce = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => {
-    const grid = current.grid
-    return Effect.map(service.craft(grid), (result) => {
-      if (result._tag === 'Crafted') {
-        current = {
-          inventoryCarried: current.inventoryCarried,
-          carried: undefined,
-          grid: emptyGrid(current.grid.width, current.grid.height),
-          preview: undefined,
-          status: result,
-        }
-        options.onCrafted?.()
-      } else {
-        current = { ...current, status: result }
-      }
-      return state()
+  const craftOnce = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> =>
+    Effect.suspend(() => {
+      if (crafting) return Effect.succeed(state())
+
+      crafting = true
+      const grid = current.grid
+      return Effect.ensuring(
+        Effect.flatMap(service.craft(grid), (result) => {
+          if (result._tag !== 'Crafted') {
+            current = { ...current, preview: undefined, status: result }
+            return Effect.succeed(state())
+          }
+
+          current = {
+            inventoryCarried: current.inventoryCarried,
+            carried: undefined,
+            grid: options.consumeCraftingGrid === true
+              ? {
+                  ...grid,
+                  cells: grid.cells.map((cell) => {
+                    if (cell === undefined || cell.count <= 1) return undefined
+                    return { ...cell, count: (cell.count - 1) as Count }
+                  }),
+                }
+              : grid,
+            preview: undefined,
+            status: result,
+          }
+          options.onCrafted?.()
+
+          return Effect.matchCauseEffect(service.previewCraft(current.grid), {
+            onFailure: () => Effect.succeed(state()),
+            onSuccess: (match) => {
+              current = { ...current, preview: match }
+              return Effect.succeed(state())
+            },
+          })
+        }),
+        Effect.sync(() => {
+          crafting = false
+        }),
+      )
     })
-  }
 
-  const close = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => {
+  const close = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => Effect.suspend(() => {
+    if (crafting) return Effect.succeed(state())
     const inventoryCarried = current.inventoryCarried
     if (inventoryCarried === undefined) {
       return Effect.succeed(configureGrid(current.grid.width, current.grid.height))
     }
     return Effect.map(returnInventoryCarried(), () => {
+      if (crafting) return state()
       current = {
         ...current,
         carried: undefined,
@@ -386,7 +427,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
       }
       return state()
     })
-  }
+  })
 
   return {
     state,

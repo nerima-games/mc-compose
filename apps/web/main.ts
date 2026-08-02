@@ -94,7 +94,15 @@ import {
   type WeatherLoopKind,
   type Vec3,
 } from '@nerima-games/mc-audio'
-import { blockIdOf, blockTypeOfId, capabilityOfBlockId, propertyOfBlockId } from '@nerima-games/mc-kernel'
+import {
+  blockIdOf,
+  blockTypeOfId,
+  capabilityOfBlockId,
+  MonotonicTimeSecs as KernelMonotonicTimeSecs,
+  position,
+  propertyOfBlockId,
+  type CameraPoseSnapshot,
+} from '@nerima-games/mc-kernel'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   addExperience as addVitalsExperience,
@@ -102,6 +110,7 @@ import {
   emptyFurnaceState,
   emptyPlayerStorage,
   equipmentDefinitionFor,
+  EQUIPMENT_SLOTS,
   itemStack,
   makeCropService,
   makeSimFrameState,
@@ -161,6 +170,8 @@ import {
   type RenderEntity,
 } from '@nerima-games/mc-render'
 import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
+import { makeThreePostProcessingRenderer } from './post-processing'
+import { applyAnvilOperation, spendExperienceLevels } from './anvil-repair'
 import { excludeReservedPlacementConsumptions } from './placement-consumption'
 import {
   advancePlayerSwimmingRuntime,
@@ -277,6 +288,7 @@ import {
   requestMobSpawn,
   requestPotatoFoodUse,
   requestPotatoHarvest,
+  requestTargetedBoneMeal,
   requestTargetedPotatoPlanting,
   requestTargetedSoilTill,
   requestTargetedBlockBreak,
@@ -358,6 +370,17 @@ import {
   recoverProjectile,
 } from './projectile-runtime'
 import {
+  type PlayerDamageCommand,
+  type PlayerDamageCommandResult,
+} from './player-damage-network'
+import {
+  advanceEyeOfEnderRuntime,
+  eyeOfEnderRenderDescriptors,
+  eyeOfEnderRuntimeSnapshot,
+  initialEyeOfEnderRuntimeState,
+  launchRuntimeEyeOfEnder,
+} from './eye-of-ender-runtime'
+import {
   advanceWitherRuntime,
   damageRuntimeWither,
   matchRuntimeWitherSummon,
@@ -384,6 +407,7 @@ import {
   makeBrowserWebSocketTransport,
   type BrowserWebSocketTransport,
 } from './multiplayer-websocket'
+import { validateMultiplayerUrl } from './multiplayer-url'
 import {
   announceInventoryTransition,
   captionRenderSignature,
@@ -393,8 +417,14 @@ import {
 } from './audio-runtime'
 import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
+import { createDroppedItemLifetimeTracker } from './dropped-item-lifetime'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
 import { makeSurvivalHungerCoordinator } from './survival-hunger-runtime'
+import {
+  advanceFootstepRuntime,
+  initialFootstepRuntimeState,
+  surfaceForBlockType,
+} from './footstep-runtime'
 import { advanceFurnaceRuntime } from './furnace-runtime'
 import {
   advanceSleep,
@@ -440,7 +470,10 @@ import {
   loadSession,
   makeSessionChunkSource,
   saveSession,
-  normalizePersistedEntityRoster,
+  EMPTY_ENTITY_ROSTER,
+  normalizePersistedEntityRosters,
+  persistedItemDropMetadata,
+  persistedItemDropLifetime,
   SESSION_FORMAT_VERSION,
   snapshotResidentChunks,
   type DimensionChunk,
@@ -448,6 +481,7 @@ import {
   type PersistedLeverState,
   type PersistedPortalState,
   type PersistedEndPortalFrameState,
+  type PersistedEntityRoster,
   type PersistedVillager,
   type SessionState,
 } from './session-persistence'
@@ -570,6 +604,19 @@ const QA_PORTAL_LAYOUT = {
     x: 120 + (index % 2),
     y: 65 + Math.floor(index / 2),
     z: 8,
+  })),
+} as const
+const QA_IGNITION_PORTAL_LAYOUT = {
+  frame: [
+    ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 65, z: 9 })),
+    ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 69, z: 9 })),
+    ...Array.from({ length: 3 }, (_, offset) => ({ x: 7, y: 66 + offset, z: 9 })),
+    ...Array.from({ length: 3 }, (_, offset) => ({ x: 10, y: 66 + offset, z: 9 })),
+  ],
+  interior: Array.from({ length: 6 }, (_, index) => ({
+    x: 8 + (index % 2),
+    y: 66 + Math.floor(index / 2),
+    z: 9,
   })),
 } as const
 const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
@@ -755,12 +802,14 @@ const bootTitle = async (): Promise<void> => {
   const multiplayerName = requireElement('multiplayer-name')
   const multiplayerPlayer = requireElement('multiplayer-player')
   const multiplayerUrl = requireElement('multiplayer-url')
+  const multiplayerRegistrationToken = requireElement('multiplayer-registration-token')
   const multiplayerJoinButton = requireElement('multiplayer-join-button')
   if (!(multiplayerJoin instanceof HTMLFormElement)
     || !(multiplayerWorld instanceof HTMLSelectElement)
     || !(multiplayerName instanceof HTMLInputElement)
     || !(multiplayerPlayer instanceof HTMLInputElement)
     || !(multiplayerUrl instanceof HTMLInputElement)
+    || !(multiplayerRegistrationToken instanceof HTMLInputElement)
     || !(multiplayerJoinButton instanceof HTMLButtonElement)) {
     throw new Error('index.html has invalid multiplayer join controls')
   }
@@ -863,21 +912,35 @@ const bootTitle = async (): Promise<void> => {
       titleStatus.textContent = 'Player name and ID cannot be blank.'
       return
     }
-    let url: URL
-    try {
-      url = new URL(multiplayerUrl.value)
-    } catch {
-      titleStatus.textContent = 'Enter a valid multiplayer server URL.'
-      return
-    }
-    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
-      titleStatus.textContent = 'Multiplayer server must use ws:// or wss://.'
+    const validation = validateMultiplayerUrl(multiplayerUrl.value, window.location.href)
+    if (!validation.ok) {
+      titleStatus.textContent = validation.message
       return
     }
     const href = new URL(sessionHref(multiplayerWorld.value), window.location.origin)
-    href.searchParams.set('multiplayer', url.href)
+    href.searchParams.set('multiplayer', validation.url.href)
     href.searchParams.set('player', player)
     href.searchParams.set('multiplayerName', name)
+    const registrationToken = multiplayerRegistrationToken.value
+    try {
+      const registrationTokenKey = multiplayerRegistrationTokenKey(
+        validation.url.href,
+        multiplayerWorld.value,
+        player,
+      )
+      if (registrationToken.length > 0) {
+        window.sessionStorage.setItem(
+          registrationTokenKey,
+          registrationToken,
+        )
+      } else {
+        window.sessionStorage.removeItem(registrationTokenKey)
+      }
+    } catch (error: unknown) {
+      titleStatus.textContent = 'Legacy registration token could not be stored for navigation.'
+      console.error('[mc-compose] multiplayer registration token storage failed', error)
+      return
+    }
     void navigateAfterSettingsSaved(`${href.pathname}${href.search}`)
   })
   const createWorld = async ({ name, mode }: CreateWorldRequest): Promise<void> => {
@@ -943,6 +1006,18 @@ const readMultiplayerQuery = (search: string): MultiplayerQuery | undefined => {
   }
   return { url, player: PlayerId.make(player), name: PlayerName.make(name) }
 }
+
+const multiplayerReconnectTokenKey = (
+  url: string,
+  worldId: string,
+  player: PlayerId,
+): string => `mc-compose:multiplayer-reconnect:${JSON.stringify([url, worldId, String(player)])}`
+
+const multiplayerRegistrationTokenKey = (
+  url: string,
+  worldId: string,
+  player: string,
+): string => `mc-compose:multiplayer-registration:${JSON.stringify([url, worldId, player])}`
 
 type RemotePlayer = {
   readonly name: PlayerName
@@ -1012,6 +1087,9 @@ const bootGame = async (
     readonly enchantedItem?: EnchantedItem
   }
   const droppedItemMetadata = new Map<string, DroppedItemMetadata>()
+  const droppedItemLifetime = createDroppedItemLifetimeTracker()
+  const droppedItemMetadataKey = (dimension: SessionState['dimension'], entityId: string): string =>
+    `${dimension}:${entityId}`
   const equipmentMetadataKey = (slot: EquipmentSlotId): string => `equipment:${slot}`
   const containerMetadataKey = (containerId: string, slot: number): string =>
     `container:${containerId}:${String(slot)}`
@@ -1324,6 +1402,7 @@ const bootGame = async (
       canvas,
       { width: canvas.clientWidth, height: canvas.clientHeight },
       atlasTexture,
+      { postProcessing: makeThreePostProcessingRenderer },
     ))
     : await Effect.runPromise(
         makeWorldRenderer<HTMLCanvasElement, THREE.BufferGeometry, THREE.MeshBasicMaterial>(
@@ -1447,13 +1526,90 @@ const bootGame = async (
       dimension: initialDimension,
     }),
   )
+  const restoredEntityRosters = normalizePersistedEntityRosters(
+    Option.isSome(loadedSession) ? loadedSession.value.state.entities : undefined,
+  )
+  const entityRosters = new Map<Dimension, PersistedEntityRoster>([
+    ['overworld', restoredEntityRosters.overworld],
+    ['nether', restoredEntityRosters.nether],
+    ['end', restoredEntityRosters.end],
+  ])
+  for (const [dimension, roster] of entityRosters) {
+    Effect.runSync(
+      world.entities.restore(
+        roster as Parameters<typeof world.entities.restore>[0],
+      ),
+    )
+    const canonicalRoster = Effect.runSync(world.entities.snapshot)
+    entityRosters.set(dimension, canonicalRoster)
+    droppedItemLifetime.restore(
+      dimension,
+      canonicalRoster.entities
+        .filter((entity) => isDroppedItemBehaviour(entity.behaviour))
+        .map((entity) => ({
+          entityId: entity.id,
+          elapsedSecs: persistedItemDropLifetime(entity.behaviour).elapsedSecs,
+        })),
+    )
+    for (const entity of canonicalRoster.entities) {
+      if (!isDroppedItemBehaviour(entity.behaviour)) continue
+      const metadata = persistedItemDropMetadata(entity.behaviour)
+      droppedItemMetadata.set(droppedItemMetadataKey(dimension, entity.id), {
+        ...(metadata.customName === undefined ? {} : { customName: metadata.customName }),
+        ...(metadata.enchantments === undefined
+          ? {}
+          : {
+              enchantedItem: {
+                item: entity.behaviour.item,
+                durability: entity.behaviour.durability,
+                enchantments: metadata.enchantments,
+              },
+            }),
+      })
+    }
+  }
+  const rosterWithDroppedItemLifetimes = (
+    dimension: Dimension,
+    roster: PersistedEntityRoster,
+  ): PersistedEntityRoster => ({
+    ...roster,
+    entities: roster.entities.map((entity) => {
+      if (!isDroppedItemBehaviour(entity.behaviour)) return entity
+      const metadata = droppedItemMetadata.get(droppedItemMetadataKey(dimension, entity.id))
+      return {
+          ...entity,
+          behaviour: {
+            ...entity.behaviour,
+            elapsedSecs: droppedItemLifetime.elapsed(dimension, entity.id),
+            ...(metadata?.customName === undefined ? {} : { customName: metadata.customName }),
+            ...(metadata?.enchantedItem === undefined
+              ? {}
+              : { enchantments: metadata.enchantedItem.enchantments }),
+          },
+        }
+    }),
+  })
+  const snapshotEntityRosters = (): SessionState['entities'] => {
+    entityRosters.set(
+      currentChunkContext.dimension,
+      rosterWithDroppedItemLifetimes(
+        currentChunkContext.dimension,
+        Effect.runSync(world.entities.snapshot),
+      ),
+    )
+    return {
+      overworld: entityRosters.get('overworld') ?? EMPTY_ENTITY_ROSTER,
+      nether: entityRosters.get('nether') ?? EMPTY_ENTITY_ROSTER,
+      end: entityRosters.get('end') ?? EMPTY_ENTITY_ROSTER,
+    }
+  }
   const survivalHunger = makeSurvivalHungerCoordinator(world.vitals)
   const initialSpawnPose = await Effect.runPromise(world.player.pose)
   const initialSpawnDimension = await Effect.runPromise(world.player.dimension)
   if (Option.isSome(loadedSession)) {
     await Effect.runPromise(
       world.entities.restore(
-        normalizePersistedEntityRoster(loadedSession.value.state.entities) as Parameters<
+        (entityRosters.get(initialDimension) ?? EMPTY_ENTITY_ROSTER) as Parameters<
           typeof world.entities.restore
         >[0],
       ),
@@ -1621,6 +1777,7 @@ const bootGame = async (
   let fishingResult = 'idle'
   let nextFishingRoll = 1
   let swimmingState = initialPlayerSwimmingRuntimeState()
+  let footstepRuntimeState = initialFootstepRuntimeState()
   const furnaceKeyOf = (
     furnace: Pick<PersistedFurnaceState, 'dimension' | 'position'>,
   ): string => JSON.stringify([
@@ -1706,7 +1863,7 @@ const bootGame = async (
       furnaces: [...furnaceStates.values()],
       portals: [...portalStates.values()],
       crops: Effect.runSync(crops.snapshot),
-      entities: Effect.runSync(world.entities.snapshot),
+      entities: snapshotEntityRosters(),
       villagers: {
         residents: [...villagerResidents.values()],
         trades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
@@ -2064,22 +2221,22 @@ const bootGame = async (
    * `Parameters<typeof renderModule>[3]` follows the signature instead, so a
    * change to it fails here rather than drifting.
    *
-   * The cast inside is for the brands: `position` is a branded `Position` and
-   * `capturedAtSecs` a branded `MonotonicTimeSecs`. Neither has a runtime
-   * representation and the renderer reads five numbers off this.
+   * The values are constructed with mc-kernel's branded constructors. The
+   * brands have no runtime representation and the renderer reads five numbers
+   * off this, but the construction remains checked at this boundary.
    *
    * The camera is eye-level above the player service's feet position.
    */
-  const initialPose = ({
-    position: {
-      x: spawnPose.feetPosition.x,
-      y: spawnPose.feetPosition.y + EYE_LEVEL_OFFSET,
-      z: spawnPose.feetPosition.z,
-    },
+  const initialPose: CameraPoseSnapshot = {
+    position: position(
+      spawnPose.feetPosition.x,
+      spawnPose.feetPosition.y + EYE_LEVEL_OFFSET,
+      spawnPose.feetPosition.z,
+    ),
     yawRadians: spawnPose.yawRadians,
     pitchRadians: spawnPose.pitchRadians,
-    capturedAtSecs: 0,
-  } as unknown as NonNullable<Parameters<typeof renderModule>[3]>)
+    capturedAtSecs: KernelMonotonicTimeSecs(0),
+  }
 
   const render = renderModule(undefined, undefined, worldRenderer, initialPose)
 
@@ -2302,6 +2459,21 @@ const bootGame = async (
   const alignActiveDimension = (dimension: Dimension): boolean => {
     if (currentChunkContext.dimension === dimension) return false
     Effect.runSync(retainDimensionResidents(currentChunkContext))
+    entityRosters.set(
+      currentChunkContext.dimension,
+      rosterWithDroppedItemLifetimes(
+        currentChunkContext.dimension,
+        Effect.runSync(world.entities.snapshot),
+      ),
+    )
+    Effect.runSync(
+      world.entities.restore(
+        (entityRosters.get(dimension) ?? EMPTY_ENTITY_ROSTER) as Parameters<
+          typeof world.entities.restore
+        >[0],
+      ),
+    )
+    entityRosters.set(dimension, Effect.runSync(world.entities.snapshot))
     currentChunkContext = getOrCreateDimensionChunkContext(dimension)
     Effect.runSync(clearRenderedChunks)
     redstoneDirty = true
@@ -2416,8 +2588,19 @@ const bootGame = async (
   let nextMobDropId = 0
   let lastObservedItemUse: ItemUseResult | undefined
   type PendingItemUse =
-    | { readonly kind: 'ignition'; readonly slotIndex: number; readonly heldItem: IgnitionItemType }
+    | {
+        readonly kind: 'ignition'
+        readonly slotIndex: number
+        readonly heldItem: IgnitionItemType
+        readonly dimension: Dimension
+      }
     | { readonly kind: 'till'; readonly slotIndex: number; readonly heldItem: HoeItemType }
+    | {
+        readonly kind: 'bone-meal'
+        readonly slotIndex: number
+        readonly dimension: Dimension
+        readonly position: { readonly x: number; readonly y: number; readonly z: number }
+      }
     | { readonly kind: 'plant'; readonly slotIndex: number; readonly dimension: Dimension }
     | {
         readonly kind: 'harvest'
@@ -2428,6 +2611,8 @@ const bootGame = async (
   const pendingItemUses = new Map<string, PendingItemUse>()
   let bowUseState: BowUseState = IDLE_BOW_USE
   let projectileRuntimeState = initialProjectileRuntimeState()
+  let eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
+  let nextEyeOfEnderBreaks: boolean | undefined
   const pendingMeleeAttacks = new Map<
     string,
     { readonly slotIndex: number; readonly item: SwordItem }
@@ -2502,6 +2687,29 @@ const bootGame = async (
   }> = []
 
   const multiplayerQuery = readMultiplayerQuery(window.location.search)
+  const multiplayerUrlValidation = multiplayerQuery === undefined
+    ? undefined
+    : validateMultiplayerUrl(multiplayerQuery.url, window.location.href)
+  if (multiplayerUrlValidation?.ok === false) {
+    failBoot(multiplayerUrlValidation.message)
+    return
+  }
+  let registrationToken: string | undefined
+  if (multiplayerQuery !== undefined && multiplayerUrlValidation?.ok === true) {
+    const registrationTokenKey = multiplayerRegistrationTokenKey(
+      multiplayerUrlValidation.url.href,
+      sessionId,
+      String(multiplayerQuery.player),
+    )
+    try {
+      registrationToken = window.sessionStorage.getItem(registrationTokenKey) ?? undefined
+      window.sessionStorage.removeItem(registrationTokenKey)
+    } catch (error: unknown) {
+      failBoot('Legacy registration token could not be read securely. Return to the title screen and try again.')
+      console.error('[mc-compose] multiplayer registration token retrieval failed', error)
+      return
+    }
+  }
   const requiredSleepRatio = sleepRatioFromPercentage(
     new URLSearchParams(window.location.search).get('sleepPercentage'),
   )
@@ -2509,7 +2717,35 @@ const bootGame = async (
     ? undefined
     : await Effect.runPromise(
         Effect.gen(function* () {
-          const transport = yield* makeBrowserWebSocketTransport({ url: multiplayerQuery.url })
+          const reconnectTokenKey = multiplayerReconnectTokenKey(
+            multiplayerQuery.url,
+            sessionId,
+            multiplayerQuery.player,
+          )
+          let reconnectToken: string | undefined
+          const transport = yield* makeBrowserWebSocketTransport({
+            url: multiplayerUrlValidation?.url.href ?? multiplayerQuery.url,
+            reconnectAuth: {
+              playerId: String(multiplayerQuery.player),
+              loadToken: () => {
+                if (reconnectToken !== undefined) return reconnectToken
+                try {
+                  reconnectToken = window.localStorage.getItem(reconnectTokenKey) ?? undefined
+                } catch {
+                  // Fall back to the latest token retained for this page lifetime.
+                }
+                return reconnectToken
+              },
+              saveToken: (token) => {
+                reconnectToken = token
+                window.localStorage.setItem(reconnectTokenKey, token)
+              },
+              loadRegistrationToken: () => registrationToken,
+              clearRegistrationToken: () => {
+                registrationToken = undefined
+              },
+            },
+          })
           const host = yield* makeMultiplayerHost.pipe(
             Effect.provideService(TransportPort, transport),
           )
@@ -2530,7 +2766,27 @@ const bootGame = async (
   let nextVitalsCommand = 0
   let nextEntityCommand = 0
   let nextFacilityCommand = 0
+  let nextInventoryCommand = 0
+  let nextPlayerDamageCommand = 0
+  let nextVillagerTradeCommand = 0
   let pendingVitalsCommand: CommandId | null = null
+  let pendingInventoryCommand: {
+    readonly commandId: CommandId
+    acceptedRevision: number | null
+  } | null = null
+  let pendingVillagerTradeCommand: CommandId | null = null
+  let queuedHotbarSelection: number | null = null
+  type QueuedPlayerDamage = Readonly<{
+    readonly amount: number
+    readonly minimumHealthPoints: number
+  }>
+  let queuedPlayerDamages: QueuedPlayerDamage[] = []
+  let pendingPlayerDamage: {
+    readonly commandId: string
+    readonly acceptedRevision: number | null
+  } | null = null
+  let playerDamageResyncPending = false
+  let lastPlayerVitalsRevision = -1
   let pendingFacilityCommand: {
     readonly commandId: CommandId
     readonly facility: 'container' | 'furnace'
@@ -2615,6 +2871,51 @@ const bootGame = async (
     }))
   }
 
+  const sendInventorySelection = (slot: number): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete) return false
+    if (pendingInventoryCommand !== null) {
+      queuedHotbarSelection = slot
+      return true
+    }
+    nextInventoryCommand += 1
+    const commandId = CommandId.make(`inventory-${String(nextInventoryCommand)}`)
+    pendingInventoryCommand = { commandId, acceptedRevision: null }
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'PlayerInventoryCommand',
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+      action: { _tag: 'select-slot', slot },
+    }))
+    return true
+  }
+
+  const sendVillagerTradeCommand = (villagerId: string, offerId: string): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingVillagerTradeCommand !== null) return false
+    nextVillagerTradeCommand += 1
+    const commandId = CommandId.make(`villager-trade-${String(nextVillagerTradeCommand)}`)
+    pendingVillagerTradeCommand = commandId
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'VillagerTradeCommand',
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+      villagerId,
+      offerId,
+      action: 'execute-trade',
+    }))
+    return true
+  }
+
+  const flushQueuedHotbarSelection = (): void => {
+    if (pendingInventoryCommand !== null || queuedHotbarSelection === null) return
+    const slot = queuedHotbarSelection
+    queuedHotbarSelection = null
+    sendInventorySelection(slot)
+  }
+
   const sendEntityCommand = (
     command: Omit<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'VehicleCommand' }>, 'commandId' | 'player' | 'world' | 'expectedRevision'>,
   ): void => {
@@ -2653,6 +2954,72 @@ const bootGame = async (
     } as NetworkMessage))
     return true
   }
+
+  const pumpPlayerDamage = (): void => {
+    if (
+      multiplayer === undefined
+      || !multiplayerHandshakeComplete
+      || playerDamageResyncPending
+      || pendingPlayerDamage !== null
+    ) return
+    const next = queuedPlayerDamages[0]
+    if (next === undefined) return
+    queuedPlayerDamages = queuedPlayerDamages.slice(1)
+    nextPlayerDamageCommand += 1
+    const commandId = `damage-${String(nextPlayerDamageCommand)}`
+    pendingPlayerDamage = { commandId, acceptedRevision: null }
+    const command = {
+      _tag: 'PlayerDamageCommand' as const,
+      commandId,
+      player: String(multiplayer.query.player),
+      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      expectedRevision: multiplayerRevision,
+      amount: next.amount,
+      minimumHealthPoints: next.minimumHealthPoints,
+    } as PlayerDamageCommand & Readonly<{ minimumHealthPoints: number }>
+    Effect.runSync(multiplayer.transport.sendPlayerDamage(command))
+  }
+
+  const settlePlayerDamageAfterVitals = (revision: number): void => {
+    lastPlayerVitalsRevision = Math.max(lastPlayerVitalsRevision, revision)
+    const pending = pendingPlayerDamage
+    if (
+      pending !== null
+      && pending.acceptedRevision !== null
+      && revision >= pending.acceptedRevision
+    ) {
+      pendingPlayerDamage = null
+      pumpPlayerDamage()
+    }
+  }
+
+  const applyPlayerDamageResult = (message: PlayerDamageCommandResult): void => {
+    if (multiplayer === undefined || pendingPlayerDamage?.commandId !== message.commandId) return
+    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+    if (message.accepted) {
+      pendingPlayerDamage = { ...pendingPlayerDamage, acceptedRevision: message.revision }
+      if (lastPlayerVitalsRevision >= message.revision) {
+        pendingPlayerDamage = null
+        pumpPlayerDamage()
+      }
+      return
+    }
+    pendingPlayerDamage = null
+    playerDamageResyncPending = true
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'AuthoritativeResyncRequest',
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      lastKnownRevision: multiplayerRevision,
+    }))
+  }
+
+  const drainPlayerDamageInbound = (): void => {
+    if (multiplayer === undefined) return
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.playerDamageInbound))) {
+      if (message._tag === 'PlayerDamageCommandResult') applyPlayerDamageResult(message)
+    }
+  }
+
   document.addEventListener('mc-entity-command', (event) => {
     const detail = (event as CustomEvent<{ readonly entityId: string; readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'; readonly at?: { readonly x: number; readonly y: number; readonly z: number } }>).detail
     if (detail === undefined) return
@@ -2684,6 +3051,40 @@ const bootGame = async (
         : { item: stack.item as ItemStack['item'], count: stack.count }),
     }))
     selectedHotbarIndex = state.selectedSlot
+  }
+
+  type NetworkVillagerTradeState = Extract<NetworkMessage, { readonly _tag: 'VillagerTradeDelta' }>['state']
+
+  const applyNetworkVillagerTrade = (state: NetworkVillagerTradeState): void => {
+    const current = Effect.runSync(snapshotVillagerTrades(gameplayState))
+    const villagers = current.villagers.map((villager) => {
+      if (villager.id !== state.villagerId) return villager
+      return {
+        ...villager,
+        offers: villager.offers.map((offer) => {
+          const networkOffer = state.offers.find((candidate) => candidate.offerId === offer.id)
+          const input = networkOffer?.input[0]
+          if (networkOffer === undefined || input === undefined) return offer
+          return {
+            ...offer,
+            input: { item: input.item as typeof offer.input.item, count: input.count },
+            output: { item: networkOffer.output.item as typeof offer.output.item, count: networkOffer.output.count },
+            uses: networkOffer.uses,
+            maxUses: networkOffer.maxUses,
+          }
+        }),
+      }
+    })
+    Effect.runSync(restoreVillagerTrades(gameplayState, { ...current, villagers }))
+  }
+
+  const applyNetworkTimeWeather = (
+    state: Extract<NetworkMessage, { readonly _tag: 'WorldTimeWeatherDelta' }>['state'],
+  ): void => {
+    Effect.runSync(time.setTimeOfDay(state.timeOfDay / 24_000))
+    const nextWeather: WeatherState = { weather: state.weather, remainingSecs: 300 }
+    Effect.runSync(weather.applyTransition(nextWeather))
+    presentWeather(nextWeather)
   }
 
   type NetworkContainerState = Extract<NetworkMessage, { readonly _tag: 'ContainerDelta' }>['state']
@@ -2767,9 +3168,14 @@ const bootGame = async (
         if (message.revision < multiplayerRevision) return
         multiplayerRevision = message.revision
         const local = message.vitals.find(({ player }) => player === multiplayer.query.player)
-        if (local !== undefined) applyNetworkVitals(local.state)
+        if (local !== undefined) {
+          applyNetworkVitals(local.state)
+          settlePlayerDamageAfterVitals(message.revision)
+        }
         const localInventory = message.inventories.find(({ player }) => player === multiplayer.query.player)
         if (localInventory !== undefined) applyNetworkInventory(localInventory.state)
+        for (const villagerTrade of message.villagerTrades) applyNetworkVillagerTrade(villagerTrade)
+        applyNetworkTimeWeather(message.timeWeather)
         applyNetworkContainers(message.containers)
         furnaceStates.clear()
         for (const furnace of message.furnaces) applyNetworkFurnace(furnace)
@@ -2793,6 +3199,13 @@ const bootGame = async (
         }
         multiplayerEntities.clear()
         for (const entity of message.entities ?? []) multiplayerEntities.set(entity.entityId, entity)
+        if (playerDamageResyncPending) {
+          playerDamageResyncPending = false
+          pendingPlayerDamage = null
+          pumpPlayerDamage()
+        }
+        flushQueuedHotbarSelection()
+        pendingVillagerTradeCommand = null
         break
       }
       case 'EntitySpawnDelta':
@@ -2822,11 +3235,28 @@ const bootGame = async (
             && pendingFacilityCommand.facilityDeltaRevision >= pendingFacilityCommand.acceptedRevision
           ) pendingFacilityCommand = null
         }
+        if (
+          message.player === multiplayer.query.player
+          && pendingInventoryCommand !== null
+          && pendingInventoryCommand.acceptedRevision !== null
+          && message.revision >= pendingInventoryCommand.acceptedRevision
+        ) {
+          pendingInventoryCommand = null
+          flushQueuedHotbarSelection()
+        }
         break
       case 'PlayerVitalsDelta':
         if (message.revision < multiplayerRevision) return
         multiplayerRevision = message.revision
-        if (message.player === multiplayer.query.player) applyNetworkVitals(message.state)
+        if (message.player === multiplayer.query.player) {
+          applyNetworkVitals(message.state)
+          settlePlayerDamageAfterVitals(message.revision)
+        }
+        break
+      case 'WorldTimeWeatherDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        applyNetworkTimeWeather(message.state)
         break
       case 'ContainerDelta':
         if (message.revision < multiplayerRevision) return
@@ -2848,9 +3278,22 @@ const bootGame = async (
         ) pendingFacilityCommand.facilityDeltaRevision = message.revision
         if (inventoryOpen && inventoryMode === 'furnace' && activeFurnaceKey === message.state.furnaceId) renderPlayerUi()
         break
+      case 'VillagerTradeDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        applyNetworkVillagerTrade(message.state)
+        if (activeVillagerId === message.state.villagerId) {
+          tradeStatus = 'Trade complete'
+          renderTradeUi()
+        }
+        break
       case 'AuthoritativeCommandAccepted':
         multiplayerRevision = Math.max(multiplayerRevision, message.revision)
         if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
+        if (message.commandId === pendingInventoryCommand?.commandId) {
+          pendingInventoryCommand.acceptedRevision = message.revision
+        }
+        if (message.commandId === pendingVillagerTradeCommand) pendingVillagerTradeCommand = null
         if (message.commandId === pendingFacilityCommand?.commandId) {
           if (!pendingFacilityCommand.expectsDelta) pendingFacilityCommand = null
           else if (
@@ -2861,11 +3304,20 @@ const bootGame = async (
           ) pendingFacilityCommand = null
           else pendingFacilityCommand.acceptedRevision = message.revision
         }
+        if (message.commandId === pendingVillagerTradeCommand) {
+          pendingVillagerTradeCommand = null
+          tradeStatus = message.reason
+          if (tradeOpen) renderTradeUi()
+        }
         break
       case 'AuthoritativeCommandRejected':
         multiplayerRevision = Math.max(multiplayerRevision, message.revision)
         multiplayerRejection = message.reason
         if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
+        if (message.commandId === pendingInventoryCommand?.commandId) {
+          pendingInventoryCommand = null
+          if (!message.resyncRequired) flushQueuedHotbarSelection()
+        }
         if (message.commandId === pendingFacilityCommand?.commandId) {
           pendingFacilityCommand = null
           chestStatus = message.reason
@@ -3037,9 +3489,8 @@ const bootGame = async (
   // the parent is an argument because mx-ui never goes looking for a document
   // (docs/public-api.md §4-1).
   //
-  // NOTE: mx-ui's tidy `UiMount` facade in §4-1 is still unimplemented, so the
-  // host calls the per-screen constructors directly. That is a smaller surface
-  // than it looks: both take (factory, parent, motion) and hand back a handle.
+  // mx-ui exposes UiMount, but this host also owns specialized furnace, chest,
+  // anvil, enchanting, and trade overlays, so it composes those screens here.
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduced' : 'full'
   const hud = createHudView(document, hudParent, motion)
   const inventoryView = createInventoryView(document, inventoryParent)
@@ -3144,6 +3595,13 @@ const bootGame = async (
     const button = event.target.closest<HTMLElement>('[data-trade-offer-id]')
     const offerId = button?.dataset['tradeOfferId']
     if (activeVillagerId === undefined || offerId === undefined) return
+    if (multiplayer !== undefined && multiplayerHandshakeComplete) {
+      if (sendVillagerTradeCommand(activeVillagerId, offerId)) {
+        tradeStatus = 'Trading...'
+        renderTradeUi()
+      }
+      return
+    }
     nextVillagerTradeRequestId += 1
     Effect.runSync(requestVillagerTrade(gameplayState, {
       requestId: `villager-trade-${String(nextVillagerTradeRequestId)}`,
@@ -3350,6 +3808,7 @@ const bootGame = async (
     canInventoryClick: ({ slotIndex, slotBefore, carriedBefore }) =>
       carriedBefore === undefined || slotBefore === undefined || carriedBefore.item !== slotBefore.item
       || metadataMatches(slotIndex),
+    consumeCraftingGrid: true,
     onCrafted: () => markSessionDirty(),
     onInventoryChanged: () => markSessionDirty(),
     onInventoryReset: () => {
@@ -3640,6 +4099,14 @@ const bootGame = async (
     canvas.setAttribute('data-stronghold-direction', String(Math.atan2(dx, -dz)))
     canvas.setAttribute('data-stronghold-distance', String(Math.round(Math.hypot(dx, dz))))
     if (!isCreativeMode) yield* world.inventory.removeAt(selectedHotbarIndex, 'eye_of_ender', 1)
+    const breaks = nextEyeOfEnderBreaks ?? Math.random() < 0.2
+    nextEyeOfEnderBreaks = undefined
+    eyeOfEnderRuntimeState = launchRuntimeEyeOfEnder(eyeOfEnderRuntimeState, {
+      dimension,
+      position: { ...pose.feetPosition, y: pose.feetPosition.y + EYE_LEVEL_OFFSET },
+      target: site.value,
+      breaks,
+    })
     queueEndAudio('eyeThrow', pose.feetPosition)
     markSessionDirty()
     return true
@@ -3698,6 +4165,16 @@ const bootGame = async (
       armorPointsForEquipment(equipment),
       enchantedArmor,
     )
+    if (multiplayer !== undefined) {
+      if (reducedDamage.amount > 0) {
+        queuedPlayerDamages = [...queuedPlayerDamages, {
+          amount: reducedDamage.amount,
+          minimumHealthPoints,
+        }]
+        pumpPlayerDamage()
+      }
+      return
+    }
     const healthBefore = Effect.runSync(world.vitals.view).healthPoints
     Effect.runSync(world.vitals.damage(reducedDamage))
     const damagedVitals = Effect.runSync(world.vitals.snapshot)
@@ -3753,18 +4230,94 @@ const bootGame = async (
   const handleLocalPlayerDeath = (): void => {
     const deathPosition = Effect.runSync(world.player.pose).feetPosition
     const storage = Effect.runSync(world.inventory.storageSnapshot)
-    const drops = deathDropsFromPlayerStorage(storage, deathPosition)
+    const drops = deathDropsFromPlayerStorage(storage, deathPosition, {
+      customNames: Object.fromEntries(customNames),
+      enchantedItems: Object.fromEntries(enchantedItems),
+    })
     if (drops.length > 0) {
       const dropped = Effect.runSync(spawnDroppedItems(
         world.entities,
-        drops.map((drop) => ({ ...drop, eligibleFromFrame: Number.MAX_SAFE_INTEGER })),
+        drops.map(({ customName: _customName, enchantments: _enchantments, ...drop }) => ({
+          ...drop,
+          eligibleFromFrame: Number.MAX_SAFE_INTEGER,
+        })),
       ))
-      dropped.forEach((entity) => droppedItemMetadata.set(String(entity.id), {}))
+      const dimension = Effect.runSync(world.player.dimension)
+      dropped.forEach((entity, index) => {
+        const drop = drops[index]
+        if (drop === undefined) return
+        droppedItemMetadata.set(droppedItemMetadataKey(dimension, String(entity.id)), {
+          ...(drop.customName === undefined ? {} : { customName: drop.customName }),
+          ...(drop.enchantments === undefined
+            ? {}
+            : {
+                enchantedItem: {
+                  item: drop.item,
+                  durability: drop.durability ?? null,
+                  enchantments: drop.enchantments,
+                },
+              }),
+        })
+      })
+    }
+    storage.inventory.slots.forEach((_stack, index) => {
+      customNames.delete(String(index))
+      enchantedItems.delete(String(index))
+    })
+    for (const slot of EQUIPMENT_SLOTS) {
+      customNames.delete(equipmentMetadataKey(slot))
+      enchantedItems.delete(equipmentMetadataKey(slot))
     }
     Effect.runSync(world.inventory.restoreStorage(emptyPlayerStorage()))
     const vitals = Effect.runSync(world.vitals.snapshot)
     Effect.runSync(world.vitals.restore(addVitalsExperience(vitals, -vitals.totalExperience)))
     deathDropDimension = Effect.runSync(world.player.dimension)
+    markSessionDirty()
+  }
+
+  const applyWorldExplosion = (
+    center: Readonly<{ x: number; y: number; z: number }>,
+    radius: number,
+    seed: number,
+    destroysResistantBlocks: boolean,
+  ): void => {
+    const entities = Effect.runSync(world.entities.entities)
+    const plan = planExplosion({
+      center,
+      radius,
+      seed,
+      blocks: (position) => {
+        const reading = Effect.runSync(currentChunkStore.getBlock(position))
+        if (reading._tag !== 'Block') return undefined
+        const type = blockTypeOfId(reading.block)
+        if (type === 'air') return { resistance: 0, destructible: false }
+        const hardness = propertyOfBlockId(reading.block, 'hardness')
+        return {
+          resistance: destroysResistantBlocks ? 0 : hardness,
+          destructible: type !== 'bedrock',
+        }
+      },
+      entities,
+    })
+    for (const position of plan.destroyedBlocks) {
+      Effect.runSync(currentChunkStore.setBlock(position, 0))
+    }
+    for (const effect of plan.entityEffects) {
+      Effect.runSync(resolveBowHits(world.entities, [{ id: effect.id, damage: effect.damage }]))
+    }
+    const playerPosition = Effect.runSync(playerApi.pose).feetPosition
+    const playerDistance = Math.hypot(
+      playerPosition.x - center.x,
+      playerPosition.y + 0.9 - center.y,
+      playerPosition.z - center.z,
+    )
+    if (playerDistance < radius) {
+      const exposure = 1 - playerDistance / radius
+      applyPlayerDamage({
+        amount: ((exposure * exposure + exposure) / 2) * 7 * radius + 1,
+        cause: 'generic',
+      })
+    }
     markSessionDirty()
   }
 
@@ -3830,20 +4383,26 @@ const bootGame = async (
       ? undefined
       : { itemId: selectedStack.item, count: selectedStack.count }
     if (inventoryMode === 'anvil') {
-      const hasIron = storage.inventory.slots.some(
-        (slot) => slot?.item === 'iron_ingot' && slot.count > 0,
-      )
+      const selectedDurability = storage.inventoryDurability[selectedHotbarIndex]
+      const hasAnvilChange = anvilName.trim() !== (customNames.get(selectedSlotKey) ?? '')
+        || (selectedDurability !== null && selectedDurability.current < selectedDurability.max)
+      const anvilResult = applyAnvilOperation(storage, selectedHotbarIndex, hasAnvilChange)
+      const hasIron = anvilResult !== undefined
       const level = Effect.runSync(world.vitals.view).experienceLevel
       anvilView.render(anvilViewModel({
         primaryInput: selectedSlot,
         secondaryInput: hasIron ? { itemId: 'iron_ingot', count: 1 } : undefined,
-        output: selectedStack != null && hasIron && level >= 1 ? selectedSlot : undefined,
+        output: selectedStack != null && hasIron && hasAnvilChange && level >= 1
+          ? selectedSlot
+          : undefined,
         name: anvilName,
         levelCost: 1,
         rejectionReason: selectedStack == null
           ? 'Select an item in the hotbar'
           : !hasIron
             ? 'Requires one iron ingot'
+            : !hasAnvilChange
+              ? 'Change the name or repair a damaged item'
             : level < 1
               ? 'Requires level 1'
               : undefined,
@@ -4366,20 +4925,34 @@ const bootGame = async (
   }
 
   const activateAnvilOutput = (): void => {
-    const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const selected = storage.inventory.slots[selectedHotbarIndex]
     const vitals = Effect.runSync(world.vitals.snapshot)
-    const level = Effect.runSync(world.vitals.view).experienceLevel
-    if (selected === undefined || level < 1 || !removeInventoryItem('iron_ingot', 1)) {
+    const normalizedName = anvilName.trim()
+    const durability = storage.inventoryDurability[selectedHotbarIndex]
+    const hasChange = normalizedName !== (customNames.get(String(selectedHotbarIndex)) ?? '')
+      || (durability !== null && durability.current < durability.max)
+    const anvilResult = applyAnvilOperation(storage, selectedHotbarIndex, hasChange)
+    const remainingExperience = spendExperienceLevels(vitals.totalExperience, 1)
+    if (selected === undefined || anvilResult === undefined || remainingExperience === undefined) {
       anvilStatus = 'Repair or rename requirements are not met'
       renderPlayerUi()
       return
     }
-    const normalizedName = anvilName.trim()
-    if (normalizedName.length > 0) customNames.set(String(selectedHotbarIndex), normalizedName)
-    else customNames.delete(String(selectedHotbarIndex))
+    Effect.runSync(world.inventory.restoreStorage(anvilResult))
     Effect.runSync(world.vitals.restore(
-      addVitalsExperience(vitals, totalExperienceAtLevel(level - 1) - vitals.totalExperience),
+      addVitalsExperience(vitals, remainingExperience - vitals.totalExperience),
     ))
+    const itemKey = String(selectedHotbarIndex)
+    const enchantedItem = enchantedItems.get(itemKey)
+    if (enchantedItem !== undefined) {
+      enchantedItems.set(itemKey, {
+        ...enchantedItem,
+        durability: anvilResult.inventoryDurability[selectedHotbarIndex] ?? null,
+      })
+    }
+    if (normalizedName.length > 0) customNames.set(itemKey, normalizedName)
+    else customNames.delete(itemKey)
     anvilStatus = normalizedName.length > 0 ? `Renamed to ${normalizedName}` : 'Item repaired'
     document.body.setAttribute('data-anvil-result', anvilStatus)
     markSessionDirty()
@@ -4632,6 +5205,7 @@ const bootGame = async (
     resetPrimaryAttackGesture()
     resetBowUse()
     projectileRuntimeState = initialProjectileRuntimeState()
+    eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
     if (mountedVehicleId !== undefined) {
       const vehicle = vehicles.get(mountedVehicleId)
       if (vehicle !== undefined) vehicles.set(mountedVehicleId, exitVehicle(vehicle).vehicle)
@@ -4658,12 +5232,12 @@ const bootGame = async (
     if (validRespawn === null) respawnLocation = null
     sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
     const respawnDimension = validRespawn?.dimension ?? initialSpawnDimension
-    deathDropDimension = undefined
     const respawnPose = validRespawn === null
       ? initialSpawnPose
       : { ...initialSpawnPose, feetPosition: validRespawn.position }
     Effect.runSync(world.player.restore(respawnPose, respawnDimension))
     alignActiveDimension(respawnDimension)
+    deathDropDimension = undefined
     resetSimState(true)
 	setInventoryOpen(false)
 	syncTouchControls()
@@ -4849,6 +5423,7 @@ const bootGame = async (
       category: entity._tag === 'item-drop' ? 'item' as const : 'hostile' as const,
     } satisfies RenderEntity)),
     ...projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
+    ...eyeOfEnderRenderDescriptors(eyeOfEnderRuntimeState, currentChunkContext.dimension),
     ...witherRenderDescriptors(witherRuntimeState, currentChunkContext.dimension),
     ...[...(multiplayer?.players.entries() ?? [])]
       .filter(([, player]) => player.world === currentChunkContext.dimension)
@@ -4915,6 +5490,9 @@ const bootGame = async (
     const dimension = Effect.runSync(playerApi.dimension)
     const reading = Effect.runSync(currentChunkStore.getBlock(KNOWN_TARGET_BLOCK))
     const ignitionReading = Effect.runSync(currentChunkStore.getBlock(QA_IGNITION_CELL))
+    const bedExplosionProbeReading = Effect.runSync(
+      currentChunkStore.getBlock(QA_IGNITION_HIT_BLOCK),
+    )
     const farmSoilReading = Effect.runSync(currentChunkStore.getBlock(KNOWN_TARGET_BLOCK))
     const farmCropReading = Effect.runSync(currentChunkStore.getBlock(QA_FARM_CROP_BLOCK))
     const cropSnapshot = Effect.runSync(crops.snapshot)
@@ -4955,6 +5533,7 @@ const bootGame = async (
       },
       swimming: swimmingState,
       projectiles: projectileRuntimeSnapshot(projectileRuntimeState),
+      eyesOfEnder: eyeOfEnderRuntimeSnapshot(eyeOfEnderRuntimeState),
       wither: snapshotWitherRuntime(witherRuntimeState),
       weather: Effect.runSync(weather.snapshot),
       vitals,
@@ -4993,7 +5572,7 @@ const bootGame = async (
         dragonEggRewarded,
       },
       entityCount: entities.length,
-      renderedEntities: entityRenderProjection(),
+      renderedEntities: Effect.runSync(worldRenderer.entitySnapshot),
       mobDrops: observedMobDrops.map(({ renderId: _, ...drop }) => drop),
       itemUse: lastObservedItemUse ?? null,
       entities: entities.map((entity) => {
@@ -5020,6 +5599,10 @@ const bootGame = async (
         position: QA_IGNITION_CELL,
         reading: ignitionReading._tag,
         block: ignitionReading._tag === 'Block' ? ignitionReading.block : null,
+      },
+      bedExplosionProbe: {
+        reading: bedExplosionProbeReading._tag,
+        block: bedExplosionProbeReading._tag === 'Block' ? bedExplosionProbeReading.block : null,
       },
       farming: {
         soilBlock: farmSoilReading._tag === 'Block' ? farmSoilReading.block : null,
@@ -5144,6 +5727,11 @@ const bootGame = async (
     const dimension = Effect.runSync(playerApi.dimension)
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, dimension))
     resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('stone', 1))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
     const fixtures = [
       [QA_REDSTONE_BUTTON, 77],
       [QA_REDSTONE_REPEATER, 78],
@@ -5378,6 +5966,35 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedPortalIgnitionEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('flint_and_steel', 1))
+    portalStates.delete(portalKeyOf({
+      dimension: 'overworld',
+      position: QA_IGNITION_PORTAL_LAYOUT.interior[0],
+    }))
+    Effect.runSync(syncPortalCandidatesFor('overworld'))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('stone')))
+    for (const position of QA_IGNITION_PORTAL_LAYOUT.frame) {
+      Effect.runSync(currentChunkStore.setBlock(position, OBSIDIAN_BLOCK_ID))
+    }
+    for (const position of QA_IGNITION_PORTAL_LAYOUT.interior) {
+      Effect.runSync(currentChunkStore.setBlock(position, blockIdOf('air')))
+    }
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    pendingItemUses.clear()
+    lastObservedItemUse = undefined
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
   const enterQaDimension = (dimension: Dimension) => {
     const pose = Effect.runSync(playerApi.pose)
     Effect.runSync(playerApi.restore(pose, dimension))
@@ -5387,6 +6004,61 @@ const bootGame = async (
       streamAround(currentChunkContext, pose.feetPosition.x, pose.feetPosition.z),
     )
     markSessionDirty()
+    return gameplaySnapshot()
+  }
+
+  const seedBedExplosionEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'nether'))
+    alignActiveDimension('nether')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('bed')))
+    Effect.runSync(currentChunkStore.setBlock({
+      x: QA_IGNITION_HIT_BLOCK.x,
+      y: QA_IGNITION_HIT_BLOCK.y - 1,
+      z: QA_IGNITION_HIT_BLOCK.z,
+    }, blockIdOf('stone')))
+    document.body.removeAttribute('data-bed-explosion-request')
+    document.body.removeAttribute('data-sleep-result')
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedBowProjectileEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('bow', 1))
+    Effect.runSync(world.inventory.add('arrow', 8))
+    for (let x = 6; x <= 10; x += 1) {
+      for (let y = 62; y <= 69; y += 1) {
+        Effect.runSync(currentChunkStore.setBlock({ x, y, z: 2 }, blockIdOf('stone')))
+      }
+    }
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    markSessionDirty()
+    renderPlayerUi()
     return gameplaySnapshot()
   }
 
@@ -5488,6 +6160,78 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedItemUpgradeEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(currentChunkStore.setBlock(
+      QA_IGNITION_HIT_BLOCK,
+      blockIdOf('enchanting_table'),
+    ))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('diamond_pickaxe', 1))
+    Effect.runSync(world.inventory.add('lapis_lazuli', 3))
+    Effect.runSync(world.inventory.add('iron_ingot', 1))
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const durability = [...storage.inventoryDurability]
+    const pickaxeDurability = durability[0]
+    if (pickaxeDurability === null || pickaxeDurability === undefined) {
+      throw new Error('seeded diamond pickaxe has no durability')
+    }
+    durability[0] = { current: Math.floor(pickaxeDurability.max / 2), max: pickaxeDurability.max }
+    Effect.runSync(world.inventory.restoreStorage({ ...storage, inventoryDurability: durability }))
+    for (const key of [...customNames.keys(), ...enchantedItems.keys()]) {
+      if (/^\d+$/.test(key)) deleteItemMetadata(key)
+    }
+    for (let candidate = 0; candidate < 10_000; candidate += 1) {
+      const id = enchantmentOffers(candidate, 15)[0].enchantment.id
+      if (id === 'efficiency' || id === 'unbreaking' || id === 'fortune') {
+        enchantmentSeed = candidate
+        break
+      }
+    }
+    const vitals = Effect.runSync(world.vitals.snapshot)
+    Effect.runSync(world.vitals.restore(addVitalsExperience(
+      vitals,
+      totalExperienceAtLevel(30) - vitals.totalExperience,
+    )))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    setInventoryOpen(false)
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const switchItemUpgradeStationToAnvil = () => {
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('anvil')))
+    setInventoryOpen(false)
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
   const poseLookingAt = (target: SessionPosition, distance: number): typeof QA_POSE => ({
     feetPosition: {
       x: target.x + 0.5,
@@ -5521,6 +6265,57 @@ const bootGame = async (
     setFishingResult('idle')
     markSessionDirty()
     renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedSubmergedSwimmingEncounter = () => {
+    respawnPlayer()
+    const pool = {
+      x: QA_IGNITION_HIT_BLOCK.x,
+      y: QA_IGNITION_HIT_BLOCK.y,
+      z: QA_IGNITION_HIT_BLOCK.z,
+    }
+    Effect.runSync(streamAround(currentChunkContext, pool.x, pool.z))
+    for (let x = pool.x - 2; x <= pool.x + 2; x += 1) {
+      for (let z = pool.z - 2; z <= pool.z + 2; z += 1) {
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, pool.y - 1, z), blockIdOf('stone')))
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, pool.y, z), blockIdOf('water')))
+        for (let y = pool.y + 1; y <= pool.y + 12; y += 1) {
+          Effect.runSync(currentChunkStore.setBlock(blockPosition(x, y, z), blockIdOf('water')))
+        }
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, pool.y + 13, z), blockIdOf('air')))
+      }
+    }
+    for (let y = pool.y - 1; y <= pool.y + 13; y += 1) {
+      Effect.runSync(currentChunkStore.setBlock(blockPosition(pool.x + 3, y, pool.z), blockIdOf(
+        y === pool.y - 1 ? 'stone' : 'air',
+      )))
+    }
+    Effect.runSync(playerApi.restore({
+      feetPosition: { x: pool.x + 0.5, y: pool.y + 0.05, z: pool.z + 0.5 },
+      yawRadians: 0,
+      pitchRadians: 0,
+    }, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    swimmingState = {
+      ...initialPlayerSwimmingRuntimeState(),
+      oxygenSecs: 0.05,
+      drowningElapsedSecs: 0.95,
+    }
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const leaveSubmergedSwimmingEncounter = () => {
+    const pool = QA_IGNITION_HIT_BLOCK
+    Effect.runSync(playerApi.restore({
+      feetPosition: { x: pool.x + 3.5, y: pool.y + 0.05, z: pool.z + 0.5 },
+      yawRadians: 0,
+      pitchRadians: 0,
+    }, 'overworld'))
+    resetSimState(true)
     return gameplaySnapshot()
   }
 
@@ -5912,6 +6707,8 @@ const bootGame = async (
         },
         enterNether: () => enterQaDimension('nether'),
         enterOverworld: () => enterQaDimension('overworld'),
+        seedBedExplosionEncounter,
+        seedBowProjectileEncounter,
         breakTarget: () => {
           if (playerIsDead()) return null
           const target = Effect.runSync(
@@ -5938,6 +6735,8 @@ const bootGame = async (
         mutateObserverInput,
         seedFarmingEncounter,
         seedFishingEncounter,
+        seedSubmergedSwimmingEncounter,
+        leaveSubmergedSwimmingEncounter,
         seedVillageTradingEncounter,
         grantNearestVillagerTradeInput,
         harvestFarmingCrop,
@@ -5961,6 +6760,7 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedPortalEncounter,
+        seedPortalIgnitionEncounter,
         seedWoodenPickaxeProgression,
         seedIronArmor: () => {
           Effect.runSync(world.inventory.reset)
@@ -6112,6 +6912,7 @@ const bootGame = async (
             kind: 'ignition',
             slotIndex: selectedHotbarIndex,
             heldItem: 'fire_charge',
+            dimension: Effect.runSync(playerApi.dimension),
           })
           markSessionDirty()
           return gameplaySnapshot()
@@ -6165,7 +6966,17 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedBrewingEncounter,
+        seedItemUpgradeEncounter,
+        switchItemUpgradeStationToAnvil,
         seedEndEyeCrafting,
+        forceNextEyeOfEnderDrop: () => {
+          nextEyeOfEnderBreaks = false
+          return gameplaySnapshot()
+        },
+        forceNextEyeOfEnderBreak: () => {
+          nextEyeOfEnderBreaks = true
+          return gameplaySnapshot()
+        },
         spawnFullHealthEnderman: () => spawnFullHealthHostile(ENDERMAN_KIND, 40),
         spawnFullHealthBlaze: () => spawnFullHealthHostile(BLAZE_KIND, 20),
         targetNearestHostile,
@@ -6349,12 +7160,16 @@ const bootGame = async (
     }
 
     if (!dead && !inventoryOpen && !tradeOpen) {
-      selectedHotbarIndex = selectedHotbarAfterInput(
+      const nextHotbarIndex = selectedHotbarAfterInput(
         selectedHotbarIndex,
         walk.wheelSteps,
         (action) => Effect.runSync(inputApi.wasActionJustTriggered(action)),
         wrapHotbarSelection,
       )
+      if (nextHotbarIndex !== selectedHotbarIndex) {
+        if (multiplayer === undefined) selectedHotbarIndex = nextHotbarIndex
+        else sendInventorySelection(nextHotbarIndex)
+      }
     }
 
     const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
@@ -6493,6 +7308,7 @@ const bootGame = async (
         at: pose.feetPosition,
       }))
       multiplayerHandshakeComplete = true
+      pumpPlayerDamage()
       lastPlayerMoveSent = {
         world: worldId,
         at: pose.feetPosition,
@@ -6531,6 +7347,7 @@ const bootGame = async (
       }
     }
 
+    drainPlayerDamageInbound()
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
     if (swimmingState.active && mountedVehicle === undefined) {
       Effect.runSync(Ref.set(simState.velocity, swimmingState.velocity))
@@ -6618,11 +7435,32 @@ const bootGame = async (
       return
     }
 
+    const activeEntities = Effect.runSync(world.entities.entities)
+    const droppedEntitiesById = new Map(
+      activeEntities
+        .filter((entity) => isDroppedItemBehaviour(entity.behaviour))
+        .map((entity) => [String(entity.id), entity]),
+    )
+    const expiredDroppedItemIds = droppedItemLifetime.advance(
+      currentChunkContext.dimension,
+      deltaSecs,
+      [...droppedEntitiesById.keys()],
+    )
+    for (const entityId of expiredDroppedItemIds) {
+      const entity = droppedEntitiesById.get(entityId)
+      if (entity === undefined) continue
+      Effect.runSync(world.entities.despawn(entity.id))
+      droppedItemMetadata.delete(droppedItemMetadataKey(currentChunkContext.dimension, entityId))
+    }
+    if (expiredDroppedItemIds.length > 0) markSessionDirty()
+
     const playerPosition = Effect.runSync(playerApi.pose).feetPosition
+    const playerDimension = Effect.runSync(playerApi.dimension)
     for (const entity of Effect.runSync(world.entities.entities)) {
       if (deadAfterFrame) break
       if (!isDroppedItemBehaviour(entity.behaviour)) continue
-      const metadata = droppedItemMetadata.get(String(entity.id)) ?? {}
+      const metadataKey = droppedItemMetadataKey(playerDimension, String(entity.id))
+      const metadata = droppedItemMetadata.get(metadataKey) ?? {}
       const dx = entity.feetPosition.x - playerPosition.x
       const dy = entity.feetPosition.y - playerPosition.y
       const dz = entity.feetPosition.z - playerPosition.z
@@ -6677,7 +7515,7 @@ const bootGame = async (
       }
       if (remaining === 0) {
         Effect.runSync(world.entities.despawn(entity.id))
-        droppedItemMetadata.delete(String(entity.id))
+        droppedItemMetadata.delete(metadataKey)
       } else {
         Effect.runSync(world.entities.sweep((candidate) => ({
           transition: candidate.id === entity.id && isDroppedItemBehaviour(candidate.behaviour)
@@ -6694,7 +7532,9 @@ const bootGame = async (
       renderPlayerUi()
     }
 
-    const villagerTradeResults = Effect.runSync(drainVillagerTradeResults(gameplayState))
+    const villagerTradeResults = multiplayer === undefined || !multiplayerHandshakeComplete
+      ? Effect.runSync(drainVillagerTradeResults(gameplayState))
+      : []
     for (const result of villagerTradeResults) {
       if (result.villagerId !== activeVillagerId) continue
       tradeStatus = villagerTradeStatus(result)
@@ -6770,7 +7610,10 @@ const bootGame = async (
             dropped.forEach((entity, index) => {
               const metadata = slotMetadata[index]
               if (metadata?.customName === undefined && metadata?.enchantedItem === undefined) return
-              droppedItemMetadata.set(String(entity.id), metadata)
+              droppedItemMetadata.set(
+                droppedItemMetadataKey(playerDimension, String(entity.id)),
+                metadata,
+              )
             })
           }
           deleteContainerMetadata(id)
@@ -6887,7 +7730,6 @@ const bootGame = async (
     if (dimensionChanged) {
       resetPrimaryAttackGesture()
       resetBowUse()
-      projectileRuntimeState = initialProjectileRuntimeState()
       alignActiveDimension(dimensionAfterFrame)
       resetSimState(!deadAfterFrame)
       markSessionDirty()
@@ -6946,45 +7788,19 @@ const bootGame = async (
         applyPlayerDamage({ amount: advancedWither.meleeDamage, cause: 'generic' })
       }
       for (const explosion of advancedWither.explosions) {
-        const explosionEntities = Effect.runSync(world.entities.entities)
-        const plan = planExplosion({
-          center: explosion.position,
-          radius: explosion.power,
-          seed: Math.floor(simulationElapsedSecs * 20),
-          blocks: (position) => {
-            const reading = Effect.runSync(currentChunkStore.getBlock(position))
-            if (reading._tag !== 'Block') return undefined
-            const type = blockTypeOfId(reading.block)
-            if (type === 'air') return { resistance: 0, destructible: false }
-            const hardness = propertyOfBlockId(reading.block, 'hardness')
-            return {
-              resistance: explosion.destroysResistantBlocks ? 0 : hardness,
-              destructible: type !== 'bedrock',
-            }
-          },
-          entities: explosionEntities,
-        })
-        for (const position of plan.destroyedBlocks) {
-          Effect.runSync(currentChunkStore.setBlock(position, 0))
-        }
-        for (const effect of plan.entityEffects) {
-          Effect.runSync(resolveBowHits(world.entities, [{ id: effect.id, damage: effect.damage }]))
-        }
-        const playerDistance = Math.hypot(
-          postFramePose.feetPosition.x - explosion.position.x,
-          postFramePose.feetPosition.y + 0.9 - explosion.position.y,
-          postFramePose.feetPosition.z - explosion.position.z,
+        applyWorldExplosion(
+          explosion.position,
+          explosion.power,
+          Math.floor(simulationElapsedSecs * 20),
+          explosion.destroysResistantBlocks,
         )
-        if (playerDistance < explosion.power) {
-          const exposure = 1 - playerDistance / explosion.power
-          applyPlayerDamage({ amount: ((exposure * exposure + exposure) / 2) * 7 * explosion.power + 1, cause: 'generic' })
-        }
       }
       if (advancedWither.explosions.length > 0 || advancedWither.meleeDamage > 0) markSessionDirty()
     }
 
     if (deadAfterFrame) {
       projectileRuntimeState = initialProjectileRuntimeState()
+      eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
     } else if (!dimensionChanged) {
       const projectileEntities = Effect.runSync(world.entities.entities)
       const projectileWorld = {
@@ -7119,6 +7935,24 @@ const bootGame = async (
         }
       }
     }
+    if (!deadAfterFrame && !dimensionChanged) {
+      const advancedEyes = advanceEyeOfEnderRuntime(
+        eyeOfEnderRuntimeState,
+        dimensionAfterFrame,
+        Math.min(deltaSecs, 0.1),
+      )
+      eyeOfEnderRuntimeState = advancedEyes.state
+      for (const settlement of advancedEyes.settlements) {
+        if (!settlement.breaks) {
+          Effect.runSync(spawnDroppedItems(world.entities, [{
+            item: 'eye_of_ender',
+            count: 1,
+            at: settlement.position,
+          }]))
+        }
+        markSessionDirty()
+      }
+    }
     const activeProjectileCount = projectileRuntimeState.projectiles
       .filter(({ dimension }) => dimension === dimensionAfterFrame)
       .length
@@ -7205,6 +8039,23 @@ const bootGame = async (
         postFramePose.feetPosition.x - poseBeforeFrame.feetPosition.x,
         postFramePose.feetPosition.z - poseBeforeFrame.feetPosition.z,
       )
+      const footstepBlock = Effect.runSync(currentChunkStore.getBlock({
+        x: Math.floor(postFramePose.feetPosition.x),
+        y: Math.floor(postFramePose.feetPosition.y - 0.1),
+        z: Math.floor(postFramePose.feetPosition.z),
+      }))
+      footstepRuntimeState = advanceFootstepRuntime(footstepRuntimeState, {
+        grounded: groundedAfterFrame && !swimmingState.active,
+        horizontalDistance,
+        surface: surfaceForBlockType(
+          footstepBlock._tag === 'Block' ? blockTypeOfId(footstepBlock.block) : 'air',
+        ),
+        sneaking: held('sneak') > 0,
+        dead: deadAfterFrame,
+        dimensionChanged,
+        position: postFramePose.feetPosition,
+        play: (cueId, options) => audio.play(cueId, options),
+      })
       if (!isCreativeMode && horizontalDistance > 0) {
         if (multiplayer === undefined) survivalHunger.submit(swimmingState.active
           ? { _tag: 'swim', distance: horizontalDistance }
@@ -7216,8 +8067,10 @@ const bootGame = async (
         !groundedAfterFrame && held('jump') > 0
       ) {
         if (multiplayer === undefined) survivalHunger.submit({ _tag: 'jump', count: 1 })
-        else sendVitalsCommand({ _tag: 'activity', activity: 'jump', amount: 1 })
+          else sendVitalsCommand({ _tag: 'activity', activity: 'jump', amount: 1 })
       }
+    } else {
+      footstepRuntimeState = initialFootstepRuntimeState()
     }
     if (looked || moved) markSessionDirty()
     Effect.runSync(Ref.set(gameplayState.targetPosition, postFramePose.feetPosition))
@@ -7641,11 +8494,18 @@ const bootGame = async (
         const currentDimension = Effect.runSync(playerApi.dimension)
         if (currentDimension !== 'overworld') {
           sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
+          Effect.runSync(currentChunkStore.setBlock(bedPosition, blockIdOf('air')))
+          applyWorldExplosion(
+            { x: bedPosition.x + 0.5, y: bedPosition.y + 0.5, z: bedPosition.z + 0.5 },
+            5,
+            Math.floor(simulationElapsedSecs * 20),
+            false,
+          )
           document.body.setAttribute(
             'data-bed-explosion-request',
             `${currentDimension}:${bedPosition.x},${bedPosition.y},${bedPosition.z}`,
           )
-          document.body.setAttribute('data-sleep-result', 'explosion-requested')
+          document.body.setAttribute('data-sleep-result', 'exploded')
         } else {
           const hostilePositions = Effect.runSync(world.entities.snapshot).entities
             .filter((entity) => entity.kind !== 'dropped_item')
@@ -7779,6 +8639,23 @@ const bootGame = async (
                 heldItem: selected.item,
               })
             }
+          } else if (selected.item === 'bone_meal') {
+            const target = Effect.runSync(
+              requestTargetedBoneMeal(
+                gameplayState,
+                currentChunkStore,
+                playerApi,
+                requestId,
+              ),
+            )
+            if (Option.isSome(target)) {
+              pendingItemUses.set(requestId, {
+                kind: 'bone-meal',
+                slotIndex: selectedHotbarIndex,
+                dimension: Effect.runSync(playerApi.dimension),
+                position: target.value.position,
+              })
+            }
           } else if (
             isLegacyGameplayItemType(selected.item) &&
             isGameplayIgnitionItem(selected.item)
@@ -7797,6 +8674,7 @@ const bootGame = async (
                 kind: 'ignition',
                 slotIndex: selectedHotbarIndex,
                 heldItem: selected.item,
+                dimension: Effect.runSync(playerApi.dimension),
               })
             }
           } else {
@@ -8104,14 +8982,16 @@ const bootGame = async (
     document.body.setAttribute('data-sleep-required', String(requiredSleepers))
     if (sleepAdvance.skipToMorning) {
       appliedNightSkipRevision = multiplayer === undefined ? null : networkSleepState.revision
-      const clearWeather: WeatherState = { weather: 'clear', remainingSecs: 300 }
-      Effect.runSync(time.setTimeOfDay(0.25))
-      Effect.runSync(weather.applyTransition(clearWeather))
-      presentWeather(clearWeather)
+      if (multiplayer === undefined) {
+        const clearWeather: WeatherState = { weather: 'clear', remainingSecs: 300 }
+        Effect.runSync(time.setTimeOfDay(0.25))
+        Effect.runSync(weather.applyTransition(clearWeather))
+        presentWeather(clearWeather)
+        markSessionDirty()
+      }
       sleepRuntimeState = initialSleepRuntimeState()
       sleepHud.hidden = true
       document.body.setAttribute('data-sleep-result', 'morning-skipped')
-      markSessionDirty()
     }
     presentWeatherRuntime(
       weatherAdvanced ?? Effect.runSync(weather.snapshot),
@@ -8147,6 +9027,19 @@ const bootGame = async (
       if (pending === undefined || !result.success) continue
 
       if (!('action' in result) && pending.kind === 'ignition' && pending.heldItem === result.heldItem) {
+        if (
+          result.outcome._tag === 'Portal'
+          && result.outcome.outcome._tag === 'Lit'
+          && result.outcome.outcome.cells.length === result.outcome.outcome.frame.interior.length
+          && result.outcome.outcome.cells.length > 0
+        ) {
+          const anchor = [...result.outcome.outcome.cells].sort((left, right) =>
+            left.y - right.y || left.x - right.x || left.z - right.z
+          )[0]
+          if (anchor !== undefined) {
+            registerPortal({ dimension: pending.dimension, position: anchor })
+          }
+        }
         if (result.heldItem === 'fire_charge') {
           Effect.runSync(world.inventory.removeAt(pending.slotIndex, pending.heldItem, 1))
         } else if (Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]?.item === 'flint_and_steel') {
@@ -8154,6 +9047,17 @@ const bootGame = async (
         }
       } else if ('action' in result) {
         switch (result.action) {
+          case 'ApplyBoneMeal':
+            if (pending.kind === 'bone-meal' && result.outcome._tag === 'applied') {
+              const advanced = Effect.runSync(crops.advanceByBoneMeal({
+                dimension: pending.dimension,
+                position: pending.position,
+              }))
+              if (advanced) {
+                Effect.runSync(world.inventory.removeAt(pending.slotIndex, 'bone_meal', result.consumedCount))
+              }
+            }
+            break
           case 'TillSoil':
             if (
               pending.kind === 'till'
@@ -8334,6 +9238,7 @@ const bootGame = async (
     startRuntime: (surface) => Effect.sync(() => {
       const hiddenNetworkPump = window.setInterval(() => {
         if (document.visibilityState !== 'hidden' || multiplayerInboundStage === undefined) return
+        drainPlayerDamageInbound()
         Effect.runSync(multiplayerInboundStage.run(0))
         drainMultiplayerInbound()
       }, 100)

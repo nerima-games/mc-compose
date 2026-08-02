@@ -48,7 +48,7 @@ export const MODDING_API_VERSION = 1
  * Must cover the canonical id of every phase in `STANDARD_STAGE_SKELETON`; the
  * two tables cannot see each other, so `test/modding.test.ts` asserts the
  * agreement rather than trusting it. `network:` is the group prefix for the two
- * network phases, exactly as `simulation:` is for the six simulation ones — one
+ * network phases, exactly as `simulation:` is for the simulation phases — one
  * entry, so a later network phase is reserved the day it is added rather than
  * the day somebody remembers this list.
  */

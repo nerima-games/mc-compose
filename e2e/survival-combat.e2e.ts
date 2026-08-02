@@ -71,6 +71,13 @@ type GameplaySnapshot = {
     readonly reading: string
     readonly block: number | null
   }
+  readonly activePortal: {
+    readonly interiorBlock: number
+  } | null
+  readonly portals: ReadonlyArray<{
+    readonly dimension: 'overworld' | 'nether' | 'end'
+    readonly position: Position
+  }>
   readonly target: {
     readonly reading: string
     readonly block: number | null
@@ -467,9 +474,15 @@ test('preserves Nether death drops and unrelated drops across respawn', async ({
       .filter((entity) => entity.kind === 'dropped_item')
       .map((entity) => entity.id)
       .sort(),
-  ).toEqual([unrelatedDropId!, ...deathDropIds].sort())
+  ).toEqual([unrelatedDropId!])
 
   await callQa<unknown>(page, 'gameplay.enterNether')
+  expect(
+    (await snapshot(page)).entities
+      .filter((entity) => entity.kind === 'dropped_item')
+      .map((entity) => entity.id)
+      .sort(),
+  ).toEqual(deathDropIds)
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const countBeforePickup = (await snapshot(page)).entities.filter(
       (entity) => entity.kind === 'dropped_item',
@@ -616,6 +629,54 @@ test('damages flint and steel after successful ignition', async ({ page }) => {
     success: true,
     outcome: 'Lit',
     tools: toolsBefore,
+    durability: 63,
+  })
+
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('lights a completed obsidian portal frame with flint and steel', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await startGameSession(page)
+  const canvas = page.locator('#game-canvas')
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await canvas.hover()
+  const seeded = await callQa<GameplaySnapshot>(
+    page,
+    'gameplay.seedPortalIgnitionEncounter',
+  )
+  expect(seeded.inventory.durability[0]?.current).toBe(64)
+
+  await grantPointerLock(page)
+  await canvas.click({ button: 'right' })
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return {
+      item: current.itemUse?.heldItem,
+      success: current.itemUse?.success,
+      outerOutcome: current.itemUse?.outcome._tag,
+      innerOutcome: current.itemUse?.outcome.outcome._tag,
+      ignitionBlock: current.ignitionTarget.block,
+      portalInteriorBlock: current.activePortal?.interiorBlock ?? null,
+      registered: current.portals.some((portal) =>
+        portal.dimension === 'overworld'
+        && portal.position.x === 8
+        && portal.position.y === 66
+        && portal.position.z === 9
+      ),
+      durability: current.inventory.durability[0]?.current,
+    }
+  }).toEqual({
+    item: 'flint_and_steel',
+    success: true,
+    outerOutcome: 'Portal',
+    innerOutcome: 'Lit',
+    ignitionBlock: 118,
+    portalInteriorBlock: 118,
+    registered: true,
     durability: 63,
   })
 

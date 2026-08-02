@@ -51,4 +51,56 @@ describe('deathDropsFromPlayerStorage', () => {
     expect(deathDropsFromPlayerStorage(emptyPlayerStorage(), { x: 0, y: 64, z: 0 }))
       .toStrictEqual([])
   })
+
+  it('associates inventory and equipment metadata with their death drops', () => {
+    const empty = emptyPlayerStorage()
+    const inventorySlots = [...empty.inventory.slots]
+    inventorySlots[3] = itemStack('diamond_pickaxe', 1)
+    const storage: PlayerStorage = {
+      ...empty,
+      inventory: { slots: inventorySlots },
+      inventoryDurability: empty.inventoryDurability.map((value, index) =>
+        index === 3 ? { current: 1500, max: 1561 } : value
+      ),
+      equipment: {
+        slots: {
+          ...empty.equipment.slots,
+          head: equipmentItem(itemStack('iron_helmet', 1), { current: 150, max: 165 }),
+        },
+      },
+    }
+
+    expect(deathDropsFromPlayerStorage(storage, { x: 0, y: 64, z: 0 }, {
+      customNames: { '3': 'Fortune Miner', 'equipment:head': 'Deep Guard' },
+      enchantedItems: {
+        '3': {
+          item: 'diamond_pickaxe',
+          durability: { current: 1500, max: 1561 },
+          enchantments: [{ id: 'fortune', level: 3 }],
+        },
+        'equipment:head': {
+          item: 'iron_helmet',
+          durability: { current: 150, max: 165 },
+          enchantments: [{ id: 'protection', level: 4 }],
+        },
+      },
+    })).toStrictEqual([
+      {
+        item: 'diamond_pickaxe',
+        count: 1,
+        at: { x: 0, y: 64, z: 0 },
+        durability: { current: 1500, max: 1561 },
+        customName: 'Fortune Miner',
+        enchantments: [{ id: 'fortune', level: 3 }],
+      },
+      {
+        item: 'iron_helmet',
+        count: 1,
+        at: { x: 0, y: 64, z: 0 },
+        durability: { current: 150, max: 165 },
+        customName: 'Deep Guard',
+        enchantments: [{ id: 'protection', level: 4 }],
+      },
+    ])
+  })
 })

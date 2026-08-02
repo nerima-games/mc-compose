@@ -451,7 +451,7 @@ describe('the standard skeleton (plan.md §4.2)', () => {
     }),
   )
 
-  it.effect('orders the six simulation sub-stages physics -> interactions -> entities -> fluids -> redstone -> time/weather', () =>
+  it.effect('orders the nine simulation sub-stages from physics through time/weather', () =>
     Effect.sync(() => {
       const resolved = order(everyStage, STANDARD_STAGE_SKELETON)
       const positions = SIMULATION_STAGES.map((value) => positionIn(resolved, value))
@@ -565,7 +565,10 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
         // the chain.
         'sim:physics',
         'gameplay:interactions',
+        'gameplay:fire',
+        'gameplay:survival-hunger',
         'gameplay:entities',
+        'gameplay:ender-dragon',
         'gameplay:fluids',
         // Two stages in one phase: mc-compose places the PHASE, and their
         // relative order falls to the tie-break unless mx-redstone declares one

@@ -11,6 +11,12 @@ type EntitySnapshot = {
   readonly item?: string
 }
 
+type RenderedEntitySnapshot = {
+  readonly id: string
+  readonly kind: string
+  readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
+}
+
 type EndSnapshot = {
   readonly pose: {
     readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
@@ -23,6 +29,11 @@ type EndSnapshot = {
   }
   readonly vitals: { readonly totalExperience: number }
   readonly entities: ReadonlyArray<EntitySnapshot>
+  readonly renderedEntities: ReadonlyArray<RenderedEntitySnapshot>
+  readonly eyesOfEnder: ReadonlyArray<{
+    readonly id: string
+    readonly position: { readonly x: number; readonly y: number; readonly z: number }
+  }>
   readonly end: {
     readonly frames: ReadonlyArray<unknown>
     readonly portalComplete: boolean
@@ -167,9 +178,50 @@ test('completes and persists a survival End journey without progression-state se
   await expect(inventory).toBeHidden()
   await selectHotbarItem(page, 'eye_of_ender')
   await grantPointerLock(page)
+  await callQa(page, 'gameplay.forceNextEyeOfEnderDrop')
   await canvas.click({ button: 'right' })
   await expect(canvas).toHaveAttribute('data-stronghold-direction', /.+/)
   await expect.poll(async () => itemCount(await snapshot(page), 'eye_of_ender')).toBe(EYES_REQUIRED - 1)
+  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length).toBe(1)
+  const thrownEye = (await snapshot(page)).eyesOfEnder[0]
+  expect(thrownEye).toBeDefined()
+  const renderedEyeId = `projectile:${thrownEye?.id ?? ''}`
+  expect((await snapshot(page)).renderedEntities.find((entity) => entity.id === renderedEyeId))
+    .toMatchObject({ kind: 'eye_of_ender', feetPosition: thrownEye?.position })
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    const position = current.eyesOfEnder.find((eye) => eye.id === thrownEye?.id)?.position
+    const rendered = current.renderedEntities.find((entity) => entity.id === renderedEyeId)
+    return position !== undefined
+      && rendered?.feetPosition.x === position.x
+      && rendered.feetPosition.y === position.y
+      && rendered.feetPosition.z === position.z
+      && (position.x !== thrownEye?.position.x || position.z !== thrownEye.position.z)
+  }).toBe(true)
+  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length, { timeout: 5_000 }).toBe(0)
+  await expect.poll(async () => (
+    (await snapshot(page)).entities.some((entity) => (
+      entity.kind === 'dropped_item' && entity.item === 'eye_of_ender'
+    ))
+  )).toBe(true)
+  await callQa(page, 'gameplay.targetNearestDroppedItem')
+  await expect.poll(async () => itemCount(await snapshot(page), 'eye_of_ender'))
+    .toBe(EYES_REQUIRED)
+  await expect.poll(async () => (
+    (await snapshot(page)).entities.some((entity) => (
+      entity.kind === 'dropped_item' && entity.item === 'eye_of_ender'
+    ))
+  )).toBe(false)
+
+  await callQa(page, 'gameplay.forceNextEyeOfEnderBreak')
+  await canvas.click({ button: 'right' })
+  await expect.poll(async () => itemCount(await snapshot(page), 'eye_of_ender'))
+    .toBe(EYES_REQUIRED - 1)
+  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length).toBe(1)
+  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length, { timeout: 5_000 }).toBe(0)
+  expect((await snapshot(page)).entities.some((entity) => (
+    entity.kind === 'dropped_item' && entity.item === 'eye_of_ender'
+  ))).toBe(false)
 
   for (let frame = 0; frame < 12; frame += 1) {
     if ((await snapshot(page)).end.portalComplete) break

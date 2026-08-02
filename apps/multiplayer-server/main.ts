@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { createServer, type Server as HttpServer } from 'node:http'
+import { createServer, type RequestListener, type Server as HttpServer } from 'node:http'
+import { createServer as createHttpsServer } from 'node:https'
 import { dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -14,11 +15,22 @@ import {
   localCoordOfBlock,
   type Chunk,
 } from '@nerima-games/mc-worldgen'
-import { AuthoritativeSnapshot, type BlockPos, type Orientation, type PlayerId, type WireText } from '@nerima-games/mx-multiplayer'
+import {
+  AuthoritativeSnapshot,
+  PlayerId as PlayerIdSchema,
+  decodeFrame,
+  type BlockPos,
+  type Orientation,
+  type PlayerId,
+  type WireText,
+} from '@nerima-games/mx-multiplayer'
 import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
 
 import { makeMultiplayerServerCore, type MultiplayerServerState } from './core'
+import { loadLegacyPlayerClaims } from './legacy-player-claims'
+import { createReconnectAuth } from './reconnect-auth'
+import { isAllowedWebSocketOrigin, resolveTransportSecurity } from './transport-security'
 
 const DEFAULT_BLOCKS = [
   'bedrock',
@@ -43,6 +55,10 @@ export interface MultiplayerRuntimeOptions {
   readonly allowedBlocks?: ReadonlySet<string>
   readonly installSignalHandlers?: boolean
   readonly stateFile?: string
+  readonly tlsCert?: string
+  readonly tlsKey?: string
+  readonly allowedOrigins?: string
+  readonly legacyPlayerClaimsFile?: string
 }
 
 export interface MultiplayerRuntime {
@@ -50,6 +66,48 @@ export interface MultiplayerRuntime {
   readonly port: number
   readonly close: () => Promise<void>
 }
+
+type PlayerResume = Readonly<{
+  _tag: 'PlayerResume'
+  player: PlayerId
+  token?: string
+  registrationToken?: string
+}>
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const decodePlayerResume = (frame: string): PlayerResume | undefined => {
+  let value: unknown
+  try {
+    value = JSON.parse(frame)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(value)) return undefined
+  const resume = value
+  if (
+    resume['_tag'] !== 'PlayerResume'
+    || typeof resume['player'] !== 'string'
+    || resume['player'].length === 0
+    || (resume['token'] !== undefined && typeof resume['token'] !== 'string')
+    || (resume['registrationToken'] !== undefined && typeof resume['registrationToken'] !== 'string')
+  ) return undefined
+  const player = Schema.decodeUnknownEither(PlayerIdSchema)(resume['player'])
+  if (Either.isLeft(player)) return undefined
+  return {
+    _tag: 'PlayerResume',
+    player: player.right,
+    ...(resume['token'] === undefined ? {} : { token: resume['token'] }),
+    ...(resume['registrationToken'] === undefined ? {} : { registrationToken: resume['registrationToken'] }),
+  }
+}
+
+const encodePlayerResumeAccepted = (player: PlayerId, token: string): string => JSON.stringify({
+  _tag: 'PlayerResumeAccepted',
+  player,
+  token,
+})
 
 const valueAfter = (arguments_: ReadonlyArray<string>, name: string): string | undefined => {
   const equalsPrefix = `--${name}=`
@@ -72,15 +130,26 @@ export const resolveMultiplayerRuntimeOptions = (
 ): MultiplayerRuntimeOptions => {
   const port = integerOption(valueAfter(arguments_, 'port') ?? environment['MULTIPLAYER_PORT'], 5182, 'port')
   const stateFile = valueAfter(arguments_, 'state-file') ?? environment['MULTIPLAYER_STATE_FILE']
+  const tlsCert = valueAfter(arguments_, 'tls-cert') ?? environment['MULTIPLAYER_TLS_CERT']
+  const tlsKey = valueAfter(arguments_, 'tls-key') ?? environment['MULTIPLAYER_TLS_KEY']
+  const allowedOrigins = valueAfter(arguments_, 'allowed-origins') ?? environment['MULTIPLAYER_ALLOWED_ORIGINS']
+  const legacyPlayerClaimsFile = valueAfter(arguments_, 'legacy-player-claims-file')
+    ?? environment['MULTIPLAYER_LEGACY_PLAYER_CLAIMS_FILE']
   if (port < 0 || port > 65_535) throw new Error('port must be between 0 and 65535')
-  return {
+  const options: MultiplayerRuntimeOptions = {
     host: valueAfter(arguments_, 'host') ?? environment['MULTIPLAYER_HOST'] ?? '127.0.0.1',
     port,
     worldId: valueAfter(arguments_, 'world') ?? environment['MULTIPLAYER_WORLD'] ?? 'overworld',
     seed: integerOption(valueAfter(arguments_, 'seed') ?? environment['MULTIPLAYER_SEED'], 0, 'seed'),
     ...(stateFile === undefined ? {} : { stateFile }),
+    ...(tlsCert === undefined ? {} : { tlsCert }),
+    ...(tlsKey === undefined ? {} : { tlsKey }),
+    ...(allowedOrigins === undefined ? {} : { allowedOrigins }),
+    ...(legacyPlayerClaimsFile === undefined ? {} : { legacyPlayerClaimsFile }),
     installSignalHandlers: true,
   }
+  resolveTransportSecurity(options)
+  return options
 }
 
 interface PersistedServerState {
@@ -91,47 +160,53 @@ interface PersistedServerState {
 }
 
 const isBlockPos = (value: unknown): value is BlockPos => {
-  if (typeof value !== 'object' || value === null) return false
-  const position = value as Record<string, unknown>
+  if (!isRecord(value)) return false
+  const position = value
   return Number.isInteger(position['x']) && Number.isInteger(position['y']) && Number.isInteger(position['z'])
 }
 
 const isPlayerPosition = (value: unknown): value is BlockPos => {
-  if (typeof value !== 'object' || value === null) return false
-  const position = value as Record<string, unknown>
+  if (!isRecord(value)) return false
+  const position = value
   return typeof position['x'] === 'number' && Number.isFinite(position['x'])
     && typeof position['y'] === 'number' && Number.isFinite(position['y'])
     && typeof position['z'] === 'number' && Number.isFinite(position['z'])
 }
 
 const isOrientation = (value: unknown): value is Orientation => {
-  if (typeof value !== 'object' || value === null) return false
-  const orientation = value as Record<string, unknown>
+  if (!isRecord(value)) return false
+  const orientation = value
   return typeof orientation['yawRadians'] === 'number' && Number.isFinite(orientation['yawRadians'])
     && typeof orientation['pitchRadians'] === 'number' && Number.isFinite(orientation['pitchRadians'])
 }
 
 const decodeServerState = (value: unknown, worldId: string): MultiplayerServerState | undefined => {
-  if (typeof value !== 'object' || value === null) return undefined
-  const state = value as Record<string, unknown>
-  if (!Number.isInteger(state['revision']) || (state['revision'] as number) < 0 || !Array.isArray(state['blocks'])) return undefined
-  if (!state['blocks'].every((entry: unknown) => {
-    if (typeof entry !== 'object' || entry === null) return false
-    const mutation = entry as Record<string, unknown>
-    return isBlockPos(mutation['at']) && (mutation['block'] === null || typeof mutation['block'] === 'string')
-  })) return undefined
-  if (state['playerPositions'] !== undefined && (
-    !Array.isArray(state['playerPositions']) || !state['playerPositions'].every((entry: unknown) => {
-      if (typeof entry !== 'object' || entry === null) return false
-      const position = entry as Record<string, unknown>
-      return typeof position['player'] === 'string' && isPlayerPosition(position['at']) && isOrientation(position['facing'])
-    })
-  )) return undefined
+  if (!isRecord(value)) return undefined
+  const state = value
+  const revision = state['revision']
+  const blocksValue = state['blocks']
+  if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0 || !Array.isArray(blocksValue)) return undefined
+  const blocks = blocksValue.flatMap((entry: unknown) => {
+    if (!isRecord(entry) || !isBlockPos(entry['at']) || (entry['block'] !== null && typeof entry['block'] !== 'string')) return []
+    return [{ at: entry['at'], block: entry['block'] }]
+  })
+  if (blocks.length !== blocksValue.length) return undefined
+
+  const playerPositionsValue = state['playerPositions']
+  if (playerPositionsValue !== undefined && !Array.isArray(playerPositionsValue)) return undefined
+  const playerPositions = playerPositionsValue === undefined
+    ? []
+    : playerPositionsValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !isPlayerPosition(entry['at']) || !isOrientation(entry['facing'])) return []
+        const player = Schema.decodeUnknownEither(PlayerIdSchema)(entry['player'])
+        return Either.isLeft(player) ? [] : [{ player: player.right, at: entry['at'], facing: entry['facing'] }]
+      })
+  if (playerPositionsValue !== undefined && playerPositions.length !== playerPositionsValue.length) return undefined
 
   const decoded = Schema.decodeUnknownEither(AuthoritativeSnapshot)({
     _tag: 'AuthoritativeSnapshot',
     world: worldId,
-    revision: state['revision'],
+    revision,
     inventories: state['inventories'] ?? [],
     vitals: state['vitals'] ?? [],
     timeWeather: state['timeWeather'] ?? { timeOfDay: 6_000, weather: 'clear' },
@@ -144,7 +219,7 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
   const snapshot = decoded.right
   return {
     revision: snapshot.revision,
-    blocks: state['blocks'] as MultiplayerServerState['blocks'],
+    blocks,
     inventories: snapshot.inventories,
     vitals: snapshot.vitals,
     timeWeather: snapshot.timeWeather,
@@ -152,11 +227,7 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     furnaces: snapshot.furnaces,
     villagerTrades: snapshot.villagerTrades,
     entities: snapshot.entities ?? [],
-    playerPositions: (state['playerPositions'] as ReadonlyArray<Readonly<{
-      player: PlayerId
-      at: BlockPos
-      facing: Orientation
-    }>> | undefined) ?? [],
+    playerPositions,
     ...(state['wither'] === undefined ? {} : { wither: state['wither'] as NonNullable<MultiplayerServerState['wither']> }),
     ...(Number.isInteger(state['witherRevision']) ? { witherRevision: state['witherRevision'] as number } : {}),
   }
@@ -180,8 +251,8 @@ const loadServerState = async (
   } catch (error) {
     throw new Error(`Failed to read multiplayer state: ${path}`, { cause: error })
   }
-  if (typeof value !== 'object' || value === null) throw new Error(`invalid multiplayer state file: ${path}`)
-  const persisted = value as Record<string, unknown>
+  if (!isRecord(value)) throw new Error(`invalid multiplayer state file: ${path}`)
+  const persisted = value
   if (persisted['format'] !== 1 || persisted['worldId'] !== worldId || persisted['seed'] !== seed) {
     throw new Error(`multiplayer state file does not match world ${worldId} and seed ${String(seed)}: ${path}`)
   }
@@ -306,9 +377,19 @@ const listen = (server: HttpServer, port: number, host: string): Promise<number>
   })
 
 export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions): Promise<MultiplayerRuntime> => {
+  const transportSecurity = resolveTransportSecurity(options)
   const initialState = options.stateFile === undefined
     ? undefined
     : await loadServerState(options.stateFile, options.worldId, options.seed)
+  const legacyPlayers = new Set([
+    ...(initialState?.inventories.map(({ player }) => player) ?? []),
+    ...(initialState?.vitals.map(({ player }) => player) ?? []),
+    ...(initialState?.playerPositions?.map(({ player }) => player) ?? []),
+  ])
+  const legacyPlayerClaims = options.legacyPlayerClaimsFile === undefined
+    ? undefined
+    : await loadLegacyPlayerClaims(options.legacyPlayerClaimsFile)
+  const reconnectAuth = await createReconnectAuth(options.stateFile)
   const persistence = options.stateFile === undefined
     ? undefined
     : createLatestStatePersistence((state: MultiplayerServerState) =>
@@ -325,7 +406,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     ...(persistence === undefined ? {} : { onStateChanged: persistence.request }),
     passableBlocks: new Set(['water']),
   })
-  const server = createServer((request, response) => {
+  const requestHandler: RequestListener = (request, response) => {
     if (request.method === 'GET' && request.url === '/health') {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
       response.end(JSON.stringify({ status: 'ok', world: options.worldId }))
@@ -333,10 +414,23 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     }
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
     response.end('Not found')
-  })
+  }
+  const server: HttpServer = transportSecurity.secure
+    ? createHttpsServer({
+        cert: await readFile(transportSecurity.tlsCert as string),
+        key: await readFile(transportSecurity.tlsKey as string),
+      }, requestHandler)
+    : createServer(requestHandler)
   const sockets = new WebSocketServer({ noServer: true })
+  const activePlayers = new Map<string, string>()
+  const reservedPlayers = new Set<string>()
 
   server.on('upgrade', (request, socket, head) => {
+    if (!isAllowedWebSocketOrigin(request.headers.origin, transportSecurity)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
+    }
     const path = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`).pathname
     if (path !== '/ws') {
       socket.destroy()
@@ -348,16 +442,94 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   sockets.on('connection', (socket) => {
     const clientId = randomUUID()
     let disconnected = false
+    let authenticatedPlayer: PlayerId | undefined
+    let activePlayer: PlayerId | undefined
+    let _messageQueue = Promise.resolve()
     const disconnect = (): void => {
       if (disconnected) return
       disconnected = true
+      if (authenticatedPlayer !== undefined) reservedPlayers.delete(authenticatedPlayer)
+      if (activePlayer !== undefined && activePlayers.get(activePlayer) === clientId) {
+        activePlayers.delete(activePlayer)
+      }
       core.disconnect(clientId)
+    }
+    const rejectHandshake = (): void => {
+      if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'reconnect authentication failed')
+    }
+    const authenticate = async (resume: PlayerResume): Promise<void> => {
+      const player = resume.player
+      if (activePlayers.has(player) || reservedPlayers.has(player)) {
+        rejectHandshake()
+        return
+      }
+      reservedPlayers.add(player)
+      try {
+        let token: string | undefined
+        if (reconnectAuth.has(player)) {
+          token = resume.token === undefined ? undefined : await reconnectAuth.rotate(player, resume.token)
+        } else if (legacyPlayers.has(player)) {
+          token = resume.registrationToken !== undefined
+            && legacyPlayerClaims?.has(player) === true
+            && legacyPlayerClaims.verify(player, resume.registrationToken)
+            ? await reconnectAuth.issue(player)
+            : undefined
+        } else {
+          token = await reconnectAuth.issue(player)
+        }
+        if (token === undefined || disconnected) {
+          reservedPlayers.delete(player)
+          rejectHandshake()
+          return
+        }
+        authenticatedPlayer = player
+        socket.send(encodePlayerResumeAccepted(player, token))
+      } catch {
+        reservedPlayers.delete(player)
+        rejectHandshake()
+      }
     }
     core.connect(clientId, (frame) => {
       if (socket.readyState === WebSocket.OPEN) socket.send(frame)
     })
     socket.on('message', (data, isBinary) => {
-      if (!isBinary) core.receive(clientId, data.toString() as WireText)
+      if (isBinary) return
+      const frame = data.toString() as WireText
+      _messageQueue = _messageQueue.then(async () => {
+        if (disconnected) return
+        if (activePlayer !== undefined) {
+          core.receive(clientId, frame)
+          return
+        }
+        if (authenticatedPlayer === undefined) {
+          const resume = decodePlayerResume(frame)
+          if (resume === undefined) {
+            rejectHandshake()
+            return
+          }
+          await authenticate(resume)
+          return
+        }
+        const decoded = decodeFrame(frame)
+        if (
+          Either.isLeft(decoded)
+          || decoded.right._tag !== 'PlayerJoin'
+          || decoded.right.player !== authenticatedPlayer
+        ) {
+          reservedPlayers.delete(authenticatedPlayer)
+          rejectHandshake()
+          return
+        }
+        const result = core.receive(clientId, frame)
+        if (!result.accepted) {
+          reservedPlayers.delete(authenticatedPlayer)
+          rejectHandshake()
+          return
+        }
+        activePlayer = authenticatedPlayer
+        activePlayers.set(activePlayer, clientId)
+        reservedPlayers.delete(activePlayer)
+      }).catch(() => rejectHandshake())
     })
     socket.once('close', disconnect)
     socket.once('error', disconnect)
@@ -398,5 +570,6 @@ const entryPoint = process.argv[1]
 if (entryPoint !== undefined && import.meta.url === pathToFileURL(entryPoint).href) {
   const options = resolveMultiplayerRuntimeOptions()
   const runtime = await startMultiplayerServer(options)
-  process.stdout.write(`multiplayer server listening on ws://${runtime.host}:${String(runtime.port)}/ws\n`)
+  const scheme = options.tlsCert === undefined ? 'ws' : 'wss'
+  process.stdout.write(`multiplayer server listening on ${scheme}://${runtime.host}:${String(runtime.port)}/ws\n`)
 }

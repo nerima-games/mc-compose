@@ -139,7 +139,8 @@ const STAGE_HUD_SYNC           // 'hud-sync'
 ```
 input
   -> network:inbound                                                          ★
-  -> simulation (physics -> interactions -> entities -> fluids -> redstone -> time/weather)
+  -> simulation (physics -> interactions -> fire -> survival/hunger -> entities
+                 -> ender-dragon -> fluids -> redstone -> time/weather)
   -> network:outbound                                                         ★
   -> camera-mirror
   -> chunk-sync
@@ -194,7 +195,7 @@ type StageRegistration = {
   readonly after?: ReadonlyArray<StageId>
   readonly run: (dt: DeltaTimeSecs) => Effect<void, never, FrameServices>
 }
-type ModuleLayer = Layer<any, any, never>               // RIn だけは never に締めてある
+type ModuleLayer = Layer<never, unknown, never>         // erased module boundary
 const EMPTY_MODULE_LAYER: ModuleLayer
 
 type GameModule = {
@@ -298,28 +299,25 @@ delta はクランプせずそのまま渡す
 実モジュールの Layer はすべて問題なく代入できる。空 Layer だけが例外であり、
 この定数がその例外の封じ込め場所である。
 
-### `ModuleLayer` の `RIn` は `never` に締めた。`ROut` は締められていない
+### `ModuleLayer` の `RIn` は `never`。合成時は提供サービスの union を保持する
 
 以前は `Layer<any, any, any>` だった。`RIn` が `any` だと `Effect.provide(game.layer)` は
 要求を **discharge するのではなく消去する** — どのモジュールも提供していないサービスを要求する
 Effect が型検査を通り、実行時に `Service not found` で落ちる。
 `tsc` はこれを `exactOptionalPropertyTypes` 経由で偶発的にしか捕まえない。
 
-`Layer` の `RIn` は共変(`out RIn`)なので、`Layer<X, E, R>` が `Layer<any, any, never>` に
+`Layer` の `RIn` は共変(`out RIn`)なので、`Layer<X, E, R>` が `Layer<never, unknown, never>` に
 代入できるのは `R` が `never` のときだけである。つまり**モジュールは自己完結して届かなければならない**。
 これは新しい規則ではない。モジュールは対等であり(`Layer.merge`、`Layer.provide` ではない)、
 他モジュールのサービスを構築に要求するモジュールは plan.md §2.3-1 が禁じる依存エッジそのものである。
 プラットフォームハンドルを要求するモジュールは、`composeGame` に渡す**前に**それを受け取る
 ——ホスト側にはまだそれを満たす型がある。
 
-**残る不健全さを明記しておく**: `ROut` は依然として `any` である。`composeGame` は
-サービス型の異なるモジュールの異種配列を取るので、その和を正確に書くには可変長タプル型が要る。
-したがって `Effect.provide(game.layer)` は「要求されたサービスをどれかのモジュールが提供しているか」を
-検査できない。**ただしこの穴はフレームの経路には無い** — `runFrame` は `FrameServices` を自分の型に
+`composeGame` は const generic の異種配列から提供サービスの union を推論する。
+型を保持した `GameModule<ROut>` を渡せば `Effect.provide(game.layer)` はその union を要求から
+除去し、未提供のサービスは型検査に残る。`GameModule` として明示的に消去された配列だけは
+`ROut = never` となる。**フレームの経路にも穴は無い** — `runFrame` は `FrameServices` を自分の型に
 書いており、`runFrameWith` は正確に型付けされた Layer に対して discharge する。
-`test/composition.test.ts` の
-`KNOWN LIMIT: ROut stays erased, so a missing service still fails at runtime, not at tsc`
-が、これを驚きではなく既知の穴として固定している。
 
 ## 4. ブラウザ composition root(`domain/browser-session.ts`)
 

@@ -66,14 +66,14 @@ const MANIFEST: RosterModule = {
     {
       id: 'gameplay:interactions',
       after: ['sim:physics'],
-      declaredAt: 'mx-gameplay/stages/registration.ts:5',
-      idAt: 'mx-gameplay/stages/stage-ids.ts:5',
+      declaredAt: 'mx-gameplay/src/stages/registration.ts:5',
+      idAt: 'mx-gameplay/src/stages/stage-ids.ts:5',
     },
     {
       id: 'gameplay:entities',
       after: ['gameplay:interactions'],
-      declaredAt: 'mx-gameplay/stages/registration.ts:10',
-      idAt: 'mx-gameplay/stages/stage-ids.ts:6',
+      declaredAt: 'mx-gameplay/src/stages/registration.ts:10',
+      idAt: 'mx-gameplay/src/stages/stage-ids.ts:6',
     },
   ],
 }
@@ -85,8 +85,8 @@ const ioOf = (files: Readonly<Record<string, string>>): Io => ({
 })
 
 const FILES: Readonly<Record<string, string>> = {
-  '/roster/mx-gameplay/stages/stage-ids.ts': STAGE_IDS_SOURCE,
-  '/roster/mx-gameplay/stages/registration.ts': REGISTRATION_SOURCE,
+  '/roster/mx-gameplay/src/stages/stage-ids.ts': STAGE_IDS_SOURCE,
+  '/roster/mx-gameplay/src/stages/registration.ts': REGISTRATION_SOURCE,
 }
 
 // ---------------------------------------------------------------------------
@@ -233,8 +233,8 @@ describe('comparing the manifest against the source', () => {
       const drifted: RosterModule = {
         ...MANIFEST,
         stages: [
-          { ...MANIFEST.stages[0]!, declaredAt: 'mx-gameplay/stages/registration.ts:999' },
-          { ...MANIFEST.stages[1]!, idAt: 'mx-gameplay/stages/stage-ids.ts:1' },
+          { ...MANIFEST.stages[0]!, declaredAt: 'mx-gameplay/src/stages/registration.ts:999' },
+          { ...MANIFEST.stages[1]!, idAt: 'mx-gameplay/src/stages/stage-ids.ts:1' },
         ],
       }
       const problems = compareModule('/roster', drifted, ioOf(FILES))
@@ -278,8 +278,8 @@ describe('the repositories that register nothing', () => {
   it.effect('fails loudly the day a silent repository registers a stage', () =>
     Effect.sync(() => {
       const withPhysics = ioOf({
-        '/roster/mc-sim/stages/stage-ids.ts': `export const SIM_STAGE_IDS = { physics: StageId('sim:physics') } as const\n`,
-        '/roster/mc-sim/stages/registration.ts': `const s = [{ id: SIM_STAGE_IDS.physics, run: () => Effect.void }]\n`,
+        '/roster/mc-sim/src/stages/stage-ids.ts': `export const SIM_STAGE_IDS = { physics: StageId('sim:physics') } as const\n`,
+        '/roster/mc-sim/src/stages/registration.ts': `const s = [{ id: SIM_STAGE_IDS.physics, run: () => Effect.void }]\n`,
       })
       const problems = compareSilentModule('/roster', { name: 'mc-sim' }, withPhysics)
 
@@ -329,7 +329,7 @@ describe('finding the checkouts', () => {
     Effect.sync(() => {
       const { problems, stageCount } = run('/nowhere', ioOf({}))
       expect(problems).toHaveLength(ROSTER.length)
-      expect(stageCount).toBe(16)
+      expect(stageCount).toBe(19)
     }),
   )
 })
