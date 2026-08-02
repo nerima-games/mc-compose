@@ -178,6 +178,62 @@ const writeServerState = async (
   await rename(temporaryPath, path)
 }
 
+export type LatestStatePersistence<State> = {
+  readonly request: (state: State) => void
+  readonly drain: () => Promise<void>
+}
+
+export const createLatestStatePersistence = <State>(
+  write: (state: State) => Promise<void>,
+): LatestStatePersistence<State> => {
+  let pending!: State
+  let hasPending = false
+  let running: Promise<void> | undefined
+  let failure: unknown
+
+  const start = (): void => {
+    if (running !== undefined || !hasPending) return
+    let complete!: () => void
+    running = new Promise<void>((resolve) => { complete = resolve })
+    void (async () => {
+      while (hasPending) {
+        const state = pending
+        hasPending = false
+        try {
+          await write(state)
+          failure = undefined
+        } catch (error: unknown) {
+          if (!hasPending) {
+            pending = state
+            hasPending = true
+          }
+          failure = error
+          return
+        }
+      }
+    })().finally(() => {
+      running = undefined
+      if (hasPending && failure === undefined) start()
+      complete()
+    })
+  }
+
+  return {
+    request: (state) => {
+      pending = state
+      hasPending = true
+      start()
+    },
+    drain: async () => {
+      while (running !== undefined || hasPending) {
+        start()
+        await running
+        if (failure !== undefined) throw failure
+      }
+    },
+  }
+}
+
 export const makeGeneratedBlockAt = (seed: number): ((position: BlockPos) => string | null) => {
   const chunks = new Map<string, Chunk>()
   return (at) => {
@@ -215,22 +271,18 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   const initialState = options.stateFile === undefined
     ? undefined
     : await loadServerState(options.stateFile, options.worldId, options.seed)
-  let persistenceQueue = Promise.resolve()
-  let persistenceFailure: unknown
-  const persist = options.stateFile === undefined
+  const persistence = options.stateFile === undefined
     ? undefined
-    : (state: MultiplayerServerState): void => {
-        persistenceQueue = persistenceQueue
-          .then(() => writeServerState(options.stateFile as string, options.worldId, options.seed, state))
-          .catch((error: unknown) => { persistenceFailure = error })
-      }
+    : createLatestStatePersistence((state: MultiplayerServerState) =>
+        writeServerState(options.stateFile as string, options.worldId, options.seed, state),
+      )
   const core = makeMultiplayerServerCore({
     worldId: options.worldId,
     seed: options.seed,
     allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
     generatedBlockAt: makeGeneratedBlockAt(options.seed),
     ...(initialState === undefined ? {} : { initialState }),
-    ...(persist === undefined ? {} : { onStateChanged: persist }),
+    ...(persistence === undefined ? {} : { onStateChanged: persistence.request }),
     passableBlocks: new Set(['water']),
   })
   const server = createServer((request, response) => {
@@ -284,8 +336,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       sockets.close()
       server.close((error) => error === undefined ? resolve() : reject(error))
     }).then(async () => {
-      await persistenceQueue
-      if (persistenceFailure !== undefined) throw persistenceFailure
+      await persistence?.drain()
     })
     return closing
   }

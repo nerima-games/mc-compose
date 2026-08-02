@@ -280,8 +280,15 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     })),
   }))
   const commandResults = new Map<string, AuthoritativeCommandResult>()
+  const commandResultLimit = 1_024
   const commandResultKey = (message: AuthoritativeCommand): string =>
     `${String(message.player)}\0${String(message.commandId)}`
+  const cacheCommandResult = (message: AuthoritativeCommand, result: AuthoritativeCommandResult): void => {
+    commandResults.set(commandResultKey(message), result)
+    if (commandResults.size <= commandResultLimit) return
+    const oldestKey = commandResults.keys().next().value
+    if (oldestKey !== undefined) commandResults.delete(oldestKey)
+  }
   let revision = options.initialState?.revision ?? 0
   let witherRevision = options.initialState?.witherRevision ?? 0
   let witherState: WitherRuntimeState = restoreWitherRuntime(options.initialState?.wither)
@@ -702,7 +709,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       reason,
       resyncRequired: reason === 'stale-revision' || reason === 'snapshot-required',
     }
-    commandResults.set(commandResultKey(message), result)
+    cacheCommandResult(message, result)
     sendMessage(client, result)
     return { accepted: false, reason: reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command' }
   }
@@ -729,7 +736,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       world: worldId,
       revision,
     }
-    commandResults.set(commandResultKey(message), result)
+    cacheCommandResult(message, result)
     notifyStateChanged()
     sendMessage(client, result)
     for (const delta of decision.deltas(revision)) broadcast(delta)

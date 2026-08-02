@@ -165,19 +165,16 @@ test('moves, persists, and spills chest contents', async ({ page }) => {
     })
     .toBe(0)
 
+  await expect.poll(async () => {
+    const snapshot = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+    return snapshot.inventory.slots.findIndex((slot) => slot?.item === 'oak_log')
+  }, { timeout: 15_000 }).toBeGreaterThanOrEqual(0)
+
   snapshot = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
   expect(snapshot.containerStorage.containers).toEqual([])
-  const dropped = snapshot.entities
-    .filter((entity) => entity.item === 'oak_log')
-    .map(({ item, count, durability }) => ({ item, count, durability }))
-  const collected = snapshot.inventory.slots.flatMap((slot, index) =>
-    slot?.item === 'oak_log'
-      ? [{ ...slot, durability: snapshot.inventory.durability[index] ?? null }]
-      : [],
-  )
-  expect([...dropped, ...collected]).toEqual([
-    { item: 'oak_log', count: 1, durability: null },
-  ])
+  const pickedUpSlot = snapshot.inventory.slots.findIndex((slot) => slot?.item === 'oak_log')
+  expect(snapshot.inventory.slots[pickedUpSlot]).toEqual({ item: 'oak_log', count: 1 })
+  expect(snapshot.inventory.durability[pickedUpSlot]).toBeNull()
 })
 
 test('moves chest item metadata without merging incompatible stacks', async ({ page }) => {

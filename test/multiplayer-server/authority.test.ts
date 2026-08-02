@@ -178,6 +178,80 @@ describe('multiplayer server authoritative state', () => {
     ])
   })
 
+  it('evicts the oldest command result when the FIFO cache reaches its limit', () => {
+    const fixture = makeFixture()
+    fixture.sent.length = 0
+    const oldestCommand: NetworkMessage = {
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('cache-oldest'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'select-slot', slot: 1 },
+    }
+
+    expect(fixture.receive(oldestCommand).accepted).toBe(true)
+    fixture.sent.length = 0
+    expect(fixture.receive(oldestCommand).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'AuthoritativeCommandAccepted',
+        commandId: 'cache-oldest',
+        revision: 5,
+      }),
+    ])
+    expect(fixture.persisted).toHaveLength(1)
+
+    for (let index = 0; index < 1_024; index += 1) {
+      expect(fixture.receive({
+        _tag: 'PlayerInventoryCommand',
+        commandId: commandId(`cache-filler-${index}`),
+        player: playerId('alice'),
+        world: worldId('world-1'),
+        expectedRevision: 4,
+        action: { _tag: 'select-slot', slot: 1 },
+      })).toEqual({ accepted: false, reason: 'invalid-command' })
+    }
+
+    fixture.sent.length = 0
+    expect(fixture.receive(oldestCommand)).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'AuthoritativeCommandRejected',
+        commandId: 'cache-oldest',
+        revision: 5,
+        reason: 'stale-revision',
+      }),
+    ])
+
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('cache-advance'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 5,
+      action: { _tag: 'select-slot', slot: 2 },
+    }).accepted).toBe(true)
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('cache-filler-1023'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'select-slot', slot: 1 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'AuthoritativeCommandRejected',
+        commandId: 'cache-filler-1023',
+        revision: 5,
+        reason: 'stale-revision',
+      }),
+    ])
+  })
+
   it('scopes duplicate command ids to each player', () => {
     const fixture = makeFixture()
     const bobSent: WireText[] = []

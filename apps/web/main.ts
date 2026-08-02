@@ -6393,8 +6393,8 @@ const bootGame = async (
     const playerPosition = Effect.runSync(playerApi.pose).feetPosition
     for (const entity of Effect.runSync(world.entities.entities)) {
       if (deadAfterFrame) break
-      const metadata = droppedItemMetadata.get(String(entity.id))
-      if (metadata === undefined || !isDroppedItemBehaviour(entity.behaviour)) continue
+      if (!isDroppedItemBehaviour(entity.behaviour)) continue
+      const metadata = droppedItemMetadata.get(String(entity.id)) ?? {}
       const dx = entity.feetPosition.x - playerPosition.x
       const dy = entity.feetPosition.y - playerPosition.y
       const dz = entity.feetPosition.z - playerPosition.z
