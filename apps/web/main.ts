@@ -98,7 +98,6 @@ import { blockIdOf, blockTypeOfId, capabilityOfBlockId, propertyOfBlockId } from
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   addExperience as addVitalsExperience,
-  advanceFurnace,
   containerIdAt,
   emptyFurnaceState,
   equipmentDefinitionFor,
@@ -265,6 +264,7 @@ import {
   PLAYER_HALF_HEIGHT,
   PLAYER_HALF_WIDTH,
   requestBlockBreak,
+  requestFurnaceAdvance,
   requestBlockPlacementCommand,
   requestItemUse,
   requestMeleeAttack,
@@ -385,6 +385,7 @@ import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
 import { makeSurvivalHungerCoordinator } from './survival-hunger-runtime'
+import { advanceFurnaceRuntime } from './furnace-runtime'
 import {
   advanceSleep,
   enterSleep,
@@ -2233,6 +2234,8 @@ const bootGame = async (
   }
   window.addEventListener('mousedown', queueNativeUse, true)
   let nextItemUseRequestId = 0
+  const pendingFurnaceAdvances = new Map<string, string>()
+  const deferredFurnaceAdvanceSecs = new Map<string, number>()
   let nextBlockUseRequestId = 0
   let nextBlockPlacementRequestId = 0
   let nextMeleeAttackRequestId = 0
@@ -5957,6 +5960,20 @@ const bootGame = async (
       multiplayerStatus.hidden = false
     }
 
+    for (const [key, furnace] of furnaceStates) {
+      nextItemUseRequestId += 1
+      const requestId = `furnace-advance-${String(nextItemUseRequestId)}`
+      pendingFurnaceAdvances.set(requestId, key)
+      const deferredSecs = deferredFurnaceAdvanceSecs.get(key) ?? 0
+      deferredFurnaceAdvanceSecs.delete(key)
+      Effect.runSync(requestFurnaceAdvance(
+        gameplayState,
+        requestId,
+        furnace.state,
+        deltaSecs + deferredSecs,
+      ))
+    }
+
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
     if (swimmingState.active && mountedVehicle === undefined) {
       Effect.runSync(Ref.set(simState.velocity, swimmingState.velocity))
@@ -6082,19 +6099,6 @@ const bootGame = async (
     // Portal travel has already updated the player. Make its destination world
     // concrete before dimension alignment streams or renders that world.
     Effect.runSync(applyPortalTravels())
-
-    let furnaceStateChanged = false
-    for (const [key, furnace] of furnaceStates) {
-      const next = advanceFurnace(furnace.state, deltaSecs).state
-      if (JSON.stringify(next) !== JSON.stringify(furnace.state)) {
-        furnaceStates.set(key, { ...furnace, state: next })
-        furnaceStateChanged = true
-      }
-    }
-    if (furnaceStateChanged) {
-      markSessionDirty()
-      if (inventoryOpen && inventoryMode === 'furnace') renderPlayerUi()
-    }
 
     for (const pending of pendingBlockBreakConfirmations.splice(0)) {
       const context = dimensionContexts.get(pending.dimension)
@@ -7404,6 +7408,26 @@ const bootGame = async (
 
     const itemUseResults = Effect.runSync(drainItemUseResults(gameplayState))
     for (const result of itemUseResults) {
+      if ('action' in result && result.action === 'AdvanceFurnace') {
+        const key = pendingFurnaceAdvances.get(result.requestId)
+        pendingFurnaceAdvances.delete(result.requestId)
+        const furnace = key === undefined ? undefined : furnaceStates.get(key)
+        if (key !== undefined && furnace !== undefined) {
+          const applied = advanceFurnaceRuntime(furnace.state, result.plan)
+          if (applied.deferredSecs > 0) {
+            deferredFurnaceAdvanceSecs.set(
+              key,
+              (deferredFurnaceAdvanceSecs.get(key) ?? 0) + applied.deferredSecs,
+            )
+          }
+          if (applied.changed) {
+            furnaceStates.set(key, { ...furnace, state: applied.state })
+            markSessionDirty()
+            if (inventoryOpen && inventoryMode === 'furnace') renderPlayerUi()
+          }
+        }
+        continue
+      }
       lastObservedItemUse = result
       const pending = pendingItemUses.get(result.requestId)
       pendingItemUses.delete(result.requestId)
