@@ -50,7 +50,10 @@ import {
   emptyVillagerTradeState,
   emptyBrewingStandState,
   emptyStatusEffectState,
+  isValidBrewingStandState,
   isValidPlayerVitals,
+  isValidStatusEffectState,
+  isValidVillagerTradeState,
   decodeEnchantedItem,
   SPAWN_PLAYER_VITALS,
   EnderDragonEncounterSnapshotSchema,
@@ -72,6 +75,24 @@ const WitherRuntimeSnapshotSchema = Schema.Unknown.pipe(
     message: () => 'Wither runtime snapshot violates persistence invariants',
   }),
 ) as unknown as Schema.Schema<WitherRuntimeSnapshot>
+
+const BrewingStandStateSchema = Schema.Unknown.pipe(
+  Schema.filter((value): value is BrewingStandState => isValidBrewingStandState(value), {
+    message: () => 'Brewing stand state violates gameplay invariants',
+  }),
+) as unknown as Schema.Schema<BrewingStandState>
+
+const StatusEffectStateSchema = Schema.Unknown.pipe(
+  Schema.filter((value): value is StatusEffectState => isValidStatusEffectState(value), {
+    message: () => 'Status effects violate gameplay invariants',
+  }),
+) as unknown as Schema.Schema<StatusEffectState>
+
+const VillagerTradeStateSchema = Schema.Unknown.pipe(
+  Schema.filter((value): value is VillagerTradeState => isValidVillagerTradeState(value), {
+    message: () => 'Villager trades violate gameplay invariants',
+  }),
+) as unknown as Schema.Schema<VillagerTradeState>
 
 export type SessionPosition = {
   readonly x: number
@@ -450,6 +471,16 @@ const PersistedPortalsSchema: Schema.Schema<ReadonlyArray<PersistedPortalState>>
   }),
 )
 
+const PersistedVillagerStateSchema: Schema.Schema<PersistedVillagerState> = Schema.Struct({
+  residents: Schema.Array(Schema.Struct({
+    id: Schema.String.pipe(Schema.minLength(1)),
+    profession: Schema.Literal('farmer', 'toolsmith'),
+    dimension: DimensionSchema,
+    feetPosition: PositionSchema,
+  })),
+  trades: VillagerTradeStateSchema,
+})
+
 const PersistedEndStateSchema: Schema.Schema<PersistedEndState> = Schema.Struct({
   frames: Schema.Array(Schema.Struct({
     position: BlockPositionSchema,
@@ -502,9 +533,9 @@ const SessionStateSchema = Schema.Struct({
   portals: PersistedPortalsSchema,
   crops: CropSnapshotSchema,
   entities: Schema.Unknown as unknown as Schema.Schema<PersistedEntityRosters>,
-  villagers: Schema.Unknown as unknown as Schema.Schema<PersistedVillagerState>,
-  brewing: Schema.Unknown as unknown as Schema.Schema<BrewingStandState>,
-  statusEffects: Schema.Unknown as unknown as Schema.Schema<StatusEffectState>,
+  villagers: PersistedVillagerStateSchema,
+  brewing: BrewingStandStateSchema,
+  statusEffects: StatusEffectStateSchema,
   end: PersistedEndStateSchema,
   workstations: Schema.optional(Schema.Struct({
     enchantmentSeed: Schema.Number,

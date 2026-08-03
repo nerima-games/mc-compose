@@ -481,6 +481,54 @@ describe('session persistence', () => {
     }).pipe(Effect.provide(storage.layer))
   })
 
+  it.effect('rejects malformed direct gameplay snapshots', () => {
+    const storage = controlledStorage()
+    const state = sessionState(42)
+    const invalidStates = [
+      { ...state, brewing: { ...state.brewing, fuelUnits: -1 } },
+      {
+        ...state,
+        statusEffects: {
+          effects: [{ type: 'speed', remainingSecs: Number.POSITIVE_INFINITY, pulseClockSecs: 0 }],
+        },
+      },
+      {
+        ...state,
+        villagers: {
+          ...state.villagers,
+          residents: [{
+            id: '',
+            profession: 'farmer',
+            dimension: 'overworld',
+            feetPosition: { x: 0, y: 64, z: 0 },
+          }],
+        },
+      },
+    ]
+
+    for (const [index, invalidState] of invalidStates.entries()) {
+      const sessionId = `invalid-gameplay-snapshot-${String(index)}`
+      storage.setEnvelope(sessionHeadKey(sessionId), {
+        format: SESSION_FORMAT_NAME,
+        version: 17,
+        payload: {
+          sessionId,
+          revision: 'r1',
+          metadata: defaultMetadata,
+          state: invalidState,
+          chunks: [],
+        },
+      })
+    }
+
+    return Effect.gen(function* () {
+      for (const index of invalidStates.keys()) {
+        const error = yield* Effect.flip(loadSession(`invalid-gameplay-snapshot-${String(index)}`))
+        expect(error).toMatchObject({ _tag: 'SaveDecodeError' })
+      }
+    }).pipe(Effect.provide(storage.layer))
+  })
+
   it.effect('migrates a v8 session with an absent furnace registry', () => {
     const storage = controlledStorage()
     const key = sessionHeadKey('legacy-v8')
