@@ -1168,7 +1168,7 @@ describe('multiplayer server authoritative state', () => {
       entity: {
         entityId: 'cow-1',
         at: { x: expect.closeTo(Math.cos(1) * 1, 10), z: expect.closeTo(Math.sin(1) * 1, 10) },
-        mobState: { motionPhase: 1, attackCooldownSecs: 0, provoked: false },
+        mobState: expect.objectContaining({ motionPhase: 1, attackCooldownSecs: 0, provoked: false }),
       },
     })
     expect(fixture.persisted.at(-1)?.entities).toContainEqual(expect.objectContaining({
@@ -1195,7 +1195,7 @@ describe('multiplayer server authoritative state', () => {
         _tag: 'EntityUpdateDelta',
         entity: expect.objectContaining({
           entityId: 'skeleton-1',
-          mobState: { motionPhase: 1, attackCooldownSecs: 2, provoked: false },
+          mobState: expect.objectContaining({ motionPhase: 1, attackCooldownSecs: 2, provoked: false }),
         }),
       }),
       expect.objectContaining({ _tag: 'PlayerVitalsDelta', player: 'alice', state: expect.objectContaining({ health: 16 }) }),
@@ -1213,6 +1213,65 @@ describe('multiplayer server authoritative state', () => {
     fixture.server.tick(1_000)
     expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
       _tag: 'PlayerVitalsDelta', player: 'alice', state: expect.objectContaining({ health: 12 }),
+    }))
+  })
+
+  it('despawns distant hostile mobs while retaining named, tamed, and persistent mobs', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      entities: [
+        {
+          _tag: 'living', entityId: entityId('distant-zombie'), entityType: 'zombie',
+          at: { x: 129, y: 64, z: 0 }, health: 20, maxHealth: 20,
+        },
+        {
+          _tag: 'living', entityId: entityId('named-zombie'), entityType: 'zombie',
+          at: { x: 130, y: 64, z: 0 }, health: 20, maxHealth: 20,
+          mobState: { attackCooldownSecs: 0, motionPhase: 0, provoked: false, named: true, tamed: true, persistent: true },
+        },
+      ],
+    })
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(50)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityDespawnDelta', entityId: 'distant-zombie',
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta',
+      entity: expect.objectContaining({
+        entityId: 'named-zombie',
+        mobState: expect.objectContaining({ ageTicks: 1, named: true, tamed: true, persistent: true }),
+      }),
+    }))
+    expect(fixture.persisted.at(-1)?.entities).not.toContainEqual(expect.objectContaining({ entityId: 'distant-zombie' }))
+  })
+
+  it('despawns hostile mobs in peaceful mode without removing passive mobs', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      entities: [
+        {
+          _tag: 'living', entityId: entityId('peaceful-zombie'), entityType: 'zombie',
+          at: { x: 4, y: 64, z: 0 }, health: 20, maxHealth: 20,
+        },
+        {
+          _tag: 'living', entityId: entityId('peaceful-cow'), entityType: 'cow',
+          at: { x: 5, y: 64, z: 0 }, health: 10, maxHealth: 10,
+        },
+      ],
+    }, undefined, 'peaceful')
+    fixture.sent.length = 0
+
+    fixture.server.tick(50)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityDespawnDelta', entityId: 'peaceful-zombie',
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta', entity: expect.objectContaining({ entityId: 'peaceful-cow' }),
     }))
   })
 
@@ -1292,7 +1351,7 @@ describe('multiplayer server authoritative state', () => {
       _tag: 'EntityUpdateDelta',
       entity: expect.objectContaining({
         entityId: 'creeper-1',
-        mobState: { attackCooldownSecs: 0, motionPhase: 1, provoked: true },
+        mobState: expect.objectContaining({ attackCooldownSecs: 0, motionPhase: 1, provoked: true }),
       }),
     }))
     fixture.sent.length = 0

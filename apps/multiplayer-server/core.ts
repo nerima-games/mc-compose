@@ -41,6 +41,7 @@ import {
   applyFurnaceAdvance,
   blockLoot,
   dropRollsNeeded,
+  despawnVerdict,
   ENDERMAN_TELEPORT_ATTEMPTS,
   ENDERMAN_TELEPORT_MAX_BLOCKS,
   endermanTeleportUrge,
@@ -163,6 +164,7 @@ type TimeWeatherState = AuthoritativeSnapshot['timeWeather']
 type ContainerState = AuthoritativeSnapshot['containers'][number]
 type FurnaceState = AuthoritativeSnapshot['furnaces'][number]
 type ItemStack = NonNullable<InventoryState['slots'][number]>
+type MobWireState = NonNullable<Extract<AuthoritativeEntityState, { readonly _tag: 'living' }>['mobState']>
 
 const supportedMobKind = (entityType: string) => {
   if (entityType === ZOMBIE_KIND) return ZOMBIE_KIND
@@ -189,6 +191,29 @@ const supportedHostileEcosystemMobKind = (entityType: string) => {
   return undefined
 }
 
+const isAuthoritativeHostileMob = (entityType: string): boolean =>
+  entityType === CREEPER_KIND || entityType === ENDERMAN_KIND || supportedHostileEcosystemMobKind(entityType) !== undefined
+
+const mobWireState = (value: unknown): MobWireState => {
+  if (typeof value !== 'object' || value === null) {
+    return { attackCooldownSecs: 0, motionPhase: 0, provoked: false }
+  }
+  const state = value as Record<string, unknown>
+  return {
+    attackCooldownSecs: typeof state['attackCooldownSecs'] === 'number' && Number.isFinite(state['attackCooldownSecs']) && state['attackCooldownSecs'] >= 0
+      ? state['attackCooldownSecs']
+      : 0,
+    motionPhase: typeof state['motionPhase'] === 'number' && Number.isFinite(state['motionPhase']) && state['motionPhase'] >= 0
+      ? state['motionPhase']
+      : 0,
+    provoked: state['provoked'] === true,
+    ...(typeof state['ageTicks'] === 'number' && Number.isSafeInteger(state['ageTicks']) && state['ageTicks'] >= 0 ? { ageTicks: state['ageTicks'] } : {}),
+    ...(typeof state['persistent'] === 'boolean' ? { persistent: state['persistent'] } : {}),
+    ...(typeof state['named'] === 'boolean' ? { named: state['named'] } : {}),
+    ...(typeof state['tamed'] === 'boolean' ? { tamed: state['tamed'] } : {}),
+  }
+}
+
 const ecosystemMobStateForSimulation = (value: unknown) => {
   if (typeof value !== 'object' || value === null) return undefined
   return repairEcosystemMobState({ ...value, _tag: 'EcosystemMob' })
@@ -203,7 +228,8 @@ const creeperFuseForSimulation = (value: unknown): CreeperFuse => {
     : DORMANT_FUSE
 }
 
-const creeperWireState = (fuse: CreeperFuse) => ({
+const creeperWireState = (fuse: CreeperFuse, state: MobWireState): MobWireState => ({
+  ...state,
   attackCooldownSecs: 0,
   motionPhase: fuse._tag === 'Lit' ? fuse.burnedSecs : 0,
   provoked: fuse._tag === 'Lit',
@@ -211,26 +237,6 @@ const creeperWireState = (fuse: CreeperFuse) => ({
 
 const creeperDeltaTime = (elapsedSecs: number): Parameters<typeof stepCreeperFuse>[2] =>
   elapsedSecs as Parameters<typeof stepCreeperFuse>[2]
-
-const endermanWireState = (value: unknown) => {
-  if (typeof value !== 'object' || value === null) {
-    return { attackCooldownSecs: 0, motionPhase: 0, provoked: false }
-  }
-  const state = value as {
-    readonly attackCooldownSecs?: unknown
-    readonly motionPhase?: unknown
-    readonly provoked?: unknown
-  }
-  return {
-    attackCooldownSecs: typeof state.attackCooldownSecs === 'number' && Number.isFinite(state.attackCooldownSecs) && state.attackCooldownSecs >= 0
-      ? state.attackCooldownSecs
-      : 0,
-    motionPhase: typeof state.motionPhase === 'number' && Number.isFinite(state.motionPhase) && state.motionPhase >= 0
-      ? state.motionPhase
-      : 0,
-    provoked: state.provoked === true,
-  }
-}
 
 const endermanTeleportOffset = (roll: number): number =>
   Math.max(0, Math.min(1, roll)) * ENDERMAN_TELEPORT_MAX_BLOCKS * 2 - ENDERMAN_TELEPORT_MAX_BLOCKS
@@ -785,7 +791,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             ...entity,
             health,
             ...(entity.entityType === ENDERMAN_KIND
-              ? { mobState: { ...endermanWireState(entity.mobState), provoked: true } }
+              ? { mobState: { ...mobWireState(entity.mobState), provoked: true } }
               : {}),
           }
           entities.set(entity.entityId, updated)
@@ -1719,17 +1725,37 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       let worldChanged = false
       for (const entity of entities.values()) {
         if (entity._tag !== 'living') continue
+        const targetEntry = [...players.entries()]
+          .filter(([player, presence]) => presence.world === worldId && (vitals.get(player)?.health ?? 0) > 0)
+          .map(([player, presence]) => [player, presence, Math.hypot(
+            presence.at.x - entity.at.x,
+            presence.at.y - entity.at.y,
+            presence.at.z - entity.at.z,
+          )] as const)
+          .sort((left, right) => left[2] - right[2])[0]
+        const initialMobState = mobWireState(entity.mobState)
+        const hostileMobState = isAuthoritativeHostileMob(entity.entityType)
+          ? { ...initialMobState, ageTicks: (initialMobState.ageTicks ?? 0) + elapsedTicks }
+          : initialMobState
+        if (isAuthoritativeHostileMob(entity.entityType)) {
+          const verdict = despawnVerdict({
+            distanceToPlayerBlocks: targetEntry?.[2],
+            persistent: hostileMobState.persistent === true,
+            ...(hostileMobState.named === undefined ? {} : { named: hostileMobState.named }),
+            ...(hostileMobState.tamed === undefined ? {} : { tamed: hostileMobState.tamed }),
+            ...(hostileMobState.ageTicks === undefined ? {} : { ageTicks: hostileMobState.ageTicks }),
+            randomRoll: deterministicRoll(`${String(options.seed)}:${String(revision)}:${String(entity.entityId)}:despawn:${String(hostileMobState.ageTicks)}`),
+            difficulty: options.difficulty ?? 'normal',
+          })
+          if (verdict._tag === 'Despawn') {
+            entities.delete(entity.entityId)
+            movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
+            continue
+          }
+        }
         if (entity.entityType === CREEPER_KIND) {
-          const targetEntry = [...players.entries()]
-            .filter(([player, presence]) => presence.world === worldId && (vitals.get(player)?.health ?? 0) > 0)
-            .map(([player, presence]) => [player, presence, Math.hypot(
-              presence.at.x - entity.at.x,
-              presence.at.y - entity.at.y,
-              presence.at.z - entity.at.z,
-            )] as const)
-            .sort((left, right) => left[2] - right[2])[0]
           const step = stepCreeperFuse(
-            creeperFuseForSimulation(entity.mobState),
+            creeperFuseForSimulation(hostileMobState),
             { distanceToTargetBlocks: targetEntry?.[2] },
             creeperDeltaTime(elapsedSecs),
           )
@@ -1778,22 +1804,14 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             }
             continue
           }
-          const mobState = creeperWireState(step.fuse)
+          const mobState = creeperWireState(step.fuse, hostileMobState)
           const updated = { ...entity, mobState }
           entities.set(entity.entityId, updated)
           movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
           continue
         }
         if (entity.entityType === ENDERMAN_KIND) {
-          const targetEntry = [...players.entries()]
-            .filter(([player, presence]) => presence.world === worldId && (vitals.get(player)?.health ?? 0) > 0)
-            .map(([player, presence]) => [player, presence, Math.hypot(
-              presence.at.x - entity.at.x,
-              presence.at.y - entity.at.y,
-              presence.at.z - entity.at.z,
-            )] as const)
-            .sort((left, right) => left[2] - right[2])[0]
-          const mobState = endermanWireState(entity.mobState)
+          const mobState = hostileMobState
           const urge = endermanTeleportUrge({
             damagedThisStep: mobState.provoked,
             stuckTicks: mobState.motionPhase,
@@ -1848,17 +1866,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const hostileKind = supportedHostileEcosystemMobKind(entity.entityType)
         const kind = passiveKind ?? hostileKind
         if (kind === undefined) continue
-        const targetEntry = hostileKind === undefined
-          ? undefined
-          : [...players.entries()]
-            .filter(([player, presence]) => presence.world === worldId && (vitals.get(player)?.health ?? 0) > 0)
-            .map(([player, presence]) => [player, presence, Math.hypot(
-              presence.at.x - entity.at.x,
-              presence.at.y - entity.at.y,
-              presence.at.z - entity.at.z,
-            )] as const)
-            .sort((left, right) => left[2] - right[2])[0]
-        const target = targetEntry?.[1].at
+        const target = hostileKind === undefined ? undefined : targetEntry?.[1].at
         const state = ecosystemMobStateForSimulation(entity.mobState) ?? initialEcosystemMobState()
         const step = stepEcosystemMob(kind, state, entity.at, target, elapsedSecs)
         const at = {
@@ -1867,6 +1875,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           z: Math.min(bounds.maxZ, Math.max(bounds.minZ, step.feetPosition.z)),
         }
         const mobState = {
+          ...(hostileKind === undefined ? initialMobState : hostileMobState),
           attackCooldownSecs: step.state.attackCooldownSecs,
           motionPhase: step.state.motionPhase,
           provoked: step.state.provoked,
