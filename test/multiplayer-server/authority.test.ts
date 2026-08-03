@@ -1108,6 +1108,42 @@ describe('multiplayer server authoritative state', () => {
     }))
   })
 
+  it('ages item drops authoritatively and despawns them after five minutes', () => {
+    const fixture = makeFixture(initialState())
+    fixture.sent.length = 0
+    expect(fixture.server.spawnEntity({
+      _tag: 'item-drop',
+      entityId: entityId('expiring-drop'),
+      at: { x: 2, y: 65, z: 3 },
+      stack: { item: 'stone', count: 1 },
+    })).toBe(true)
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(100)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta',
+      entity: expect.objectContaining({
+        _tag: 'item-drop', entityId: 'expiring-drop', ageTicks: 2,
+      }),
+    }))
+    expect(fixture.persisted.at(-1)?.entities).toContainEqual(expect.objectContaining({
+      _tag: 'item-drop', entityId: 'expiring-drop', ageTicks: 2,
+    }))
+
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+    fixture.server.tick(299_900)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityDespawnDelta', entityId: 'expiring-drop',
+    }))
+    expect(fixture.persisted.at(-1)?.entities).not.toContainEqual(expect.objectContaining({
+      entityId: 'expiring-drop',
+    }))
+  })
+
   it('rejects unauthorized and missing-resource commands without advancing revision', () => {
     const fixture = makeFixture()
     fixture.sent.length = 0

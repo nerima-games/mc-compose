@@ -217,6 +217,7 @@ const DEFAULT_VITALS: VitalsState = { health: 20, hunger: 20, experience: 0 }
 const DEFAULT_TIME_WEATHER: TimeWeatherState = { timeOfDay: 6_000, weather: 'clear' }
 const MINECRAFT_DAY_TICKS = 24_000
 const MINECRAFT_TICK_MS = 50
+const ITEM_DROP_LIFESPAN_TICKS = 6_000
 const PLAYER_HALF_WIDTH = 0.3
 const PLAYER_HEIGHT = 1.8
 const COLLISION_EPSILON = 1e-9
@@ -1598,6 +1599,28 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         for (const furnace of changedFurnaces) {
           broadcast({ _tag: 'FurnaceDelta', world: worldId, revision, state: furnaceSnapshot(furnace) })
         }
+      }
+    }
+
+    if (elapsedTicks > 0) {
+      const agedEntities: AuthoritativeDelta[] = []
+      for (const entity of entities.values()) {
+        if (entity._tag !== 'item-drop') continue
+        const ageTicks = (entity.ageTicks ?? 0) + elapsedTicks
+        if (ageTicks >= ITEM_DROP_LIFESPAN_TICKS) {
+          entities.delete(entity.entityId)
+          agedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
+          continue
+        }
+        if (ageTicks === entity.ageTicks) continue
+        const updated = { ...entity, ageTicks }
+        entities.set(entity.entityId, updated)
+        agedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
+      }
+      if (agedEntities.length > 0) {
+        revision += 1
+        stateChanged = true
+        postPersistenceDeltas.push(...agedEntities.map((delta) => ({ ...delta, revision })))
       }
     }
 
