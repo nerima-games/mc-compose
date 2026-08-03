@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   makeMultiplayerServerCore,
+  type MultiplayerServerOptions,
   playerDamageResultKey,
   type MultiplayerServerState,
   type ReceiveResult,
@@ -116,6 +117,7 @@ const makeFixture = (
   state: MultiplayerServerState = initialState(),
   joinAt: Readonly<{ x: number; y: number; z: number }> = { x: 0, y: 64, z: 0 },
   difficulty: 'peaceful' | 'easy' | 'normal' | 'hard' = 'normal',
+  serverOptions: Partial<Pick<MultiplayerServerOptions, 'generatedBlockAt' | 'passableBlocks'>> = {},
 ) => {
   const sent: Array<WireText> = []
   const persisted: Array<MultiplayerServerState> = []
@@ -126,6 +128,7 @@ const makeFixture = (
     allowedBlocks: new Set(['stone', 'chest', 'furnace']),
     initialState: state,
     difficulty,
+    ...serverOptions,
     onStateChanged: (state) => {
       timeline.push('persist')
       persisted.push(state)
@@ -1299,6 +1302,58 @@ describe('multiplayer server authoritative state', () => {
     ]))
     expect(fixture.persisted.at(-1)?.entities).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: 'creeper-1' }),
+    ]))
+  })
+
+  it('records enderman damage and resolves its teleport on the server', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      entities: [{
+        _tag: 'living',
+        entityId: entityId('enderman-2'),
+        entityType: 'enderman',
+        at: { x: 1, y: 64, z: 0 },
+        health: 20,
+        maxHealth: 20,
+      }],
+    }, undefined, 'normal', {
+      generatedBlockAt: (position) => position.y === 63 ? 'stone' : null,
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'EntityAttackCommand',
+      commandId: commandId('enderman-hit'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      entityId: entityId('enderman-2'),
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta',
+      entity: expect.objectContaining({
+        entityId: 'enderman-2',
+        health: 16,
+        mobState: expect.objectContaining({ provoked: true }),
+      }),
+    }))
+    fixture.sent.length = 0
+
+    fixture.server.tick(50)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta',
+      entity: expect.objectContaining({
+        entityId: 'enderman-2',
+        at: expect.not.objectContaining({ x: 1, z: 0 }),
+        mobState: expect.objectContaining({ provoked: false }),
+      }),
+    }))
+    expect(fixture.persisted.at(-1)?.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        entityId: 'enderman-2',
+        mobState: expect.objectContaining({ provoked: false }),
+      }),
     ]))
   })
 

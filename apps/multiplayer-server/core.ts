@@ -41,6 +41,9 @@ import {
   applyFurnaceAdvance,
   blockLoot,
   dropRollsNeeded,
+  ENDERMAN_TELEPORT_ATTEMPTS,
+  ENDERMAN_TELEPORT_MAX_BLOCKS,
+  endermanTeleportUrge,
   furnaceAdvanceChanged,
   miningLootContextForItem,
   planFurnaceAdvance,
@@ -48,9 +51,11 @@ import {
   mobXpReward,
   initialEcosystemMobState,
   repairEcosystemMobState,
+  resolveSafeEndermanTeleport,
   stepCreeperFuse,
   stepEcosystemMob,
   type CreeperFuse,
+  type EndermanTeleportCell,
 } from '@nerima-games/mx-gameplay'
 import { Either } from 'effect'
 import {
@@ -206,6 +211,29 @@ const creeperWireState = (fuse: CreeperFuse) => ({
 
 const creeperDeltaTime = (elapsedSecs: number): Parameters<typeof stepCreeperFuse>[2] =>
   elapsedSecs as Parameters<typeof stepCreeperFuse>[2]
+
+const endermanWireState = (value: unknown) => {
+  if (typeof value !== 'object' || value === null) {
+    return { attackCooldownSecs: 0, motionPhase: 0, provoked: false }
+  }
+  const state = value as {
+    readonly attackCooldownSecs?: unknown
+    readonly motionPhase?: unknown
+    readonly provoked?: unknown
+  }
+  return {
+    attackCooldownSecs: typeof state.attackCooldownSecs === 'number' && Number.isFinite(state.attackCooldownSecs) && state.attackCooldownSecs >= 0
+      ? state.attackCooldownSecs
+      : 0,
+    motionPhase: typeof state.motionPhase === 'number' && Number.isFinite(state.motionPhase) && state.motionPhase >= 0
+      ? state.motionPhase
+      : 0,
+    provoked: state.provoked === true,
+  }
+}
+
+const endermanTeleportOffset = (roll: number): number =>
+  Math.max(0, Math.min(1, roll)) * ENDERMAN_TELEPORT_MAX_BLOCKS * 2 - ENDERMAN_TELEPORT_MAX_BLOCKS
 
 const mobExperienceReward = (kind: ReturnType<typeof supportedMobKind>): number => {
   if (kind === ZOMBIE_KIND) return ZOMBIE_XP_REWARD
@@ -752,7 +780,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
         const health = entity.health - 4
         if (health > 0) {
-          const updated = { ...entity, health }
+          const updated = {
+            ...entity,
+            health,
+            ...(entity.entityType === ENDERMAN_KIND
+              ? { mobState: { ...endermanWireState(entity.mobState), provoked: true } }
+              : {}),
+          }
           entities.set(entity.entityId, updated)
           return { accepted: true, deltas: (nextRevision) => [{ _tag: 'EntityUpdateDelta', world: worldId, revision: nextRevision, entity: updated }] }
         }
@@ -1745,6 +1779,66 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           }
           const mobState = creeperWireState(step.fuse)
           const updated = { ...entity, mobState }
+          entities.set(entity.entityId, updated)
+          movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
+          continue
+        }
+        if (entity.entityType === ENDERMAN_KIND) {
+          const targetEntry = [...players.entries()]
+            .filter(([player, presence]) => presence.world === worldId && (vitals.get(player)?.health ?? 0) > 0)
+            .map(([player, presence]) => [player, presence, Math.hypot(
+              presence.at.x - entity.at.x,
+              presence.at.y - entity.at.y,
+              presence.at.z - entity.at.z,
+            )] as const)
+            .sort((left, right) => left[2] - right[2])[0]
+          const mobState = endermanWireState(entity.mobState)
+          const urge = endermanTeleportUrge({
+            damagedThisStep: mobState.provoked,
+            stuckTicks: mobState.motionPhase,
+            roll: deterministicRoll(`${String(options.seed)}:${String(revision)}:${String(entity.entityId)}:enderman:urge`),
+          })
+          let at = entity.at
+          if (urge._tag === 'Teleport') {
+            const anchor = urge.anchor === 'self' ? entity.at : targetEntry?.[1].at
+            if (anchor !== undefined) {
+              const rolls = Array.from(
+                { length: ENDERMAN_TELEPORT_ATTEMPTS * 2 },
+                (_, index) => deterministicRoll(`${String(options.seed)}:${String(revision)}:${String(entity.entityId)}:enderman:teleport:${String(index)}`),
+              )
+              const cells: EndermanTeleportCell[] = []
+              for (let attempt = 0; attempt < ENDERMAN_TELEPORT_ATTEMPTS; attempt += 1) {
+                const xRoll = rolls[attempt * 2]
+                const zRoll = rolls[attempt * 2 + 1]
+                if (xRoll === undefined || zRoll === undefined) continue
+                const destination = {
+                  x: anchor.x + endermanTeleportOffset(xRoll),
+                  y: entity.at.y,
+                  z: anchor.z + endermanTeleportOffset(zRoll),
+                }
+                for (const position of [
+                  { ...destination, y: destination.y - 1 },
+                  destination,
+                  { ...destination, y: destination.y + 1 },
+                ]) {
+                  const blockPosition = {
+                    x: Math.floor(position.x),
+                    y: Math.floor(position.y),
+                    z: Math.floor(position.z),
+                  }
+                  if (!isInBounds(blockPosition)) continue
+                  const block = blockAt(blockPosition)
+                  cells.push({
+                    position,
+                    block: block ?? 'air',
+                    solid: block !== null && options.passableBlocks?.has(block) !== true,
+                  })
+                }
+              }
+              at = resolveSafeEndermanTeleport(entity.at, anchor, rolls, cells)
+            }
+          }
+          const updated = { ...entity, at, mobState: { ...mobState, provoked: false } }
           entities.set(entity.entityId, updated)
           movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
           continue
