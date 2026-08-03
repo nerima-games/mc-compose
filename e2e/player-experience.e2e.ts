@@ -137,6 +137,29 @@ test.describe('player inventory experience', () => {
     await expect(output).toBeHidden()
   })
 
+  test('moves a complete stack between ordinary inventory slots by dragging', async ({ page }) => {
+    await startGameSession(page)
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+    await callQa(page, 'gameplay.seedCreativeBreakEncounter')
+
+    const inventory = page.locator('#inventory-root')
+    const source = inventory.locator('[data-region="hotbar"] [data-slot-index="0"]')
+    const destination = inventory.locator('[data-region="main"] [data-slot-index="0"]')
+
+    await page.keyboard.press('KeyE')
+    await expect(inventory).toBeVisible()
+    await expect(source).toHaveAttribute('aria-label', /stone, 2/)
+    await expect(destination).toHaveAttribute('aria-label', /empty/)
+
+    await source.dragTo(destination)
+
+    await expect(source).toHaveAttribute('aria-label', /empty/)
+    await expect(destination).toHaveAttribute('aria-label', /stone, 2/)
+    const snapshot = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
+    expect(snapshot.inventory.slots[0]).toBeNull()
+    expect(snapshot.inventory.slots[9]).toEqual({ item: 'stone', count: 2 })
+  })
+
   test('progresses from wood through diamond and mines obsidian', async ({ page }) => {
     test.setTimeout(90_000)
     await startGameSession(page)

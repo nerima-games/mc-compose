@@ -2922,12 +2922,10 @@ const bootGame = async (
     }))
   }
 
-  const sendInventorySelection = (slot: number): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete) return false
-    if (pendingInventoryCommand !== null) {
-      queuedHotbarSelection = slot
-      return true
-    }
+  const sendInventoryCommand = (
+    action: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryCommand' }>['action'],
+  ): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingInventoryCommand !== null) return false
     nextInventoryCommand += 1
     const commandId = CommandId.make(`inventory-${String(nextInventoryCommand)}`)
     pendingInventoryCommand = { commandId, acceptedRevision: null }
@@ -2937,9 +2935,18 @@ const bootGame = async (
       player: multiplayer.query.player,
       world: WorldId.make(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
-      action: { _tag: 'select-slot', slot },
+      action,
     }))
     return true
+  }
+
+  const sendInventorySelection = (slot: number): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete) return false
+    if (pendingInventoryCommand !== null) {
+      queuedHotbarSelection = slot
+      return true
+    }
+    return sendInventoryCommand({ _tag: 'select-slot', slot })
   }
 
   const sendVillagerTradeCommand = (villagerId: string, offerId: string): boolean => {
@@ -4959,6 +4966,50 @@ const bootGame = async (
           : 'Invalid equipment action')
   }
 
+  const moveInventoryItem = (
+    action: InventoryAction,
+    source: number,
+    destination: number,
+  ): void => {
+    if (source === destination) {
+      rejectInventoryAction(action, 'Source and destination are the same slot')
+      return
+    }
+    const inventory = Effect.runSync(world.inventory.snapshot)
+    const sourceStack = inventory.slots[source]
+    const destinationStack = inventory.slots[destination]
+    if (sourceStack === undefined) {
+      rejectInventoryAction(action, 'Source slot is empty')
+      return
+    }
+    if (destinationStack !== undefined && destinationStack.item !== sourceStack.item) {
+      rejectInventoryAction(action, 'Destination must be empty or contain the same item')
+      return
+    }
+    if (multiplayer !== undefined) {
+      if (!sendInventoryCommand({
+        _tag: 'move-item',
+        source,
+        destination,
+        count: sourceStack.count,
+      })) {
+        rejectInventoryAction(action, 'Inventory update is pending')
+        return
+      }
+      equipmentActionStatus = ''
+      document.body.setAttribute('data-equipment-action', 'pending')
+      renderPlayerUi()
+      return
+    }
+    if (inventoryInteraction.state().inventoryCarried !== undefined) {
+      rejectInventoryAction(action, 'Place the carried stack first')
+      return
+    }
+    Effect.runSync(inventoryInteraction.clickInventoryItem(source, 'left'))
+    Effect.runSync(inventoryInteraction.clickInventoryItem(destination, 'left'))
+    completeInventoryAction()
+  }
+
   const dispatchInventoryAction = (action: InventoryAction): void => {
     if (action.kind === 'drag') {
       if (action.source.kind === 'slot' && action.target.kind === 'equipment-slot') {
@@ -4971,6 +5022,16 @@ const bootGame = async (
         const targetSlot = inventorySlotOf(action.target)
         if (targetSlot !== undefined) unequip(action, action.source.slot, targetSlot)
         else rejectInventoryAction(action, 'Equipment cannot move to crafting slots')
+        return
+      }
+      if (action.source.kind === 'slot' && action.target.kind === 'slot') {
+        const sourceSlot = inventorySlotOf(action.source)
+        const targetSlot = inventorySlotOf(action.target)
+        if (sourceSlot === undefined || targetSlot === undefined) {
+          rejectInventoryAction(action, 'Crafting slots cannot move inventory items')
+        } else {
+          moveInventoryItem(action, sourceSlot, targetSlot)
+        }
         return
       }
       rejectInventoryAction(action, 'Drag between these slots is not supported')
