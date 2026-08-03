@@ -347,6 +347,48 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted).toEqual([])
   })
 
+  it('resolves bucket collection and placement from the authoritative player pose', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [
+        ...state.blocks,
+        { at: { x: 0, y: 65, z: -1 }, block: 'water' },
+        { at: { x: 0, y: 65, z: -2 }, block: 'stone' },
+      ],
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'bucket', count: 1 }, null, null], selectedSlot: 0 },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BucketUseCommand', commandId: commandId('collect-water'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta', revision: 5, player: playerId('alice'),
+        state: expect.objectContaining({ slots: [{ item: 'water_bucket', count: 1 }, null, null] }),
+      }),
+      expect.objectContaining({ _tag: 'BlockBreak', at: { x: 0, y: 65, z: -1 } }),
+    ]))
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'BucketUseCommand', commandId: commandId('place-water'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 5,
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta', revision: 6, player: playerId('alice'),
+        state: expect.objectContaining({ slots: [{ item: 'bucket', count: 1 }, null, null] }),
+      }),
+      expect.objectContaining({ _tag: 'BlockPlace', at: { x: 0, y: 65, z: -1 }, block: 'water' }),
+    ]))
+  })
+
   it('keeps fishing, rod wear, and full-inventory loot drops authoritative', () => {
     const state = initialState()
     const fixture = makeFixture({

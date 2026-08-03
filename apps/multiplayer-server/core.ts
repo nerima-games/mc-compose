@@ -47,6 +47,7 @@ import {
   ZOMBIFIED_PIGLIN_KIND,
   applyFurnaceAdvance,
   blockLoot,
+  isBucketItem,
   dropRollsNeeded,
   despawnVerdict,
   enderPearlDisplacement,
@@ -69,6 +70,7 @@ import {
   stepEcosystemMob,
   TNT_EXPLOSION_POWER,
   type CreeperFuse,
+  type BucketItemType,
   type EndermanTeleportCell,
   type FishingRod,
   type FishingSession,
@@ -415,6 +417,7 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'BowUseCommand' ||
   message._tag === 'IgniteTntCommand' ||
   message._tag === 'EnderPearlCommand' ||
+  message._tag === 'BucketUseCommand' ||
   message._tag === 'FishingCommand' ||
   message._tag === 'VehicleCommand'
 
@@ -1047,6 +1050,74 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             at: { ...actor.at },
             facing: { ...actor.facing },
           }],
+        }
+      }
+      case 'BucketUseCommand': {
+        const actor = players.get(message.player)
+        if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+        const selected = inventory.slots[inventory.selectedSlot]
+        if (selected === null || selected === undefined || !isItemType(selected.item) || !isBucketItem(selected.item)) {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+
+        const target = Option.getOrUndefined(targetBlockFromPlayerPose({
+          feetPosition: actor.at,
+          yawRadians: actor.facing.yawRadians,
+          pitchRadians: actor.facing.pitchRadians,
+        }, BLOCK_INTERACTION_RANGE, (x, y, z) => {
+          const block = blockAt({ x, y, z })
+          return selected.item === 'bucket'
+            ? block === 'water' || block === 'lava'
+            : block !== null
+        }))
+        if (target === undefined) return { accepted: false, reason: 'invalid-command' }
+
+        let at: BlockPos
+        let block: 'water' | 'lava' | null
+        let replacement: BucketItemType
+        if (selected.item === 'bucket') {
+          const source = blockAt(target.position)
+          if (source !== 'water' && source !== 'lava') return { accepted: false, reason: 'invalid-command' }
+          at = target.position
+          block = null
+          replacement = source === 'water' ? 'water_bucket' : 'lava_bucket'
+        } else {
+          if (!isInBounds(target.adjacentPosition) || blockAt(target.adjacentPosition) !== null) {
+            return { accepted: false, reason: 'invalid-command' }
+          }
+          at = target.adjacentPosition
+          block = selected.item === 'water_bucket' ? 'water' : 'lava'
+          replacement = 'bucket'
+        }
+
+        const nextSlots = inventory.slots.map((stack) => stack === null ? null : { ...stack })
+        const nextDurability = inventory.durability.map((state) => state === null ? null : { ...state })
+        if (selected.count === 1) {
+          nextSlots[inventory.selectedSlot] = { item: replacement, count: 1 }
+          nextDurability[inventory.selectedSlot] = null
+        } else {
+          nextSlots[inventory.selectedSlot] = { ...selected, count: selected.count - 1 }
+          if (addStackToInventory(nextSlots, { item: replacement, count: 1 }) !== null) {
+            return { accepted: false, reason: 'invalid-command' }
+          }
+        }
+
+        inventory.slots.splice(0, inventory.slots.length, ...nextSlots)
+        inventory.durability.splice(0, inventory.durability.length, ...nextDurability)
+        blocks.set(positionKey(at), { at, block })
+        disturbFallingBlocks([at])
+        return {
+          accepted: true,
+          deltas: (nextRevision) => [{
+            _tag: 'PlayerInventoryDelta' as const,
+            world: actor.world,
+            revision: nextRevision,
+            player: message.player,
+            state: inventorySnapshot(inventory),
+          }],
+          messages: () => [block === null
+            ? { _tag: 'BlockBreak' as const, player: message.player, world: actor.world, at }
+            : { _tag: 'BlockPlace' as const, player: message.player, world: actor.world, at, block }],
         }
       }
       case 'FishingCommand': {

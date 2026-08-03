@@ -2968,7 +2968,7 @@ const bootGame = async (
   }
 
   const sendEntityCommand = (
-    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'EnderPearlCommand' | 'FishingCommand' | 'VehicleCommand' }>>,
+    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'EnderPearlCommand' | 'BucketUseCommand' | 'FishingCommand' | 'VehicleCommand' }>>,
   ): void => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete) return
     nextEntityCommand += 1
@@ -8500,25 +8500,30 @@ const bootGame = async (
         usedSpecialItem = true
       }
       if (!usedSpecialItem && specialSelected !== undefined && isBucketItem(specialSelected.item)) {
-        const target = Effect.runSync(targetedBlock())
-        if (target !== undefined) {
-          const dimension = Effect.runSync(playerApi.dimension)
-          const result = Effect.runSync(useBucket(
-            currentChunkStore,
-            world.inventory,
-            gameplayState.fluidFrontier,
-            {
-              activeDimension: dimension,
-              targetDimension: dimension,
-              position: specialSelected.item === 'bucket' ? target.position : target.adjacentPosition,
-              heldItem: specialSelected.item,
-            },
-          ))
-          document.body.setAttribute('data-bucket-result', result._tag)
+        if (multiplayer !== undefined && multiplayerHandshakeComplete) {
+          sendEntityCommand({ _tag: 'BucketUseCommand' })
           usedSpecialItem = true
-          if (result._tag === 'Collected' || result._tag === 'Placed') {
-            markSessionDirty()
-            renderPlayerUi()
+        } else {
+          const target = Effect.runSync(targetedBlock())
+          if (target !== undefined) {
+            const dimension = Effect.runSync(playerApi.dimension)
+            const result = Effect.runSync(useBucket(
+              currentChunkStore,
+              world.inventory,
+              gameplayState.fluidFrontier,
+              {
+                activeDimension: dimension,
+                targetDimension: dimension,
+                position: specialSelected.item === 'bucket' ? target.position : target.adjacentPosition,
+                heldItem: specialSelected.item,
+              },
+            ))
+            document.body.setAttribute('data-bucket-result', result._tag)
+            usedSpecialItem = true
+            if (result._tag === 'Collected' || result._tag === 'Placed') {
+              markSessionDirty()
+              renderPlayerUi()
+            }
           }
         }
       }
