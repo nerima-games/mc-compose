@@ -6,12 +6,17 @@ export default defineConfig({
     alias: {
       // mc-audio migrated its entry point to src/index.ts (PACKAGE_STANDARD.md);
       // this alias follows it there rather than the pre-migration path.
-      '@nerima-games/mc-audio': fileURLToPath(new URL('../mc-audio/src/index.ts', import.meta.url)),
+      '@nerima-games/mc-audio': fileURLToPath(new URL('../../../../mc-audio/src/index.ts', import.meta.url)),
     },
   },
   test: {
     environment: 'node',
     globals: false,
+    server: {
+      deps: {
+        inline: ['@nerima-games/mc-audio'],
+      },
+    },
     pool: 'forks',
     poolOptions: {
       forks: {
