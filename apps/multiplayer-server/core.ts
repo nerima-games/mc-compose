@@ -20,7 +20,7 @@ import {
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem } from '@nerima-games/mc-kernel'
-import { planExplosion, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
+import { EYE_LEVEL_OFFSET, forwardVector, planExplosion, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
@@ -30,6 +30,8 @@ import {
   CREEPER_KIND,
   CREEPER_XP_REWARD,
   DORMANT_FUSE,
+  ENDER_PEARL_DAMAGE,
+  ENDER_PEARL_MAX_DISTANCE,
   CHICKEN_KIND,
   COW_KIND,
   ENDERMAN_KIND,
@@ -45,6 +47,7 @@ import {
   blockLoot,
   dropRollsNeeded,
   despawnVerdict,
+  enderPearlDisplacement,
   ENDERMAN_TELEPORT_ATTEMPTS,
   ENDERMAN_TELEPORT_MAX_BLOCKS,
   endermanTeleportUrge,
@@ -65,7 +68,7 @@ import {
   type CreeperFuse,
   type EndermanTeleportCell,
 } from '@nerima-games/mx-gameplay'
-import { Either } from 'effect'
+import { Either, Option } from 'effect'
 import {
   SleepAuthority,
   decodeSleepWireMessage,
@@ -311,6 +314,7 @@ type CommandDecision =
   | Readonly<{
       accepted: true
       deltas: (revision: number) => ReadonlyArray<AuthoritativeDelta>
+      messages?: (revision: number) => ReadonlyArray<NetworkMessage>
       worldSnapshotRequired?: boolean
     }>
 
@@ -395,6 +399,7 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'EntityPickupCommand' ||
   message._tag === 'BowUseCommand' ||
   message._tag === 'IgniteTntCommand' ||
+  message._tag === 'EnderPearlCommand' ||
   message._tag === 'VehicleCommand'
 
 const moveStack = (
@@ -918,6 +923,76 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           ],
         }
       }
+      case 'EnderPearlCommand': {
+        const actor = players.get(message.player)
+        const playerVitals = vitals.get(message.player)
+        if (actor === undefined || playerVitals === undefined) return { accepted: false, reason: 'resource-not-found' }
+        if (playerVitals.health <= 0) return { accepted: false, reason: 'invalid-command' }
+        const selected = inventory.slots[inventory.selectedSlot]
+        if (selected?.item !== 'ender_pearl') return { accepted: false, reason: 'invalid-command' }
+
+        const target = Option.getOrUndefined(targetBlockFromPlayerPose({
+          feetPosition: actor.at,
+          yawRadians: actor.facing.yawRadians,
+          pitchRadians: actor.facing.pitchRadians,
+        }, ENDER_PEARL_MAX_DISTANCE, (x, y, z) => blockAt({ x, y, z }) !== null))
+        const origin = { x: actor.at.x, y: actor.at.y + EYE_LEVEL_OFFSET, z: actor.at.z }
+        const hitDistance = target === undefined
+          ? undefined
+          : Math.hypot(
+              target.position.x + 0.5 - origin.x,
+              target.position.y + 0.5 - origin.y,
+              target.position.z + 0.5 - origin.z,
+            )
+        const direction = forwardVector(actor.facing)
+        const displacement = enderPearlDisplacement(direction.x, direction.y, direction.z, hitDistance)
+        if (displacement === undefined) return { accepted: false, reason: 'invalid-command' }
+
+        inventory.slots[inventory.selectedSlot] = selected.count === 1
+          ? null
+          : { ...selected, count: selected.count - 1 }
+        actor.at = {
+          x: actor.at.x + displacement.x,
+          y: actor.at.y + displacement.y,
+          z: actor.at.z + displacement.z,
+        }
+        playerPositions.set(message.player, { at: { ...actor.at }, facing: { ...actor.facing } })
+        const wasAlive = playerVitals.health > 0
+        playerVitals.health = Math.max(0, playerVitals.health - ENDER_PEARL_DAMAGE)
+        const hungerActor = hungerActors.get(message.player)
+        if (hungerActor !== undefined) {
+          hungerActors.set(message.player, { ...hungerActor, state: { ...hungerActor.state, health: playerVitals.health } })
+        }
+        const died = wasAlive && playerVitals.health <= 0
+
+        return {
+          accepted: true,
+          deltas: (nextRevision) => [
+            ...applyPlayerDeaths(died ? [message.player] : [], nextRevision),
+            ...(died ? [] : [{
+              _tag: 'PlayerInventoryDelta' as const,
+              world: actor.world,
+              revision: nextRevision,
+              player: message.player,
+              state: inventorySnapshot(inventory),
+            }]),
+            {
+              _tag: 'PlayerVitalsDelta' as const,
+              world: actor.world,
+              revision: nextRevision,
+              player: message.player,
+              state: vitalsSnapshot(playerVitals),
+            },
+          ],
+          messages: () => [{
+            _tag: 'PlayerMove',
+            player: message.player,
+            world: actor.world,
+            at: { ...actor.at },
+            facing: { ...actor.facing },
+          }],
+        }
+      }
       case 'EntityAttackCommand': {
         const entity = entities.get(message.entityId)
         if (entity === undefined) return { accepted: false, reason: 'resource-not-found' }
@@ -1296,8 +1371,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
     const decision = decideCommand(message)
     if (!decision.accepted) return rejectCommand(client, message, decision.reason)
-    const deltas = decision.deltas(revision + 1)
-    if (deltas.length > 0) revision += 1
+    const nextRevision = revision + 1
+    const deltas = decision.deltas(nextRevision)
+    const outboundMessages = decision.messages?.(nextRevision) ?? []
+    if (deltas.length > 0 || outboundMessages.length > 0) revision += 1
     const result: AuthoritativeCommandResult = {
       _tag: 'AuthoritativeCommandAccepted',
       commandId: message.commandId,
@@ -1308,6 +1385,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     notifyStateChanged()
     sendMessage(client, result)
     for (const delta of deltas) broadcast(delta)
+    for (const outboundMessage of outboundMessages) broadcast(outboundMessage)
     if (decision.worldSnapshotRequired === true) broadcast(authoritativeSnapshot())
     return { accepted: true, message }
   }

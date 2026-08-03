@@ -284,6 +284,69 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted).toEqual([])
   })
 
+  it('resolves ender pearl movement, consumption, and damage on the server', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { selectedSlot: 0, slots: [{ item: 'ender_pearl', count: 2 }, null, null] },
+      }],
+      vitals: [{ player: playerId('alice'), state: { health: 20, hunger: 20, experience: 7 } }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'EnderPearlCommand', commandId: commandId('throw-ender-pearl'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+    }).accepted).toBe(true)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        revision: 5,
+        player: playerId('alice'),
+        state: { selectedSlot: 0, slots: [{ item: 'ender_pearl', count: 1 }, null, null] },
+      }),
+      expect.objectContaining({
+        _tag: 'PlayerVitalsDelta',
+        revision: 5,
+        player: playerId('alice'),
+        state: { health: 15, hunger: 20, experience: 7 },
+      }),
+      expect.objectContaining({
+        _tag: 'PlayerMove',
+        player: playerId('alice'),
+        world: worldId('world-1'),
+        at: { x: 0, y: 64, z: -24 },
+      }),
+      expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'throw-ender-pearl', revision: 5 }),
+    ]))
+    expect(fixture.persisted.at(-1)?.playerPositions).toContainEqual(expect.objectContaining({
+      player: playerId('alice'), at: { x: 0, y: 64, z: -24 },
+    }))
+  })
+
+  it('rejects ender pearl use without a selected pearl', () => {
+    const fixture = makeFixture()
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'EnderPearlCommand', commandId: commandId('throw-ender-pearl-without-item'),
+      player: playerId('alice'), world: worldId('world-1'), expectedRevision: 4,
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'AuthoritativeCommandRejected',
+        commandId: 'throw-ender-pearl-without-item',
+        reason: 'invalid-command',
+        revision: 4,
+      }),
+    ])
+    expect(fixture.persisted).toEqual([])
+  })
+
   it('moves unsupported sand through the server snapshot after its support is broken', () => {
     const state = initialState()
     const fixture = makeFixture({

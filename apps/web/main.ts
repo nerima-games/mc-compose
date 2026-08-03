@@ -2967,7 +2967,7 @@ const bootGame = async (
   }
 
   const sendEntityCommand = (
-    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'VehicleCommand' }>>,
+    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'EnderPearlCommand' | 'VehicleCommand' }>>,
   ): void => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete) return
     nextEntityCommand += 1
@@ -8435,40 +8435,44 @@ const bootGame = async (
       const specialInventory = Effect.runSync(world.inventory.snapshot)
       const specialSelected = specialInventory.slots[selectedHotbarIndex]
       if (!usedSpecialItem && specialSelected?.item === 'ender_pearl') {
-        const pose = Effect.runSync(playerApi.pose)
-        const horizontal = Math.cos(pose.pitchRadians)
-        const origin = {
-          x: pose.feetPosition.x,
-          y: pose.feetPosition.y + EYE_LEVEL_OFFSET,
-          z: pose.feetPosition.z,
-        }
-        const target = Effect.runSync(targetedBlock())
-        const hitDistance = target === undefined
-          ? undefined
-          : Math.hypot(
-              target.position.x + 0.5 - origin.x,
-              target.position.y + 0.5 - origin.y,
-              target.position.z + 0.5 - origin.z,
-            )
-        Effect.runSync(Ref.update(gameplayState.pendingPearlThrows, (requests) => [
-          ...requests,
-          {
-            origin,
-            inventory: {
-              mode: isCreativeMode ? 'creative' as const : 'survival' as const,
-              slotIndex: selectedHotbarIndex,
+        if (multiplayer !== undefined) {
+          sendEntityCommand({ _tag: 'EnderPearlCommand' })
+        } else {
+          const pose = Effect.runSync(playerApi.pose)
+          const horizontal = Math.cos(pose.pitchRadians)
+          const origin = {
+            x: pose.feetPosition.x,
+            y: pose.feetPosition.y + EYE_LEVEL_OFFSET,
+            z: pose.feetPosition.z,
+          }
+          const target = Effect.runSync(targetedBlock())
+          const hitDistance = target === undefined
+            ? undefined
+            : Math.hypot(
+                target.position.x + 0.5 - origin.x,
+                target.position.y + 0.5 - origin.y,
+                target.position.z + 0.5 - origin.z,
+              )
+          Effect.runSync(Ref.update(gameplayState.pendingPearlThrows, (requests) => [
+            ...requests,
+            {
+              origin,
+              inventory: {
+                mode: isCreativeMode ? 'creative' as const : 'survival' as const,
+                slotIndex: selectedHotbarIndex,
+              },
+              dirX: -Math.sin(pose.yawRadians) * horizontal,
+              dirY: Math.sin(pose.pitchRadians),
+              dirZ: -Math.cos(pose.yawRadians) * horizontal,
+              ...(hitDistance === undefined ? {} : { hitDistance }),
             },
-            dirX: -Math.sin(pose.yawRadians) * horizontal,
-            dirY: Math.sin(pose.pitchRadians),
-            dirZ: -Math.cos(pose.yawRadians) * horizontal,
-            ...(hitDistance === undefined ? {} : { hitDistance }),
-          },
-        ]))
-        if (!isCreativeMode) {
-          Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, 'ender_pearl', 1))
+          ]))
+          if (!isCreativeMode) {
+            Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, 'ender_pearl', 1))
+          }
+          markSessionDirty()
+          renderPlayerUi()
         }
-        markSessionDirty()
-        renderPlayerUi()
         usedSpecialItem = true
       }
       if (!usedSpecialItem && specialSelected !== undefined && isBucketItem(specialSelected.item)) {
@@ -8824,15 +8828,19 @@ const bootGame = async (
         }
       }
     }
-    for (const outcome of Effect.runSync(Ref.getAndSet(gameplayState.enderPearlOutcomes, []))) {
-      const pose = Effect.runSync(playerApi.pose)
-      Effect.runSync(playerApi.moveTo({
-        x: pose.feetPosition.x + outcome.displacement.x,
-        y: pose.feetPosition.y + outcome.displacement.y,
-        z: pose.feetPosition.z + outcome.displacement.z,
-      }))
-      if (outcome.damage !== undefined) applyPlayerDamage(outcome.damage)
-      markSessionDirty()
+    const pearlOutcomes = Effect.runSync(Ref.getAndSet(gameplayState.enderPearlOutcomes, []))
+
+    if (multiplayer === undefined) {
+      for (const outcome of pearlOutcomes) {
+        const pose = Effect.runSync(playerApi.pose)
+        Effect.runSync(playerApi.moveTo({
+          x: pose.feetPosition.x + outcome.displacement.x,
+          y: pose.feetPosition.y + outcome.displacement.y,
+          z: pose.feetPosition.z + outcome.displacement.z,
+        }))
+        if (outcome.damage !== undefined) applyPlayerDamage(outcome.damage)
+        markSessionDirty()
+      }
     }
     const confirmedPlacementItems: GameplayItemType[] = []
     const reservedPlacementItems: GameplayItemType[] = []
