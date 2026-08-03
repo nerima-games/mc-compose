@@ -33,12 +33,6 @@
     "LICENSE",
     "README.md"
   ],
-  "pnpm": {
-    "overrides": {
-      "@nerima-games/mc-kernel": "0.2.16",
-      "@nerima-games/mc-sim": "0.1.36"
-    }
-  },
   "keywords": [
     "minecraft",
     "effect-ts",

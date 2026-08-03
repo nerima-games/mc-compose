@@ -170,7 +170,6 @@ import {
   type RenderEntity,
 } from '@nerima-games/mc-render'
 import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
-import { makeThreePostProcessingRenderer } from './post-processing'
 import { applyAnvilOperation, spendExperienceLevels } from './anvil-repair'
 import { excludeReservedPlacementConsumptions } from './placement-consumption'
 import {
@@ -288,7 +287,6 @@ import {
   requestMobSpawn,
   requestPotatoFoodUse,
   requestPotatoHarvest,
-  requestTargetedBoneMeal,
   requestTargetedPotatoPlanting,
   requestTargetedSoilTill,
   requestTargetedBlockBreak,
@@ -483,6 +481,7 @@ import {
   type PersistedEndPortalFrameState,
   type PersistedEntityRoster,
   type PersistedVillager,
+  type SessionPosition,
   type SessionState,
 } from './session-persistence'
 import {
@@ -662,14 +661,14 @@ const isSwordItem = (item: ItemStack['item']): item is SwordItem =>
 
 type GameplayUseItemType = Exclude<ItemStack['item'], EquipmentOnlyItemType>
 type LegacyGameplayItemType = Exclude<ItemStack['item'], 'arrow' | 'bow'>
-type GameplayModuleItemType = Parameters<typeof isPlaceableItem>[0]
+type GameplayItemType = Parameters<typeof isPlaceableItem>[0]
 type GameplayHoeItemType = Parameters<typeof requestTargetedSoilTill>[4]
 type GameplayIgnitionItemType = Parameters<typeof requestTargetedItemUse>[4]
 
 // mx-ui 0.2.10 and mx-gameplay 0.1.35 expose adjacent mc-sim item unions.
 // Their shared runtime item identifiers remain compatible at this host boundary.
-const gameplayModuleItem = (item: ItemStack['item']): GameplayModuleItemType =>
-  item as GameplayModuleItemType
+const gameplayModuleItem = (item: ItemStack['item']): GameplayItemType =>
+  item as GameplayItemType
 
 const isGameplayHoeItem = (item: ItemStack['item']): item is GameplayHoeItemType =>
   isHoeItem(gameplayModuleItem(item))
@@ -1379,8 +1378,10 @@ const bootGame = async (
   // its side without naming a `three` type, which is the one thing that seam
   // exists not to do. The host has `three` in scope and pins them here.
   const terrainAtlas = generateTerrainAtlas()
+  const atlasData = new Uint8Array(new ArrayBuffer(terrainAtlas.data.byteLength))
+  atlasData.set(terrainAtlas.data)
   const atlasTexture = new THREE.DataTexture(
-    terrainAtlas.data,
+    atlasData,
     terrainAtlas.width,
     terrainAtlas.height,
     THREE.RGBAFormat,
@@ -1394,7 +1395,7 @@ const bootGame = async (
     ? await Effect.runPromise(makeProductionWorldRenderer<
       HTMLCanvasElement,
       THREE.BufferGeometry,
-      THREE.ShaderMaterial,
+      THREE.MeshBasicMaterial,
       THREE.InstancedBufferGeometry,
       THREE.ShaderMaterial
     >(
@@ -1402,7 +1403,7 @@ const bootGame = async (
       canvas,
       { width: canvas.clientWidth, height: canvas.clientHeight },
       atlasTexture,
-      { postProcessing: makeThreePostProcessingRenderer },
+      {},
     ))
     : await Effect.runPromise(
         makeWorldRenderer<HTMLCanvasElement, THREE.BufferGeometry, THREE.MeshBasicMaterial>(
@@ -1701,7 +1702,7 @@ const bootGame = async (
       daylight: weatherDaylight(Effect.runSync(time.timeOfDay)),
       temperature: 1,
       seed: activeSeed,
-      lightningSequence,
+      ...(lightningSequence === undefined ? {} : { lightningSequence }),
     }, camera))
     const thunder = lightningSequence === undefined
       ? undefined
@@ -1716,7 +1717,7 @@ const bootGame = async (
       listener: camera,
       listenerForward: readAudioListenerForward(),
       occlusion: 0,
-      thunder,
+      ...(thunder === undefined ? {} : { thunder }),
     })
     canvas.setAttribute('data-weather-particles', String(renderPlan.particles.length))
     canvas.setAttribute('data-weather-lightning', String(renderPlan.lightningFlash > 0))
@@ -2595,12 +2596,6 @@ const bootGame = async (
         readonly dimension: Dimension
       }
     | { readonly kind: 'till'; readonly slotIndex: number; readonly heldItem: HoeItemType }
-    | {
-        readonly kind: 'bone-meal'
-        readonly slotIndex: number
-        readonly dimension: Dimension
-        readonly position: { readonly x: number; readonly y: number; readonly z: number }
-      }
     | { readonly kind: 'plant'; readonly slotIndex: number; readonly dimension: Dimension }
     | {
         readonly kind: 'harvest'
@@ -8639,23 +8634,6 @@ const bootGame = async (
                 heldItem: selected.item,
               })
             }
-          } else if (selected.item === 'bone_meal') {
-            const target = Effect.runSync(
-              requestTargetedBoneMeal(
-                gameplayState,
-                currentChunkStore,
-                playerApi,
-                requestId,
-              ),
-            )
-            if (Option.isSome(target)) {
-              pendingItemUses.set(requestId, {
-                kind: 'bone-meal',
-                slotIndex: selectedHotbarIndex,
-                dimension: Effect.runSync(playerApi.dimension),
-                position: target.value.position,
-              })
-            }
           } else if (
             isLegacyGameplayItemType(selected.item) &&
             isGameplayIgnitionItem(selected.item)
@@ -9047,17 +9025,6 @@ const bootGame = async (
         }
       } else if ('action' in result) {
         switch (result.action) {
-          case 'ApplyBoneMeal':
-            if (pending.kind === 'bone-meal' && result.outcome._tag === 'applied') {
-              const advanced = Effect.runSync(crops.advanceByBoneMeal({
-                dimension: pending.dimension,
-                position: pending.position,
-              }))
-              if (advanced) {
-                Effect.runSync(world.inventory.removeAt(pending.slotIndex, 'bone_meal', result.consumedCount))
-              }
-            }
-            break
           case 'TillSoil':
             if (
               pending.kind === 'till'
