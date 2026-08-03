@@ -175,6 +175,7 @@ const supportedPassiveMobKind = (entityType: string) => {
 const supportedHostileEcosystemMobKind = (entityType: string) => {
   if (entityType === String(SKELETON_KIND)) return SKELETON_KIND
   if (entityType === String(SPIDER_KIND)) return SPIDER_KIND
+  if (entityType === String(ZOMBIE_KIND)) return ZOMBIE_KIND
   if (entityType === String(ZOMBIFIED_PIGLIN_KIND)) return ZOMBIFIED_PIGLIN_KIND
   if (entityType === String(BLAZE_KIND)) return BLAZE_KIND
   return undefined

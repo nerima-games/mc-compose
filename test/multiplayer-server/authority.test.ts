@@ -1210,6 +1210,24 @@ describe('multiplayer server authoritative state', () => {
     }))
   })
 
+  it('applies zombie melee damage through the authoritative entity loop', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      vitals: [{ player: playerId('alice'), state: { health: 20, hunger: 20, experience: 0 } }],
+      entities: [{
+        _tag: 'living', entityId: entityId('zombie-1'), entityType: 'zombie',
+        at: { x: 1, y: 64, z: 0 }, health: 20, maxHealth: 20,
+      }],
+    })
+    fixture.sent.length = 0
+
+    fixture.server.tick(1_000)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', player: 'alice', state: expect.objectContaining({ health: 17 }),
+    }))
+  })
+
   it('rejects unauthorized and missing-resource commands without advancing revision', () => {
     const fixture = makeFixture()
     fixture.sent.length = 0
