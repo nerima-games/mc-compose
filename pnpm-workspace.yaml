@@ -1,0 +1,7 @@
+packages:
+  - '.'
+
+overrides:
+  '@nerima-games/mc-kernel': 0.2.16
+  '@nerima-games/mc-sim': 0.1.36
+  '@nerima-games/mc-worldgen': 0.1.12
