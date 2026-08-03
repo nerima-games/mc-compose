@@ -1399,6 +1399,30 @@ describe('multiplayer server authoritative state', () => {
     expect(messages(fixture.sent).some((message) => message._tag === 'PlayerVitalsDelta' || message._tag === 'EntitySpawnDelta')).toBe(false)
   })
 
+  it('applies Wither explosion damage across the full gameplay blast diameter', () => {
+    const state = initialState()
+    const position = { x: 13, y: 64, z: 0 }
+    const fixture = makeFixture({
+      ...state,
+      vitals: [{ player: playerId('alice'), state: { health: 10, hunger: 20, experience: 0 } }],
+      playerPositions: [{
+        player: playerId('alice'),
+        at: position,
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      }],
+      wither: witherState('world-1', 'charging'),
+    }, position)
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta',
+      player: playerId('alice'),
+      state: expect.objectContaining({ health: 6 }),
+    }))
+  })
+
   it('consumes food and broadcasts inventory and vitals deltas atomically', () => {
     const state = initialState()
     const fixture = makeFixture({

@@ -49,6 +49,7 @@ import {
   blockLoot,
   isBucketItem,
   dropRollsNeeded,
+  explosionDamageAmount,
   explosionDamageAt,
   despawnVerdict,
   enderPearlDisplacement,
@@ -2690,12 +2691,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
               presence.at.y + 0.9 - explosion.position.y,
               presence.at.z - explosion.position.z,
             )
-            if (distance >= explosion.power) continue
-            const exposure = 1 - distance / explosion.power
+            const damageAmount = explosionDamageAmount(explosion.power, distance)
+            if (damageAmount <= 0) continue
             const playerVitals = vitals.get(player)
             if (playerVitals === undefined) continue
             const wasAlive = playerVitals.health > 0
-            playerVitals.health = Math.max(0, playerVitals.health - (((exposure * exposure + exposure) / 2) * 7 * explosion.power + 1))
+            playerVitals.health = Math.max(0, playerVitals.health - damageAmount)
             const hungerActor = hungerActors.get(player)
             if (hungerActor !== undefined) hungerActors.set(player, {
               ...hungerActor,
