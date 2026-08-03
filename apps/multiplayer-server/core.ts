@@ -487,7 +487,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         && (at.x - bed.x) ** 2 + (at.y - bed.y) ** 2 + (at.z - bed.z) ** 2 <= 5 ** 2
       const hostileNearby = [...entities.values()].some((entity) => entity._tag === 'living'
         && entity.health > 0
-        && supportedMobKind(entity.entityType) !== undefined
+        && (supportedMobKind(entity.entityType) !== undefined
+          || supportedHostileEcosystemMobKind(entity.entityType) !== undefined)
         && Math.abs(entity.at.x - bed.x) <= 8
         && Math.abs(entity.at.y - bed.y) <= 5
         && Math.abs(entity.at.z - bed.z) <= 8)

@@ -156,6 +156,9 @@ describe('multiplayer server authoritative state', () => {
   it.each([
     ['horizontal boundary', 'zombie', { x: 8, y: 64, z: 8 }],
     ['vertical boundary', 'blaze', { x: 0, y: 69, z: 0 }],
+    ['overworld ranged hostile', 'skeleton', { x: 0, y: 64, z: 0 }],
+    ['overworld melee hostile', 'spider', { x: 0, y: 64, z: 0 }],
+    ['nether melee hostile', 'zombified_piglin', { x: 0, y: 64, z: 0 }],
   ] as const)('rejects sleep when a hostile mob is at the %s', (_case, entityType, at) => {
     const state = initialState()
     const fixture = makeFixture({
