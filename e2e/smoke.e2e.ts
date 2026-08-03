@@ -223,9 +223,8 @@ test.describe('smoke — the composed frame in a real browser', () => {
    * the transcript has already been wrong once, listing six stage ids that no
    * module registered, and staying green for it.
    *
-   * Nine stages, not sixteen: three modules are composed, not six. The exact
-   * ids are asserted rather than the count, because a count is satisfied by any
-   * nine things.
+   * Eighteen stages across the composed modules. The exact ids are asserted
+   * rather than the count, because a count is satisfied by any set of stages.
    */
   test('#3b the resolved stage order is the one the loaded modules declare', async ({ page }) => {
     await startGameSession(page)
@@ -260,6 +259,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'render:post-fx',
       'ui:hud-sync',
       'ui:overlay-sync',
+      'gameplay:vehicles',
     ])
   })
 
