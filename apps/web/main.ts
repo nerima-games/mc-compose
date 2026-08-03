@@ -3497,6 +3497,7 @@ const bootGame = async (
               if (String(vehicle.id) === mountedVehicleId) mountedVehicleId = undefined
             },
           },
+          { mobSimulation: multiplayer === undefined },
         ),
       ),
     }),
@@ -9137,7 +9138,9 @@ const bootGame = async (
       markSessionDirty()
     }
 
-    const mobDrops = Effect.runSync(drainMobDrops(gameplayState))
+    const mobDrops = multiplayer === undefined
+      ? Effect.runSync(drainMobDrops(gameplayState))
+      : []
     if (mobDrops.length > 0) {
       Effect.runSync(spawnMobDrops(world.entities, mobDrops))
       markSessionDirty()
@@ -9146,7 +9149,9 @@ const bootGame = async (
       nextMobDropId += 1
       observedMobDrops.push({ ...drop, renderId: `mob-drop-${nextMobDropId}` })
     }
-    const mobExperience = Effect.runSync(drainMobExperience(gameplayState))
+    const mobExperience = multiplayer === undefined
+      ? Effect.runSync(drainMobExperience(gameplayState))
+      : []
     for (const event of mobExperience) {
       const currentVitals = Effect.runSync(world.vitals.snapshot)
       Effect.runSync(world.vitals.restore(addVitalsExperience(currentVitals, event.amount)))
