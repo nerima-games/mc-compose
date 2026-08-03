@@ -347,6 +347,67 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted).toEqual([])
   })
 
+  it('keeps fishing, rod wear, and full-inventory loot drops authoritative', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          selectedSlot: 0,
+          slots: [{ item: 'fishing_rod', count: 1 }, { item: 'stone', count: 64 }, { item: 'coal', count: 64 }],
+          durability: [{ current: 64, max: 64 }, null, null],
+        },
+      }],
+    }, undefined, 'normal', {
+      generatedBlockAt: (at) => at.x === 0 && at.y === 65 && at.z < 0 && at.z >= -5 ? 'water' : null,
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'FishingCommand', action: 'cast', commandId: commandId('cast-fishing'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerFishingDelta', revision: 5, player: playerId('alice'), state: { phase: 'waiting', result: 'cast' },
+    }))
+
+    let biteObserved = false
+    for (let second = 0; second < 30 && !biteObserved; second += 1) {
+      fixture.server.tick(1_000)
+      biteObserved = messages(fixture.sent).some((message) =>
+        message._tag === 'PlayerFishingDelta' && message.state.phase === 'bite')
+    }
+    expect(biteObserved).toBe(true)
+    const currentRevision = messages(fixture.sent).reduce(
+      (latest, message) => 'revision' in message && typeof message.revision === 'number'
+        ? Math.max(latest, message.revision)
+        : latest,
+      0,
+    )
+    expect(currentRevision).toBeGreaterThan(5)
+
+    expect(fixture.receive({
+      _tag: 'FishingCommand', action: 'reel', commandId: commandId('reel-fishing'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: currentRevision,
+    }).accepted).toBe(true)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        player: playerId('alice'),
+        state: expect.objectContaining({ durability: [{ current: 63, max: 64 }, null, null] }),
+      }),
+      expect.objectContaining({
+        _tag: 'PlayerFishingDelta', player: playerId('alice'), state: { phase: 'idle', result: 'caught' },
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({ _tag: 'item-drop', at: { x: 0, y: 64, z: 0 } }),
+      }),
+    ]))
+  })
+
   it('moves unsupported sand through the server snapshot after its support is broken', () => {
     const state = initialState()
     const fixture = makeFixture({

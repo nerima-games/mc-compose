@@ -20,12 +20,14 @@ import {
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem } from '@nerima-games/mc-kernel'
-import { EYE_LEVEL_OFFSET, forwardVector, planExplosion, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
+import { EYE_LEVEL_OFFSET, durabilityForItem, forwardVector, isValidDurabilityForItem, planExplosion, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
   bowCharge,
   bowDamage,
+  castFishing,
+  advanceFishing,
   canFireBow,
   CREEPER_KIND,
   CREEPER_XP_REWARD,
@@ -48,6 +50,7 @@ import {
   dropRollsNeeded,
   despawnVerdict,
   enderPearlDisplacement,
+  reelFishing,
   ENDERMAN_TELEPORT_ATTEMPTS,
   ENDERMAN_TELEPORT_MAX_BLOCKS,
   endermanTeleportUrge,
@@ -67,6 +70,8 @@ import {
   TNT_EXPLOSION_POWER,
   type CreeperFuse,
   type EndermanTeleportCell,
+  type FishingRod,
+  type FishingSession,
 } from '@nerima-games/mx-gameplay'
 import { Either, Option } from 'effect'
 import {
@@ -286,6 +291,7 @@ const deterministicRoll = (input: string): number => {
 
 interface MutableInventoryState {
   readonly slots: Array<ItemStack | null>
+  readonly durability: Array<{ readonly current: number; readonly max: number } | null>
   selectedSlot: number
 }
 
@@ -351,12 +357,21 @@ const positionKey = ({ x, y, z }: BlockPos): string => `${String(x)},${String(y)
 const cloneStack = (stack: ItemStack | null): ItemStack | null => stack === null ? null : { ...stack }
 const cloneInventory = (state: InventoryState): MutableInventoryState => ({
   slots: state.slots.map(cloneStack),
+  durability: state.slots.map((stack, index) => {
+    const durability = state.durability?.[index]
+    if (stack?.item !== 'fishing_rod') return null
+    return durability !== undefined && isValidDurabilityForItem('fishing_rod', durability)
+      ? { ...durability }
+      : durabilityForItem('fishing_rod')
+  }),
   selectedSlot: state.selectedSlot,
 })
-const inventorySnapshot = (state: MutableInventoryState): InventoryState => ({
-  slots: state.slots.map(cloneStack),
-  selectedSlot: state.selectedSlot,
-})
+const inventorySnapshot = (state: MutableInventoryState): InventoryState => {
+  const durability = state.durability.map((value, index) => state.slots[index]?.item === 'fishing_rod' && value !== null ? { ...value } : null)
+  return durability.some((value) => value !== null)
+    ? { slots: state.slots.map(cloneStack), selectedSlot: state.selectedSlot, durability }
+    : { slots: state.slots.map(cloneStack), selectedSlot: state.selectedSlot }
+}
 const vitalsSnapshot = (state: MutableVitalsState): VitalsState => ({ ...state })
 const containerSnapshot = (state: MutableContainerState): ContainerState => ({
   containerId: state.containerId,
@@ -400,6 +415,7 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'BowUseCommand' ||
   message._tag === 'IgniteTntCommand' ||
   message._tag === 'EnderPearlCommand' ||
+  message._tag === 'FishingCommand' ||
   message._tag === 'VehicleCommand'
 
 const moveStack = (
@@ -420,6 +436,28 @@ const moveStack = (
     ? { item: source.item, count }
     : { ...destination, count: destination.count + count }
   return null
+}
+
+/** Adds as much of a stack as possible and returns only the unplaceable remainder. */
+const addStackToInventory = (slots: Array<ItemStack | null>, stack: ItemStack): ItemStack | null => {
+  if (!isItemType(stack.item)) return stack
+  let remaining = stack.count
+  const maxStackCount = maxStackCountOfItem(stack.item)
+  for (const [index, current] of slots.entries()) {
+    if (current === null || current.item !== stack.item || current.count >= maxStackCount) continue
+    const added = Math.min(maxStackCount - current.count, remaining)
+    slots[index] = { ...current, count: current.count + added }
+    remaining -= added
+    if (remaining === 0) return null
+  }
+  for (const [index, current] of slots.entries()) {
+    if (current !== null) continue
+    const added = Math.min(maxStackCount, remaining)
+    slots[index] = { item: stack.item, count: added }
+    remaining -= added
+    if (remaining === 0) return null
+  }
+  return { item: stack.item, count: remaining }
 }
 
 export interface MultiplayerServerCore {
@@ -451,6 +489,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   )
   const fallingPending = new Map<string, BlockPos>()
   const bowDrawStartedAt = new Map<PlayerId, number>()
+  const fishingSessions = new Map<PlayerId, { session: FishingSession; slot: number; water: BlockPos }>()
   const inventories = new Map<PlayerId, MutableInventoryState>(
     (options.initialState?.inventories ?? []).map(({ player, state }) => [player, cloneInventory(state)]),
   )
@@ -623,6 +662,22 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return override === undefined ? (options.generatedBlockAt?.(at) ?? null) : override.block
   }
 
+  const fishingEnvironmentAt = (water: BlockPos) => {
+    let hasSkyAccess = true
+    for (let y = water.y + 1; y <= bounds.maxY; y += 1) {
+      if (blockAt({ x: water.x, y, z: water.z }) !== null) {
+        hasSkyAccess = false
+        break
+      }
+    }
+    return {
+      hasWater: blockAt(water) === 'water',
+      hasSkyAccess,
+      isRaining: timeWeather.weather === 'rain' || timeWeather.weather === 'thunder',
+      isOpenWater: false,
+    }
+  }
+
   const disturbFallingBlocks = (positions: Iterable<BlockPos>): void => {
     for (const at of positions) {
       if (!isInBounds(at)) continue
@@ -719,7 +774,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
   const ensurePlayerState = (player: PlayerId): void => {
     if (!inventories.has(player)) {
-      inventories.set(player, { slots: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), selectedSlot: 0 })
+      inventories.set(player, { slots: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), durability: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), selectedSlot: 0 })
     }
     if (!vitals.has(player)) vitals.set(player, { ...DEFAULT_VITALS })
     const playerVitals = vitals.get(player) as MutableVitalsState
@@ -780,6 +835,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         deltas.push({ _tag: 'EntitySpawnDelta', world: presence.world, revision: nextRevision, entity })
       }
       inventory.slots.fill(null)
+      inventory.durability.fill(null)
       playerVitals.experience = 0
       deltas.push({
         _tag: 'PlayerInventoryDelta',
@@ -992,6 +1048,67 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             facing: { ...actor.facing },
           }],
         }
+      }
+      case 'FishingCommand': {
+        const actor = players.get(message.player)
+        if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+        const active = fishingSessions.get(message.player)
+        if (message.action === 'cast') {
+          if (active !== undefined) return { accepted: false, reason: 'invalid-command' }
+          const selected = inventory.slots[inventory.selectedSlot]
+          const durability = inventory.durability[inventory.selectedSlot]
+          if (selected?.item !== 'fishing_rod' || durability === null || !isValidDurabilityForItem('fishing_rod', durability)) {
+            return { accepted: true, deltas: (nextRevision) => [{ _tag: 'PlayerFishingDelta', world: actor.world, revision: nextRevision, player: message.player, state: { phase: 'idle', result: 'invalid-rod' } }] }
+          }
+          const target = Option.getOrUndefined(targetBlockFromPlayerPose({
+            feetPosition: actor.at,
+            yawRadians: actor.facing.yawRadians,
+            pitchRadians: actor.facing.pitchRadians,
+          }, BLOCK_INTERACTION_RANGE, (x, y, z) => blockAt({ x, y, z }) === 'water'))
+          if (target === undefined) {
+            return { accepted: true, deltas: (nextRevision) => [{ _tag: 'PlayerFishingDelta', world: actor.world, revision: nextRevision, player: message.player, state: { phase: 'idle', result: 'no-water' } }] }
+          }
+          const cast = castFishing({ ...selected, durability } as FishingRod, fishingEnvironmentAt(target.position), {
+            wait: deterministicRoll(`${String(message.player)}:${String(message.commandId)}:wait`),
+            category: deterministicRoll(`${String(message.player)}:${String(message.commandId)}:category`),
+            item: deterministicRoll(`${String(message.player)}:${String(message.commandId)}:item`),
+          })
+          if (cast._tag !== 'Cast') {
+            const result = cast._tag === 'NoWater' ? 'no-water' : 'invalid-rod'
+            return { accepted: true, deltas: (nextRevision) => [{ _tag: 'PlayerFishingDelta', world: actor.world, revision: nextRevision, player: message.player, state: { phase: 'idle', result } }] }
+          }
+          fishingSessions.set(message.player, { session: cast.session, slot: inventory.selectedSlot, water: target.position })
+          return { accepted: true, deltas: (nextRevision) => [{ _tag: 'PlayerFishingDelta', world: actor.world, revision: nextRevision, player: message.player, state: { phase: 'waiting', result: 'cast' } }] }
+        }
+        if (active === undefined) return { accepted: false, reason: 'invalid-command' }
+        fishingSessions.delete(message.player)
+        const result = reelFishing(active.session)
+        const current = inventory.slots[active.slot]
+        if (current?.item !== 'fishing_rod') {
+          return { accepted: true, deltas: (nextRevision) => [{ _tag: 'PlayerFishingDelta', world: actor.world, revision: nextRevision, player: message.player, state: { phase: 'idle', result: 'cancelled' } }] }
+        }
+        if (result.rod === null) {
+          inventory.slots[active.slot] = null
+          inventory.durability[active.slot] = null
+        } else inventory.durability[active.slot] = { ...result.rod.durability }
+        const overflow = result._tag === 'Caught'
+          ? addStackToInventory(inventory.slots, { item: result.loot.item, count: result.loot.count })
+          : null
+        const overflowDrop: AuthoritativeEntityState | null = overflow === null
+          ? null
+          : {
+              _tag: 'item-drop',
+              entityId: `${String(message.player)}:fishing:${String(message.commandId)}` as AuthoritativeEntityState['entityId'],
+              at: { ...actor.at },
+              stack: overflow,
+            }
+        if (overflowDrop !== null) entities.set(overflowDrop.entityId, overflowDrop)
+        const fishingResult = result._tag === 'Caught' ? 'caught' : result._tag === 'ReeledTooEarly' ? 'too-early' : 'too-late'
+        return { accepted: true, deltas: (nextRevision) => [
+          { _tag: 'PlayerInventoryDelta', world: actor.world, revision: nextRevision, player: message.player, state: inventorySnapshot(inventory) },
+          { _tag: 'PlayerFishingDelta', world: actor.world, revision: nextRevision, player: message.player, state: { phase: 'idle', result: fishingResult } },
+          ...(overflowDrop === null ? [] : [{ _tag: 'EntitySpawnDelta' as const, world: actor.world, revision: nextRevision, entity: overflowDrop }]),
+        ] }
       }
       case 'EntityAttackCommand': {
         const entity = entities.get(message.entityId)
@@ -1455,6 +1572,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     const playerId = client.playerId
     if (playerId === null) return
     client.playerId = null
+    fishingSessions.delete(playerId)
     players.delete(playerId)
     playerClients.delete(playerId)
     broadcast({ _tag: 'PlayerLeave', player: playerId }, clientId)
@@ -1851,6 +1969,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       case 'AuthoritativeSnapshot':
       case 'PlayerInventoryDelta':
       case 'PlayerVitalsDelta':
+      case 'PlayerFishingDelta':
       case 'WorldTimeWeatherDelta':
       case 'ContainerDelta':
       case 'FurnaceDelta':
@@ -1887,6 +2006,31 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     const elapsedTicks = Math.floor((timeTickRemainderMs + validElapsedMs) / MINECRAFT_TICK_MS)
     timeTickRemainderMs = timeTickRemainderMs + validElapsedMs - elapsedTicks * MINECRAFT_TICK_MS
     const timeChanged = elapsedTicks > 0
+    if (elapsedSecs > 0) {
+      const fishingDeltas: Array<Omit<Extract<AuthoritativeDelta, { readonly _tag: 'PlayerFishingDelta' }>, 'revision'>> = []
+      for (const [player, active] of fishingSessions) {
+        const actor = players.get(player)
+        const inventory = inventories.get(player)
+        if (actor === undefined || inventory?.slots[active.slot]?.item !== 'fishing_rod') {
+          fishingSessions.delete(player)
+          if (actor !== undefined) fishingDeltas.push({ _tag: 'PlayerFishingDelta', world: actor.world, player, state: { phase: 'idle', result: 'cancelled' } })
+          continue
+        }
+        const advanced = advanceFishing(active.session, elapsedSecs, { hasWater: blockAt(active.water) === 'water' })
+        if (advanced._tag === 'Cancelled') {
+          fishingSessions.delete(player)
+          fishingDeltas.push({ _tag: 'PlayerFishingDelta', world: actor.world, player, state: { phase: 'idle', result: 'lost-water' } })
+        } else if (advanced._tag === 'Bite' || advanced._tag === 'Escaped') {
+          active.session = advanced.session
+          fishingDeltas.push({ _tag: 'PlayerFishingDelta', world: actor.world, player, state: { phase: advanced._tag === 'Bite' ? 'bite' : 'escaped', result: advanced._tag.toLowerCase() as 'bite' | 'escaped' } })
+        } else if (advanced._tag === 'Waiting') active.session = advanced.session
+      }
+      if (fishingDeltas.length > 0) {
+        revision += 1
+        stateChanged = true
+        postPersistenceDeltas.push(...fishingDeltas.map((delta) => ({ ...delta, revision })))
+      }
+    }
     if (timeChanged) {
       timeWeather = {
         ...timeWeather,

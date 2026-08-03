@@ -1821,6 +1821,7 @@ const bootGame = async (
   let fishingSession: FishingSession | undefined
   let fishingWater: { readonly dimension: Dimension; readonly position: SessionPosition } | undefined
   let fishingResult = 'idle'
+  let networkFishingState: { readonly phase: 'idle' | 'waiting' | 'bite' | 'escaped'; readonly result: string } = { phase: 'idle', result: 'idle' }
   let nextFishingRoll = 1
   let swimmingState = initialPlayerSwimmingRuntimeState()
   let footstepRuntimeState = initialFootstepRuntimeState()
@@ -1919,7 +1920,7 @@ const bootGame = async (
       wither: snapshotWitherRuntime(witherRuntimeState),
       fishing: {
         result: fishingResult,
-        phase: fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
+        phase: multiplayer === undefined ? (fishingSession === undefined ? 'idle' : fishingPhase(fishingSession)) : networkFishingState.phase,
         water: fishingWater ?? null,
       },
       vehicles: vehicleList(),
@@ -2967,7 +2968,7 @@ const bootGame = async (
   }
 
   const sendEntityCommand = (
-    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'EnderPearlCommand' | 'VehicleCommand' }>>,
+    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'EnderPearlCommand' | 'FishingCommand' | 'VehicleCommand' }>>,
   ): void => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete) return
     nextEntityCommand += 1
@@ -3095,10 +3096,19 @@ const bootGame = async (
   }
 
   const applyNetworkInventory = (state: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryDelta' }>['state']): void => {
-    Effect.runSync(world.inventory.restore({
-      slots: state.slots.map((stack) => stack === null
-        ? undefined
-        : { item: stack.item as ItemStack['item'], count: StackCount(stack.count) }),
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const slots = state.slots.map((stack) => stack === null
+      ? undefined
+      : { item: stack.item as ItemStack['item'], count: StackCount(stack.count) })
+    Effect.runSync(world.inventory.restoreStorage({
+      ...storage,
+      inventory: { slots },
+      inventoryDurability: slots.map((stack, index) => {
+        const durability = state.durability?.[index]
+        if (durability !== undefined) return durability
+        const previous = storage.inventory.slots[index]
+        return previous?.item === stack?.item ? storage.inventoryDurability[index] : null
+      }),
     }))
     selectedHotbarIndex = state.selectedSlot
   }
@@ -3224,6 +3234,7 @@ const bootGame = async (
         }
         const localInventory = message.inventories.find(({ player }) => player === multiplayer.query.player)
         if (localInventory !== undefined) applyNetworkInventory(localInventory.state)
+        networkFishingState = { phase: 'idle', result: 'idle' }
         for (const villagerTrade of message.villagerTrades) applyNetworkVillagerTrade(villagerTrade)
         applyNetworkTimeWeather(message.timeWeather)
         applyNetworkContainers(message.containers)
@@ -3307,6 +3318,16 @@ const bootGame = async (
         if (message.player === multiplayer.query.player) {
           applyNetworkVitals(message.state)
           settlePlayerDamageAfterVitals(message.revision)
+        }
+        break
+      case 'PlayerFishingDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        if (message.player === multiplayer.query.player) {
+          networkFishingState = message.state
+          fishingResult = message.state.result
+          document.body.setAttribute('data-fishing-result', message.state.result)
+          document.body.setAttribute('data-fishing-phase', message.state.phase)
         }
         break
       case 'WorldTimeWeatherDelta':
@@ -7348,7 +7369,7 @@ const bootGame = async (
     Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
     Effect.runSync(syncPortalCandidateSnapshots())
 
-    if (fishingSession !== undefined && fishingWater !== undefined) {
+    if (multiplayer === undefined && fishingSession !== undefined && fishingWater !== undefined) {
       const storage = Effect.runSync(world.inventory.storageSnapshot)
       const held = storage.inventory.slots[selectedHotbarIndex]
       if (held?.item !== 'fishing_rod') {
@@ -8359,7 +8380,10 @@ const bootGame = async (
       const fishingStorage = Effect.runSync(world.inventory.storageSnapshot)
       const fishingHeld = fishingStorage.inventory.slots[selectedHotbarIndex]
       const fishingDurability = fishingStorage.inventoryDurability[selectedHotbarIndex]
-      if (fishingSession !== undefined) {
+      if (multiplayer !== undefined && multiplayerHandshakeComplete && (fishingSession !== undefined || fishingHeld?.item === 'fishing_rod')) {
+        sendEntityCommand({ _tag: 'FishingCommand', action: networkFishingState.phase === 'idle' ? 'cast' : 'reel' })
+        usedSpecialItem = true
+      } else if (fishingSession !== undefined) {
         const result = reelFishing(fishingSession)
         Effect.runSync(world.inventory.damageAt(
           { _tag: 'Inventory', slotIndex: selectedHotbarIndex },
