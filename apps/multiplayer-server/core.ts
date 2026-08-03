@@ -338,6 +338,7 @@ const DEFAULT_BOUNDS = {
 const DEFAULT_FACING: Orientation = { yawRadians: 0, pitchRadians: 0 }
 const DEFAULT_MAX_MOVE_DISTANCE = 8
 const DEFAULT_MAX_VEHICLE_MOVE_DISTANCE = 4
+const VEHICLE_MOVE_DISTANCE = 1
 const DEFAULT_INVENTORY_SLOTS = 36
 const DEFAULT_VITALS: VitalsState = { health: 20, hunger: 20, experience: 0 }
 const DEFAULT_TIME_WEATHER: TimeWeatherState = { timeOfDay: 6_000, weather: 'clear' }
@@ -1359,9 +1360,19 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           updated = { ...entity, occupant: null }
         } else {
           if (entity.occupant !== message.player) return { accepted: false, reason: 'not-mounted' }
-          if (!isValidVehicleMovement(entity.at, message.action.at)) return { accepted: false, reason: 'out-of-range' }
-          updated = { ...entity, at: message.action.at }
-          actor.at = message.action.at
+          const forward = forwardVector(actor.facing)
+          const horizontalLength = Math.hypot(forward.x, forward.z)
+          if (horizontalLength === 0) return { accepted: false, reason: 'invalid-command' }
+          const direction = message.action.direction === 'forward' ? 1 : -1
+          const at = {
+            x: entity.at.x + direction * VEHICLE_MOVE_DISTANCE * forward.x / horizontalLength,
+            y: entity.at.y,
+            z: entity.at.z + direction * VEHICLE_MOVE_DISTANCE * forward.z / horizontalLength,
+          }
+          if (!isValidVehicleMovement(entity.at, at)) return { accepted: false, reason: 'out-of-range' }
+          updated = { ...entity, at }
+          actor.at = at
+          playerPositions.set(message.player, { at: { ...at }, facing: { ...actor.facing } })
         }
         entities.set(entity.entityId, updated)
         return { accepted: true, deltas: (nextRevision) => [{ _tag: 'EntityUpdateDelta', world: worldId, revision: nextRevision, entity: updated }] }

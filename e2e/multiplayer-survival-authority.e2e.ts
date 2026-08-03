@@ -165,7 +165,7 @@ const entityCommand = (
   detail: {
     readonly entityId: string
     readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'
-    readonly at?: { readonly x: number; readonly y: number; readonly z: number }
+    readonly direction?: 'forward' | 'backward'
   },
 ): Promise<void> => page.evaluate((command) => {
   document.dispatchEvent(new CustomEvent('mc-entity-command', { detail: command }))
@@ -301,8 +301,8 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     }).toBe(1)
     const aliceRejected = await mountRejection(alice.page)
     const rider = aliceRejected ? bob.page : alice.page
-    const movedTo = { x: PLAYER_AT.x + 3, y: PLAYER_AT.y, z: PLAYER_AT.z + 1 }
-    await entityCommand(rider, { entityId: 'survival-boat', action: 'move', at: movedTo })
+    const movedTo = { x: PLAYER_AT.x, y: PLAYER_AT.y, z: PLAYER_AT.z + 1 }
+    await entityCommand(rider, { entityId: 'survival-boat', action: 'move', direction: 'backward' })
     await expect.poll(() => authoritativeEntity(alice.page, 'survival-boat')).toMatchObject({ feetPosition: movedTo })
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-boat')).toMatchObject({ feetPosition: movedTo })
     await entityCommand(rider, { entityId: 'survival-boat', action: 'dismount' })

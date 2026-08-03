@@ -1827,19 +1827,19 @@ describe('multiplayer server authoritative state', () => {
     if (drop?._tag !== 'EntitySpawnDelta') throw new Error('missing item drop')
     send({ _tag: 'EntityPickupCommand', commandId: commandId('pickup-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 6, entityId: drop.entity.entityId })
     send({ _tag: 'VehicleCommand', commandId: commandId('mount-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 7, entityId: entityId('boat-1'), action: 'mount' })
-    send({ _tag: 'VehicleCommand', commandId: commandId('move-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 8, entityId: entityId('boat-1'), action: { _tag: 'move', at: { x: 3, y: 64, z: 1 } } })
+    send({ _tag: 'VehicleCommand', commandId: commandId('move-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 8, entityId: entityId('boat-1'), action: { _tag: 'move', direction: 'backward' } })
     send({ _tag: 'VehicleCommand', commandId: commandId('dismount-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 9, entityId: entityId('boat-1'), action: 'dismount' })
     expect(messages(observer)).toEqual(expect.arrayContaining([
       expect.objectContaining({ _tag: 'EntityUpdateDelta', entity: expect.objectContaining({ entityId: 'zombie-1', health: 4 }) }),
       expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'zombie-1' }),
       expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: drop.entity.entityId }),
-      expect.objectContaining({ _tag: 'EntityUpdateDelta', entity: expect.objectContaining({ entityId: 'boat-1', at: { x: 3, y: 64, z: 1 }, occupant: null }) }),
+      expect.objectContaining({ _tag: 'EntityUpdateDelta', entity: expect.objectContaining({ entityId: 'boat-1', at: { x: 1, y: 64, z: 2 }, occupant: null }) }),
     ]))
     fixture.server.disconnect('socket-a')
     const reconnect: Array<WireText> = []
     fixture.server.connect('socket-a2', (wire) => reconnect.push(wire))
-    fixture.server.receive('socket-a2', frame({ _tag: 'PlayerJoin', player: playerId('alice'), name: playerName('Alice'), at: { x: 3, y: 64, z: 1 } }))
-    expect(messages(reconnect).find((message) => message._tag === 'AuthoritativeSnapshot')).toMatchObject({ _tag: 'AuthoritativeSnapshot', revision: 10, entities: [{ entityId: 'boat-1', at: { x: 3, y: 64, z: 1 }, occupant: null }] })
+    fixture.server.receive('socket-a2', frame({ _tag: 'PlayerJoin', player: playerId('alice'), name: playerName('Alice'), at: { x: 1, y: 64, z: 2 } }))
+    expect(messages(reconnect).find((message) => message._tag === 'AuthoritativeSnapshot')).toMatchObject({ _tag: 'AuthoritativeSnapshot', revision: 10, entities: [{ entityId: 'boat-1', at: { x: 1, y: 64, z: 2 }, occupant: null }] })
   })
 
   it('does not turn an unknown living entity type into an invalid inventory item', () => {
@@ -1886,7 +1886,7 @@ describe('multiplayer server authoritative state', () => {
       world: worldId('world-1'),
       expectedRevision: 4,
       entityId: entityId('boat-1'),
-      action: { _tag: 'move', at: { x: 2, y: 64, z: 0 } },
+      action: { _tag: 'move', direction: 'forward' },
     })).toEqual({ accepted: false, reason: 'invalid-command' })
     expect(fixture.receive({
       _tag: 'VehicleCommand',
@@ -1911,22 +1911,21 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.receive(mount).accepted).toBe(true)
     expect(fixture.receive({
       _tag: 'VehicleCommand',
-      commandId: commandId('vehicle-teleport'),
+      commandId: commandId('vehicle-move'),
       player: playerId('alice'),
       world: worldId('world-1'),
       expectedRevision: 5,
       entityId: entityId('boat-1'),
-      action: { _tag: 'move', at: { x: 7, y: 64, z: 0 } },
-    })).toEqual({ accepted: false, reason: 'invalid-command' })
+      action: { _tag: 'move', direction: 'forward' },
+    }).accepted).toBe(true)
     expect(fixture.persisted.at(-1)).toMatchObject({
-      revision: 5,
-      entities: [{ entityId: 'far-zombie', health: 20 }, { entityId: 'boat-1', occupant: 'alice' }],
+      revision: 6,
+      entities: [{ entityId: 'far-zombie', health: 20 }, { entityId: 'boat-1', at: { x: 1, y: 64, z: -1 }, occupant: 'alice' }],
     })
     expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
       expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', reason: 'out-of-range', revision: 4 }),
       expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', reason: 'not-mounted', revision: 4 }),
       expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', reason: 'stale-revision', revision: 4, resyncRequired: true }),
-      expect.objectContaining({ _tag: 'AuthoritativeCommandRejected', commandId: 'vehicle-teleport', reason: 'out-of-range', revision: 5 }),
     ]))
   })
 

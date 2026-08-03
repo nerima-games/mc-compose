@@ -3072,16 +3072,17 @@ const bootGame = async (
   }
 
   document.addEventListener('mc-entity-command', (event) => {
-    const detail = (event as CustomEvent<{ readonly entityId: string; readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'; readonly at?: { readonly x: number; readonly y: number; readonly z: number } }>).detail
+    const detail = (event as CustomEvent<{ readonly entityId: string; readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'; readonly direction?: 'forward' | 'backward' }>).detail
     if (detail === undefined) return
     const entityId = EntityId.make(detail.entityId)
     if (detail.action === 'attack') sendEntityCommand({ _tag: 'EntityAttackCommand', entityId })
     else if (detail.action === 'pickup') sendEntityCommand({ _tag: 'EntityPickupCommand', entityId })
-    else sendEntityCommand({
+    else if (detail.action !== 'move') sendEntityCommand({
       _tag: 'VehicleCommand',
       entityId,
-      action: detail.action === 'move' && detail.at !== undefined ? { _tag: 'move', at: detail.at } : detail.action as 'mount' | 'dismount',
+      action: detail.action,
     })
+    else if (detail.direction !== undefined) sendEntityCommand({ _tag: 'VehicleCommand', entityId, action: { _tag: 'move', direction: detail.direction } })
   })
 
   const applyNetworkVitals = (state: { readonly health: number; readonly hunger: number; readonly experience: number }): void => {
