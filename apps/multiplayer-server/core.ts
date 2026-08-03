@@ -26,6 +26,7 @@ import {
   BLAZE_XP_REWARD,
   CREEPER_KIND,
   CREEPER_XP_REWARD,
+  DORMANT_FUSE,
   CHICKEN_KIND,
   COW_KIND,
   ENDERMAN_KIND,
@@ -47,7 +48,9 @@ import {
   mobXpReward,
   initialEcosystemMobState,
   repairEcosystemMobState,
+  stepCreeperFuse,
   stepEcosystemMob,
+  type CreeperFuse,
 } from '@nerima-games/mx-gameplay'
 import { Either } from 'effect'
 import {
@@ -185,6 +188,24 @@ const ecosystemMobStateForSimulation = (value: unknown) => {
   if (typeof value !== 'object' || value === null) return undefined
   return repairEcosystemMobState({ ...value, _tag: 'EcosystemMob' })
 }
+
+const creeperFuseForSimulation = (value: unknown): CreeperFuse => {
+  if (typeof value !== 'object' || value === null) return DORMANT_FUSE
+  const state = value as { readonly motionPhase?: unknown; readonly provoked?: unknown }
+  if (state.provoked !== true || typeof state.motionPhase !== 'number') return DORMANT_FUSE
+  return Number.isFinite(state.motionPhase) && state.motionPhase >= 0
+    ? { _tag: 'Lit', burnedSecs: state.motionPhase }
+    : DORMANT_FUSE
+}
+
+const creeperWireState = (fuse: CreeperFuse) => ({
+  attackCooldownSecs: 0,
+  motionPhase: fuse._tag === 'Lit' ? fuse.burnedSecs : 0,
+  provoked: fuse._tag === 'Lit',
+})
+
+const creeperDeltaTime = (elapsedSecs: number): Parameters<typeof stepCreeperFuse>[2] =>
+  elapsedSecs as Parameters<typeof stepCreeperFuse>[2]
 
 const mobExperienceReward = (kind: ReturnType<typeof supportedMobKind>): number => {
   if (kind === ZOMBIE_KIND) return ZOMBIE_XP_REWARD
@@ -1660,8 +1681,74 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       const movedEntities: AuthoritativeDelta[] = []
       const damagedPlayers = new Set<PlayerId>()
       const deadPlayers = new Set<PlayerId>()
+      let worldChanged = false
       for (const entity of entities.values()) {
         if (entity._tag !== 'living') continue
+        if (entity.entityType === CREEPER_KIND) {
+          const targetEntry = [...players.entries()]
+            .filter(([player, presence]) => presence.world === worldId && (vitals.get(player)?.health ?? 0) > 0)
+            .map(([player, presence]) => [player, presence, Math.hypot(
+              presence.at.x - entity.at.x,
+              presence.at.y - entity.at.y,
+              presence.at.z - entity.at.z,
+            )] as const)
+            .sort((left, right) => left[2] - right[2])[0]
+          const step = stepCreeperFuse(
+            creeperFuseForSimulation(entity.mobState),
+            { distanceToTargetBlocks: targetEntry?.[2] },
+            creeperDeltaTime(elapsedSecs),
+          )
+          if (step.explosion !== undefined) {
+            entities.delete(entity.entityId)
+            movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
+            const blockReader = (position: BlockPos) => {
+              if (!isInBounds(position)) return undefined
+              const block = blockAt(position)
+              return block === null ? { resistance: 0, destructible: false } : {
+                resistance: 1,
+                destructible: block !== 'bedrock',
+              }
+            }
+            const plan = planExplosion({
+              center: entity.at,
+              radius: step.explosion.power,
+              seed: revision,
+              blocks: blockReader,
+              entities: [],
+            })
+            for (const position of plan.destroyedBlocks) {
+              blocks.set(positionKey(position), { at: position, block: null })
+              worldChanged = true
+            }
+            for (const [player, presence] of players) {
+              if (presence.world !== worldId) continue
+              const distance = Math.hypot(
+                presence.at.x - entity.at.x,
+                presence.at.y + 0.9 - entity.at.y,
+                presence.at.z - entity.at.z,
+              )
+              if (distance >= step.explosion.power) continue
+              const exposure = 1 - distance / step.explosion.power
+              const playerVitals = vitals.get(player)
+              if (playerVitals === undefined) continue
+              const wasAlive = playerVitals.health > 0
+              playerVitals.health = Math.max(0, playerVitals.health - (((exposure * exposure + exposure) / 2) * 7 * step.explosion.power + 1))
+              const hungerActor = hungerActors.get(player)
+              if (hungerActor !== undefined) hungerActors.set(player, {
+                ...hungerActor,
+                state: { ...hungerActor.state, health: playerVitals.health },
+              })
+              damagedPlayers.add(player)
+              if (wasAlive && playerVitals.health <= 0) deadPlayers.add(player)
+            }
+            continue
+          }
+          const mobState = creeperWireState(step.fuse)
+          const updated = { ...entity, mobState }
+          entities.set(entity.entityId, updated)
+          movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
+          continue
+        }
         const passiveKind = supportedPassiveMobKind(entity.entityType)
         const hostileKind = supportedHostileEcosystemMobKind(entity.entityType)
         const kind = passiveKind ?? hostileKind
@@ -1707,11 +1794,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           }
         }
       }
-      if (movedEntities.length > 0 || damagedPlayers.size > 0) {
+      if (movedEntities.length > 0 || damagedPlayers.size > 0 || worldChanged) {
         revision += 1
         stateChanged = true
         postPersistenceDeltas.push(...movedEntities.map((delta) => ({ ...delta, revision })))
         postPersistenceDeltas.push(...applyPlayerDeaths([...deadPlayers], revision))
+        if (worldChanged) broadcast(snapshot())
         for (const player of damagedPlayers) {
           const presence = players.get(player)
           if (presence !== undefined) postPersistenceDeltas.push({

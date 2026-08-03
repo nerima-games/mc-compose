@@ -1266,6 +1266,42 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted).toEqual([])
   })
 
+  it('advances creeper fuses and resolves their explosion on the server', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      entities: [{
+        _tag: 'living',
+        entityId: entityId('creeper-1'),
+        entityType: 'creeper',
+        at: { x: 1, y: 64, z: 0 },
+        health: 20,
+        maxHealth: 20,
+      }],
+    })
+    fixture.sent.length = 0
+
+    fixture.server.tick(1_000)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta',
+      entity: expect.objectContaining({
+        entityId: 'creeper-1',
+        mobState: { attackCooldownSecs: 0, motionPhase: 1, provoked: true },
+      }),
+    }))
+    fixture.sent.length = 0
+
+    fixture.server.tick(600)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'creeper-1' }),
+      expect.objectContaining({ _tag: 'PlayerVitalsDelta', player: 'alice', state: expect.objectContaining({ health: 0 }) }),
+    ]))
+    expect(fixture.persisted.at(-1)?.entities).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityId: 'creeper-1' }),
+    ]))
+  })
+
   it('synchronizes entities and restores their canonical state on reconnect', () => {
     const fixture = makeFixture({ ...initialState(), entities: [
       { _tag: 'living', entityId: entityId('zombie-1'), entityType: 'zombie', at: { x: 1, y: 64, z: 0 }, health: 8, maxHealth: 20 },
