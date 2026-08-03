@@ -2822,8 +2822,15 @@ const bootGame = async (
   let pendingVitalsCommand: CommandId | null = null
   let pendingInventoryCommand: {
     readonly commandId: CommandId
+    readonly action: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryCommand' }>['action']
     acceptedRevision: number | null
   } | null = null
+  type RetryableEntityCommand = WithoutAuthority<Extract<NetworkMessage, {
+    readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'VehicleCommand'
+  }>>
+  let pendingEntityCommand: { readonly commandId: CommandId; readonly command: RetryableEntityCommand } | null = null
+  let queuedEntityCommands: ReadonlyArray<RetryableEntityCommand> = []
+  let pendingInventoryRetry: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryCommand' }>['action'] | null = null
   let pendingVillagerTradeCommand: CommandId | null = null
   let queuedHotbarSelection: number | null = null
 type MultiplayerInventorySelection = Readonly<{
@@ -2934,7 +2941,7 @@ type MultiplayerInventorySelection = Readonly<{
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingInventoryCommand !== null) return false
     nextInventoryCommand += 1
     const commandId = CommandId.make(`inventory-${String(nextInventoryCommand)}`)
-    pendingInventoryCommand = { commandId, acceptedRevision: null }
+    pendingInventoryCommand = { commandId, action, acceptedRevision: null }
     Effect.runSync(multiplayer.host.enqueueOutbound({
       _tag: 'PlayerInventoryCommand',
       commandId,
@@ -2980,10 +2987,34 @@ type MultiplayerInventorySelection = Readonly<{
     sendInventorySelection(slot)
   }
 
+  const replayPendingInventoryCommand = (): void => {
+    if (pendingInventoryRetry === null || pendingInventoryCommand !== null) return
+    const action = pendingInventoryRetry
+    pendingInventoryRetry = null
+    sendInventoryCommand(action)
+  }
+
   const sendEntityCommand = (
     command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'EnderPearlCommand' | 'BucketUseCommand' | 'VehicleUseCommand' | 'FishingCommand' | 'VehicleCommand' }>>,
   ): void => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete) return
+    if (command._tag === 'EntityAttackCommand' || command._tag === 'EntityPickupCommand' || command._tag === 'VehicleCommand') {
+      if (pendingEntityCommand !== null) {
+        queuedEntityCommands = [...queuedEntityCommands, command]
+        return
+      }
+      nextEntityCommand += 1
+      const commandId = CommandId.make(`entity-${String(nextEntityCommand)}`)
+      pendingEntityCommand = { commandId, command }
+      Effect.runSync(multiplayer.host.enqueueOutbound({
+        ...command,
+        commandId,
+        player: multiplayer.query.player,
+        world: WorldId.make(Effect.runSync(playerApi.dimension)),
+        expectedRevision: multiplayerRevision,
+      } as NetworkMessage))
+      return
+    }
     nextEntityCommand += 1
     Effect.runSync(multiplayer.host.enqueueOutbound({
       ...command,
@@ -2992,6 +3023,20 @@ type MultiplayerInventorySelection = Readonly<{
       world: WorldId.make(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
     } as NetworkMessage))
+  }
+
+  const pumpEntityCommands = (): void => {
+    if (pendingEntityCommand !== null) return
+    const [next, ...remaining] = queuedEntityCommands
+    if (next === undefined) return
+    queuedEntityCommands = remaining
+    sendEntityCommand(next)
+  }
+
+  const resumeCommandsAfterResync = (): void => {
+    replayPendingInventoryCommand()
+    flushQueuedHotbarSelection()
+    pumpEntityCommands()
   }
 
   const sendFacilityCommand = (
@@ -3239,7 +3284,10 @@ type MultiplayerInventorySelection = Readonly<{
         for (const block of message.blocks) applyNetworkBlock(block.world, block.at, block.block)
         break
       case 'AuthoritativeSnapshot': {
-        if (message.revision < multiplayerRevision) return
+        if (message.revision < multiplayerRevision) {
+          resumeCommandsAfterResync()
+          break
+        }
         multiplayerRevision = message.revision
         const local = message.vitals.find(({ player }) => player === multiplayer.query.player)
         if (local !== undefined) {
@@ -3282,7 +3330,7 @@ type MultiplayerInventorySelection = Readonly<{
           pendingPlayerDamage = null
           pumpPlayerDamage()
         }
-        flushQueuedHotbarSelection()
+        resumeCommandsAfterResync()
         pendingVillagerTradeCommand = null
         break
       }
@@ -3384,6 +3432,10 @@ type MultiplayerInventorySelection = Readonly<{
         if (message.commandId === pendingInventoryCommand?.commandId) {
           pendingInventoryCommand.acceptedRevision = message.revision
         }
+        if (message.commandId === pendingEntityCommand?.commandId) {
+          pendingEntityCommand = null
+          pumpEntityCommands()
+        }
         if (message.commandId === pendingFacilityCommand?.commandId) {
           if (!pendingFacilityCommand.expectsDelta) pendingFacilityCommand = null
           else if (
@@ -3405,8 +3457,17 @@ type MultiplayerInventorySelection = Readonly<{
         multiplayerRejection = message.reason
         if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
         if (message.commandId === pendingInventoryCommand?.commandId) {
+          if (message.resyncRequired) pendingInventoryRetry = pendingInventoryCommand.action
           pendingInventoryCommand = null
           if (!message.resyncRequired) flushQueuedHotbarSelection()
+        }
+        if (message.commandId === pendingEntityCommand?.commandId) {
+          const command = pendingEntityCommand.command
+          pendingEntityCommand = null
+          if (message.resyncRequired) {
+            queuedEntityCommands = [command, ...queuedEntityCommands]
+          }
+          else pumpEntityCommands()
         }
         if (message.commandId === pendingFacilityCommand?.commandId) {
           pendingFacilityCommand = null

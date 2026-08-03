@@ -73,11 +73,17 @@ const initialState = {
   entities: [
     {
       _tag: 'living',
-      entityId: 'survival-zombie',
-      entityType: 'zombie',
+      entityId: 'survival-target',
+      entityType: 'test-target',
       at: { x: PLAYER_AT.x + 1, y: PLAYER_AT.y, z: PLAYER_AT.z },
       health: 8,
       maxHealth: 20,
+    },
+    {
+      _tag: 'item-drop',
+      entityId: 'survival-rotten-flesh',
+      at: { x: PLAYER_AT.x + 1, y: PLAYER_AT.y, z: PLAYER_AT.z },
+      stack: { item: 'rotten_flesh', count: 2 },
     },
     {
       _tag: 'vehicle',
@@ -253,7 +259,9 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await alice.page.keyboard.press('KeyE')
     await expect(aliceInventory).toBeVisible()
     await alicePotatoes.click({ button: 'right' })
+    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'selecting')
     await aliceMainSlot.click({ button: 'right' })
+    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'pending')
     await expect.poll(async () => (await snapshot(alice.page)).inventory.slots.slice(0, 10)).toEqual([
       { item: 'potato', count: 1 },
       null,
@@ -270,13 +278,13 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await expect(aliceInventory).toBeHidden()
     await expect.poll(async () => (await snapshot(bob.page)).vitals.healthPoints).toBe(18)
     await expect.poll(async () => (await snapshot(bob.page)).inventory.slots[0]).toBeNull()
-    await expect.poll(() => authoritativeEntity(bob.page, 'survival-zombie')).toMatchObject({ kind: 'zombie' })
+    await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toMatchObject({ kind: 'test-target' })
 
-    await entityCommand(alice.page, { entityId: 'survival-zombie', action: 'attack' })
-    await expect.poll(() => revision(bob.page)).toBe(5)
-    await expect.poll(() => revision(alice.page)).toBe(5)
-    await entityCommand(alice.page, { entityId: 'survival-zombie', action: 'attack' })
-    await expect.poll(() => authoritativeEntity(bob.page, 'survival-zombie')).toBeUndefined()
+    await entityCommand(alice.page, { entityId: 'survival-target', action: 'attack' })
+    await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toMatchObject({ kind: 'test-target' })
+    await expect.poll(() => authoritativeEntity(alice.page, 'survival-target')).toMatchObject({ kind: 'test-target' })
+    await entityCommand(alice.page, { entityId: 'survival-target', action: 'attack' })
+    await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toBeUndefined()
 
     await expect.poll(async () => (await snapshot(bob.page)).renderedEntities.find(
       (entity) => entity.kind === 'dropped_item',
@@ -322,12 +330,16 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     }).toBe(1)
     const aliceRejected = await mountRejection(alice.page)
     const rider = aliceRejected ? bob.page : alice.page
-    const movedTo = { x: PLAYER_AT.x, y: PLAYER_AT.y, z: PLAYER_AT.z + 1 }
+    await expect.poll(() => revision(rider)).toBeGreaterThanOrEqual(9)
+    const revisionBeforeMove = await revision(rider)
+    const movedTo = { x: PLAYER_AT.x, y: PLAYER_AT.y, z: PLAYER_AT.z + 2 }
     await entityCommand(rider, { entityId: 'survival-boat', action: 'move', direction: 'backward' })
+    await expect.poll(() => revision(rider)).toBeGreaterThan(revisionBeforeMove)
     await expect.poll(() => authoritativeEntity(alice.page, 'survival-boat')).toMatchObject({ feetPosition: movedTo })
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-boat')).toMatchObject({ feetPosition: movedTo })
+    const revisionBeforeDismount = await revision(rider)
     await entityCommand(rider, { entityId: 'survival-boat', action: 'dismount' })
-    await expect.poll(() => revision(alice.page)).toBeGreaterThanOrEqual(10)
+    await expect.poll(() => revision(rider)).toBeGreaterThan(revisionBeforeDismount)
 
     await bob.page.close()
     await expect(alice.page.locator('#game-canvas')).toHaveAttribute('data-multiplayer-player-count', '1')
@@ -351,7 +363,7 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     )
     await expect.poll(() => authoritativeEntity(reconnectedBob, 'survival-boat')).toMatchObject({ feetPosition: movedTo })
     await expect.poll(async () => (await snapshot(reconnectedBob)).renderedEntities.some(
-      (entity) => entity.id === 'authoritative:survival-zombie' || entity.kind === 'dropped_item',
+      (entity) => entity.id === 'authoritative:survival-target' || entity.kind === 'dropped_item',
     )).toBe(false)
     await expect.poll(async () => (await snapshot(reconnectedBob)).vitals.healthPoints).toBe(18)
     await expect.poll(async () => (await snapshot(reconnectedBob)).inventory.slots[0]).toBeNull()

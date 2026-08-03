@@ -539,7 +539,7 @@ describe('multiplayer server authoritative state', () => {
         ]),
       }),
     ]))
-    expect(emitted.at(-1)).toEqual(expect.objectContaining({ _tag: 'WorldSnapshot', revision: 7 }))
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({ _tag: 'WorldSnapshot', revision: 6 }))
   })
 
   it.each([
@@ -1056,7 +1056,7 @@ describe('multiplayer server authoritative state', () => {
     expect(messages(fixture.sent)).toEqual([
       expect.objectContaining({
         _tag: 'WorldTimeWeatherDelta',
-        revision: 6,
+        revision: 5,
         state: { timeOfDay: 6_040, weather: 'clear' },
       }),
     ])
@@ -1064,12 +1064,12 @@ describe('multiplayer server authoritative state', () => {
     expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
       expect.objectContaining({
         _tag: 'WorldTimeWeatherDelta',
-        revision: 7,
+        revision: 5,
         state: { timeOfDay: 6_080, weather: 'clear' },
       }),
       expect.objectContaining({
         _tag: 'PlayerVitalsDelta',
-        revision: 8,
+        revision: 6,
         player: 'alice',
         state: { health: 3, hunger: 2, experience: 7 },
       }),
@@ -1086,7 +1086,7 @@ describe('multiplayer server authoritative state', () => {
     })).accepted).toBe(true)
     expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
       _tag: 'AuthoritativeSnapshot',
-      revision: 8,
+      revision: 6,
       vitals: [{ player: 'alice', state: { health: 3, hunger: 2, experience: 7 } }],
     }))
   })
@@ -1584,6 +1584,7 @@ describe('multiplayer server authoritative state', () => {
 
     expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
       _tag: 'EntityUpdateDelta',
+      revision: 5,
       entity: expect.objectContaining({
         _tag: 'item-drop', entityId: 'expiring-drop', ageTicks: 2,
       }),

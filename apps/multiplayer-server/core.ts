@@ -2279,7 +2279,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         changedFurnaces.push(furnace)
       }
       if (timeChanged || changedFurnaces.length > 0) {
-        revision += 1
+        // Time is replicated state but does not invalidate gameplay commands.
+        if (changedFurnaces.length > 0) revision += 1
         stateChanged = true
         if (timeChanged) postPersistenceDeltas.push({ _tag: 'WorldTimeWeatherDelta', world: worldId, revision, state: { ...timeWeather } })
         for (const furnace of changedFurnaces) {
@@ -2310,7 +2311,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         agedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
       }
       if (agedEntities.length > 0) {
-        revision += 1
+        // Age updates are replicated visual state; only a despawn invalidates commands.
+        if (agedEntities.some((delta) => delta._tag === 'EntityDespawnDelta')) revision += 1
         stateChanged = true
         postPersistenceDeltas.push(...agedEntities.map((delta) => ({ ...delta, revision })))
       }
