@@ -294,6 +294,7 @@ import {
   requestTargetedBlockPlacement,
   requestTargetedBlockUse,
   requestTargetedItemUse,
+  resolveTargetedBlock,
   requestVillagerTrade,
   drainBlockPlacementResults,
   reelFishing,
@@ -2966,7 +2967,7 @@ const bootGame = async (
   }
 
   const sendEntityCommand = (
-    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'VehicleCommand' }>>,
+    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'VehicleCommand' }>>,
   ): void => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete) return
     nextEntityCommand += 1
@@ -5490,6 +5491,8 @@ const bootGame = async (
           ? entity.vehicleType
           : entity._tag === 'arrow'
             ? 'arrow'
+            : entity._tag === 'primed-tnt'
+              ? 'primed_tnt'
             : 'dropped_item',
       feetPosition: entity.at,
       category: entity._tag === 'item-drop' || entity._tag === 'arrow' ? 'item' as const : 'hostile' as const,
@@ -8696,22 +8699,35 @@ const bootGame = async (
             isLegacyGameplayItemType(selected.item) &&
             isGameplayIgnitionItem(selected.item)
           ) {
-            const target = Effect.runSync(
-              requestTargetedItemUse(
-                gameplayState,
-                currentChunkStore,
-                playerApi,
-                requestId,
-                selected.item,
-              ),
-            )
-            if (Option.isSome(target)) {
-              pendingItemUses.set(requestId, {
-                kind: 'ignition',
-                slotIndex: selectedHotbarIndex,
-                heldItem: selected.item,
-                dimension: Effect.runSync(playerApi.dimension),
-              })
+            const blockTarget = Effect.runSync(resolveTargetedBlock(currentChunkStore, playerApi))
+            const blockReading = Option.isSome(blockTarget)
+              ? Effect.runSync(currentChunkStore.getBlock(blockTarget.value.position))
+              : undefined
+            if (
+              multiplayer !== undefined &&
+              Option.isSome(blockTarget) &&
+              blockReading?._tag === 'Block' &&
+              blockTypeOfId(blockReading.block) === 'tnt'
+            ) {
+              sendEntityCommand({ _tag: 'IgniteTntCommand', at: blockTarget.value.position })
+            } else {
+              const target = Effect.runSync(
+                requestTargetedItemUse(
+                  gameplayState,
+                  currentChunkStore,
+                  playerApi,
+                  requestId,
+                  selected.item,
+                ),
+              )
+              if (Option.isSome(target)) {
+                pendingItemUses.set(requestId, {
+                  kind: 'ignition',
+                  slotIndex: selectedHotbarIndex,
+                  heldItem: selected.item,
+                  dimension: Effect.runSync(playerApi.dimension),
+                })
+              }
             }
           } else {
             shouldAttemptPlacement = true

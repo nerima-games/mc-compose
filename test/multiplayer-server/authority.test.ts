@@ -125,7 +125,7 @@ const makeFixture = (
   const server = makeMultiplayerServerCore({
     worldId: 'world-1',
     seed: 42,
-    allowedBlocks: new Set(['stone', 'sand', 'gravel', 'chest', 'furnace']),
+    allowedBlocks: new Set(['stone', 'sand', 'gravel', 'chest', 'furnace', 'tnt']),
     initialState: state,
     difficulty,
     ...serverOptions,
@@ -207,6 +207,81 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted.at(-1)?.entities).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: 'bow-target', health: expect.any(Number) }),
     ]))
+  })
+
+  it('ignites TNT and resolves its explosion on the server', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { selectedSlot: 0, slots: [{ item: 'fire_charge', count: 1 }, null, null] },
+      }],
+      blocks: [...state.blocks, { at: { x: 1, y: 64, z: 0 }, block: 'tnt' }],
+      vitals: [{ player: playerId('alice'), state: { health: 20, hunger: 20, experience: 0 } }],
+    }, { x: -2, y: 64, z: 0 })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'IgniteTntCommand', commandId: commandId('ignite-tnt'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, at: { x: 1, y: 64, z: 0 },
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        player: playerId('alice'),
+        state: { selectedSlot: 0, slots: [null, null, null] },
+      }),
+      expect.objectContaining({ _tag: 'EntitySpawnDelta', revision: 5, entity: expect.objectContaining({ _tag: 'primed-tnt', burnedSecs: 0 }) }),
+      expect.objectContaining({
+        _tag: 'AuthoritativeSnapshot',
+        revision: 5,
+        entities: [expect.objectContaining({ _tag: 'primed-tnt', entityId: 'ignite-tnt:tnt' })],
+      }),
+    ]))
+    expect(fixture.persisted.at(-1)?.blocks).not.toContainEqual(expect.objectContaining({
+      at: { x: 1, y: 64, z: 0 }, block: 'tnt',
+    }))
+    fixture.sent.length = 0
+
+    fixture.server.tick(1_000)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta', entity: expect.objectContaining({ _tag: 'primed-tnt', burnedSecs: 1 }),
+    }))
+    fixture.sent.length = 0
+
+    fixture.server.tick(3_000)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'ignite-tnt:tnt' }),
+      expect.objectContaining({ _tag: 'WorldSnapshot' }),
+    ]))
+    expect(fixture.persisted.at(-1)?.entities).not.toContainEqual(expect.objectContaining({
+      entityId: 'ignite-tnt:tnt',
+    }))
+  })
+
+  it('rejects TNT ignition without an ignition item', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [...state.blocks, { at: { x: 1, y: 64, z: 0 }, block: 'tnt' }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'IgniteTntCommand', commandId: commandId('ignite-tnt-without-item'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, at: { x: 1, y: 64, z: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(messages(fixture.sent)).toEqual([
+      expect.objectContaining({
+        _tag: 'AuthoritativeCommandRejected',
+        commandId: 'ignite-tnt-without-item',
+        reason: 'invalid-command',
+        revision: 4,
+      }),
+    ])
+    expect(fixture.persisted).toEqual([])
   })
 
   it('moves unsupported sand through the server snapshot after its support is broken', () => {

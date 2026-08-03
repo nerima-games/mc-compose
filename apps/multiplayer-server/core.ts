@@ -53,6 +53,7 @@ import {
   miningLootContextForItem,
   planFurnaceAdvance,
   planFallingBlockMoves,
+  PRIMED_TNT_FUSE_SECS,
   rollDropsOfKind,
   mobXpReward,
   initialEcosystemMobState,
@@ -60,6 +61,7 @@ import {
   resolveSafeEndermanTeleport,
   stepCreeperFuse,
   stepEcosystemMob,
+  TNT_EXPLOSION_POWER,
   type CreeperFuse,
   type EndermanTeleportCell,
 } from '@nerima-games/mx-gameplay'
@@ -306,7 +308,11 @@ interface MutableFurnaceState {
 
 type CommandDecision =
   | Readonly<{ accepted: false; reason: CommandRejectionReason }>
-  | Readonly<{ accepted: true; deltas: (revision: number) => ReadonlyArray<AuthoritativeDelta> }>
+  | Readonly<{
+      accepted: true
+      deltas: (revision: number) => ReadonlyArray<AuthoritativeDelta>
+      worldSnapshotRequired?: boolean
+    }>
 
 const DEFAULT_BOUNDS = {
   minX: -30_000_000,
@@ -388,6 +394,7 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'EntityAttackCommand' ||
   message._tag === 'EntityPickupCommand' ||
   message._tag === 'BowUseCommand' ||
+  message._tag === 'IgniteTntCommand' ||
   message._tag === 'VehicleCommand'
 
 const moveStack = (
@@ -874,6 +881,43 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           { _tag: 'EntitySpawnDelta', world: worldId, revision: nextRevision, entity: arrow },
         ] }
       }
+      case 'IgniteTntCommand': {
+        const actor = players.get(message.player)
+        if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+        if (!isInBounds(message.at) || !isBlockWithinReach(actor, message.at)) {
+          return { accepted: false, reason: 'out-of-range' }
+        }
+        const selected = inventory.slots[inventory.selectedSlot]
+        if (selected?.item !== 'flint_and_steel' && selected?.item !== 'fire_charge') {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+        if (blockAt(message.at) !== 'tnt') return { accepted: false, reason: 'invalid-command' }
+        if (selected.item === 'fire_charge') {
+          inventory.slots[inventory.selectedSlot] = selected.count === 1
+            ? null
+            : { ...selected, count: selected.count - 1 }
+        }
+        blocks.set(positionKey(message.at), { at: message.at, block: null })
+        disturbFallingBlocks([message.at])
+        const tnt: AuthoritativeEntityState = {
+          _tag: 'primed-tnt',
+          entityId: `${message.commandId}:tnt` as AuthoritativeEntityState['entityId'],
+          at: { x: message.at.x + 0.5, y: message.at.y + 0.5, z: message.at.z + 0.5 },
+          burnedSecs: 0,
+          owner: message.player,
+        }
+        entities.set(tnt.entityId, tnt)
+        return {
+          accepted: true,
+          worldSnapshotRequired: true,
+          deltas: (nextRevision) => [
+            ...(selected.item === 'fire_charge'
+              ? [{ _tag: 'PlayerInventoryDelta' as const, world: actor.world, revision: nextRevision, player: message.player, state: inventorySnapshot(inventory) }]
+              : []),
+            { _tag: 'EntitySpawnDelta', world: worldId, revision: nextRevision, entity: tnt },
+          ],
+        }
+      }
       case 'EntityAttackCommand': {
         const entity = entities.get(message.entityId)
         if (entity === undefined) return { accepted: false, reason: 'resource-not-found' }
@@ -1264,6 +1308,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     notifyStateChanged()
     sendMessage(client, result)
     for (const delta of deltas) broadcast(delta)
+    if (decision.worldSnapshotRequired === true) broadcast(authoritativeSnapshot())
     return { accepted: true, message }
   }
 
@@ -1831,6 +1876,54 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       const damagedPlayers = new Set<PlayerId>()
       const deadPlayers = new Set<PlayerId>()
       let worldChanged = false
+      const applyExplosion = (
+        center: Readonly<{ x: number; y: number; z: number }>,
+        power: number,
+      ): void => {
+        // Explosion resolution always needs a snapshot, including an empty crater.
+        worldChanged = true
+        const blockReader = (position: BlockPos) => {
+          if (!isInBounds(position)) return undefined
+          const block = blockAt(position)
+          return block === null ? { resistance: 0, destructible: false } : {
+            resistance: 1,
+            destructible: block !== 'bedrock',
+          }
+        }
+        const plan = planExplosion({
+          center,
+          radius: power,
+          seed: revision,
+          blocks: blockReader,
+          entities: [],
+        })
+        for (const position of plan.destroyedBlocks) {
+          blocks.set(positionKey(position), { at: position, block: null })
+          disturbFallingBlocks([position])
+          worldChanged = true
+        }
+        for (const [player, presence] of players) {
+          if (presence.world !== worldId) continue
+          const distance = Math.hypot(
+            presence.at.x - center.x,
+            presence.at.y + 0.9 - center.y,
+            presence.at.z - center.z,
+          )
+          if (distance >= power) continue
+          const exposure = 1 - distance / power
+          const playerVitals = vitals.get(player)
+          if (playerVitals === undefined) continue
+          const wasAlive = playerVitals.health > 0
+          playerVitals.health = Math.max(0, playerVitals.health - (((exposure * exposure + exposure) / 2) * 7 * power + 1))
+          const hungerActor = hungerActors.get(player)
+          if (hungerActor !== undefined) hungerActors.set(player, {
+            ...hungerActor,
+            state: { ...hungerActor.state, health: playerVitals.health },
+          })
+          damagedPlayers.add(player)
+          if (wasAlive && playerVitals.health <= 0) deadPlayers.add(player)
+        }
+      }
       for (const entity of entities.values()) {
         if (entity._tag === 'arrow') {
           const ageTicks = entity.ageTicks + elapsedTicks
@@ -1891,6 +1984,19 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
           continue
         }
+        if (entity._tag === 'primed-tnt') {
+          const burnedSecs = entity.burnedSecs + elapsedSecs
+          if (burnedSecs >= PRIMED_TNT_FUSE_SECS) {
+            entities.delete(entity.entityId)
+            movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
+            applyExplosion(entity.at, TNT_EXPLOSION_POWER)
+            continue
+          }
+          const updated = { ...entity, burnedSecs }
+          entities.set(updated.entityId, updated)
+          movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
+          continue
+        }
         if (entity._tag !== 'living') continue
         const targetEntry = [...players.entries()]
           .filter(([player, presence]) => presence.world === worldId && (vitals.get(player)?.health ?? 0) > 0)
@@ -1929,47 +2035,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           if (step.explosion !== undefined) {
             entities.delete(entity.entityId)
             movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
-            const blockReader = (position: BlockPos) => {
-              if (!isInBounds(position)) return undefined
-              const block = blockAt(position)
-              return block === null ? { resistance: 0, destructible: false } : {
-                resistance: 1,
-                destructible: block !== 'bedrock',
-              }
-            }
-            const plan = planExplosion({
-              center: entity.at,
-              radius: step.explosion.power,
-              seed: revision,
-              blocks: blockReader,
-              entities: [],
-            })
-            for (const position of plan.destroyedBlocks) {
-              blocks.set(positionKey(position), { at: position, block: null })
-              disturbFallingBlocks([position])
-              worldChanged = true
-            }
-            for (const [player, presence] of players) {
-              if (presence.world !== worldId) continue
-              const distance = Math.hypot(
-                presence.at.x - entity.at.x,
-                presence.at.y + 0.9 - entity.at.y,
-                presence.at.z - entity.at.z,
-              )
-              if (distance >= step.explosion.power) continue
-              const exposure = 1 - distance / step.explosion.power
-              const playerVitals = vitals.get(player)
-              if (playerVitals === undefined) continue
-              const wasAlive = playerVitals.health > 0
-              playerVitals.health = Math.max(0, playerVitals.health - (((exposure * exposure + exposure) / 2) * 7 * step.explosion.power + 1))
-              const hungerActor = hungerActors.get(player)
-              if (hungerActor !== undefined) hungerActors.set(player, {
-                ...hungerActor,
-                state: { ...hungerActor.state, health: playerVitals.health },
-              })
-              damagedPlayers.add(player)
-              if (wasAlive && playerVitals.health <= 0) deadPlayers.add(player)
-            }
+            applyExplosion(entity.at, step.explosion.power)
             continue
           }
           const mobState = creeperWireState(step.fuse, hostileMobState)
