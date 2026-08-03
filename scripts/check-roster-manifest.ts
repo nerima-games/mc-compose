@@ -274,8 +274,8 @@ export const compareModule = (
   module: RosterModule,
   io: Io,
 ): ReadonlyArray<string> => {
-  const idsPath = path.join(root, module.name, 'stages', 'stage-ids.ts')
-  const registrationPath = path.join(root, module.name, 'stages', 'registration.ts')
+  const idsPath = path.join(root, module.name, 'src', 'stages', 'stage-ids.ts')
+  const registrationPath = path.join(root, module.name, 'src', 'stages', 'registration.ts')
 
   const idsText = io.readFile(idsPath)
   const registrationText = io.readFile(registrationPath)
@@ -309,8 +309,8 @@ export const compareModule = (
     const mintedAt = ids.get(
       [...ids.entries()].find(([, value]) => value.id === stage.id)?.[0] ?? '',
     )
-    const expectedDeclared = `${module.name}/stages/registration.ts:${String(onDisk?.declaredAtLine ?? 0)}`
-    const expectedMinted = `${module.name}/stages/stage-ids.ts:${String(mintedAt?.line ?? 0)}`
+    const expectedDeclared = `${module.name}/src/stages/registration.ts:${String(onDisk?.declaredAtLine ?? 0)}`
+    const expectedMinted = `${module.name}/src/stages/stage-ids.ts:${String(mintedAt?.line ?? 0)}`
 
     if (stage.declaredAt !== expectedDeclared) {
       problems.push(
@@ -347,16 +347,16 @@ export const compareSilentModule = (
   entry: { readonly name: string },
   io: Io,
 ): ReadonlyArray<string> => {
-  const registrationPath = path.join(root, entry.name, 'stages', 'registration.ts')
+  const registrationPath = path.join(root, entry.name, 'src', 'stages', 'registration.ts')
   const text = io.readFile(registrationPath)
   if (text === undefined) {
     return []
   }
-  const idsText = io.readFile(path.join(root, entry.name, 'stages', 'stage-ids.ts')) ?? ''
+  const idsText = io.readFile(path.join(root, entry.name, 'src', 'stages', 'stage-ids.ts')) ?? ''
   const parsed = parseRegistrations(
     registrationPath,
     text,
-    parseStageIds(path.join(root, entry.name, 'stages', 'stage-ids.ts'), idsText),
+    parseStageIds(path.join(root, entry.name, 'src', 'stages', 'stage-ids.ts'), idsText),
   )
   return parsed.stages.length === 0
     ? []

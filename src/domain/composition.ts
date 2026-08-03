@@ -78,17 +78,18 @@ export type StageRegistration = {
 }
 
 /**
- * A module's Layer, with `ROut` and `E` erased — but NOT `RIn`.
+ * A self-contained module Layer at the composition boundary.
  *
  * ---------------------------------------------------------------------------
  * What is erased, what is not, and why the difference matters
  * ---------------------------------------------------------------------------
  *
  * `composeGame` takes a heterogeneous array of modules whose PROVIDED service
- * types differ. Expressing that union precisely needs a variadic tuple type
- * threaded through `mergeModuleLayers`, `ComposedGame` and `composeGame`'s
- * return; `ROut` and `E` are therefore still `any`, and an honest `any` beats a
- * fake precision.
+ * types differ. The variadic tuple is threaded through
+ * `mergeModuleLayers`, `ComposedGame` and `composeGame`'s return, so the
+ * composed layer exposes the union of the services the supplied modules
+ * provide. An explicitly erased `GameModule` still produces `never`, which is
+ * deliberately conservative: the boundary never claims an unknown service.
  *
  * `RIn` is `never`, and that is a real tightening rather than a cosmetic one.
  * With `RIn` erased to `any`, `Effect.provide(game.layer)` ERASED the
@@ -97,37 +98,27 @@ export type StageRegistration = {
  * is the worst possible shape for this particular failure — `tsc` caught it
  * only incidentally, via `exactOptionalPropertyTypes`, and only sometimes.
  * `Layer`'s `RIn` is covariant (`out RIn`), so `Layer<X, E, R>` is assignable
- * to `Layer<any, any, never>` exactly when `R` is `never`. A module must
+ * to `Layer<never, unknown, never>` exactly when `R` is `never`. A module must
  * therefore arrive SELF-CONTAINED, which is not a new rule: modules are peers
  * (`Layer.merge`, never `Layer.provide`), and a module needing another
  * module's services to build is the dependency edge plan.md §2.3-1 forbids
  * outright. A module that needs a platform handle takes it before it is handed
  * to `composeGame`, where the host still has the type to satisfy.
  *
- * WHAT REMAINS UNSOUND, stated plainly: because `ROut` is `any`,
- * `Effect.provide(game.layer)` still cannot check that the service an effect
- * asks for is one some module provides. That hole no longer sits on the FRAME's
- * path — `runFrame` carries `FrameServices` in its own type and `runFrameWith`
- * discharges it against a precisely typed `Layer.Layer<FrameServices>` — but it
- * is still there for anything else built on `game.layer`. Closing it needs the
- * variadic tuple; `test/composition.test.ts` pins the limit so that it is a
- * known hole rather than a surprise.
+ * The frame path remains precise through `FrameServices` and `runFrameWith`.
  */
-export type ModuleLayer = Layer.Layer<any, any, never>
+export type ModuleLayer = Layer.Layer<never, unknown, never>
 
 /**
  * A module that provides no services.
  *
  * Exported rather than left to callers writing `Layer.empty`, because
  * `Layer.empty` does NOT assign to `ModuleLayer`: `Layer` declares `in ROut`
- * (contravariant), so `Layer<never, ...>` would need `any` to be assignable to
- * `never` — and `never` is the one type `any` does not assign to. Every real
- * module layer assigns fine; the empty one is the single exception, and this
- * constant is where that exception is confined.
+ * (contravariant), so `Layer.empty` is already assignable to this safe erased
+ * boundary. Every real module layer also assigns fine; the constant remains
+ * the shared spelling for an empty module.
  *
- * Note that the assertion widens `ROut` only. `RIn` is `never` on both sides,
- * so tightening `ModuleLayer`'s third parameter did not make this cast any
- * broader than it already was.
+ * No output service is claimed by the empty layer.
  */
 export const EMPTY_MODULE_LAYER: ModuleLayer = Layer.empty as unknown as ModuleLayer
 
@@ -151,10 +142,10 @@ export const EMPTY_MODULE_LAYER: ModuleLayer = Layer.empty as unknown as ModuleL
  * appears. It is deliberately not erased there: the host is what discharges it,
  * and the host has the type to do so.
  */
-export type GameModule = {
+export type GameModule<ROut = never, E = unknown> = {
   /** For diagnostics only. Never branched on. */
   readonly name: string
-  readonly layers: ModuleLayer
+  readonly layers: Layer.Layer<ROut, E, never>
   readonly frameStages: ReadonlyArray<StageRegistration>
 }
 
@@ -172,24 +163,24 @@ export type GameModule = {
  * to build its input stage still forces the host to supply `InputService`. That
  * is the property the erased `ModuleLayer` cannot give, and it is why this
  * function exists rather than callers writing `Effect.map` by hand and losing
- * the parameter to inference on an `any`.
+ * the parameter to inference on an erased boundary.
  */
-export const registerModule = <RRegister>(module: {
+export const registerModule = <RRegister, ROut = never, E = unknown>(module: {
   readonly name: string
-  readonly layers: ModuleLayer
+  readonly layers: Layer.Layer<ROut, E, never>
   readonly frameStages: Effect.Effect<ReadonlyArray<StageRegistration>, never, RRegister>
-}): Effect.Effect<GameModule, never, RRegister> =>
+}): Effect.Effect<GameModule<ROut, E>, never, RRegister> =>
   Effect.map(module.frameStages, (frameStages) => ({
     name: module.name,
     layers: module.layers,
     frameStages,
   }))
 
-export type ComposedGame = {
+export type ComposedGame<ROut = never, E = unknown> = {
   /** The resolved total order, plus the dropped and the unrecognised. */
   readonly plan: StageOrderPlan
   /** Every module's services, merged. */
-  readonly layer: ModuleLayer
+  readonly layer: Layer.Layer<ROut, E, never>
   /**
    * Run one frame: every stage, once, in `plan.order`.
    *
@@ -242,24 +233,23 @@ export type ComposeOptions = {
  * needed module B's services to *build*, that would be a dependency edge
  * between two experience modules, which plan.md §2.3-1 forbids outright.
  */
-export const mergeModuleLayers = (modules: ReadonlyArray<GameModule>): ModuleLayer => {
-  // A plain loop rather than `reduce`: with `ModuleLayer` erased to `any`,
-  // `reduce`'s overload set resolves to the wrong signature and the accumulator
-  // is inferred as `GameModule`. The loop states the intent unambiguously.
-  //
+type ModuleList = ReadonlyArray<GameModule<never, unknown>>
+type LayerOutput<T> = T extends Layer.Layer<infer ROut, unknown, never> ? ROut : never
+type LayerError<T> = T extends Layer.Layer<never, infer E, never> ? E : never
+type ModuleOutput<Modules extends ModuleList> = LayerOutput<Modules[number]['layers']>
+type ModuleError<Modules extends ModuleList> = LayerError<Modules[number]['layers']>
+
+export const mergeModuleLayers = <const Modules extends ModuleList>(
+  modules: Modules,
+): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, never> => {
   // Seeded with EMPTY_MODULE_LAYER; see that constant for why `Layer.empty`
   // cannot be used directly.
   //
-  // NOTE on the erasure: erasing to `Layer<never, unknown, unknown>` instead
-  // would need no assertion anywhere — but then `Effect.provide(game.layer)`
-  // would discharge no requirement, which defeats the purpose of merging. The
-  // precise alternative is a variadic tuple type, and that belongs to the
-  // vertical-slice spike once the real service set exists.
-  let merged = EMPTY_MODULE_LAYER
+  let merged: ModuleLayer = EMPTY_MODULE_LAYER
   for (const module of modules) {
     merged = Layer.merge(merged, module.layers)
   }
-  return merged
+  return merged as unknown as Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, never>
 }
 
 /** Every module's stages, flattened. Order here is irrelevant — the resolver sorts. */
@@ -278,16 +268,16 @@ const asConstraint = (registration: StageRegistration): StageConstraint =>
  * stage id, or a cycle. Everything else — a dangling `after`, a module with no
  * stages, an empty module list — is legal and reported rather than rejected.
  */
-export const composeGame = (
-  modules: ReadonlyArray<GameModule>,
+export const composeGame = <const Modules extends ModuleList>(
+  modules: Modules,
   options: ComposeOptions = {},
-): Either.Either<ComposedGame, StageOrderError> => {
+): Either.Either<ComposedGame<ModuleOutput<Modules>, ModuleError<Modules>>, StageOrderError> => {
   const stages = collectStages(modules)
   const skeleton = options.skeleton ?? STANDARD_STAGE_SKELETON
 
   return Either.map(
     resolveStageOrder(stages.map(asConstraint), { skeleton }),
-    (plan): ComposedGame => {
+    (plan): ComposedGame<ModuleOutput<Modules>, ModuleError<Modules>> => {
       const byId = new Map(stages.map((stage) => [stage.id, stage] as const))
       const ordered = plan.order.flatMap((id) => {
         const stage = byId.get(id)

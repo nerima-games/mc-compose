@@ -1,5 +1,5 @@
 /**
- * THE ROSTER MANIFEST — every frame stage the sixteen repositories actually
+ * THE ROSTER MANIFEST — every frame stage the six repositories actually
  * register today, transcribed with provenance.
  *
  * ---------------------------------------------------------------------------
@@ -129,26 +129,44 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         id: 'gameplay:interactions',
         // Binds to mc-sim's registered `sim:physics` stage below.
         after: ['sim:physics'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:1088',
-        idAt: 'mx-gameplay/stages/stage-ids.ts:41',
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:2687',
+        idAt: 'mx-gameplay/src/stages/stage-ids.ts:41',
+      },
+      {
+        id: 'gameplay:fire',
+        after: ['gameplay:interactions'],
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3481',
+        idAt: 'mx-gameplay/src/stages/stage-ids.ts:43',
+      },
+      {
+        id: 'gameplay:survival-hunger',
+        after: ['gameplay:fire'],
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3486',
+        idAt: 'mx-gameplay/src/stages/stage-ids.ts:45',
       },
       {
         id: 'gameplay:entities',
-        after: ['gameplay:interactions'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:1621',
-        idAt: 'mx-gameplay/stages/stage-ids.ts:43',
+        after: ['gameplay:survival-hunger'],
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3491',
+        idAt: 'mx-gameplay/src/stages/stage-ids.ts:47',
+      },
+      {
+        id: 'gameplay:ender-dragon',
+        after: ['gameplay:entities'],
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3740',
+        idAt: 'mx-gameplay/src/stages/stage-ids.ts:49',
       },
       {
         id: 'gameplay:fluids',
-        after: ['gameplay:entities'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:1843',
-        idAt: 'mx-gameplay/stages/stage-ids.ts:45',
+        after: ['gameplay:ender-dragon'],
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3748',
+        idAt: 'mx-gameplay/src/stages/stage-ids.ts:51',
       },
       {
         id: 'gameplay:time-weather',
         after: ['gameplay:fluids'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:1858',
-        idAt: 'mx-gameplay/stages/stage-ids.ts:47',
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3782',
+        idAt: 'mx-gameplay/src/stages/stage-ids.ts:53',
       },
     ],
   },
@@ -158,14 +176,14 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
       {
         id: 'redstone:power',
         after: ['sim:physics'],
-        declaredAt: 'mx-redstone/stages/registration.ts:117',
-        idAt: 'mx-redstone/stages/stage-ids.ts:38',
+        declaredAt: 'mx-redstone/src/stages/registration.ts:121',
+        idAt: 'mx-redstone/src/stages/stage-ids.ts:38',
       },
       {
         id: 'redstone:effects',
         after: ['redstone:power'],
-        declaredAt: 'mx-redstone/stages/registration.ts:144',
-        idAt: 'mx-redstone/stages/stage-ids.ts:49',
+        declaredAt: 'mx-redstone/src/stages/registration.ts:149',
+        idAt: 'mx-redstone/src/stages/stage-ids.ts:49',
       },
     ],
   },
@@ -175,14 +193,14 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
       {
         id: 'ui:hud-sync',
         after: ['sim:physics'],
-        declaredAt: 'mx-ui/stages/registration.ts:103',
-        idAt: 'mx-ui/stages/stage-ids.ts:36',
+        declaredAt: 'mx-ui/src/stages/registration.ts:111',
+        idAt: 'mx-ui/src/stages/stage-ids.ts:36',
       },
       {
         id: 'ui:overlay-sync',
         after: ['ui:hud-sync'],
-        declaredAt: 'mx-ui/stages/registration.ts:116',
-        idAt: 'mx-ui/stages/stage-ids.ts:38',
+        declaredAt: 'mx-ui/src/stages/registration.ts:124',
+        idAt: 'mx-ui/src/stages/stage-ids.ts:38',
       },
     ],
   },
@@ -195,32 +213,32 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // that lands in the frame is mc-compose's to decide — its skeleton
         // claims the NAME half of this id (`input`) for the first phase."
         after: [],
-        declaredAt: 'mc-render/stages/registration.ts:262',
-        idAt: 'mc-render/stages/stage-ids.ts:85',
+        declaredAt: 'mc-render/src/stages/registration.ts:262',
+        idAt: 'mc-render/src/stages/stage-ids.ts:85',
       },
       {
         id: 'render:camera-mirror',
         after: ['sim:physics'],
-        declaredAt: 'mc-render/stages/registration.ts:321',
-        idAt: 'mc-render/stages/stage-ids.ts:92',
+        declaredAt: 'mc-render/src/stages/registration.ts:321',
+        idAt: 'mc-render/src/stages/stage-ids.ts:92',
       },
       {
         id: 'render:chunk-sync',
         after: ['render:camera-mirror'],
-        declaredAt: 'mc-render/stages/registration.ts:346',
-        idAt: 'mc-render/stages/stage-ids.ts:94',
+        declaredAt: 'mc-render/src/stages/registration.ts:346',
+        idAt: 'mc-render/src/stages/stage-ids.ts:94',
       },
       {
         id: 'render:draw',
         after: ['render:chunk-sync'],
-        declaredAt: 'mc-render/stages/registration.ts:374',
-        idAt: 'mc-render/stages/stage-ids.ts:96',
+        declaredAt: 'mc-render/src/stages/registration.ts:374',
+        idAt: 'mc-render/src/stages/stage-ids.ts:96',
       },
       {
         id: 'render:post-fx',
         after: ['render:draw'],
-        declaredAt: 'mc-render/stages/registration.ts:404',
-        idAt: 'mc-render/stages/stage-ids.ts:105',
+        declaredAt: 'mc-render/src/stages/registration.ts:404',
+        idAt: 'mc-render/src/stages/stage-ids.ts:105',
       },
     ],
   },
@@ -242,8 +260,8 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // Every cross-repository `after` edge in the roster names it, and until
         // it existed all four dangled.
         after: [],
-        declaredAt: 'mc-sim/stages/registration.ts:184',
-        idAt: 'mc-sim/stages/stage-ids.ts:86',
+        declaredAt: 'mc-sim/src/stages/registration.ts:209',
+        idAt: 'mc-sim/src/stages/stage-ids.ts:86',
       },
     ],
   },
@@ -259,8 +277,8 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // names `render:input` as the precedent, which declares no `after`
         // either for the same reason.
         after: [],
-        declaredAt: 'mx-multiplayer/stages/registration.ts:188',
-        idAt: 'mx-multiplayer/stages/stage-ids.ts:125',
+        declaredAt: 'mx-multiplayer/src/stages/registration.ts:193',
+        idAt: 'mx-multiplayer/src/stages/stage-ids.ts:125',
       },
       {
         id: 'multiplayer:outbound',
@@ -270,8 +288,8 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // one. Same argument as `render:camera-mirror after sim:physics`, aimed
         // at the far end of a socket.
         after: ['sim:physics'],
-        declaredAt: 'mx-multiplayer/stages/registration.ts:234',
-        idAt: 'mx-multiplayer/stages/stage-ids.ts:147',
+        declaredAt: 'mx-multiplayer/src/stages/registration.ts:239',
+        idAt: 'mx-multiplayer/src/stages/stage-ids.ts:135',
       },
     ],
   },
@@ -350,7 +368,10 @@ export const PLAN_4_2_FRAME: ReadonlyArray<string> = [
   'multiplayer:inbound', //    network:inbound         — EXTENSION (not in §4.2)
   'sim:physics', //            simulation:physics
   'gameplay:interactions', //  simulation:interactions
+  'gameplay:fire', //          simulation:fire
+  'gameplay:survival-hunger', // simulation:survival-hunger
   'gameplay:entities', //      simulation:entities
+  'gameplay:ender-dragon', //  simulation:ender-dragon
   'gameplay:fluids', //        simulation:fluids
   'redstone:power', //         simulation:redstone     — mx-redstone orders these two
   'redstone:effects', //       simulation:redstone       against each other
@@ -379,7 +400,10 @@ export const PLAN_4_2_FRAME: ReadonlyArray<string> = [
  */
 export const EXPECTED_PHASE_OF: ReadonlyArray<readonly [string, string]> = [
   ['gameplay:interactions', 'simulation:interactions'],
+  ['gameplay:fire', 'simulation:fire'],
+  ['gameplay:survival-hunger', 'simulation:survival-hunger'],
   ['gameplay:entities', 'simulation:entities'],
+  ['gameplay:ender-dragon', 'simulation:ender-dragon'],
   ['gameplay:fluids', 'simulation:fluids'],
   ['gameplay:time-weather', 'simulation:time-weather'],
   ['redstone:power', 'simulation:redstone'],

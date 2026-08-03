@@ -58,6 +58,8 @@ describe('public API surface', () => {
         // the bridge from kernel's `GameModule` (whose `frameStages` is an
         // Effect) to the post-registration module this repository composes
         'registerModule',
+        // browser runtime lifecycle composition
+        'startBrowserSession',
         // kernel's branded delta, re-exported so a host can construct one
         // without reaching into `domain/kernel-vocabulary.ts`
         'DeltaTimeSecs',
@@ -142,7 +144,10 @@ describe('the prime directive, as a surface check', () => {
         'network:inbound',
         'simulation:physics',
         'simulation:interactions',
+        'simulation:fire',
+        'simulation:survival-hunger',
         'simulation:entities',
+        'simulation:ender-dragon',
         'simulation:fluids',
         'simulation:redstone',
         'simulation:time-weather',
@@ -186,7 +191,10 @@ describe('the prime directive, as a surface check', () => {
         ['network:inbound', ['inbound']],
         ['simulation:physics', ['physics']],
         ['simulation:interactions', ['interactions']],
+        ['simulation:fire', ['fire']],
+        ['simulation:survival-hunger', ['survival-hunger']],
         ['simulation:entities', ['entities']],
+        ['simulation:ender-dragon', ['ender-dragon']],
         ['simulation:fluids', ['fluids']],
         ['simulation:redstone', ['redstone', 'redstone:']],
         ['simulation:time-weather', ['time-weather', 'weather']],
@@ -214,7 +222,7 @@ describe('the prime directive, as a surface check', () => {
     Effect.sync(() => {
       const registeredToday = ROSTER_STAGE_IDS
 
-      expect(registeredToday).toHaveLength(16)
+      expect(registeredToday).toHaveLength(19)
 
       for (const stageId of registeredToday) {
         expect(

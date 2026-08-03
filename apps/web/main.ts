@@ -83,38 +83,74 @@
  * dirty chunk notifications are the only render synchronization path.
  */
 import * as THREE from 'three'
-import { Context, Effect, Either, Exit, Layer, Option, Ref, Scope } from 'effect'
+import { Context, Effect, Either, Exit, Layer, Option, Queue, Ref, Scope } from 'effect'
 import {
+  createOriginalSampleManifest,
+  makeEndAudioController,
+  makeWeatherAudioController,
   makeWebAudioBackend,
+  type EndAudioEvent,
+  type WeatherAudioHandle,
+  type WeatherLoopKind,
   type Vec3,
 } from '@nerima-games/mc-audio'
-import { blockIdOf, blockTypeOfId, propertyOfBlockId } from '@nerima-games/mc-kernel'
+import {
+  blockIdOf,
+  blockTypeOfId,
+  capabilityOfBlockId,
+  MonotonicTimeSecs as KernelMonotonicTimeSecs,
+  position,
+  propertyOfBlockId,
+  type CameraPoseSnapshot,
+} from '@nerima-games/mc-kernel'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
-  advanceFurnace,
+  addExperience as addVitalsExperience,
   containerIdAt,
   emptyFurnaceState,
+  emptyPlayerStorage,
+  equipmentDefinitionFor,
+  EQUIPMENT_SLOTS,
   itemStack,
   makeCropService,
   makeSimFrameState,
   makeTimeService,
   makeWeatherService,
+  planExplosion,
   maxStackCountForItem,
+  totalExperienceAtLevel,
   POTATO_MATURITY_SECS,
   resetLandingImpact,
+  changed,
+  UNCHANGED,
   simStages,
   STARTER_FUEL_RULES,
   STARTER_SMELTING_RECIPES,
+  targetBlockFromPlayerPose,
+  OccupantId,
+  VehicleId,
   type FurnaceState,
   type CropLocation,
   type ItemStack,
   type SimPhysicsConfig,
   type WeatherState,
+  type Vehicle,
 } from '@nerima-games/mc-sim'
 import {
+  biomeFor,
+  blockPosition,
   chunkCoord,
   chunkSnapshotOf,
+  DEFAULT_TERRAIN_LEVELS,
+  detectCompletedEndPortal,
+  END_PORTAL_BLOCK,
+  END_PORTAL_FRAME_OFFSETS,
+  endArrivalDescriptor,
+  endPortalCenterForStronghold,
   generatedChunkSource,
+  nearestStrongholdSite,
+  surfaceHeightAt,
+  villageVillagerSpawnsForChunk,
   type ChunkSource,
 } from '@nerima-games/mc-worldgen'
 import {
@@ -122,7 +158,10 @@ import {
   ESCAPE_KEY_CODE,
   InputService,
   chunkKeyOf,
+  generateTerrainAtlas,
+  makeChunkStoreLightColor,
   makeChunkStoreMesher,
+  makeProductionWorldRenderer,
   makeWorldRenderer,
   renderModule,
   syncWorld,
@@ -130,11 +169,23 @@ import {
   type ChunkRef,
   type RenderEntity,
 } from '@nerima-games/mc-render'
+import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
+import { makeThreePostProcessingRenderer } from './post-processing'
+import { applyAnvilOperation, spendExperienceLevels } from './anvil-repair'
+import { excludeReservedPlacementConsumptions } from './placement-consumption'
+import {
+  advancePlayerSwimmingRuntime,
+  initialPlayerSwimmingRuntimeState,
+  MAX_SWIMMING_OXYGEN_SECS,
+} from './player-swimming-runtime'
+import { deathDropsFromPlayerStorage } from './player-death'
 import {
   chestStorageCloseIntent,
   chestStorageSlotClickIntent,
   chestStorageViewModel,
+  createAnvilView,
   createChestStorageView,
+  createEnchantingTableView,
   createMainMenuView,
   createCrosshairView,
   createFurnaceView,
@@ -142,73 +193,132 @@ import {
   createInventoryView,
   crosshairViewModel,
   furnaceViewModel,
+  anvilViewModel,
+  enchantingTableViewModel,
   hudViewModel,
   initialMainMenuState,
   inventoryViewModel,
+  inventoryActionTarget,
   mainMenuViewModel,
+  makeUiFrameState,
   slotSnapshotOf,
-  uiModule,
+  uiStages,
   type CreateWorldRequest,
   type ChestStorageSlotTarget,
   type FurnaceSlotId,
   type FurnaceSnapshot,
   type InventoryInteractionTarget,
+  type InventoryAction,
+  type InventoryActionTarget,
+  type InventoryDragTarget,
+  type EquipmentSlotId,
   type MainMenuState,
   type SavedWorld,
 } from '@nerima-games/mx-ui'
 import {
+  applyPistonPlan,
   makeRuntimeRedstoneStages,
+  pistonPositionAt,
+  planPistonTransition,
   RedstoneWorldRuntime,
   RedstoneWorldRuntimeLayer,
+  type PistonMovementPlan,
+  type PoweredPistonTransition,
   type RedstoneComponentSnapshot,
 } from '@nerima-games/mx-redstone'
 import {
+  addVillager,
+  advanceFishing,
   advanceMiningProgress,
-  applyArmorToDamage,
+  boardVehicle,
+  bowCharge,
+  bowDamage,
+  bowDamageWithEnchantments,
+  canFireBow,
+  cancelFishing,
+  castFishing,
+  applyEnchantmentOffer,
+  armorDamageWithEnchantments,
   armorPointsForEquipment,
   armorDurabilityWearFromPreMitigationDamage,
+  durabilityWearWithEnchantments,
   CREEPER_KIND,
+  BLAZE_KIND,
+  ENDERMAN_KIND,
   drainBlockUseResults,
-  drainBowShotResults,
   drainItemUseResults,
   drainMeleeAttackResults,
   drainMobDrops,
+  drainMobExperience,
   drainPortalTravels,
   drainPlayerDamages,
+  drainPlayerHeals,
+  drainVillagerTradeResults,
+  enchantmentOffers,
+  enchantmentLevel,
   DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
+  emptyBrewingStandState,
+  emptyStatusEffectState,
+  exitVehicle,
+  fishingPhase,
   gameplayStages,
+  getPlayerMovementSpeedMultiplier,
+  insertBrewingBottle,
+  insertBrewingFuel,
+  insertBrewingIngredient,
   INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
   makeGameplayFrameState,
+  makeVillager,
   makeGeneratedWorld,
   meleeDamageForItem,
+  meleeDamageWithEnchantments,
   isDroppedItemBehaviour,
   isHoeItem,
   isIgnitionItem,
+  isBucketItem,
   isPlaceableItem,
   PLAYER_HALF_HEIGHT,
   PLAYER_HALF_WIDTH,
-  requestBowShot,
   requestBlockBreak,
+  requestFurnaceAdvance,
+  requestBlockPlacementCommand,
   requestItemUse,
   requestMeleeAttack,
   requestMobSpawn,
   requestPotatoFoodUse,
   requestPotatoHarvest,
+  requestTargetedBoneMeal,
   requestTargetedPotatoPlanting,
   requestTargetedSoilTill,
   requestTargetedBlockBreak,
   requestTargetedBlockPlacement,
   requestTargetedBlockUse,
   requestTargetedItemUse,
+  requestVillagerTrade,
+  drainBlockPlacementResults,
+  reelFishing,
+  resolveBedSleep,
   resolveEnvironmentalContactDamage,
+  resolveBowHits,
   resolveFallDamage,
   resolveTargetedPrimaryAttack,
+  restoreVillagerTrades,
+  restoreBrewingStand,
+  restoreStatusEffects,
   setPortalCandidates,
   solidityFromStore,
   spawnDroppedItems,
   spawnMobDrops,
+  stepBoat,
+  stepMinecart,
+  snapshotVillagerTrades,
+  snapshotBrewingStand,
+  snapshotStatusEffects,
+  collectBrewingPotion,
   targetedRightClickRoute,
+  useBrewingPotion,
+  useBucket,
   weatherLightScale,
   miningLootContextForItem,
   miningProgressFraction,
@@ -221,9 +331,17 @@ import {
   type MobDropEvent,
   type MiningProgressState,
   type PlaceableItemType,
+  type VillagerTradeResult,
+  type BrewingBottle,
+  type BrewingIngredient,
+  type EnchantedItem,
+  type FishingRod,
+  type FishingSession,
 } from '@nerima-games/mx-gameplay'
 import {
   encodeFrame,
+  CommandId,
+  EntityId,
   makeMultiplayerHost,
   PlayerId,
   PlayerName,
@@ -231,14 +349,46 @@ import {
   WorldId,
   type MultiplayerHost,
   type NetworkMessage,
+  type AuthoritativeEntityState,
 } from '@nerima-games/mx-multiplayer'
+import { makeBrowserPreview } from '@nerima-games/mc-playground-kit'
 import {
   advanceBowUse,
   IDLE_BOW_USE,
-  takeBowSettlement,
   type BowUseState,
-  type PendingBowShot,
 } from './bow-use'
+import {
+  decodeProjectedEnchantedItem,
+  projectEnchantedItem,
+} from './enchanted-item-state'
+import {
+  advanceProjectileRuntime,
+  initialProjectileRuntimeState,
+  launchRuntimeProjectile,
+  projectileRenderDescriptors,
+  projectileRuntimeSnapshot,
+  recoverProjectile,
+} from './projectile-runtime'
+import {
+  type PlayerDamageCommand,
+  type PlayerDamageCommandResult,
+} from './player-damage-network'
+import {
+  advanceEyeOfEnderRuntime,
+  eyeOfEnderRenderDescriptors,
+  eyeOfEnderRuntimeSnapshot,
+  initialEyeOfEnderRuntimeState,
+  launchRuntimeEyeOfEnder,
+} from './eye-of-ender-runtime'
+import {
+  advanceWitherRuntime,
+  damageRuntimeWither,
+  matchRuntimeWitherSummon,
+  restoreWitherRuntime,
+  snapshotWitherRuntime,
+  summonRuntimeWither,
+  witherRenderDescriptors,
+} from './wither-runtime'
 import {
   composeGame,
   EMPTY_MODULE_LAYER,
@@ -246,21 +396,57 @@ import {
   type GameModule,
 } from '../../src/domain/composition'
 import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../src/domain/kernel-vocabulary'
-import { buildQaRegistry, describeQaApiError, installQaApi } from '../../src/domain/qa-api'
+import {
+  buildQaRegistry,
+  describeQaApiError,
+  installQaApi,
+  QA_GLOBAL_KEY,
+} from '../../src/domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
 import {
   makeBrowserWebSocketTransport,
   type BrowserWebSocketTransport,
 } from './multiplayer-websocket'
+import { validateMultiplayerUrl } from './multiplayer-url'
 import {
-  announceConfirmedPlacements,
   announceInventoryTransition,
   captionRenderSignature,
+  horizontalListenerForward,
   makeAudioRuntime,
+  makePlacementAudioLatch,
 } from './audio-runtime'
 import { createInventoryInteraction } from './inventory-interaction'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
+import { createDroppedItemLifetimeTracker } from './dropped-item-lifetime'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
+import { makeSurvivalHungerCoordinator } from './survival-hunger-runtime'
+import {
+  advanceFootstepRuntime,
+  initialFootstepRuntimeState,
+  surfaceForBlockType,
+} from './footstep-runtime'
+import { advanceFurnaceRuntime } from './furnace-runtime'
+import {
+  advanceSleep,
+  enterSleep,
+  initialSleepRuntimeState,
+  isDangerNearby,
+  leaveSleep,
+  reconcileSleepers,
+  requiredSleeperCount,
+  sleepRatioFromPercentage,
+  validRespawnLocation,
+  type SleepLocation,
+} from './sleep-runtime'
+import {
+  applySleepCommandResult,
+  applySleepEvents,
+  initialSleepClientState,
+  queueSleepCommand,
+  sleepClientFromSnapshot,
+  type SleepClientState,
+  type SleepCommand,
+} from './sleep-network'
 import {
   DEFAULT_PLAYER_SETTINGS,
   PLAYER_BINDING_ACTIONS,
@@ -284,13 +470,19 @@ import {
   loadSession,
   makeSessionChunkSource,
   saveSession,
+  EMPTY_ENTITY_ROSTER,
+  normalizePersistedEntityRosters,
+  persistedItemDropMetadata,
+  persistedItemDropLifetime,
   SESSION_FORMAT_VERSION,
   snapshotResidentChunks,
   type DimensionChunk,
   type PersistedFurnaceState,
   type PersistedLeverState,
   type PersistedPortalState,
-  type SessionMetadata,
+  type PersistedEndPortalFrameState,
+  type PersistedEntityRoster,
+  type PersistedVillager,
   type SessionState,
 } from './session-persistence'
 import {
@@ -298,6 +490,7 @@ import {
   createUniqueSessionId,
   readSessionRoute,
   sessionHref,
+  type SessionRoute,
 } from './session-navigation'
 
 /**
@@ -318,7 +511,6 @@ const clampDelta = (raw: number): DeltaTimeSecs =>
   DeltaTimeSecs(Math.min(Math.max(MIN_FRAME_SECS, raw), MAX_FRAME_SECS))
 
 /** How often the FPS readout is recomputed. Long enough to be a rate, short enough to watch. */
-const FPS_WINDOW_SECS = 0.5
 
 /**
  * How fast the player walks, jumps and turns.
@@ -333,13 +525,15 @@ const FPS_WINDOW_SECS = 0.5
  * grouped and labelled so that deletion is one block rather than a search.
  */
 const WALK_SPEED_M_PER_S = 4.3
-const WALK_EXHAUSTION_PER_METRE = 0.01
 const JUMP_SPEED_M_PER_S = 8.4
 const LOOK_SENSITIVITY = 0.0022
 const WORLD_SEED = 20260728
 const FARMLAND_BLOCK_ID = 49
 const POTATO_CROP_BLOCK_ID = 72
 const DATABASE_NAME = 'nerima-games-minecraft'
+const MISSING_SESSION_ERROR = 'The requested saved world could not be found.'
+
+class RequestedSessionNotFoundError extends Error {}
 const AUTOSAVE_INTERVAL_MS = 5_000
 const SAVE_DEBOUNCE_MS = 500
 const KNOWN_TARGET_BLOCK = { x: 8, y: 63, z: 8 } as const
@@ -348,6 +542,23 @@ const QA_IGNITION_HIT_BLOCK = { x: 8, y: 66, z: 8 } as const
 const QA_IGNITION_CELL = { x: 8, y: 66, z: 9 } as const
 const QA_IGNITION_SUPPORT_BLOCK = { x: 8, y: 65, z: 9 } as const
 const QA_IGNITION_FLOOR_BLOCK = { x: 8, y: 64, z: 10 } as const
+const QA_PISTON = { x: 8, y: 66, z: 8 } as const
+const QA_PISTON_LEVER = { x: 8, y: 66, z: 9 } as const
+const QA_PISTON_NEAR = { x: 8, y: 66, z: 7 } as const
+const QA_PISTON_FAR = { x: 8, y: 66, z: 6 } as const
+const QA_REDSTONE_BUTTON = { x: 8, y: 66, z: 9 } as const
+const QA_REDSTONE_REPEATER = { x: 8, y: 66, z: 8 } as const
+const QA_REDSTONE_LAMP = { x: 8, y: 66, z: 7 } as const
+const QA_REDSTONE_BRANCH_BUTTON = { x: 12, y: 66, z: 9 } as const
+const QA_REDSTONE_BRANCH_WIRE = { x: 12, y: 66, z: 8 } as const
+const QA_REDSTONE_DOOR = { x: 11, y: 66, z: 8 } as const
+const QA_REDSTONE_RAIL = { x: 13, y: 66, z: 8 } as const
+const QA_REDSTONE_DISPENSER = { x: 12, y: 67, z: 8 } as const
+const QA_REDSTONE_HOPPER = { x: 12, y: 65, z: 8 } as const
+const QA_REDSTONE_OBSERVER = { x: 16, y: 66, z: 8 } as const
+const QA_REDSTONE_OBSERVER_INPUT = { x: 16, y: 66, z: 9 } as const
+const QA_REDSTONE_OBSERVER_LAMP = { x: 16, y: 66, z: 7 } as const
+const QA_REDSTONE_COMPARATOR = { x: 20, y: 66, z: 8 } as const
 const QA_ENVIRONMENT_OVERLAP_POSE = {
   feetPosition: { x: 24.95, y: 65, z: 8.5 },
   yawRadians: 0,
@@ -395,10 +606,33 @@ const QA_PORTAL_LAYOUT = {
     z: 8,
   })),
 } as const
+const QA_IGNITION_PORTAL_LAYOUT = {
+  frame: [
+    ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 65, z: 9 })),
+    ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 69, z: 9 })),
+    ...Array.from({ length: 3 }, (_, offset) => ({ x: 7, y: 66 + offset, z: 9 })),
+    ...Array.from({ length: 3 }, (_, offset) => ({ x: 10, y: 66 + offset, z: 9 })),
+  ],
+  interior: Array.from({ length: 6 }, (_, index) => ({
+    x: 8 + (index % 2),
+    y: 66 + Math.floor(index / 2),
+    z: 9,
+  })),
+} as const
 const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'redstone_dust',
+  'redstone_torch',
   'lever',
+  'stone_button',
+  'repeater',
   'redstone_lamp',
+  'observer',
+  'comparator',
+  'dispenser',
+  'hopper',
+  'piston',
+  'powered_rail',
+  'door',
 ])
 
 const EQUIPMENT_ONLY_ITEM_TYPES = [
@@ -428,6 +662,21 @@ const isSwordItem = (item: ItemStack['item']): item is SwordItem =>
 
 type GameplayUseItemType = Exclude<ItemStack['item'], EquipmentOnlyItemType>
 type LegacyGameplayItemType = Exclude<ItemStack['item'], 'arrow' | 'bow'>
+type GameplayModuleItemType = Parameters<typeof isPlaceableItem>[0]
+type GameplayHoeItemType = Parameters<typeof requestTargetedSoilTill>[4]
+type GameplayIgnitionItemType = Parameters<typeof requestTargetedItemUse>[4]
+
+// mx-ui 0.2.10 and mx-gameplay 0.1.35 expose adjacent mc-sim item unions.
+// Their shared runtime item identifiers remain compatible at this host boundary.
+const gameplayModuleItem = (item: ItemStack['item']): GameplayModuleItemType =>
+  item as GameplayModuleItemType
+
+const isGameplayHoeItem = (item: ItemStack['item']): item is GameplayHoeItemType =>
+  isHoeItem(gameplayModuleItem(item))
+
+const isGameplayIgnitionItem = (
+  item: ItemStack['item'],
+): item is GameplayIgnitionItemType => isIgnitionItem(gameplayModuleItem(item))
 
 const EQUIPMENT_ONLY_ITEM_NAMES: ReadonlySet<string> = new Set(EQUIPMENT_ONLY_ITEM_TYPES)
 
@@ -438,15 +687,19 @@ const isLegacyGameplayItemType = (item: ItemStack['item']): item is LegacyGamepl
   item !== 'arrow' && item !== 'bow'
 
 const isPlaceableGameplayItem = (item: ItemStack['item']): item is PlaceableItemType =>
-  isGameplayUseItemType(item) && isLegacyGameplayItemType(item) && isPlaceableItem(item)
+  isGameplayUseItemType(item) &&
+  isLegacyGameplayItemType(item) &&
+  isPlaceableItem(gameplayModuleItem(item))
 
-type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest'
+type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest' | 'anvil' | 'enchanting'
 
 const INVENTORY_PRESENTATIONS = {
   player: { label: 'Inventory', width: 2, height: 2 },
   craftingTable: { label: 'Crafting Table', width: 3, height: 3 },
   furnace: { label: 'Furnace', width: 0, height: 0 },
   chest: { label: 'Chest', width: 0, height: 0 },
+  anvil: { label: 'Anvil', width: 0, height: 0 },
+  enchanting: { label: 'Enchanting Table', width: 0, height: 0 },
 } as const
 
 type SettingsWriteQueue = {
@@ -544,8 +797,27 @@ const bootTitle = async (): Promise<void> => {
   const menuParent = requireElement('main-menu-root')
   const titleStatus = requireElement('title-status')
   const settingsRoot = requireElement('settings-root')
+  const multiplayerJoin = requireElement('multiplayer-join')
+  const multiplayerWorld = requireElement('multiplayer-world')
+  const multiplayerName = requireElement('multiplayer-name')
+  const multiplayerPlayer = requireElement('multiplayer-player')
+  const multiplayerUrl = requireElement('multiplayer-url')
+  const multiplayerRegistrationToken = requireElement('multiplayer-registration-token')
+  const multiplayerJoinButton = requireElement('multiplayer-join-button')
+  if (!(multiplayerJoin instanceof HTMLFormElement)
+    || !(multiplayerWorld instanceof HTMLSelectElement)
+    || !(multiplayerName instanceof HTMLInputElement)
+    || !(multiplayerPlayer instanceof HTMLInputElement)
+    || !(multiplayerUrl instanceof HTMLInputElement)
+    || !(multiplayerRegistrationToken instanceof HTMLInputElement)
+    || !(multiplayerJoinButton instanceof HTMLButtonElement)) {
+    throw new Error('index.html has invalid multiplayer join controls')
+  }
   titleScreen.hidden = false
   document.body.setAttribute('data-mc-compose-route', 'title')
+  if (new URLSearchParams(window.location.search).get('loadError') === 'missing-session') {
+    titleStatus.textContent = MISSING_SESSION_ERROR
+  }
 
   const scope = Effect.runSync(Scope.make())
   const storageContext = await Effect.runPromise(
@@ -585,6 +857,14 @@ const bootTitle = async (): Promise<void> => {
     sessionId,
     name: metadata.name,
   }))
+  multiplayerWorld.replaceChildren(...savedWorlds.map(({ sessionId, name }) => {
+    const option = document.createElement('option')
+    option.value = sessionId
+    option.textContent = name
+    return option
+  }))
+  multiplayerPlayer.value = `player-${crypto.randomUUID().slice(0, 8)}`
+  multiplayerJoinButton.disabled = savedWorlds.length === 0
   const existingIds = savedWorlds.map(({ sessionId }) => sessionId)
   let menuState: MainMenuState = initialMainMenuState
   let menuView: ReturnType<typeof createMainMenuView>
@@ -623,6 +903,46 @@ const bootTitle = async (): Promise<void> => {
   const openSession = async (sessionId: string): Promise<void> => {
     await navigateAfterSettingsSaved(sessionHref(sessionId))
   }
+  multiplayerJoin.addEventListener('submit', (event) => {
+    event.preventDefault()
+    if (titleNavigationPending || !multiplayerJoin.reportValidity()) return
+    const player = multiplayerPlayer.value.trim()
+    const name = multiplayerName.value.trim()
+    if (player.length === 0 || name.length === 0) {
+      titleStatus.textContent = 'Player name and ID cannot be blank.'
+      return
+    }
+    const validation = validateMultiplayerUrl(multiplayerUrl.value, window.location.href)
+    if (!validation.ok) {
+      titleStatus.textContent = validation.message
+      return
+    }
+    const href = new URL(sessionHref(multiplayerWorld.value), window.location.origin)
+    href.searchParams.set('multiplayer', validation.url.href)
+    href.searchParams.set('player', player)
+    href.searchParams.set('multiplayerName', name)
+    const registrationToken = multiplayerRegistrationToken.value
+    try {
+      const registrationTokenKey = multiplayerRegistrationTokenKey(
+        validation.url.href,
+        multiplayerWorld.value,
+        player,
+      )
+      if (registrationToken.length > 0) {
+        window.sessionStorage.setItem(
+          registrationTokenKey,
+          registrationToken,
+        )
+      } else {
+        window.sessionStorage.removeItem(registrationTokenKey)
+      }
+    } catch (error: unknown) {
+      titleStatus.textContent = 'Legacy registration token could not be stored for navigation.'
+      console.error('[mc-compose] multiplayer registration token storage failed', error)
+      return
+    }
+    void navigateAfterSettingsSaved(`${href.pathname}${href.search}`)
+  })
   const createWorld = async ({ name, mode }: CreateWorldRequest): Promise<void> => {
     titleStatus.textContent = ''
     const sessionId = createUniqueSessionId(name, existingIds)
@@ -674,7 +994,7 @@ const readMultiplayerQuery = (search: string): MultiplayerQuery | undefined => {
   const query = new URLSearchParams(search)
   const url = query.get('multiplayer')
   const player = query.get('player')
-  const name = query.get('name')
+  const name = query.get('multiplayerName')
   if (url === null || player === null || name === null || player.length === 0 || name.length === 0) {
     return undefined
   }
@@ -686,6 +1006,18 @@ const readMultiplayerQuery = (search: string): MultiplayerQuery | undefined => {
   }
   return { url, player: PlayerId.make(player), name: PlayerName.make(name) }
 }
+
+const multiplayerReconnectTokenKey = (
+  url: string,
+  worldId: string,
+  player: PlayerId,
+): string => `mc-compose:multiplayer-reconnect:${JSON.stringify([url, worldId, String(player)])}`
+
+const multiplayerRegistrationTokenKey = (
+  url: string,
+  worldId: string,
+  player: string,
+): string => `mc-compose:multiplayer-registration:${JSON.stringify([url, worldId, player])}`
 
 type RemotePlayer = {
   readonly name: PlayerName
@@ -702,9 +1034,10 @@ type MultiplayerRuntime = {
 }
 
 const bootGame = async (
-  sessionId: string,
-  creationMetadata?: SessionMetadata,
+  route: SessionRoute,
 ): Promise<void> => {
+  const { sessionId } = route
+  const creationMetadata = route.kind === 'create' ? route.metadata : undefined
   const gameShell = requireElement('game-shell')
   const pauseOverlay = requireElement('pause-overlay')
   const resumeButton = requireElement('resume-button')
@@ -719,12 +1052,87 @@ const bootGame = async (
   const hudParent = requireElement('hud-root')
   const captionsParent = requireElement('sound-captions')
   const inventoryParent = requireElement('inventory-root')
+  const tradeParent = requireElement('trade-root')
+  const brewingParent = requireElement('brewing-root')
   const touchControlsParent = requireElement('touch-controls')
   const touchLookSurface = requireElement('touch-look-surface')
   const fpsValue = requireElement('fps-value')
+  const multiplayerStatus = requireElement('multiplayer-status')
+  const multiplayerChat = requireElement('multiplayer-chat')
+  const multiplayerChatLog = requireElement('multiplayer-chat-log')
+  const multiplayerChatForm = requireElement('multiplayer-chat-form')
+  const multiplayerChatInput = requireElement('multiplayer-chat-input')
+  if (!(multiplayerStatus instanceof HTMLOutputElement)
+    || !(multiplayerChat instanceof HTMLElement)
+    || !(multiplayerChatLog instanceof HTMLOListElement)
+    || !(multiplayerChatForm instanceof HTMLFormElement)
+    || !(multiplayerChatInput instanceof HTMLInputElement)) {
+    throw new Error('index.html has invalid multiplayer game controls')
+  }
+  fpsValue.setAttribute('data-fps-source', 'mx-ui-frame-dt')
   const stageList = requireElement('stage-order')
   let inventoryOpen = false
+  let tradeOpen = false
+  let brewingOpen = false
+  let brewingStatus = ''
+  let activeVillagerId: string | undefined
+  let tradeStatus = ''
+  let nextVillagerTradeRequestId = 0
   let inventoryMode: InventoryMode = 'player'
+  let enchantmentSeed = WORLD_SEED
+  const customNames = new Map<string, string>()
+  const enchantedItems = new Map<string, EnchantedItem>()
+  type DroppedItemMetadata = {
+    readonly customName?: string
+    readonly enchantedItem?: EnchantedItem
+  }
+  const droppedItemMetadata = new Map<string, DroppedItemMetadata>()
+  const droppedItemLifetime = createDroppedItemLifetimeTracker()
+  const droppedItemMetadataKey = (dimension: SessionState['dimension'], entityId: string): string =>
+    `${dimension}:${entityId}`
+  const equipmentMetadataKey = (slot: EquipmentSlotId): string => `equipment:${slot}`
+  const containerMetadataKey = (containerId: string, slot: number): string =>
+    `container:${containerId}:${String(slot)}`
+  const containerMetadataLocation = (
+    key: string,
+  ): { readonly containerId: string; readonly slot: number } | undefined => {
+    if (!key.startsWith('container:')) return undefined
+    const separator = key.lastIndexOf(':')
+    const slot = Number(key.slice(separator + 1))
+    if (separator <= 'container:'.length || !Number.isInteger(slot) || slot < 0) return undefined
+    return { containerId: key.slice('container:'.length, separator), slot }
+  }
+  const sameItemMetadata = (left: string, right: string): boolean =>
+    customNames.get(left) === customNames.get(right)
+    && JSON.stringify(enchantedItems.get(left) ?? null)
+      === JSON.stringify(enchantedItems.get(right) ?? null)
+  const copyItemMetadata = (source: string, target: string): void => {
+    const enchantedItem = enchantedItems.get(source)
+    const customName = customNames.get(source)
+    if (enchantedItem === undefined) enchantedItems.delete(target)
+    else enchantedItems.set(target, enchantedItem)
+    if (customName === undefined) customNames.delete(target)
+    else customNames.set(target, customName)
+  }
+  const deleteItemMetadata = (key: string): void => {
+    enchantedItems.delete(key)
+    customNames.delete(key)
+  }
+  const deleteContainerMetadata = (containerId: string): void => {
+    const prefix = `container:${containerId}:`
+    for (const key of [...customNames.keys(), ...enchantedItems.keys()]) {
+      if (key.startsWith(prefix)) deleteItemMetadata(key)
+    }
+  }
+  const moveItemMetadata = (source: string, target: string): void => {
+    copyItemMetadata(source, target)
+    deleteItemMetadata(source)
+  }
+  let respawnLocation: SleepLocation | null = null
+  let sleepRuntimeState = initialSleepRuntimeState()
+  let anvilName = ''
+  let anvilStatus = ''
+  let enchantingStatus = ''
   let paused = false
 
   const touchControlTargets = Object.fromEntries(TOUCH_CONTROL_ACTIONS.map((action) => {
@@ -793,19 +1201,96 @@ const bootGame = async (
   ).catch(() => DEFAULT_PLAYER_SETTINGS)
   const settingsWrites = makeSettingsWriteQueue()
   let readAudioListener = (): Vec3 => ({ x: 0, y: 0, z: 0 })
+  let readAudioListenerForward = (): Vec3 => horizontalListenerForward(0)
+  const sampleManifest = createOriginalSampleManifest()
   const audioBackend = Effect.runSync(makeWebAudioBackend({
     global: globalThis,
     initialMasterGain: playerSettings.audioEnabled ? playerSettings.masterVolume : 0,
+    sampleManifest,
   }))
+  canvas.setAttribute('data-audio-samples', String(Object.keys(sampleManifest).length))
   const audio = Effect.runSync(makeAudioRuntime({
     backend: audioBackend,
     nowSecs: browserClock.monotonicSecs,
     listener: () => readAudioListener(),
+    listenerForward: () => readAudioListenerForward(),
     settings: playerSettings,
   }))
+  const endAudio = makeEndAudioController({
+    createLoop: (_kind, initialGain) => Effect.runSync(audioBackend.playTone({
+      durationSecs: 3600,
+      frequency: 42,
+      gain: initialGain,
+      loop: true,
+      pan: 0,
+      wave: 'sine',
+    })),
+    setLoopGain: () => {},
+    stopLoop: (handle) => Effect.runSync(audioBackend.stopTone(handle)),
+    playEvent: () => null,
+    playFallback: (request) => Effect.runSync(audioBackend.playTone({ ...request, loop: false })),
+    release: () => {},
+  })
+  let nextWeatherAudioHandleId = -1
+  const pendingThunder = new Map<number, number>()
+  const weatherAudio = makeWeatherAudioController({
+    createLoop: (kind: WeatherLoopKind, initialGain: number) => Effect.runSync(
+      audioBackend.playTone({
+        durationSecs: 3600,
+        frequency: kind === 'rain' ? 180 : 72,
+        gain: initialGain,
+        loop: true,
+        pan: 0,
+        wave: kind === 'rain' ? 'sawtooth' : 'triangle',
+      }),
+    ),
+    setLoopGain: () => {},
+    stopLoop: (handle) => Effect.runSync(audioBackend.stopTone(handle)),
+    playThunder: ({ delaySecs, gain, pan }): WeatherAudioHandle => {
+      const handle = { id: nextWeatherAudioHandleId-- }
+      const timeout = window.setTimeout(() => {
+        pendingThunder.delete(handle.id)
+        Effect.runSync(audioBackend.playTone({
+          durationSecs: 1.8,
+          frequency: 46,
+          gain,
+          loop: false,
+          pan,
+          wave: 'sawtooth',
+        }))
+      }, delaySecs * 1_000)
+      pendingThunder.set(handle.id, timeout)
+      return handle
+    },
+    release: (handle) => {
+      const timeout = pendingThunder.get(handle.id)
+      if (timeout !== undefined) {
+        window.clearTimeout(timeout)
+        pendingThunder.delete(handle.id)
+      }
+    },
+  })
+  let nextEndAudioEventId = 0
+  const pendingEndAudioEvents: EndAudioEvent[] = []
+  const queueEndAudio = (kind: EndAudioEvent['kind'], position: Vec3): void => {
+    pendingEndAudioEvents.push({
+      id: `end-${String(nextEndAudioEventId++)}`,
+      kind,
+      position,
+    })
+  }
+  const placementAudio = makePlacementAudioLatch(audio)
   const loadedSession = await runStorage(
     Effect.provide(loadSession(sessionId), storageContext),
   )
+  if (route.kind === 'load' && Option.isNone(loadedSession)) {
+    throw new RequestedSessionNotFoundError(MISSING_SESSION_ERROR)
+  }
+  if (route.kind === 'create') {
+    const canonicalUrl = new URL(window.location.href)
+    canonicalUrl.search = new URLSearchParams({ session: sessionId }).toString()
+    window.history.replaceState(null, '', canonicalUrl)
+  }
   const sessionMetadata = Option.isSome(loadedSession)
     ? loadedSession.value.metadata
     : creationMetadata ?? { name: sessionId, mode: 'survival' }
@@ -820,7 +1305,7 @@ const bootGame = async (
     targets: { window, document },
     canvas,
     bindings: playerSettings.bindings,
-    allowsPointerLock: () => !inventoryOpen && !paused,
+    allowsPointerLock: () => !inventoryOpen && !tradeOpen && !brewingOpen && !paused,
     touchControls,
   })
 
@@ -835,7 +1320,7 @@ const bootGame = async (
   // clicks stay UI clicks, and `attack` does not fire.
   canvas.addEventListener('click', (event) => {
     if (event.isTrusted) audio.unlock()
-    if (inventoryOpen || document.pointerLockElement === canvas) {
+    if (inventoryOpen || tradeOpen || brewingOpen || document.pointerLockElement === canvas) {
       return
     }
     try {
@@ -893,13 +1378,39 @@ const bootGame = async (
   // levels down, naming `GLBufferAttribute`. mc-render cannot pin either from
   // its side without naming a `three` type, which is the one thing that seam
   // exists not to do. The host has `three` in scope and pins them here.
-  const worldRenderer = await Effect.runPromise(
-    makeWorldRenderer<HTMLCanvasElement, THREE.BufferGeometry, THREE.MeshBasicMaterial>(
+  const terrainAtlas = generateTerrainAtlas()
+  const atlasTexture = new THREE.DataTexture(
+    terrainAtlas.data,
+    terrainAtlas.width,
+    terrainAtlas.height,
+    THREE.RGBAFormat,
+  )
+  atlasTexture.magFilter = THREE.NearestFilter
+  atlasTexture.minFilter = THREE.NearestFilter
+  atlasTexture.needsUpdate = true
+  canvas.setAttribute('data-atlas-size', `${String(terrainAtlas.width)}x${String(terrainAtlas.height)}`)
+  const webGlAvailable = canvas.getContext('webgl2') !== null || canvas.getContext('webgl') !== null
+  const worldRenderer = webGlAvailable
+    ? await Effect.runPromise(makeProductionWorldRenderer<
+      HTMLCanvasElement,
+      THREE.BufferGeometry,
+      THREE.ShaderMaterial,
+      THREE.InstancedBufferGeometry,
+      THREE.ShaderMaterial
+    >(
       THREE,
       canvas,
       { width: canvas.clientWidth, height: canvas.clientHeight },
-    ),
-  )
+      atlasTexture,
+      { postProcessing: makeThreePostProcessingRenderer },
+    ))
+    : await Effect.runPromise(
+        makeWorldRenderer<HTMLCanvasElement, THREE.BufferGeometry, THREE.MeshBasicMaterial>(
+          THREE,
+          canvas,
+          { width: canvas.clientWidth, height: canvas.clientHeight },
+        ),
+      )
 
   // The canvas is the host's element and its SIZE is the host's business, so
   // the resize listener is here rather than in mc-render — mc-render ships no
@@ -917,6 +1428,56 @@ const bootGame = async (
   // store returned here wrap the same store instance, so a mined block cannot
   // disappear from collision while remaining visible (or vice versa).
   let activeSeed = WORLD_SEED
+  const restoredWorkstations = Option.isSome(loadedSession)
+    ? loadedSession.value.state.workstations
+    : undefined
+  const resolveMetadataStack = (key: string) => {
+    if (!Option.isSome(loadedSession)) return undefined
+    const storage = loadedSession.value.state.storage
+    if (/^\d+$/.test(key)) {
+      const slot = Number(key)
+      const stack = storage.inventory.slots[slot]
+      if (stack === undefined) return undefined
+      return { stack, durability: storage.inventoryDurability[slot] ?? undefined }
+    }
+    if (key.startsWith('equipment:')) {
+      const slot = key.slice('equipment:'.length)
+      if (!(slot in storage.equipment.slots)) return undefined
+      const item = storage.equipment.slots[slot as EquipmentSlotId]
+      if (item === null || item === undefined) return undefined
+      return { stack: itemStack(item.item, item.count), durability: item.durability }
+    }
+    const location = containerMetadataLocation(key)
+    if (location === undefined) return undefined
+    const stack = loadedSession.value.state.containerStorage.containers
+      .find((container) => container.id === location.containerId)
+      ?.slots[location.slot]
+    return stack === null || stack === undefined
+      ? undefined
+      : { stack: itemStack(stack.item, stack.count), durability: stack.durability ?? undefined }
+  }
+  for (const [slot, name] of Object.entries(restoredWorkstations?.customNames ?? {})) {
+    if (resolveMetadataStack(slot) === undefined) continue
+    customNames.set(slot, name)
+  }
+  for (const [slot, encoded] of Object.entries(restoredWorkstations?.enchantedItems ?? {})) {
+    const resolved = resolveMetadataStack(slot)
+    if (resolved === undefined) continue
+    const restored = decodeProjectedEnchantedItem(encoded, resolved.stack, resolved.durability)
+    if (restored !== null) enchantedItems.set(slot, restored)
+  }
+  const restoredRespawn = restoredWorkstations?.respawn
+  respawnLocation = restoredRespawn == null
+    ? null
+    : {
+        dimension: 'overworld',
+        position: restoredRespawn.position,
+        bedPosition: {
+          x: Math.floor(restoredRespawn.position.x),
+          y: Math.floor(restoredRespawn.position.y) - 1,
+          z: Math.floor(restoredRespawn.position.z),
+        },
+      }
   let initialKnownChunks: ReadonlyArray<DimensionChunk> = []
   type Dimension = SessionState['dimension']
   const initialDimension: Dimension = Option.isSome(loadedSession)
@@ -941,6 +1502,7 @@ const bootGame = async (
       chunk: chunkSnapshotOf(chunk),
     }))
   }
+  enchantmentSeed = restoredWorkstations?.enchantmentSeed ?? activeSeed
 
   const persistedChunks = new Map(
     (restored?.chunks ?? []).map(({ dimension, chunk }) => [
@@ -964,9 +1526,94 @@ const bootGame = async (
       dimension: initialDimension,
     }),
   )
+  const restoredEntityRosters = normalizePersistedEntityRosters(
+    Option.isSome(loadedSession) ? loadedSession.value.state.entities : undefined,
+  )
+  const entityRosters = new Map<Dimension, PersistedEntityRoster>([
+    ['overworld', restoredEntityRosters.overworld],
+    ['nether', restoredEntityRosters.nether],
+    ['end', restoredEntityRosters.end],
+  ])
+  for (const [dimension, roster] of entityRosters) {
+    Effect.runSync(
+      world.entities.restore(
+        roster as Parameters<typeof world.entities.restore>[0],
+      ),
+    )
+    const canonicalRoster = Effect.runSync(world.entities.snapshot)
+    entityRosters.set(dimension, canonicalRoster)
+    droppedItemLifetime.restore(
+      dimension,
+      canonicalRoster.entities
+        .filter((entity) => isDroppedItemBehaviour(entity.behaviour))
+        .map((entity) => ({
+          entityId: entity.id,
+          elapsedSecs: persistedItemDropLifetime(entity.behaviour).elapsedSecs,
+        })),
+    )
+    for (const entity of canonicalRoster.entities) {
+      if (!isDroppedItemBehaviour(entity.behaviour)) continue
+      const metadata = persistedItemDropMetadata(entity.behaviour)
+      droppedItemMetadata.set(droppedItemMetadataKey(dimension, entity.id), {
+        ...(metadata.customName === undefined ? {} : { customName: metadata.customName }),
+        ...(metadata.enchantments === undefined
+          ? {}
+          : {
+              enchantedItem: {
+                item: entity.behaviour.item,
+                durability: entity.behaviour.durability,
+                enchantments: metadata.enchantments,
+              },
+            }),
+      })
+    }
+  }
+  const rosterWithDroppedItemLifetimes = (
+    dimension: Dimension,
+    roster: PersistedEntityRoster,
+  ): PersistedEntityRoster => ({
+    ...roster,
+    entities: roster.entities.map((entity) => {
+      if (!isDroppedItemBehaviour(entity.behaviour)) return entity
+      const metadata = droppedItemMetadata.get(droppedItemMetadataKey(dimension, entity.id))
+      return {
+          ...entity,
+          behaviour: {
+            ...entity.behaviour,
+            elapsedSecs: droppedItemLifetime.elapsed(dimension, entity.id),
+            ...(metadata?.customName === undefined ? {} : { customName: metadata.customName }),
+            ...(metadata?.enchantedItem === undefined
+              ? {}
+              : { enchantments: metadata.enchantedItem.enchantments }),
+          },
+        }
+    }),
+  })
+  const snapshotEntityRosters = (): SessionState['entities'] => {
+    entityRosters.set(
+      currentChunkContext.dimension,
+      rosterWithDroppedItemLifetimes(
+        currentChunkContext.dimension,
+        Effect.runSync(world.entities.snapshot),
+      ),
+    )
+    return {
+      overworld: entityRosters.get('overworld') ?? EMPTY_ENTITY_ROSTER,
+      nether: entityRosters.get('nether') ?? EMPTY_ENTITY_ROSTER,
+      end: entityRosters.get('end') ?? EMPTY_ENTITY_ROSTER,
+    }
+  }
+  const survivalHunger = makeSurvivalHungerCoordinator(world.vitals)
   const initialSpawnPose = await Effect.runPromise(world.player.pose)
   const initialSpawnDimension = await Effect.runPromise(world.player.dimension)
   if (Option.isSome(loadedSession)) {
+    await Effect.runPromise(
+      world.entities.restore(
+        (entityRosters.get(initialDimension) ?? EMPTY_ENTITY_ROSTER) as Parameters<
+          typeof world.entities.restore
+        >[0],
+      ),
+    )
     await Effect.runPromise(world.inventory.restoreStorage(loadedSession.value.state.storage))
     await Effect.runPromise(
       world.inventory.restoreContainerStorage(loadedSession.value.state.containerStorage),
@@ -975,46 +1622,138 @@ const bootGame = async (
       world.player.restore(loadedSession.value.state.player, loadedSession.value.state.dimension),
     )
     await Effect.runPromise(world.vitals.restore(loadedSession.value.state.vitals))
-  } else {
+  } else if (isCreativeMode) {
     await Effect.runPromise(world.inventory.add('redstone_dust', 16))
     await Effect.runPromise(world.inventory.add('lever', 4))
     await Effect.runPromise(world.inventory.add('redstone_lamp', 8))
+    await Effect.runPromise(world.inventory.add('piston', 4))
   }
   const time = await Effect.runPromise(makeTimeService())
   const weather = await Effect.runPromise(makeWeatherService())
   const crops = await Effect.runPromise(makeCropService())
+  const gameplayState = await Effect.runPromise(makeGameplayFrameState)
+  const villagerResidents = new Map<string, PersistedVillager>(
+    (Option.isSome(loadedSession) ? loadedSession.value.state.villagers.residents : [])
+      .map((villager) => [villager.id, villager]),
+  )
   if (Option.isSome(loadedSession)) {
     await Effect.runPromise(time.restore(loadedSession.value.state.time))
     await Effect.runPromise(weather.restore(loadedSession.value.state.weather))
     await Effect.runPromise(crops.restore(loadedSession.value.state.crops))
+    await Effect.runPromise(restoreVillagerTrades(
+      gameplayState,
+      loadedSession.value.state.villagers.trades,
+    ))
+    await Effect.runPromise(restoreBrewingStand(gameplayState, loadedSession.value.state.brewing))
+    await Effect.runPromise(restoreStatusEffects(gameplayState, loadedSession.value.state.statusEffects))
+    await Effect.runPromise(gameplayState.enderDragonEncounter.restore(loadedSession.value.state.end.dragon))
+  }
+  const loadedEndState = Option.isSome(loadedSession) ? loadedSession.value.state.end : undefined
+  const endPortalFrameKey = (position: SessionPosition): string =>
+    `${String(position.x)},${String(position.y)},${String(position.z)}`
+  const endPortalFrames = new Map<string, PersistedEndPortalFrameState>(
+    (loadedEndState?.frames ?? []).map((frame) => [endPortalFrameKey(frame.position), frame]),
+  )
+  let endPortalComplete = loadedEndState?.portalComplete ?? false
+  let exitPortalMaterialized = loadedEndState?.exitPortalMaterialized ?? false
+  let dragonEggRewarded = loadedEndState?.dragonEggRewarded ?? false
+  let witherRuntimeState = restoreWitherRuntime(
+    Option.isSome(loadedSession) ? loadedSession.value.state.wither : undefined,
+  )
+  const endDragonPosition = (): SessionPosition => {
+    const dragon = Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
+    const angle = dragon.phaseTimerSecs * (dragon.phase === 'charging' ? 1.4 : 0.35)
+    const radius = dragon.phase === 'perching' ? 4 : dragon.phase === 'charging' ? 8 : 20
+    return {
+      x: Math.cos(angle) * radius,
+      y: dragon.phase === 'perching' ? 68 : 76,
+      z: Math.sin(angle) * radius,
+    }
   }
 
   const presentWeather = (state: WeatherState): void => {
     canvas.setAttribute('data-weather', state.weather)
     canvas.setAttribute('data-weather-remaining-secs', String(state.remainingSecs))
-    canvas.style.filter = `brightness(${String(weatherLightScale(state.weather))})`
   }
   presentWeather(Effect.runSync(weather.snapshot))
 
+  const weatherDaylight = (timeOfDay: number): number =>
+    Math.max(0.08, Math.sin(Math.PI * 2 * (timeOfDay - 0.25)))
+
+  const presentWeatherRuntime = (
+    state: WeatherState,
+    pose: { readonly feetPosition: Vec3 },
+    nowSecs: number,
+  ): void => {
+    const timeState = Effect.runSync(time.snapshot)
+    const lightningSequence = state.weather === 'thunder'
+      ? Math.floor(timeState.ticks / (60 * 8))
+      : undefined
+    const intensity = state.weather === 'clear' ? 0 : 1
+    const camera = {
+      x: pose.feetPosition.x,
+      y: pose.feetPosition.y + EYE_LEVEL_OFFSET,
+      z: pose.feetPosition.z,
+    }
+    const renderPlan = Effect.runSync(worldRenderer.weather.frame({
+      mode: state.weather,
+      intensity,
+      daylight: weatherDaylight(Effect.runSync(time.timeOfDay)),
+      temperature: 1,
+      seed: activeSeed,
+      lightningSequence,
+    }, camera))
+    const thunder = lightningSequence === undefined
+      ? undefined
+      : {
+          id: `weather-thunder-${String(lightningSequence)}`,
+          occurredAtSecs: nowSecs,
+          position: { x: camera.x + 24, y: camera.y + 12, z: camera.z + 12 },
+        }
+    weatherAudio.update({
+      mode: state.weather,
+      intensity,
+      listener: camera,
+      listenerForward: readAudioListenerForward(),
+      occlusion: 0,
+      thunder,
+    })
+    canvas.setAttribute('data-weather-particles', String(renderPlan.particles.length))
+    canvas.setAttribute('data-weather-lightning', String(renderPlan.lightningFlash > 0))
+    canvas.setAttribute('data-weather-audio-mode', weatherAudio.state().mode)
+  }
+
+  type ChunkColorFor = NonNullable<
+    NonNullable<Parameters<typeof syncWorld>[3]>['colorForChunk']
+  >
   type DimensionChunkContext = {
     readonly dimension: Dimension
     readonly chunkStore: typeof world.chunkStore
     readonly worldgenChunkStore: typeof world.worldgenChunkStore
     readonly dirtyChunks: Parameters<typeof syncWorld>[1]
     readonly meshChunkFromStore: Parameters<typeof syncWorld>[2]
+    readonly colorForChunk: ChunkColorFor
+    readonly lightingSnapshot: () => RenderLightingSnapshot
     readonly streamLoaded: Set<string>
   }
   const makeDimensionChunkContext = (
     dimension: Dimension,
     dimensionWorld: typeof world,
-  ): DimensionChunkContext => ({
-    dimension,
-    chunkStore: dimensionWorld.chunkStore,
-    worldgenChunkStore: dimensionWorld.worldgenChunkStore,
-    dirtyChunks: Effect.runSync(dimensionWorld.worldgenChunkStore.subscribeDirty),
-    meshChunkFromStore: makeChunkStoreMesher(dimensionWorld.worldgenChunkStore),
-    streamLoaded: new Set<string>(),
-  })
+  ): DimensionChunkContext => {
+    const lighting = trackChunkLightColor((chunk, quads) =>
+      makeChunkStoreLightColor(dimensionWorld.worldgenChunkStore, chunk, quads),
+    )
+    return {
+      dimension,
+      chunkStore: dimensionWorld.chunkStore,
+      worldgenChunkStore: dimensionWorld.worldgenChunkStore,
+      dirtyChunks: Effect.runSync(dimensionWorld.worldgenChunkStore.subscribeDirty),
+      meshChunkFromStore: makeChunkStoreMesher(dimensionWorld.worldgenChunkStore),
+      colorForChunk: lighting.colorForChunk,
+      lightingSnapshot: lighting.snapshot,
+      streamLoaded: new Set<string>(),
+    }
+  }
   const dimensionContexts = new Map<Dimension, DimensionChunkContext>()
   const initialChunkContext = makeDimensionChunkContext(initialDimension, world)
   dimensionContexts.set(initialDimension, initialChunkContext)
@@ -1025,6 +1764,20 @@ const bootGame = async (
     (Option.isSome(loadedSession) ? loadedSession.value.state.redstone.levers : [])
       .map((lever) => [leverKeyOf(lever), lever]),
   )
+  const comparatorModes = new Map<string, 'compare' | 'subtract'>()
+  const observerInputs = new Map<string, number>()
+  const observerPulses = new Map<string, number>()
+  const poweredRails = new Set<string>()
+  const vehicles = new Map<string, Vehicle>()
+  const localVehicleOccupant = OccupantId('local-player')
+  let mountedVehicleId: string | undefined
+  let nextVehicleSerial = 1
+  let fishingSession: FishingSession | undefined
+  let fishingWater: { readonly dimension: Dimension; readonly position: SessionPosition } | undefined
+  let fishingResult = 'idle'
+  let nextFishingRoll = 1
+  let swimmingState = initialPlayerSwimmingRuntimeState()
+  let footstepRuntimeState = initialFootstepRuntimeState()
   const furnaceKeyOf = (
     furnace: Pick<PersistedFurnaceState, 'dimension' | 'position'>,
   ): string => JSON.stringify([
@@ -1076,6 +1829,10 @@ const bootGame = async (
     get: (_target, property) => Reflect.get(currentChunkContext.chunkStore, property),
   }) as typeof world.chunkStore
 
+  let dirtyGeneration = 0
+  let savedGeneration = 0
+  let debounceTimer: number | undefined
+
   const reportPersistenceFailure = (error: unknown): void => {
     document.body.setAttribute('data-session-persistence', 'failed')
     console.error('[mc-compose] session persistence failed', error)
@@ -1092,6 +1849,7 @@ const bootGame = async (
       )
       return residents.flat()
     },
+    currentGeneration: () => dirtyGeneration,
     snapshotState: () => ({
       seed: activeSeed,
       dimension: Effect.runSync(world.player.dimension),
@@ -1105,6 +1863,37 @@ const bootGame = async (
       furnaces: [...furnaceStates.values()],
       portals: [...portalStates.values()],
       crops: Effect.runSync(crops.snapshot),
+      entities: snapshotEntityRosters(),
+      villagers: {
+        residents: [...villagerResidents.values()],
+        trades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
+      },
+      brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
+      statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
+      wither: snapshotWitherRuntime(witherRuntimeState),
+      fishing: {
+        result: fishingResult,
+        phase: fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
+        water: fishingWater ?? null,
+      },
+      vehicles: [...vehicles.values()],
+      mountedVehicleId: mountedVehicleId ?? null,
+      end: {
+        frames: [...endPortalFrames.values()],
+        portalComplete: endPortalComplete,
+        dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
+        exitPortalMaterialized,
+        dragonEggRewarded,
+      },
+      workstations: {
+        enchantmentSeed,
+        customNames: Object.fromEntries(customNames),
+        enchantedItems: Object.fromEntries(
+          [...enchantedItems].map(([slot, item]) => [slot, JSON.stringify(item)]),
+        ),
+        deathDropDimension,
+        respawn: respawnLocation,
+      },
     }),
     publish: ({ state, chunks }) =>
       runStorage(
@@ -1119,6 +1908,12 @@ const bootGame = async (
           storageContext,
         ),
       ).then(() => undefined),
+    onPublished: (publishedGeneration) => {
+      savedGeneration = Math.max(savedGeneration, publishedGeneration)
+      if (savedGeneration === dirtyGeneration) {
+        document.body.setAttribute('data-session-persistence', 'saved')
+      }
+    },
     onFailure: reportPersistenceFailure,
   })
   let markSessionDirty = (): void => {}
@@ -1170,6 +1965,41 @@ const bootGame = async (
       for (const chunk of changed) {
         yield* context.chunkStore.load(chunk)
         context.streamLoaded.add(chunkKeyOf(chunk))
+        if (context.dimension === 'overworld') {
+          let trades = yield* snapshotVillagerTrades(gameplayState)
+          let discovered = false
+          for (const spawn of villageVillagerSpawnsForChunk(
+            activeSeed,
+            chunk.cx,
+            chunk.cz,
+            (x, z) => {
+              const surfaceY = surfaceHeightAt(activeSeed, x, z)
+              return {
+                biome: biomeFor(activeSeed, x, z, surfaceY, DEFAULT_TERRAIN_LEVELS),
+                surfaceY,
+                seaLevel: DEFAULT_TERRAIN_LEVELS.seaLevel,
+              }
+            },
+          )) {
+            if (!villagerResidents.has(spawn.id)) {
+              villagerResidents.set(spawn.id, {
+                id: spawn.id,
+                profession: spawn.profession,
+                dimension: 'overworld',
+                feetPosition: { x: spawn.x + 0.5, y: spawn.y, z: spawn.z + 0.5 },
+              })
+              discovered = true
+            }
+            if (!trades.villagers.some((villager) => villager.id === spawn.id)) {
+              trades = addVillager(trades, makeVillager(spawn.id, spawn.profession))
+              discovered = true
+            }
+          }
+          if (discovered) {
+            yield* restoreVillagerTrades(gameplayState, trades)
+            markSessionDirty()
+          }
+        }
       }
       for (const chunk of removed) {
         const snapshot = yield* context.worldgenChunkStore.snapshot(chunkCoord(chunk.cx, chunk.cz))
@@ -1183,7 +2013,9 @@ const bootGame = async (
 
       if (changed.length > 0 || removed.length > 0) redstoneDirty = true
 
-      yield* syncWorld(worldRenderer, context.dirtyChunks, context.meshChunkFromStore)
+      yield* syncWorld(worldRenderer, context.dirtyChunks, context.meshChunkFromStore, {
+        colorForChunk: context.colorForChunk,
+      })
       chunksStreamedIn += changed.length
       chunksDropped += removed.length
       canvas.setAttribute('data-chunks-meshed', String(context.streamLoaded.size))
@@ -1215,10 +2047,30 @@ const bootGame = async (
             const block = chunk.blocks[y + lz * 256 + lx * 4096]
             const kind = block === 74
               ? 'wire'
+              : block === 75
+                ? 'torch'
               : block === 76
                 ? 'lever'
+                : block === 77
+                  ? 'button'
+                  : block === 78
+                    ? 'repeater'
                 : block === 79 || block === 80
                   ? 'lamp'
+                  : block === 81
+                    ? 'observer'
+                    : block === 82
+                      ? 'comparator'
+                      : block === 83
+                        ? 'dispenser'
+                        : block === 84
+                          ? 'hopper'
+                  : block === 16
+                    ? 'piston'
+                    : block === 32
+                      ? 'powered-rail'
+                      : block === 106 || block === 107
+                        ? 'door'
                   : undefined
             if (kind === undefined) continue
             const position = { x: chunk.coord.cx * 16 + lx, y, z: chunk.coord.cz * 16 + lz }
@@ -1226,6 +2078,62 @@ const bootGame = async (
               const key = leverKeyOf({ dimension: context.dimension, position })
               observedLevers.add(key)
               components.push({ position, kind, active: leverStates.get(key)?.active ?? false })
+            } else if (kind === 'piston') {
+              const head = Effect.runSync(context.chunkStore.getBlock(
+                pistonPositionAt(position, 'north', 1),
+              ))
+              components.push({
+                position,
+                kind,
+                pistonFacing: 'north',
+                pistonKind: 'sticky',
+                pistonState: head._tag === 'Block' && head.block === 85 ? 'extended' : 'retracted',
+              })
+            } else if (kind === 'repeater') {
+              components.push({
+                position,
+                kind,
+                inputFrom: { x: position.x, y, z: position.z + 1 },
+                outputTo: { x: position.x, y, z: position.z - 1 },
+                delayTicks: 1,
+              })
+            } else if (kind === 'comparator') {
+              components.push({
+                position,
+                kind,
+                inputFrom: { x: position.x, y, z: position.z + 1 },
+                outputTo: { x: position.x, y, z: position.z - 1 },
+                sideInputs: [
+                  { x: position.x - 1, y, z: position.z },
+                  { x: position.x + 1, y, z: position.z },
+                ],
+                mode: comparatorModes.get(leverKeyOf({ dimension: context.dimension, position })) ?? 'compare',
+              })
+            } else if (kind === 'observer') {
+              const key = leverKeyOf({ dimension: context.dimension, position })
+              const watched = Effect.runSync(context.chunkStore.getBlock({
+                x: position.x,
+                y,
+                z: position.z + 1,
+              }))
+              const watchedBlock = watched._tag === 'Block' ? watched.block : 0
+              const previous = observerInputs.get(key)
+              if (previous !== undefined && previous !== watchedBlock) {
+                observerPulses.set(key, simulationElapsedSecs + 0.2)
+              }
+              observerInputs.set(key, watchedBlock)
+              components.push({
+                position,
+                kind,
+                active: (observerPulses.get(key) ?? 0) > simulationElapsedSecs,
+                outputTo: { x: position.x, y, z: position.z - 1 },
+                pulseTicks: 2,
+              })
+            } else if (kind === 'door') {
+              components.push({ position, kind, powered: block === 107 })
+            } else if (kind === 'powered-rail') {
+              const key = leverKeyOf({ dimension: context.dimension, position })
+              components.push({ position, kind, powered: poweredRails.has(key) })
             } else {
               components.push({ position, kind })
             }
@@ -1247,6 +2155,48 @@ const bootGame = async (
     }
     Effect.runSync(redstoneRuntime.syncSnapshot({ dimension: context.dimension, components }))
     redstoneDirty = false
+  }
+
+  const applyPoweredPistonTransition = (transition: PoweredPistonTransition): void => {
+    const context = dimensionContexts.get(transition.dimension as Dimension)
+    if (context === undefined) return
+    const outcome = planPistonTransition(
+      transition,
+      {
+        read: (position) => {
+          if (position.y < 0 || position.y >= 256) return { kind: 'out-of-world' }
+          const reading = Effect.runSync(context.chunkStore.getBlock(position))
+          if (reading._tag !== 'Block') return { kind: 'missing' }
+          return reading.block === 0
+            ? { kind: 'empty' }
+            : { kind: 'block', block: String(reading.block) }
+        },
+      },
+      {
+        pistonImmovable: (block) => capabilityOfBlockId(Number(block), 'pistonImmovable'),
+      },
+    )
+    if (outcome.kind !== 'move') return
+
+    Effect.runSync(applyPistonPlan(outcome.plan, {
+      commit: (plan: PistonMovementPlan) => Effect.gen(function* () {
+        for (const move of plan.moves) {
+          const source = yield* context.chunkStore.getBlock(move.from)
+          if (source._tag !== 'Block' || source.block !== Number(move.block)) {
+            return yield* Effect.dieMessage('piston source changed before commit')
+          }
+        }
+        const head = pistonPositionAt(plan.piston, plan.facing, 1)
+        if (plan.toState === 'retracted') yield* context.chunkStore.setBlock(head, 0)
+        for (const move of plan.moves) {
+          yield* context.chunkStore.setBlock(move.to, Number(move.block))
+          yield* context.chunkStore.setBlock(move.from, 0)
+        }
+        if (plan.toState === 'extended') yield* context.chunkStore.setBlock(head, 85)
+      }),
+    }))
+    markSessionDirty()
+    redstoneDirty = true
   }
 
   await Effect.runPromise(
@@ -1271,22 +2221,22 @@ const bootGame = async (
    * `Parameters<typeof renderModule>[3]` follows the signature instead, so a
    * change to it fails here rather than drifting.
    *
-   * The cast inside is for the brands: `position` is a branded `Position` and
-   * `capturedAtSecs` a branded `MonotonicTimeSecs`. Neither has a runtime
-   * representation and the renderer reads five numbers off this.
+   * The values are constructed with mc-kernel's branded constructors. The
+   * brands have no runtime representation and the renderer reads five numbers
+   * off this, but the construction remains checked at this boundary.
    *
    * The camera is eye-level above the player service's feet position.
    */
-  const initialPose = ({
-    position: {
-      x: spawnPose.feetPosition.x,
-      y: spawnPose.feetPosition.y + EYE_LEVEL_OFFSET,
-      z: spawnPose.feetPosition.z,
-    },
+  const initialPose: CameraPoseSnapshot = {
+    position: position(
+      spawnPose.feetPosition.x,
+      spawnPose.feetPosition.y + EYE_LEVEL_OFFSET,
+      spawnPose.feetPosition.z,
+    ),
     yawRadians: spawnPose.yawRadians,
     pitchRadians: spawnPose.pitchRadians,
-    capturedAtSecs: 0,
-  } as unknown as NonNullable<Parameters<typeof renderModule>[3]>)
+    capturedAtSecs: KernelMonotonicTimeSecs(0),
+  }
 
   const render = renderModule(undefined, undefined, worldRenderer, initialPose)
 
@@ -1308,11 +2258,12 @@ const bootGame = async (
   // `domain/composition.ts` exports the constant precisely so that the cast
   // lives in one place — and `pnpm typecheck:preview` caught this the first
   // time, which is the whole argument for that project existing.
+  const uiFrameState = Effect.runSync(makeUiFrameState)
   const registeredUi = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mx-ui',
       layers: EMPTY_MODULE_LAYER,
-      frameStages: uiModule.frameStages,
+      frameStages: Effect.succeed(uiStages(uiFrameState)),
     }),
   )
 
@@ -1341,6 +2292,9 @@ const bootGame = async (
   //
   const playerApi = world.player
   readAudioListener = () => Effect.runSync(playerApi.pose).feetPosition
+  readAudioListenerForward = () => horizontalListenerForward(
+    Effect.runSync(playerApi.pose).yawRadians,
+  )
   const inputApi = Context.get(inputContext, InputService)
   const applyBindings = (bindings: PlayerSettingsV1['bindings']): void => {
     for (const action of PLAYER_BINDING_ACTIONS) {
@@ -1505,6 +2459,21 @@ const bootGame = async (
   const alignActiveDimension = (dimension: Dimension): boolean => {
     if (currentChunkContext.dimension === dimension) return false
     Effect.runSync(retainDimensionResidents(currentChunkContext))
+    entityRosters.set(
+      currentChunkContext.dimension,
+      rosterWithDroppedItemLifetimes(
+        currentChunkContext.dimension,
+        Effect.runSync(world.entities.snapshot),
+      ),
+    )
+    Effect.runSync(
+      world.entities.restore(
+        (entityRosters.get(dimension) ?? EMPTY_ENTITY_ROSTER) as Parameters<
+          typeof world.entities.restore
+        >[0],
+      ),
+    )
+    entityRosters.set(dimension, Effect.runSync(world.entities.snapshot))
     currentChunkContext = getOrCreateDimensionChunkContext(dimension)
     Effect.runSync(clearRenderedChunks)
     redstoneDirty = true
@@ -1512,9 +2481,26 @@ const bootGame = async (
   }
   let breaksRequested = 0
   let placementsRequested = 0
+  let nativeUseQueued = false
+  let nativeAttackQueued = 0
+  const queueNativeUse = (event: MouseEvent): void => {
+    const bounds = canvas.getBoundingClientRect()
+    const isOverCanvas = event.clientX >= bounds.left
+      && event.clientX <= bounds.right
+      && event.clientY >= bounds.top
+      && event.clientY <= bounds.bottom
+    if (!isOverCanvas && document.pointerLockElement !== canvas) return
+    if (event.button === 0) nativeAttackQueued += 1
+    if (event.button === 2) {
+      nativeUseQueued = true
+    }
+  }
+  window.addEventListener('mousedown', queueNativeUse, true)
   let nextItemUseRequestId = 0
+  const pendingFurnaceAdvances = new Map<string, string>()
+  const deferredFurnaceAdvanceSecs = new Map<string, number>()
   let nextBlockUseRequestId = 0
-  let nextBowShotRequestId = 0
+  let nextBlockPlacementRequestId = 0
   let nextMeleeAttackRequestId = 0
 
   // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
@@ -1527,7 +2513,6 @@ const bootGame = async (
   // A host that used `gameplayModule` directly would get stages that drain an
   // inbox nobody can reach, which is the 「callable but unreachable」 state that
   // repository has had to correct more than once.
-  const gameplayState = await Effect.runPromise(makeGameplayFrameState)
   const portalDimensions = ['overworld', 'nether', 'end'] as const satisfies ReadonlyArray<Dimension>
   const syncPortalCandidatesFor = (dimension: Dimension): Effect.Effect<void> =>
     setPortalCandidates(
@@ -1603,8 +2588,19 @@ const bootGame = async (
   let nextMobDropId = 0
   let lastObservedItemUse: ItemUseResult | undefined
   type PendingItemUse =
-    | { readonly kind: 'ignition'; readonly slotIndex: number; readonly heldItem: IgnitionItemType }
+    | {
+        readonly kind: 'ignition'
+        readonly slotIndex: number
+        readonly heldItem: IgnitionItemType
+        readonly dimension: Dimension
+      }
     | { readonly kind: 'till'; readonly slotIndex: number; readonly heldItem: HoeItemType }
+    | {
+        readonly kind: 'bone-meal'
+        readonly slotIndex: number
+        readonly dimension: Dimension
+        readonly position: { readonly x: number; readonly y: number; readonly z: number }
+      }
     | { readonly kind: 'plant'; readonly slotIndex: number; readonly dimension: Dimension }
     | {
         readonly kind: 'harvest'
@@ -1614,34 +2610,19 @@ const bootGame = async (
     | { readonly kind: 'eat'; readonly slotIndex: number }
   const pendingItemUses = new Map<string, PendingItemUse>()
   let bowUseState: BowUseState = IDLE_BOW_USE
-  let pendingBowShots: ReadonlyMap<string, PendingBowShot> = new Map()
+  let projectileRuntimeState = initialProjectileRuntimeState()
+  let eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
+  let nextEyeOfEnderBreaks: boolean | undefined
   const pendingMeleeAttacks = new Map<
     string,
     { readonly slotIndex: number; readonly item: SwordItem }
   >()
   const bowInteractionLocked = (): boolean =>
-    bowUseState._tag === 'Drawing' || pendingBowShots.size > 0
+    bowUseState._tag === 'Drawing'
   const resetBowUse = (): void => {
     bowUseState = IDLE_BOW_USE
-    pendingBowShots = new Map()
     Effect.runSync(Ref.set(gameplayState.pendingBowShots, []))
     Effect.runSync(Ref.set(gameplayState.bowShotResults, []))
-  }
-  const settleBowShotResults = (): void => {
-    for (const result of Effect.runSync(drainBowShotResults(gameplayState))) {
-      const settlement = takeBowSettlement(pendingBowShots, result)
-      pendingBowShots = settlement.pending
-      if (settlement.fired === null) continue
-      Effect.runSync(world.inventory.consumeAndDamageAt({
-        consume: { item: 'arrow', count: 1 },
-        damage: {
-          location: { _tag: 'Inventory', slotIndex: settlement.fired.bowSlotIndex },
-          expectedItem: 'bow',
-          amount: 1,
-        },
-      }))
-      markSessionDirty()
-    }
   }
   const settleMeleeAttackResults = (): void => {
     for (const result of Effect.runSync(drainMeleeAttackResults(gameplayState))) {
@@ -1655,12 +2636,21 @@ const bootGame = async (
         .slots[pending.slotIndex]?.item ?? null
       if (currentItem !== pending.item) continue
 
+      const enchantedItem = projectedInventoryEnchantedItem(pending.slotIndex)
+      const appliedWear = enchantedItem === null
+        ? 1
+        : durabilityWearWithEnchantments(1, enchantedItem, [Math.random()])
+      if (appliedWear === 0) continue
       const damageResult = Effect.runSync(
         world.inventory.damageAt(
           { _tag: 'Inventory', slotIndex: pending.slotIndex },
-          1,
+          appliedWear,
         ),
       )
+      if (damageResult._tag === 'Broken') {
+        enchantedItems.delete(String(pending.slotIndex))
+        customNames.delete(String(pending.slotIndex))
+      }
       if (damageResult._tag === 'Damaged' || damageResult._tag === 'Broken') {
         markSessionDirty()
       }
@@ -1670,6 +2660,19 @@ const bootGame = async (
     string,
     { readonly dimension: Dimension; readonly position: { readonly x: number; readonly y: number; readonly z: number } }
   >()
+  const pendingBlockPlacements = new Map<
+    string,
+    {
+      readonly dimension: Dimension
+      readonly item: GameplayItemType
+      readonly position: { readonly x: number; readonly y: number; readonly z: number }
+    }
+  >()
+  const pendingWitherSummonChecks: Array<{
+    readonly dimension: Dimension
+    readonly item: 'wither_skeleton_skull'
+    readonly position: { readonly x: number; readonly y: number; readonly z: number }
+  }> = []
   const pendingMiningToolDamage: Array<{
     readonly dimension: Dimension
     readonly position: { readonly x: number; readonly y: number; readonly z: number }
@@ -1684,11 +2687,65 @@ const bootGame = async (
   }> = []
 
   const multiplayerQuery = readMultiplayerQuery(window.location.search)
+  const multiplayerUrlValidation = multiplayerQuery === undefined
+    ? undefined
+    : validateMultiplayerUrl(multiplayerQuery.url, window.location.href)
+  if (multiplayerUrlValidation?.ok === false) {
+    failBoot(multiplayerUrlValidation.message)
+    return
+  }
+  let registrationToken: string | undefined
+  if (multiplayerQuery !== undefined && multiplayerUrlValidation?.ok === true) {
+    const registrationTokenKey = multiplayerRegistrationTokenKey(
+      multiplayerUrlValidation.url.href,
+      sessionId,
+      String(multiplayerQuery.player),
+    )
+    try {
+      registrationToken = window.sessionStorage.getItem(registrationTokenKey) ?? undefined
+      window.sessionStorage.removeItem(registrationTokenKey)
+    } catch (error: unknown) {
+      failBoot('Legacy registration token could not be read securely. Return to the title screen and try again.')
+      console.error('[mc-compose] multiplayer registration token retrieval failed', error)
+      return
+    }
+  }
+  const requiredSleepRatio = sleepRatioFromPercentage(
+    new URLSearchParams(window.location.search).get('sleepPercentage'),
+  )
   const multiplayer = multiplayerQuery === undefined
     ? undefined
     : await Effect.runPromise(
         Effect.gen(function* () {
-          const transport = yield* makeBrowserWebSocketTransport({ url: multiplayerQuery.url })
+          const reconnectTokenKey = multiplayerReconnectTokenKey(
+            multiplayerQuery.url,
+            sessionId,
+            multiplayerQuery.player,
+          )
+          let reconnectToken: string | undefined
+          const transport = yield* makeBrowserWebSocketTransport({
+            url: multiplayerUrlValidation?.url.href ?? multiplayerQuery.url,
+            reconnectAuth: {
+              playerId: String(multiplayerQuery.player),
+              loadToken: () => {
+                if (reconnectToken !== undefined) return reconnectToken
+                try {
+                  reconnectToken = window.localStorage.getItem(reconnectTokenKey) ?? undefined
+                } catch {
+                  // Fall back to the latest token retained for this page lifetime.
+                }
+                return reconnectToken
+              },
+              saveToken: (token) => {
+                reconnectToken = token
+                window.localStorage.setItem(reconnectTokenKey, token)
+              },
+              loadRegistrationToken: () => registrationToken,
+              clearRegistrationToken: () => {
+                registrationToken = undefined
+              },
+            },
+          })
           const host = yield* makeMultiplayerHost.pipe(
             Effect.provideService(TransportPort, transport),
           )
@@ -1701,15 +2758,83 @@ const bootGame = async (
           } satisfies MultiplayerRuntime
         }),
       )
+  const multiplayerInboundStage = multiplayer?.host.stages.find(
+    (stage) => stage.id === 'multiplayer:inbound',
+  )
   let multiplayerRevision = 0
+  const multiplayerEntities = new Map<string, AuthoritativeEntityState>()
+  let nextVitalsCommand = 0
+  let nextEntityCommand = 0
+  let nextFacilityCommand = 0
+  let nextInventoryCommand = 0
+  let nextPlayerDamageCommand = 0
+  let nextVillagerTradeCommand = 0
+  let pendingVitalsCommand: CommandId | null = null
+  let pendingInventoryCommand: {
+    readonly commandId: CommandId
+    acceptedRevision: number | null
+  } | null = null
+  let pendingVillagerTradeCommand: CommandId | null = null
+  let queuedHotbarSelection: number | null = null
+  type QueuedPlayerDamage = Readonly<{
+    readonly amount: number
+    readonly minimumHealthPoints: number
+  }>
+  let queuedPlayerDamages: QueuedPlayerDamage[] = []
+  let pendingPlayerDamage: {
+    readonly commandId: string
+    readonly acceptedRevision: number | null
+  } | null = null
+  let playerDamageResyncPending = false
+  let lastPlayerVitalsRevision = -1
+  let pendingFacilityCommand: {
+    readonly commandId: CommandId
+    readonly facility: 'container' | 'furnace'
+    readonly facilityId: string
+    readonly expectsDelta: boolean
+    acceptedRevision: number | null
+    facilityDeltaRevision: number | null
+    inventoryDeltaRevision: number | null
+  } | null = null
+  let networkSleepState: SleepClientState = initialSleepClientState()
+  let nextSleepRequest = 1
+  let appliedNightSkipRevision: number | null = null
   let multiplayerRejection = ''
   let multiplayerHandshakeComplete = false
   let multiplayerClosed = false
   let lastPlayerMoveSentAt = Number.NEGATIVE_INFINITY
-  const multiplayerStatus = document.createElement('output')
-  multiplayerStatus.className = 'multiplayer-status'
-  multiplayerStatus.hidden = true
-  canvas.insertAdjacentElement('afterend', multiplayerStatus)
+  let lastPlayerMoveSent: {
+    readonly world: WorldId
+    readonly at: { readonly x: number; readonly y: number; readonly z: number }
+    readonly facing: { readonly yawRadians: number; readonly pitchRadians: number }
+  } | undefined
+
+  const drainMultiplayerInbound = (): void => {
+    if (multiplayer === undefined) return
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.sleepInbound))) {
+      if (message._tag === 'SleepSnapshot') networkSleepState = sleepClientFromSnapshot(message.snapshot)
+      else if (message._tag === 'SleepCommandResult') networkSleepState = applySleepCommandResult(networkSleepState, message.result)
+      else if (message._tag === 'SleepEvents') networkSleepState = applySleepEvents(networkSleepState, message.revision, message.events)
+      sleepRuntimeState = initialSleepRuntimeState()
+      for (const [player, location] of networkSleepState.sleepers) {
+        sleepRuntimeState = enterSleep(sleepRuntimeState, String(player), {
+          dimension: location.dimension as Dimension,
+          position: location.bed,
+        })
+      }
+    }
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.witherInbound))) {
+      if (message._tag === 'WitherSnapshot') {
+        witherRuntimeState = restoreWitherRuntime(message.snapshot)
+      }
+    }
+    for (const message of Effect.runSync(multiplayer.host.drainInbound)) {
+      applyNetworkMessage(message)
+    }
+  }
+  multiplayerStatus.hidden = multiplayer === undefined
+  multiplayerStatus.textContent = multiplayer === undefined ? '' : 'Connecting to multiplayer server...'
+  multiplayerChat.hidden = multiplayer === undefined
   canvas.setAttribute('data-multiplayer-connection', multiplayer === undefined ? 'disabled' : 'connecting')
   canvas.setAttribute('data-multiplayer-player-count', '0')
   canvas.setAttribute('data-multiplayer-revision', '0')
@@ -1731,6 +2856,302 @@ const bootGame = async (
     if (dimension === currentChunkContext.dimension) redstoneDirty = true
   }
 
+  const sendVitalsCommand = (action: Extract<NetworkMessage, { readonly _tag: 'PlayerVitalsCommand' }>['action']): void => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingVitalsCommand !== null) return
+    nextVitalsCommand += 1
+    const commandId = CommandId.make(`vitals-${String(nextVitalsCommand)}`)
+    pendingVitalsCommand = commandId
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'PlayerVitalsCommand',
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+      action,
+    }))
+  }
+
+  const sendInventorySelection = (slot: number): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete) return false
+    if (pendingInventoryCommand !== null) {
+      queuedHotbarSelection = slot
+      return true
+    }
+    nextInventoryCommand += 1
+    const commandId = CommandId.make(`inventory-${String(nextInventoryCommand)}`)
+    pendingInventoryCommand = { commandId, acceptedRevision: null }
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'PlayerInventoryCommand',
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+      action: { _tag: 'select-slot', slot },
+    }))
+    return true
+  }
+
+  const sendVillagerTradeCommand = (villagerId: string, offerId: string): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingVillagerTradeCommand !== null) return false
+    nextVillagerTradeCommand += 1
+    const commandId = CommandId.make(`villager-trade-${String(nextVillagerTradeCommand)}`)
+    pendingVillagerTradeCommand = commandId
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'VillagerTradeCommand',
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+      villagerId,
+      offerId,
+      action: 'execute-trade',
+    }))
+    return true
+  }
+
+  const flushQueuedHotbarSelection = (): void => {
+    if (pendingInventoryCommand !== null || queuedHotbarSelection === null) return
+    const slot = queuedHotbarSelection
+    queuedHotbarSelection = null
+    sendInventorySelection(slot)
+  }
+
+  const sendEntityCommand = (
+    command: Omit<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'VehicleCommand' }>, 'commandId' | 'player' | 'world' | 'expectedRevision'>,
+  ): void => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete) return
+    nextEntityCommand += 1
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      ...command,
+      commandId: CommandId.make(`entity-${String(nextEntityCommand)}`),
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+    } as NetworkMessage))
+  }
+
+  const sendFacilityCommand = (
+    command: Omit<Extract<NetworkMessage, { readonly _tag: 'ContainerCommand' | 'FurnaceCommand' }>, 'commandId' | 'player' | 'world' | 'expectedRevision'>,
+  ): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingFacilityCommand !== null) return false
+    nextFacilityCommand += 1
+    const commandId = CommandId.make(`facility-${String(nextFacilityCommand)}`)
+    pendingFacilityCommand = {
+      commandId,
+      facility: command._tag === 'ContainerCommand' ? 'container' : 'furnace',
+      facilityId: command._tag === 'ContainerCommand' ? command.containerId : command.furnaceId,
+      expectsDelta: command.action._tag !== 'open' && command.action._tag !== 'close',
+      acceptedRevision: null,
+      facilityDeltaRevision: null,
+      inventoryDeltaRevision: null,
+    }
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      ...command,
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+    } as NetworkMessage))
+    return true
+  }
+
+  const pumpPlayerDamage = (): void => {
+    if (
+      multiplayer === undefined
+      || !multiplayerHandshakeComplete
+      || playerDamageResyncPending
+      || pendingPlayerDamage !== null
+    ) return
+    const next = queuedPlayerDamages[0]
+    if (next === undefined) return
+    queuedPlayerDamages = queuedPlayerDamages.slice(1)
+    nextPlayerDamageCommand += 1
+    const commandId = `damage-${String(nextPlayerDamageCommand)}`
+    pendingPlayerDamage = { commandId, acceptedRevision: null }
+    const command = {
+      _tag: 'PlayerDamageCommand' as const,
+      commandId,
+      player: String(multiplayer.query.player),
+      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      expectedRevision: multiplayerRevision,
+      amount: next.amount,
+      minimumHealthPoints: next.minimumHealthPoints,
+    } as PlayerDamageCommand & Readonly<{ minimumHealthPoints: number }>
+    Effect.runSync(multiplayer.transport.sendPlayerDamage(command))
+  }
+
+  const settlePlayerDamageAfterVitals = (revision: number): void => {
+    lastPlayerVitalsRevision = Math.max(lastPlayerVitalsRevision, revision)
+    const pending = pendingPlayerDamage
+    if (
+      pending !== null
+      && pending.acceptedRevision !== null
+      && revision >= pending.acceptedRevision
+    ) {
+      pendingPlayerDamage = null
+      pumpPlayerDamage()
+    }
+  }
+
+  const applyPlayerDamageResult = (message: PlayerDamageCommandResult): void => {
+    if (multiplayer === undefined || pendingPlayerDamage?.commandId !== message.commandId) return
+    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+    if (message.accepted) {
+      pendingPlayerDamage = { ...pendingPlayerDamage, acceptedRevision: message.revision }
+      if (lastPlayerVitalsRevision >= message.revision) {
+        pendingPlayerDamage = null
+        pumpPlayerDamage()
+      }
+      return
+    }
+    pendingPlayerDamage = null
+    playerDamageResyncPending = true
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'AuthoritativeResyncRequest',
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      lastKnownRevision: multiplayerRevision,
+    }))
+  }
+
+  const drainPlayerDamageInbound = (): void => {
+    if (multiplayer === undefined) return
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.playerDamageInbound))) {
+      if (message._tag === 'PlayerDamageCommandResult') applyPlayerDamageResult(message)
+    }
+  }
+
+  document.addEventListener('mc-entity-command', (event) => {
+    const detail = (event as CustomEvent<{ readonly entityId: string; readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'; readonly at?: { readonly x: number; readonly y: number; readonly z: number } }>).detail
+    if (detail === undefined) return
+    const entityId = EntityId.make(detail.entityId)
+    if (detail.action === 'attack') sendEntityCommand({ _tag: 'EntityAttackCommand', entityId })
+    else if (detail.action === 'pickup') sendEntityCommand({ _tag: 'EntityPickupCommand', entityId })
+    else sendEntityCommand({
+      _tag: 'VehicleCommand',
+      entityId,
+      action: detail.action === 'move' && detail.at !== undefined ? { _tag: 'move', at: detail.at } : detail.action as 'mount' | 'dismount',
+    })
+  })
+
+  const applyNetworkVitals = (state: { readonly health: number; readonly hunger: number; readonly experience: number }): void => {
+    const current = Effect.runSync(world.vitals.snapshot)
+    Effect.runSync(world.vitals.restore({
+      ...current,
+      healthPoints: state.health,
+      foodPoints: state.hunger,
+      experiencePoints: state.experience,
+    }))
+    renderPlayerUi()
+  }
+
+  const applyNetworkInventory = (state: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryDelta' }>['state']): void => {
+    Effect.runSync(world.inventory.restore({
+      slots: state.slots.map((stack) => stack === null
+        ? undefined
+        : { item: stack.item as ItemStack['item'], count: stack.count }),
+    }))
+    selectedHotbarIndex = state.selectedSlot
+  }
+
+  type NetworkVillagerTradeState = Extract<NetworkMessage, { readonly _tag: 'VillagerTradeDelta' }>['state']
+
+  const applyNetworkVillagerTrade = (state: NetworkVillagerTradeState): void => {
+    const current = Effect.runSync(snapshotVillagerTrades(gameplayState))
+    const villagers = current.villagers.map((villager) => {
+      if (villager.id !== state.villagerId) return villager
+      return {
+        ...villager,
+        offers: villager.offers.map((offer) => {
+          const networkOffer = state.offers.find((candidate) => candidate.offerId === offer.id)
+          const input = networkOffer?.input[0]
+          if (networkOffer === undefined || input === undefined) return offer
+          return {
+            ...offer,
+            input: { item: input.item as typeof offer.input.item, count: input.count },
+            output: { item: networkOffer.output.item as typeof offer.output.item, count: networkOffer.output.count },
+            uses: networkOffer.uses,
+            maxUses: networkOffer.maxUses,
+          }
+        }),
+      }
+    })
+    Effect.runSync(restoreVillagerTrades(gameplayState, { ...current, villagers }))
+  }
+
+  const applyNetworkTimeWeather = (
+    state: Extract<NetworkMessage, { readonly _tag: 'WorldTimeWeatherDelta' }>['state'],
+  ): void => {
+    Effect.runSync(time.setTimeOfDay(state.timeOfDay / 24_000))
+    const nextWeather: WeatherState = { weather: state.weather, remainingSecs: 300 }
+    Effect.runSync(weather.applyTransition(nextWeather))
+    presentWeather(nextWeather)
+  }
+
+  type NetworkContainerState = Extract<NetworkMessage, { readonly _tag: 'ContainerDelta' }>['state']
+  type NetworkFurnaceState = Extract<NetworkMessage, { readonly _tag: 'FurnaceDelta' }>['state']
+
+  const applyNetworkContainers = (states: ReadonlyArray<NetworkContainerState>): void => {
+    Effect.runSync(world.inventory.restoreContainerStorage({
+      version: 1,
+      containers: states.map((state) => ({
+        id: state.containerId,
+        slots: Array.from({ length: 27 }, (_, index) => {
+          const stack = state.slots[index]
+          return stack == null
+            ? null
+            : { item: stack.item as ItemStack['item'], count: stack.count, durability: null }
+        }),
+      })),
+    }))
+  }
+
+  const applyNetworkContainer = (state: NetworkContainerState): void => {
+    const snapshot = Effect.runSync(world.inventory.containerStorageSnapshot)
+    applyNetworkContainers([
+      ...snapshot.containers
+        .filter((container) => container.id !== state.containerId)
+        .map((container) => ({ containerId: container.id, slots: container.slots })),
+      state,
+    ])
+  }
+
+  const applyNetworkFurnace = (state: NetworkFurnaceState): void => {
+    const existing = furnaceStates.get(state.furnaceId)
+    let location: Pick<PersistedFurnaceState, 'dimension' | 'position'> | undefined = existing
+    if (location === undefined) {
+      try {
+        const parsed: unknown = JSON.parse(state.furnaceId)
+        if (
+          Array.isArray(parsed)
+          && parsed.length === 4
+          && (parsed[0] === 'overworld' || parsed[0] === 'nether' || parsed[0] === 'end')
+          && parsed.slice(1).every(Number.isFinite)
+        ) {
+          location = {
+            dimension: parsed[0],
+            position: { x: parsed[1] as number, y: parsed[2] as number, z: parsed[3] as number },
+          }
+        }
+      } catch {
+        return
+      }
+    }
+    if (location === undefined) return
+    const networkStack = (stack: NetworkFurnaceState['input']): ItemStack | null => stack === null
+      ? null
+      : itemStack(stack.item as ItemStack['item'], stack.count)
+    furnaceStates.set(state.furnaceId, {
+      ...location,
+      state: {
+        input: networkStack(state.input),
+        fuel: networkStack(state.fuel),
+        output: networkStack(state.output),
+        burnRemainingSecs: state.burnTicksRemaining / 20,
+        cookElapsedSecs: state.cookTicks / 20,
+      },
+    })
+  }
+
   const applyNetworkMessage = (message: NetworkMessage): void => {
     if (multiplayer === undefined) return
     switch (message._tag) {
@@ -1743,6 +3164,168 @@ const bootGame = async (
         }
         for (const block of message.blocks) applyNetworkBlock(block.world, block.at, block.block)
         break
+      case 'AuthoritativeSnapshot': {
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        const local = message.vitals.find(({ player }) => player === multiplayer.query.player)
+        if (local !== undefined) {
+          applyNetworkVitals(local.state)
+          settlePlayerDamageAfterVitals(message.revision)
+        }
+        const localInventory = message.inventories.find(({ player }) => player === multiplayer.query.player)
+        if (localInventory !== undefined) applyNetworkInventory(localInventory.state)
+        for (const villagerTrade of message.villagerTrades) applyNetworkVillagerTrade(villagerTrade)
+        applyNetworkTimeWeather(message.timeWeather)
+        applyNetworkContainers(message.containers)
+        furnaceStates.clear()
+        for (const furnace of message.furnaces) applyNetworkFurnace(furnace)
+        if (
+          inventoryOpen
+          && inventoryMode === 'chest'
+          && activeChestId !== undefined
+          && !message.containers.some(({ containerId }) => containerId === activeChestId)
+        ) {
+          activeChestId = undefined
+          setInventoryOpen(false)
+        }
+        if (
+          inventoryOpen
+          && inventoryMode === 'furnace'
+          && activeFurnaceKey !== undefined
+          && !furnaceStates.has(activeFurnaceKey)
+        ) {
+          activeFurnaceKey = undefined
+          setInventoryOpen(false)
+        }
+        multiplayerEntities.clear()
+        for (const entity of message.entities ?? []) multiplayerEntities.set(entity.entityId, entity)
+        if (playerDamageResyncPending) {
+          playerDamageResyncPending = false
+          pendingPlayerDamage = null
+          pumpPlayerDamage()
+        }
+        flushQueuedHotbarSelection()
+        pendingVillagerTradeCommand = null
+        break
+      }
+      case 'EntitySpawnDelta':
+      case 'EntityUpdateDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        multiplayerEntities.set(message.entity.entityId, message.entity)
+        break
+      case 'EntityDespawnDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        multiplayerEntities.delete(message.entityId)
+        break
+      case 'PlayerInventoryDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        if (message.player === multiplayer.query.player) applyNetworkInventory(message.state)
+        if (
+          message.player === multiplayer.query.player
+          && pendingFacilityCommand !== null
+        ) {
+          pendingFacilityCommand.inventoryDeltaRevision = message.revision
+          if (
+            pendingFacilityCommand.acceptedRevision !== null
+            && pendingFacilityCommand.facilityDeltaRevision !== null
+            && message.revision >= pendingFacilityCommand.acceptedRevision
+            && pendingFacilityCommand.facilityDeltaRevision >= pendingFacilityCommand.acceptedRevision
+          ) pendingFacilityCommand = null
+        }
+        if (
+          message.player === multiplayer.query.player
+          && pendingInventoryCommand !== null
+          && pendingInventoryCommand.acceptedRevision !== null
+          && message.revision >= pendingInventoryCommand.acceptedRevision
+        ) {
+          pendingInventoryCommand = null
+          flushQueuedHotbarSelection()
+        }
+        break
+      case 'PlayerVitalsDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        if (message.player === multiplayer.query.player) {
+          applyNetworkVitals(message.state)
+          settlePlayerDamageAfterVitals(message.revision)
+        }
+        break
+      case 'WorldTimeWeatherDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        applyNetworkTimeWeather(message.state)
+        break
+      case 'ContainerDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        applyNetworkContainer(message.state)
+        if (
+          pendingFacilityCommand?.facility === 'container'
+          && pendingFacilityCommand.facilityId === message.state.containerId
+        ) pendingFacilityCommand.facilityDeltaRevision = message.revision
+        if (inventoryOpen && inventoryMode === 'chest' && activeChestId === message.state.containerId) renderPlayerUi()
+        break
+      case 'FurnaceDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        applyNetworkFurnace(message.state)
+        if (
+          pendingFacilityCommand?.facility === 'furnace'
+          && pendingFacilityCommand.facilityId === message.state.furnaceId
+        ) pendingFacilityCommand.facilityDeltaRevision = message.revision
+        if (inventoryOpen && inventoryMode === 'furnace' && activeFurnaceKey === message.state.furnaceId) renderPlayerUi()
+        break
+      case 'VillagerTradeDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        applyNetworkVillagerTrade(message.state)
+        if (activeVillagerId === message.state.villagerId) {
+          tradeStatus = 'Trade complete'
+          renderTradeUi()
+        }
+        break
+      case 'AuthoritativeCommandAccepted':
+        multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+        if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
+        if (message.commandId === pendingInventoryCommand?.commandId) {
+          pendingInventoryCommand.acceptedRevision = message.revision
+        }
+        if (message.commandId === pendingVillagerTradeCommand) pendingVillagerTradeCommand = null
+        if (message.commandId === pendingFacilityCommand?.commandId) {
+          if (!pendingFacilityCommand.expectsDelta) pendingFacilityCommand = null
+          else if (
+            pendingFacilityCommand.facilityDeltaRevision !== null
+            && pendingFacilityCommand.inventoryDeltaRevision !== null
+            && pendingFacilityCommand.facilityDeltaRevision >= message.revision
+            && pendingFacilityCommand.inventoryDeltaRevision >= message.revision
+          ) pendingFacilityCommand = null
+          else pendingFacilityCommand.acceptedRevision = message.revision
+        }
+        if (message.commandId === pendingVillagerTradeCommand) {
+          pendingVillagerTradeCommand = null
+          tradeStatus = message.reason
+          if (tradeOpen) renderTradeUi()
+        }
+        break
+      case 'AuthoritativeCommandRejected':
+        multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+        multiplayerRejection = message.reason
+        if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
+        if (message.commandId === pendingInventoryCommand?.commandId) {
+          pendingInventoryCommand = null
+          if (!message.resyncRequired) flushQueuedHotbarSelection()
+        }
+        if (message.commandId === pendingFacilityCommand?.commandId) {
+          pendingFacilityCommand = null
+          chestStatus = message.reason
+          furnaceStatus = message.reason
+          if (inventoryOpen) renderPlayerUi()
+        }
+        if (message.resyncRequired) Effect.runSync(multiplayer.host.enqueueOutbound({ _tag: 'AuthoritativeResyncRequest', world: message.world, lastKnownRevision: multiplayerRevision }))
+        break
       case 'PlayerJoin':
         if (message.player !== multiplayer.query.player) {
           multiplayer.players.set(message.player, {
@@ -1754,7 +3337,22 @@ const bootGame = async (
         }
         break
       case 'PlayerMove': {
-        if (message.player === multiplayer.query.player) break
+        if (message.player === multiplayer.query.player) {
+          const world = message.world ?? WorldId.make(Effect.runSync(playerApi.dimension))
+          const dimension = dimensionFromWorld(world)
+          if (dimension !== undefined) {
+            Effect.runSync(playerApi.restore({
+              feetPosition: message.at,
+              yawRadians: message.facing.yawRadians,
+              pitchRadians: message.facing.pitchRadians,
+            }, dimension))
+            lastPlayerMoveSent = { world, at: message.at, facing: message.facing }
+            lastPlayerMoveSentAt = performance.now() / 1_000
+            multiplayerStatus.textContent = 'Movement corrected by server.'
+            multiplayerStatus.hidden = false
+          }
+          break
+        }
         const previous = multiplayer.players.get(message.player)
         multiplayer.players.set(message.player, {
           name: previous?.name ?? PlayerName.make(String(message.player)),
@@ -1781,12 +3379,39 @@ const bootGame = async (
         multiplayerStatus.textContent = multiplayerRejection
         multiplayerStatus.hidden = false
         break
+      case 'Chat': {
+        const row = document.createElement('li')
+        const sender = message.player === multiplayer.query.player
+          ? multiplayer.query.name
+          : multiplayer.players.get(message.player)?.name ?? message.player
+        row.textContent = `<${String(sender)}> ${message.text}`
+        multiplayerChatLog.append(row)
+        while (multiplayerChatLog.childElementCount > 50) {
+          multiplayerChatLog.firstElementChild?.remove()
+        }
+        break
+      }
       default:
         break
     }
     canvas.setAttribute('data-multiplayer-player-count', String(multiplayer.players.size + 1))
     canvas.setAttribute('data-multiplayer-revision', String(multiplayerRevision))
     canvas.setAttribute('data-multiplayer-rejection', multiplayerRejection)
+  }
+
+  multiplayerChatForm.addEventListener('submit', (event) => {
+    event.preventDefault()
+    const text = multiplayerChatInput.value.trim()
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || text.length === 0) return
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'Chat',
+      player: multiplayer.query.player,
+      text: text.slice(0, 256),
+    }))
+    multiplayerChatInput.value = ''
+  })
+  for (const eventName of ['keydown', 'keyup'] as const) {
+    multiplayerChatInput.addEventListener(eventName, (event) => event.stopPropagation())
   }
 
   const registeredSim = await Effect.runPromise(
@@ -1864,20 +3489,284 @@ const bootGame = async (
   // the parent is an argument because mx-ui never goes looking for a document
   // (docs/public-api.md §4-1).
   //
-  // NOTE: mx-ui's tidy `UiMount` facade in §4-1 is still unimplemented, so the
-  // host calls the per-screen constructors directly. That is a smaller surface
-  // than it looks: both take (factory, parent, motion) and hand back a handle.
+  // mx-ui exposes UiMount, but this host also owns specialized furnace, chest,
+  // anvil, enchanting, and trade overlays, so it composes those screens here.
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduced' : 'full'
   const hud = createHudView(document, hudParent, motion)
   const inventoryView = createInventoryView(document, inventoryParent)
   const furnaceView = createFurnaceView(document, inventoryParent)
   const chestView = createChestStorageView(document, inventoryParent)
+  const anvilView = createAnvilView(document, inventoryParent)
+  const enchantingView = createEnchantingTableView(document, inventoryParent)
   const crosshair = createCrosshairView(document, hudParent, motion)
+  const statusEffectsHud = document.createElement('div')
+  statusEffectsHud.id = 'status-effects-hud'
+  statusEffectsHud.dataset['testid'] = 'status-effects'
+  hudParent.append(statusEffectsHud)
+  const swimmingHud = document.createElement('div')
+  swimmingHud.id = 'swimming-hud'
+  swimmingHud.dataset['testid'] = 'swimming'
+  swimmingHud.hidden = true
+  hudParent.append(swimmingHud)
+  const projectileHud = document.createElement('div')
+  projectileHud.id = 'projectile-hud'
+  projectileHud.dataset['testid'] = 'projectiles'
+  hudParent.append(projectileHud)
+  const sleepHud = document.createElement('div')
+  sleepHud.id = 'sleep-hud'
+  sleepHud.dataset['testid'] = 'sleep'
+  sleepHud.hidden = true
+  hudParent.append(sleepHud)
 
   inventoryParent.setAttribute('role', 'dialog')
   inventoryParent.setAttribute('aria-label', 'Inventory')
   inventoryParent.setAttribute('aria-hidden', 'true')
   document.body.setAttribute('data-inventory-open', 'false')
+  tradeParent.setAttribute('role', 'dialog')
+  tradeParent.setAttribute('aria-label', 'Villager trading')
+  tradeParent.setAttribute('aria-hidden', 'true')
+  document.body.setAttribute('data-trade-open', 'false')
+  brewingParent.setAttribute('role', 'dialog')
+  brewingParent.setAttribute('aria-label', 'Brewing stand')
+  brewingParent.setAttribute('aria-hidden', 'true')
+  document.body.setAttribute('data-brewing-open', 'false')
+
+  const renderTradeUi = (): void => {
+    const trades = Effect.runSync(snapshotVillagerTrades(gameplayState))
+    const villager = trades.villagers.find((candidate) => candidate.id === activeVillagerId)
+    if (!tradeOpen || villager === undefined) {
+      tradeParent.replaceChildren()
+      return
+    }
+    const title = document.createElement('h2')
+    title.textContent = villager.profession === 'farmer' ? 'Farmer' : 'Toolsmith'
+    const offers = document.createElement('div')
+    offers.className = 'trade-offers'
+    for (const offer of villager.offers) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.dataset['tradeOfferId'] = offer.id
+      button.disabled = offer.uses >= offer.maxUses
+      button.textContent = `${String(offer.input.count)} ${offer.input.item} -> ${String(offer.output.count)} ${offer.output.item} (${String(offer.uses)}/${String(offer.maxUses)})`
+      offers.append(button)
+    }
+    const status = document.createElement('p')
+    status.className = 'trade-status'
+    status.setAttribute('role', 'status')
+    status.textContent = tradeStatus
+    const close = document.createElement('button')
+    close.type = 'button'
+    close.dataset['tradeClose'] = 'true'
+    close.textContent = 'Close'
+    tradeParent.replaceChildren(title, offers, status, close)
+  }
+
+  const villagerTradeStatus = (result: VillagerTradeResult): string => {
+    if (result._tag === 'Traded') return 'Trade complete'
+    switch (result.reason) {
+      case 'UnknownOffer': return 'That offer is no longer available'
+      case 'OutOfStock': return 'This offer is out of stock'
+      case 'InsufficientItems': return 'You do not have the required items'
+      case 'InventoryFull': return 'Your inventory is full'
+    }
+  }
+
+  const setTradeOpen = (open: boolean, villagerId?: string): void => {
+    if (open && (playerIsDead() || villagerId === undefined)) return
+    if (open && brewingOpen) setBrewingOpen(false)
+    tradeOpen = open
+    activeVillagerId = open ? villagerId : undefined
+    tradeStatus = ''
+    tradeParent.hidden = !open
+    tradeParent.setAttribute('aria-hidden', String(!open))
+    document.body.setAttribute('data-trade-open', String(open))
+    renderTradeUi()
+    renderCrosshair()
+    syncTouchControls()
+    if (open && document.pointerLockElement === canvas) document.exitPointerLock()
+  }
+
+  tradeParent.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return
+    if (event.target.closest('[data-trade-close]') !== null) {
+      setTradeOpen(false)
+      return
+    }
+    const button = event.target.closest<HTMLElement>('[data-trade-offer-id]')
+    const offerId = button?.dataset['tradeOfferId']
+    if (activeVillagerId === undefined || offerId === undefined) return
+    if (multiplayer !== undefined && multiplayerHandshakeComplete) {
+      if (sendVillagerTradeCommand(activeVillagerId, offerId)) {
+        tradeStatus = 'Trading...'
+        renderTradeUi()
+      }
+      return
+    }
+    nextVillagerTradeRequestId += 1
+    Effect.runSync(requestVillagerTrade(gameplayState, {
+      requestId: `villager-trade-${String(nextVillagerTradeRequestId)}`,
+      villagerId: activeVillagerId,
+      offerId,
+    }))
+    tradeStatus = 'Trading...'
+    renderTradeUi()
+  })
+
+  const brewingBottleFromItem = (item: string): BrewingBottle | undefined => {
+    if (item === 'water_bottle') return item
+    if (item === 'awkward_potion') return { potion: 'awkward' }
+    if (item === 'potion_of_swiftness') return { potion: 'speed' }
+    if (item === 'potion_of_poison') return { potion: 'poison' }
+    if (item === 'potion_of_regeneration') return { potion: 'regeneration' }
+    return undefined
+  }
+
+  const brewingBottleLabel = (bottle: BrewingBottle | undefined): string => {
+    if (bottle === undefined) return 'Empty'
+    if (bottle === 'water_bottle') return 'Water bottle'
+    return bottle.potion === 'speed' ? 'Potion of swiftness' : `${bottle.potion} potion`
+  }
+
+  const renderBrewingUi = (): void => {
+    if (!brewingOpen) {
+      brewingParent.replaceChildren()
+      return
+    }
+    const state = Effect.runSync(snapshotBrewingStand(gameplayState))
+    let summary = brewingParent.querySelector<HTMLElement>('[data-testid="brewing-state"]')
+    let progress = brewingParent.querySelector<HTMLElement>('[data-testid="brewing-progress"]')
+    let status = brewingParent.querySelector<HTMLElement>('.brewing-status')
+    if (summary === null || progress === null || status === null) {
+      const title = document.createElement('h2')
+      title.textContent = 'Brewing Stand'
+      summary = document.createElement('p')
+      summary.dataset['testid'] = 'brewing-state'
+      progress = document.createElement('p')
+      progress.dataset['testid'] = 'brewing-progress'
+      const insert = document.createElement('button')
+      insert.type = 'button'
+      insert.dataset['brewingAction'] = 'insert'
+      insert.textContent = 'Insert selected item'
+      const collect = document.createElement('button')
+      collect.type = 'button'
+      collect.dataset['brewingAction'] = 'collect'
+      collect.textContent = 'Collect bottle'
+      const drink = document.createElement('button')
+      drink.type = 'button'
+      drink.dataset['brewingAction'] = 'drink'
+      drink.textContent = 'Drink potion'
+      const close = document.createElement('button')
+      close.type = 'button'
+      close.dataset['brewingAction'] = 'close'
+      close.textContent = 'Close'
+      status = document.createElement('p')
+      status.className = 'brewing-status'
+      status.setAttribute('role', 'status')
+      brewingParent.replaceChildren(title, summary, progress, insert, collect, drink, close, status)
+    }
+    summary.textContent = `Fuel: ${String(state.fuelUnits)} | Bottle: ${brewingBottleLabel(state.bottle)} | Ingredient: ${state.ingredient ?? 'Empty'}`
+    progress.textContent = state.brewing === undefined
+      ? 'Idle'
+      : `Brewing ${state.brewing.output}: ${state.brewing.remainingSecs.toFixed(1)}s`
+    status.textContent = brewingStatus
+  }
+
+  const setBrewingOpen = (open: boolean): void => {
+    if (open && playerIsDead()) return
+    if (open && tradeOpen) setTradeOpen(false)
+    if (open && inventoryOpen) setInventoryOpen(false)
+    brewingOpen = open
+    brewingStatus = ''
+    brewingParent.hidden = !open
+    brewingParent.setAttribute('aria-hidden', String(!open))
+    document.body.setAttribute('data-brewing-open', String(open))
+    renderBrewingUi()
+    renderCrosshair()
+    syncTouchControls()
+    if (open && document.pointerLockElement === canvas) document.exitPointerLock()
+  }
+
+  brewingParent.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return
+    const action = event.target.closest<HTMLElement>('[data-brewing-action]')
+      ?.dataset['brewingAction']
+    if (action === undefined) return
+    if (action === 'close') {
+      setBrewingOpen(false)
+      return
+    }
+    if (action === 'insert') {
+      const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
+      if (selected === undefined) {
+        brewingStatus = 'Select brewing fuel, a bottle, or an ingredient'
+        renderBrewingUi()
+        return
+      }
+      const bottle = brewingBottleFromItem(selected.item)
+      const ingredients: ReadonlySet<string> = new Set([
+        'nether_wart', 'sugar', 'spider_eye', 'ghast_tear',
+      ])
+      if (selected.item !== 'blaze_powder' && bottle === undefined && !ingredients.has(selected.item)) {
+        brewingStatus = 'That item cannot be used for brewing'
+        renderBrewingUi()
+        return
+      }
+      const removal = Effect.runSync(
+        world.inventory.removeAt(selectedHotbarIndex, selected.item, 1),
+      )
+      if (removal._tag !== 'Removed' || removal.removed !== 1) {
+        brewingStatus = 'The selected item is no longer available'
+        renderBrewingUi()
+        return
+      }
+      const result = selected.item === 'blaze_powder'
+        ? Effect.runSync(insertBrewingFuel(gameplayState))
+        : bottle !== undefined
+          ? Effect.runSync(insertBrewingBottle(gameplayState, bottle))
+          : Effect.runSync(insertBrewingIngredient(gameplayState, selected.item as BrewingIngredient))
+      if (result._tag === 'Rejected') {
+        const leftover = Effect.runSync(world.inventory.add(selected.item, 1))
+        if (leftover !== 0) throw new Error('Failed to restore rejected brewing item')
+        brewingStatus = `Cannot insert item: ${result.reason}`
+      } else {
+        brewingStatus = `Inserted ${selected.item}`
+        markSessionDirty()
+      }
+      renderBrewingUi()
+      renderPlayerUi()
+      return
+    }
+    if (action === 'collect') {
+      const result = Effect.runSync(collectBrewingPotion(gameplayState))
+      if (result._tag === 'Rejected') {
+        brewingStatus = `Cannot collect bottle: ${result.reason}`
+      } else {
+        const leftover = Effect.runSync(world.inventory.add(result.returned.item, 1))
+        if (leftover === 0) {
+          brewingStatus = `Collected ${result.returned.item}`
+          markSessionDirty()
+        } else {
+          const bottle = brewingBottleFromItem(result.returned.item)
+          if (bottle === undefined) throw new Error('Collected an invalid brewing bottle')
+          const restored = Effect.runSync(insertBrewingBottle(gameplayState, bottle))
+          if (restored._tag !== 'Accepted') throw new Error('Failed to restore uncollected potion')
+          brewingStatus = 'Inventory is full'
+        }
+      }
+      renderBrewingUi()
+      renderPlayerUi()
+      return
+    }
+    if (action === 'drink') {
+      const result = Effect.runSync(useBrewingPotion(gameplayState))
+      brewingStatus = result._tag === 'Consumed'
+        ? `Drank ${result.consumed.item}`
+        : `Cannot drink bottle: ${result.reason}`
+      if (result._tag === 'Consumed') markSessionDirty()
+      renderBrewingUi()
+      renderPlayerUi()
+    }
+  })
 
   let selectedHotbarIndex = 0
   let miningProgress: MiningProgressState | null = null
@@ -1890,7 +3779,7 @@ const bootGame = async (
     nowSecs = Effect.runSync(browserClock.monotonicSecs),
   ): void => {
     crosshair.render(crosshairViewModel({
-      modals: paused ? ['pause'] : inventoryOpen ? ['inventory'] : [],
+      modals: paused ? ['pause'] : inventoryOpen || tradeOpen || brewingOpen ? ['inventory'] : [],
       lastHitAtSecs: undefined,
       breakProgress:
         miningProgress === null ? undefined : miningProgressFraction(miningProgress),
@@ -1901,16 +3790,327 @@ const bootGame = async (
     region: 'hotbar',
     index: selectedHotbarIndex,
   }
+  let equipmentActionStatus = ''
+  let inventoryDragSource: InventoryDragTarget | undefined
   let furnaceFocus: FurnaceSlotId = 'input'
   let furnaceStatus = ''
   let chestFocus: ChestStorageSlotTarget = { region: 'chest', slot: 0 }
   let chestSelected: ChestStorageSlotTarget | undefined
   let chestStatus = ''
+  let carriedEnchantedItem: EnchantedItem | undefined
+  let carriedCustomName: string | undefined
+  const metadataMatches = (slotIndex: number): boolean => {
+    const slotKey = String(slotIndex)
+    return JSON.stringify(enchantedItems.get(slotKey)) === JSON.stringify(carriedEnchantedItem)
+      && customNames.get(slotKey) === carriedCustomName
+  }
   const inventoryInteraction = createInventoryInteraction(world.inventory, {
+    canInventoryClick: ({ slotIndex, slotBefore, carriedBefore }) =>
+      carriedBefore === undefined || slotBefore === undefined || carriedBefore.item !== slotBefore.item
+      || metadataMatches(slotIndex),
+    consumeCraftingGrid: true,
     onCrafted: () => markSessionDirty(),
     onInventoryChanged: () => markSessionDirty(),
+    onInventoryReset: () => {
+      carriedEnchantedItem = undefined
+      carriedCustomName = undefined
+    },
+    onInventoryTransition: ({ slotIndex, slotBefore, carriedBefore, result }) => {
+      const slotKey = String(slotIndex)
+      const slotEnchantment = enchantedItems.get(slotKey)
+      const slotCustomName = customNames.get(slotKey)
+      if (result._tag === 'PickedUp') {
+        carriedEnchantedItem = slotEnchantment
+        carriedCustomName = slotCustomName
+        if (slotBefore === undefined || result.carried === undefined
+          || result.carried.count >= slotBefore.count) {
+          enchantedItems.delete(slotKey)
+          customNames.delete(slotKey)
+        }
+        return
+      }
+      if (result._tag === 'Placed' || result._tag === 'Merged') {
+        if (carriedEnchantedItem === undefined) enchantedItems.delete(slotKey)
+        else enchantedItems.set(slotKey, carriedEnchantedItem)
+        if (carriedCustomName === undefined) customNames.delete(slotKey)
+        else customNames.set(slotKey, carriedCustomName)
+        if (result.carried === undefined) {
+          carriedEnchantedItem = undefined
+          carriedCustomName = undefined
+        }
+        return
+      }
+      if (result._tag === 'Swapped' && carriedBefore !== undefined) {
+        if (carriedEnchantedItem === undefined) enchantedItems.delete(slotKey)
+        else enchantedItems.set(slotKey, carriedEnchantedItem)
+        if (carriedCustomName === undefined) customNames.delete(slotKey)
+        else customNames.set(slotKey, carriedCustomName)
+        carriedEnchantedItem = slotEnchantment
+        carriedCustomName = slotCustomName
+      }
+    },
   })
+  const projectedInventoryEnchantedItem = (slotIndex: number): EnchantedItem | null => {
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    return projectEnchantedItem(
+      storage.inventory.slots[slotIndex],
+      storage.inventoryDurability[slotIndex],
+      enchantedItems.get(String(slotIndex)),
+    )
+  }
+  const inventoryMeleeDamage = (slotIndex: number): number => {
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const selectedItem = storage.inventory.slots[slotIndex]?.item ?? null
+    const baseDamage = meleeDamageForItem(
+      selectedItem === null ? null : gameplayModuleItem(selectedItem),
+    )
+    const enchantedItem = projectEnchantedItem(
+      storage.inventory.slots[slotIndex],
+      storage.inventoryDurability[slotIndex],
+      enchantedItems.get(String(slotIndex)),
+    )
+    return enchantedItem === null
+      ? baseDamage
+      : meleeDamageWithEnchantments(baseDamage, enchantedItem)
+  }
   const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
+  const coordinateKey = (x: number, y: number, z: number): string => `${x},${y},${z}`
+  const targetedBrewingStand = (): Effect.Effect<boolean> => Effect.gen(function* () {
+    const pose = yield* playerApi.pose
+    const candidates: Array<{ x: number; y: number; z: number }> = []
+    const visited = new Set<string>()
+    targetBlockFromPlayerPose(pose, DEFAULT_BLOCK_REACH, (x, y, z) => {
+      const key = coordinateKey(x, y, z)
+      if (!visited.has(key)) {
+        visited.add(key)
+        candidates.push({ x, y, z })
+      }
+      return false
+    })
+    const targetable = new Set<string>()
+    for (const position of candidates) {
+      const reading = yield* currentChunkStore.getBlock(position)
+      if (reading._tag === 'Block' && reading.block !== 0) {
+        targetable.add(coordinateKey(position.x, position.y, position.z))
+        break
+      }
+    }
+    const target = targetBlockFromPlayerPose(
+      pose,
+      DEFAULT_BLOCK_REACH,
+      (x, y, z) => targetable.has(coordinateKey(x, y, z)),
+    )
+    if (Option.isNone(target)) return false
+    const reading = yield* currentChunkStore.getBlock(target.value.position)
+    return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'brewing_stand'
+  })
+  const targetedBlock = (): Effect.Effect<{
+    readonly position: SessionPosition
+    readonly adjacentPosition: SessionPosition
+    readonly block: number
+  } | undefined> => Effect.gen(function* () {
+    const pose = yield* playerApi.pose
+    const candidates: SessionPosition[] = []
+    const visited = new Set<string>()
+    targetBlockFromPlayerPose(pose, DEFAULT_BLOCK_REACH, (x, y, z) => {
+      const key = `${String(x)},${String(y)},${String(z)}`
+      if (!visited.has(key)) {
+        visited.add(key)
+        candidates.push({ x, y, z })
+      }
+      return false
+    })
+    const targetable = new Set<string>()
+    for (const position of candidates) {
+      const reading = yield* currentChunkStore.getBlock(position)
+      if (reading._tag === 'Block' && reading.block !== 0) {
+        targetable.add(coordinateKey(position.x, position.y, position.z))
+        break
+      }
+    }
+    const target = targetBlockFromPlayerPose(
+      pose,
+      DEFAULT_BLOCK_REACH,
+      (x, y, z) => targetable.has(coordinateKey(x, y, z)),
+    )
+    if (Option.isNone(target)) return undefined
+    const reading = yield* currentChunkStore.getBlock(target.value.position)
+    return reading._tag === 'Block'
+      ? { ...target.value, block: reading.block }
+      : undefined
+  })
+
+  const fishingEnvironmentAt = (
+    position: SessionPosition,
+    isRaining: boolean,
+  ): Effect.Effect<{
+    readonly hasWater: boolean
+    readonly hasSkyAccess: boolean
+    readonly isRaining: boolean
+    readonly isOpenWater: boolean
+  }> => Effect.gen(function* () {
+    const center = yield* currentChunkStore.getBlock(position)
+    const hasWater = center._tag === 'Block' && blockTypeOfId(center.block) === 'water'
+    if (!hasWater) return { hasWater: false, hasSkyAccess: false, isRaining, isOpenWater: false }
+
+    let hasSkyAccess = true
+    for (let y = position.y + 1; y <= 127; y += 1) {
+      const reading = yield* currentChunkStore.getBlock(blockPosition(position.x, y, position.z))
+      if (reading._tag === 'Block' && reading.block !== 0) {
+        hasSkyAccess = false
+        break
+      }
+    }
+
+    let isOpenWater = true
+    for (let x = position.x - 2; x <= position.x + 2 && isOpenWater; x += 1) {
+      for (let z = position.z - 2; z <= position.z + 2; z += 1) {
+        const water = yield* currentChunkStore.getBlock(blockPosition(x, position.y, z))
+        const above = yield* currentChunkStore.getBlock(blockPosition(x, position.y + 1, z))
+        if (
+          water._tag !== 'Block' || blockTypeOfId(water.block) !== 'water'
+          || above._tag !== 'Block' || above.block !== 0
+        ) {
+          isOpenWater = false
+          break
+        }
+      }
+    }
+    return { hasWater, hasSkyAccess, isRaining, isOpenWater }
+  })
+
+  const setFishingResult = (result: string): void => {
+    fishingResult = result
+    document.body.setAttribute('data-fishing-result', result)
+    document.body.setAttribute(
+      'data-fishing-phase',
+      fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
+    )
+  }
+
+  const materializeEndArrival = (): Effect.Effect<void> => Effect.gen(function* () {
+    const arrival = endArrivalDescriptor(blockPosition(0, 64, 0))
+    const context = getOrCreateDimensionChunkContext('end')
+    const mutations = [...arrival.platform, ...arrival.clear.map((at) => ({ at, block: 0 }))]
+    const chunks = new Map<string, ChunkRef>()
+    for (const mutation of mutations) {
+      const chunk = { cx: Math.floor(mutation.at.x / 16), cz: Math.floor(mutation.at.z / 16) }
+      chunks.set(chunkKeyOf(chunk), chunk)
+    }
+    for (const [key, chunk] of chunks) {
+      if (!context.streamLoaded.has(key)) {
+        yield* context.chunkStore.load(chunk)
+        context.streamLoaded.add(key)
+      }
+    }
+    for (const mutation of mutations) yield* context.chunkStore.setBlock(mutation.at, mutation.block)
+    const pose = yield* playerApi.pose
+    yield* playerApi.restore({ ...pose, feetPosition: arrival.spawn, yawRadians: Math.PI }, 'end')
+    alignActiveDimension('end')
+    resetSimState(true)
+    markSessionDirty()
+  })
+
+  const useEndFeature = (): Effect.Effect<boolean> => Effect.gen(function* () {
+    const dimension = yield* playerApi.dimension
+    const pose = yield* playerApi.pose
+    if (dimension === 'end' && exitPortalMaterialized) {
+      const target = yield* targetedBlock()
+      if (target?.block === END_PORTAL_BLOCK.PORTAL) {
+        yield* playerApi.restore({ ...pose, feetPosition: { x: 0.5, y: 80, z: 0.5 } }, 'overworld')
+        alignActiveDimension('overworld')
+        resetSimState(true)
+        queueEndAudio('exitPortal', pose.feetPosition)
+        markSessionDirty()
+        return true
+      }
+    }
+    if (dimension === 'overworld' && endPortalComplete) {
+      const target = yield* targetedBlock()
+      if (target?.block === END_PORTAL_BLOCK.PORTAL) {
+        yield* materializeEndArrival()
+        queueEndAudio('portalActivate', target.position)
+        return true
+      }
+    }
+    const inventory = yield* world.inventory.snapshot
+    const selected = inventory.slots[selectedHotbarIndex]
+    if (dimension !== 'overworld' || selected?.item !== 'eye_of_ender') return false
+    const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
+    if (Option.isNone(site)) return false
+    const center = endPortalCenterForStronghold(site.value)
+    const isNearPortal = Math.hypot(
+      center.x - pose.feetPosition.x,
+      center.y - pose.feetPosition.y,
+      center.z - pose.feetPosition.z,
+    ) <= DEFAULT_BLOCK_REACH + 4
+    const target = isNearPortal ? yield* targetedBlock() : undefined
+    if (isNearPortal) {
+      for (const frameOffset of END_PORTAL_FRAME_OFFSETS) {
+        const position = { x: center.x + frameOffset.dx, y: center.y, z: center.z + frameOffset.dz }
+        const reading = yield* currentChunkStore.getBlock(position)
+        if (reading._tag === 'Block'
+          && (reading.block === END_PORTAL_BLOCK.FRAME_EMPTY || reading.block === END_PORTAL_BLOCK.FRAME_FILLED)) {
+          endPortalFrames.set(endPortalFrameKey(position), {
+            position,
+            facing: frameOffset.facing,
+            eye: reading.block === END_PORTAL_BLOCK.FRAME_FILLED,
+          })
+        }
+      }
+    }
+    const offset = target === undefined ? undefined : END_PORTAL_FRAME_OFFSETS.find((candidate) =>
+      center.x + candidate.dx === target.position.x
+      && center.y === target.position.y
+      && center.z + candidate.dz === target.position.z)
+    if (target?.block === END_PORTAL_BLOCK.FRAME_EMPTY && offset !== undefined) {
+      yield* currentChunkStore.setBlock(target.position, END_PORTAL_BLOCK.FRAME_FILLED)
+      endPortalFrames.set(endPortalFrameKey(target.position), {
+        position: target.position,
+        facing: offset.facing,
+        eye: true,
+      })
+      if (!isCreativeMode) yield* world.inventory.removeAt(selectedHotbarIndex, 'eye_of_ender', 1)
+      queueEndAudio('frameInsert', target.position)
+      canvas.setAttribute('data-end-portal-progress', String(
+        [...endPortalFrames.values()].filter((frame) => frame.eye).length,
+      ))
+      const completed = detectCompletedEndPortal((x, y, z) => {
+        const frame = endPortalFrames.get(endPortalFrameKey({ x, y, z }))
+        return frame === undefined
+          ? undefined
+          : {
+              block: frame.eye ? END_PORTAL_BLOCK.FRAME_FILLED : END_PORTAL_BLOCK.FRAME_EMPTY,
+              facing: frame.facing,
+            }
+      }, dimension, center)
+      if (Option.isSome(completed)) {
+        for (const mutation of completed.value.materialization) {
+          yield* currentChunkStore.setBlock(mutation.at, mutation.block)
+        }
+        endPortalComplete = true
+        queueEndAudio('portalActivate', center)
+      }
+      markSessionDirty()
+      return true
+    }
+    const dx = site.value.x - pose.feetPosition.x
+    const dz = site.value.z - pose.feetPosition.z
+    canvas.setAttribute('data-stronghold-direction', String(Math.atan2(dx, -dz)))
+    canvas.setAttribute('data-stronghold-distance', String(Math.round(Math.hypot(dx, dz))))
+    if (!isCreativeMode) yield* world.inventory.removeAt(selectedHotbarIndex, 'eye_of_ender', 1)
+    const breaks = nextEyeOfEnderBreaks ?? Math.random() < 0.2
+    nextEyeOfEnderBreaks = undefined
+    eyeOfEnderRuntimeState = launchRuntimeEyeOfEnder(eyeOfEnderRuntimeState, {
+      dimension,
+      position: { ...pose.feetPosition, y: pose.feetPosition.y + EYE_LEVEL_OFFSET },
+      target: site.value,
+      breaks,
+    })
+    queueEndAudio('eyeThrow', pose.feetPosition)
+    markSessionDirty()
+    return true
+  })
   let touchControlsVisible = false
   const resetTouchInput = (
     reason: Parameters<typeof resetTouchLook>[1],
@@ -1924,7 +4124,7 @@ const bootGame = async (
       touchAvailable,
       playing: true,
       dead: playerIsDead(),
-      inventoryOpen,
+      inventoryOpen: inventoryOpen || tradeOpen || brewingOpen,
       paused,
     })
     const wasVisible = touchControlsVisible
@@ -1934,36 +4134,195 @@ const bootGame = async (
     touchControlsParent.setAttribute('aria-hidden', String(!presentation.visible))
     if (wasVisible && !presentation.visible) resetTouchInput('state-transition')
   }
+  const presentSwimmingState = (): void => {
+    const oxygen = Math.max(0, Math.ceil(swimmingState.oxygenSecs))
+    swimmingHud.hidden = !swimmingState.fullySubmerged
+    swimmingHud.textContent = `Oxygen ${String(oxygen)}/${String(MAX_SWIMMING_OXYGEN_SECS)}`
+    document.body.setAttribute('data-swimming', String(swimmingState.active))
+    document.body.setAttribute('data-swimming-pose', swimmingState.active ? 'swimming' : 'standing')
+    document.body.setAttribute('data-fully-submerged', String(swimmingState.fullySubmerged))
+    document.body.setAttribute('data-oxygen-seconds', String(swimmingState.oxygenSecs))
+  }
+
   const applyPlayerDamage = (
     damage: Parameters<typeof world.vitals.damage>[0],
+    minimumHealthPoints = 0,
   ): void => {
     if (isCreativeMode) return
     const equipment = Effect.runSync(world.inventory.equipmentSnapshot)
-    const reducedDamage = applyArmorToDamage(damage, armorPointsForEquipment(equipment))
+    const enchantedArmor = (['head', 'chest', 'legs', 'feet'] as const).flatMap((slot) => {
+      const equippedItem = equipment.slots[slot]
+      if (equippedItem === null) return []
+      const projected = projectEnchantedItem(
+        itemStack(equippedItem.item, equippedItem.count),
+        equippedItem.durability ?? undefined,
+        enchantedItems.get(equipmentMetadataKey(slot)),
+      )
+      return projected === null ? [] : [projected]
+    })
+    const reducedDamage = armorDamageWithEnchantments(
+      damage,
+      armorPointsForEquipment(equipment),
+      enchantedArmor,
+    )
+    if (multiplayer !== undefined) {
+      if (reducedDamage.amount > 0) {
+        queuedPlayerDamages = [...queuedPlayerDamages, {
+          amount: reducedDamage.amount,
+          minimumHealthPoints,
+        }]
+        pumpPlayerDamage()
+      }
+      return
+    }
     const healthBefore = Effect.runSync(world.vitals.view).healthPoints
     Effect.runSync(world.vitals.damage(reducedDamage))
+    const damagedVitals = Effect.runSync(world.vitals.snapshot)
+    if (damagedVitals.healthPoints < minimumHealthPoints) {
+      Effect.runSync(world.vitals.restore({
+        ...damagedVitals,
+        healthPoints: minimumHealthPoints,
+      }))
+    }
     const healthAfter = Effect.runSync(world.vitals.view).healthPoints
     if (healthAfter < healthBefore) {
       const wear = armorDurabilityWearFromPreMitigationDamage(damage)
       if (wear > 0) {
         for (const slot of ['head', 'chest', 'legs', 'feet'] as const) {
           if (equipment.slots[slot] !== null) {
-            Effect.runSync(
-              world.inventory.damageAt({ _tag: 'Equipment', slot }, wear),
+            const enchantedItem = enchantedArmor.find(
+              (item) => item.item === equipment.slots[slot]?.item,
             )
+            const appliedWear = enchantedItem === undefined
+              ? wear
+              : durabilityWearWithEnchantments(
+                  wear,
+                  enchantedItem,
+                  Array.from({ length: wear }, () => Math.random()),
+                )
+            if (appliedWear === 0) continue
+            const result = Effect.runSync(
+              world.inventory.damageAt({ _tag: 'Equipment', slot }, appliedWear),
+            )
+            if (result._tag === 'Broken') {
+              enchantedItems.delete(equipmentMetadataKey(slot))
+              customNames.delete(equipmentMetadataKey(slot))
+            }
           }
         }
       }
       audio.play('playerHurt')
     }
+    if (healthBefore > 0 && playerIsDead() && multiplayer === undefined) {
+      handleLocalPlayerDeath()
+    }
     if (playerIsDead()) {
+      swimmingState = initialPlayerSwimmingRuntimeState()
+      presentSwimmingState()
       resetPrimaryAttackGesture()
       resetSimState(false)
     }
     syncTouchControls()
   }
 
+  let deathDropDimension: SessionState['dimension'] | undefined =
+    restoredWorkstations?.deathDropDimension
+  const handleLocalPlayerDeath = (): void => {
+    const deathPosition = Effect.runSync(world.player.pose).feetPosition
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const drops = deathDropsFromPlayerStorage(storage, deathPosition, {
+      customNames: Object.fromEntries(customNames),
+      enchantedItems: Object.fromEntries(enchantedItems),
+    })
+    if (drops.length > 0) {
+      const dropped = Effect.runSync(spawnDroppedItems(
+        world.entities,
+        drops.map(({ customName: _customName, enchantments: _enchantments, ...drop }) => ({
+          ...drop,
+          eligibleFromFrame: Number.MAX_SAFE_INTEGER,
+        })),
+      ))
+      const dimension = Effect.runSync(world.player.dimension)
+      dropped.forEach((entity, index) => {
+        const drop = drops[index]
+        if (drop === undefined) return
+        droppedItemMetadata.set(droppedItemMetadataKey(dimension, String(entity.id)), {
+          ...(drop.customName === undefined ? {} : { customName: drop.customName }),
+          ...(drop.enchantments === undefined
+            ? {}
+            : {
+                enchantedItem: {
+                  item: drop.item,
+                  durability: drop.durability ?? null,
+                  enchantments: drop.enchantments,
+                },
+              }),
+        })
+      })
+    }
+    storage.inventory.slots.forEach((_stack, index) => {
+      customNames.delete(String(index))
+      enchantedItems.delete(String(index))
+    })
+    for (const slot of EQUIPMENT_SLOTS) {
+      customNames.delete(equipmentMetadataKey(slot))
+      enchantedItems.delete(equipmentMetadataKey(slot))
+    }
+    Effect.runSync(world.inventory.restoreStorage(emptyPlayerStorage()))
+    const vitals = Effect.runSync(world.vitals.snapshot)
+    Effect.runSync(world.vitals.restore(addVitalsExperience(vitals, -vitals.totalExperience)))
+    deathDropDimension = Effect.runSync(world.player.dimension)
+    markSessionDirty()
+  }
+
+  const applyWorldExplosion = (
+    center: Readonly<{ x: number; y: number; z: number }>,
+    radius: number,
+    seed: number,
+    destroysResistantBlocks: boolean,
+  ): void => {
+    const entities = Effect.runSync(world.entities.entities)
+    const plan = planExplosion({
+      center,
+      radius,
+      seed,
+      blocks: (position) => {
+        const reading = Effect.runSync(currentChunkStore.getBlock(position))
+        if (reading._tag !== 'Block') return undefined
+        const type = blockTypeOfId(reading.block)
+        if (type === 'air') return { resistance: 0, destructible: false }
+        const hardness = propertyOfBlockId(reading.block, 'hardness')
+        return {
+          resistance: destroysResistantBlocks ? 0 : hardness,
+          destructible: type !== 'bedrock',
+        }
+      },
+      entities,
+    })
+    for (const position of plan.destroyedBlocks) {
+      Effect.runSync(currentChunkStore.setBlock(position, 0))
+    }
+    for (const effect of plan.entityEffects) {
+      Effect.runSync(resolveBowHits(world.entities, [{ id: effect.id, damage: effect.damage }]))
+    }
+    const playerPosition = Effect.runSync(playerApi.pose).feetPosition
+    const playerDistance = Math.hypot(
+      playerPosition.x - center.x,
+      playerPosition.y + 0.9 - center.y,
+      playerPosition.z - center.z,
+    )
+    if (playerDistance < radius) {
+      const exposure = 1 - playerDistance / radius
+      applyPlayerDamage({
+        amount: ((exposure * exposure + exposure) / 2) * 7 * radius + 1,
+        cause: 'generic',
+      })
+    }
+    markSessionDirty()
+  }
+
   const interactionStatus = (): string => {
+    if (equipmentActionStatus !== '') return equipmentActionStatus
     const status = inventoryInteraction.state().status
     if (status === undefined) return ''
     switch (status._tag) {
@@ -1988,7 +4347,13 @@ const bootGame = async (
     })
     const equipment = storage.equipment.slots
     const equipmentSlot = (slot: typeof equipment.head) =>
-      slot === null ? undefined : { item: slot.item, count: slot.count }
+      slot === null ? undefined : {
+        item: slot.item,
+        count: slot.count,
+        durability: slot.durability === null
+          ? undefined
+          : slot.durability.current / slot.durability.max,
+      }
     const draft = inventoryInteraction.state()
     hud.render(hudViewModel({
       ...Effect.runSync(world.vitals.view),
@@ -1997,11 +4362,87 @@ const bootGame = async (
         .map((slot, slotIndex) => slotSnapshotOf(slot, durabilityBySlot.get(slotIndex))),
       selectedHotbarIndex,
     }))
+    const activeEffects = Effect.runSync(snapshotStatusEffects(gameplayState)).effects
+    statusEffectsHud.hidden = activeEffects.length === 0
+    statusEffectsHud.textContent = activeEffects
+      .map((effect) => `${effect.type}: ${Math.ceil(effect.remainingSecs)}s`)
+      .join(' | ')
+    document.body.setAttribute('data-status-effects', activeEffects
+      .map((effect) => `${effect.type}:${Math.ceil(effect.remainingSecs)}`)
+      .join(','))
     inventoryView.root.style.setProperty(
-      'display', inventoryMode === 'furnace' || inventoryMode === 'chest' ? 'none' : '',
+      'display', ['furnace', 'chest', 'anvil', 'enchanting'].includes(inventoryMode) ? 'none' : '',
     )
     furnaceView.root.style.setProperty('display', inventoryMode === 'furnace' ? '' : 'none')
     chestView.root.style.setProperty('display', inventoryMode === 'chest' ? '' : 'none')
+    anvilView.root.style.setProperty('display', inventoryMode === 'anvil' ? '' : 'none')
+    enchantingView.root.style.setProperty('display', inventoryMode === 'enchanting' ? '' : 'none')
+    const selectedStack = storage.inventory.slots[selectedHotbarIndex]
+    const selectedSlotKey = String(selectedHotbarIndex)
+    const selectedSlot = selectedStack == null
+      ? undefined
+      : { itemId: selectedStack.item, count: selectedStack.count }
+    if (inventoryMode === 'anvil') {
+      const selectedDurability = storage.inventoryDurability[selectedHotbarIndex]
+      const hasAnvilChange = anvilName.trim() !== (customNames.get(selectedSlotKey) ?? '')
+        || (selectedDurability !== null && selectedDurability.current < selectedDurability.max)
+      const anvilResult = applyAnvilOperation(storage, selectedHotbarIndex, hasAnvilChange)
+      const hasIron = anvilResult !== undefined
+      const level = Effect.runSync(world.vitals.view).experienceLevel
+      anvilView.render(anvilViewModel({
+        primaryInput: selectedSlot,
+        secondaryInput: hasIron ? { itemId: 'iron_ingot', count: 1 } : undefined,
+        output: selectedStack != null && hasIron && hasAnvilChange && level >= 1
+          ? selectedSlot
+          : undefined,
+        name: anvilName,
+        levelCost: 1,
+        rejectionReason: selectedStack == null
+          ? 'Select an item in the hotbar'
+          : !hasIron
+            ? 'Requires one iron ingot'
+            : !hasAnvilChange
+              ? 'Change the name or repair a damaged item'
+            : level < 1
+              ? 'Requires level 1'
+              : undefined,
+      }), { focusedTarget: 'name', status: anvilStatus })
+      return
+    }
+    if (inventoryMode === 'enchanting') {
+      const lapis = storage.inventory.slots.reduce(
+        (count, slot) => count + (slot?.item === 'lapis_lazuli' ? slot.count : 0),
+        0,
+      )
+      const item = projectEnchantedItem(
+        selectedStack,
+        storage.inventoryDurability[selectedHotbarIndex],
+        enchantedItems.get(selectedSlotKey),
+      )
+      const playerLevel = Effect.runSync(world.vitals.view).experienceLevel
+      const offers = enchantmentOffers(enchantmentSeed, 15)
+      enchantingView.render(enchantingTableViewModel({
+        item: selectedSlot,
+        lapis: lapis > 0 ? { itemId: 'lapis_lazuli', count: lapis } : undefined,
+        offers: offers.map((offer) => {
+          const result = applyEnchantmentOffer({
+            seed: enchantmentSeed,
+            bookshelfCount: 15,
+            playerLevel,
+            lapis,
+            item,
+          }, offer)
+          return {
+            enchantmentId: offer.enchantment.id,
+            enchantmentLevel: offer.enchantment.level,
+            levelCost: offer.requiredPlayerLevel,
+            lapisCost: offer.lapisCost,
+            rejectionReason: result.ok ? undefined : result.reason,
+          }
+        }) as [NonNullable<Parameters<typeof enchantingTableViewModel>[0]['offers'][0]>, NonNullable<Parameters<typeof enchantingTableViewModel>[0]['offers'][1]>, NonNullable<Parameters<typeof enchantingTableViewModel>[0]['offers'][2]>],
+      }), { focusedTarget: 'offer-1', status: enchantingStatus })
+      return
+    }
     if (inventoryMode === 'chest') {
       const container = activeChestId === undefined
         ? null
@@ -2074,7 +4515,7 @@ const bootGame = async (
         equipmentSlot(equipment.legs),
         equipmentSlot(equipment.feet),
       ],
-      offhand: equipmentSlot(equipment.offhand),
+      offhand: equipmentSlot(equipment.offhand) ?? null,
       crafting: {
         gridWidth: draft.grid.width,
         grid: draft.grid.cells,
@@ -2085,6 +4526,8 @@ const bootGame = async (
       focused: inventoryFocus,
       status: interactionStatus(),
     })
+    inventoryView.root.querySelectorAll<HTMLElement>('[data-mx-ui="slot"][role="button"]')
+      .forEach((slot) => slot.setAttribute('draggable', 'true'))
   }
 
   const furnaceTargetOf = (source: EventTarget | null): FurnaceSlotId | undefined => {
@@ -2154,6 +4597,43 @@ const bootGame = async (
       renderPlayerUi()
       return
     }
+    const destinationStack = target.region === 'chest'
+      ? container?.slots[target.slot]
+      : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[target.slot]
+    const sourceMetadataKey = source.region === 'chest'
+      ? containerMetadataKey(activeChestId, source.slot)
+      : String(source.slot)
+    const destinationMetadataKey = target.region === 'chest'
+      ? containerMetadataKey(activeChestId, target.slot)
+      : String(target.slot)
+    if (
+      destinationStack?.item === sourceStack.item
+      && !sameItemMetadata(sourceMetadataKey, destinationMetadataKey)
+    ) {
+      chestStatus = 'Destination contains different item metadata'
+      renderPlayerUi()
+      return
+    }
+    if (multiplayer !== undefined) {
+      const sent = sendFacilityCommand({
+        _tag: 'ContainerCommand',
+        containerId: activeChestId,
+        action: {
+          _tag: 'move-item',
+          source: source.region === 'chest'
+            ? { _tag: 'container-slot', slot: source.slot }
+            : { _tag: 'player-slot', slot: source.slot },
+          destination: target.region === 'chest'
+            ? { _tag: 'container-slot', slot: target.slot }
+            : { _tag: 'player-slot', slot: target.slot },
+          count: sourceStack.count,
+        },
+      })
+      chestStatus = sent ? 'Move pending server approval' : 'Another facility action is pending'
+      if (sent) chestSelected = undefined
+      renderPlayerUi()
+      return
+    }
     const result = Effect.runSync(world.inventory.transferContainerItem({
       direction: source.region === 'chest' ? 'ContainerToPlayer' : 'PlayerToContainer',
       containerId: activeChestId,
@@ -2162,6 +4642,11 @@ const bootGame = async (
       count: sourceStack.count,
     }))
     if (result._tag === 'Transferred') {
+      const remainingSource = source.region === 'chest'
+        ? Effect.runSync(world.inventory.containerSnapshot(activeChestId))?.slots[source.slot]
+        : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[source.slot]
+      copyItemMetadata(sourceMetadataKey, destinationMetadataKey)
+      if (remainingSource == null) deleteItemMetadata(sourceMetadataKey)
       chestSelected = undefined
       chestStatus = `Moved ${String(result.count)} ${result.item}`
       markSessionDirty()
@@ -2194,6 +4679,39 @@ const bootGame = async (
     furnaceStatus = ''
     const furnace = furnaceStates.get(activeFurnaceKey)
     if (furnace === undefined) return
+    if (multiplayer !== undefined) {
+      const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
+      const stack = slot === 'output' ? furnace.state.output : selected
+      if (stack === null || stack === undefined) {
+        furnaceStatus = 'Slot is empty'
+        renderPlayerUi()
+        return
+      }
+      const sent = sendFacilityCommand(slot === 'output'
+        ? {
+            _tag: 'FurnaceCommand',
+            furnaceId: activeFurnaceKey,
+            action: {
+              _tag: 'take-output',
+              source: { _tag: 'furnace-slot', slot: 'output' },
+              destination: { _tag: 'player-slot', slot: selectedHotbarIndex },
+              count: stack.count,
+            },
+          }
+        : {
+            _tag: 'FurnaceCommand',
+            furnaceId: activeFurnaceKey,
+            action: {
+              _tag: 'move-item',
+              source: { _tag: 'player-slot', slot: selectedHotbarIndex },
+              destination: { _tag: 'furnace-slot', slot },
+              count: 1,
+            },
+          })
+      furnaceStatus = sent ? 'Transfer pending server approval' : 'Another facility action is pending'
+      renderPlayerUi()
+      return
+    }
     if (slot === 'output') {
       const output = furnace.state.output
       if (output !== null) {
@@ -2252,7 +4770,8 @@ const bootGame = async (
     const index = Number(interactive.dataset['slotIndex'])
     if (
       !Number.isInteger(index) ||
-      (region !== 'hotbar' && region !== 'main' && region !== 'crafting-grid')
+      (region !== 'hotbar' && region !== 'main' && region !== 'crafting-grid'
+        && region !== 'armour' && region !== 'offhand')
     ) {
       return undefined
     }
@@ -2289,8 +4808,226 @@ const bootGame = async (
     renderPlayerUi()
   }
 
+  const inventorySlotOf = (target: InventoryActionTarget): number | undefined => {
+    if (target.kind !== 'slot') return undefined
+    if (target.region === 'hotbar') return target.index
+    if (target.region === 'main') return 9 + target.index
+    return undefined
+  }
+
+  const rejectInventoryAction = (action: InventoryAction, reason: string): void => {
+    equipmentActionStatus = reason
+    document.body.setAttribute('data-equipment-action', `rejected:${reason}`)
+    renderPlayerUi()
+  }
+
+  const completeInventoryAction = (): void => {
+    equipmentActionStatus = ''
+    document.body.setAttribute('data-equipment-action', 'accepted')
+    markSessionDirty()
+    renderPlayerUi()
+  }
+
+  const unequip = (
+    action: InventoryAction,
+    slot: EquipmentSlotId,
+    inventorySlot?: number,
+  ): void => {
+    const result = Effect.runSync(world.inventory.unequipToInventory(slot, inventorySlot))
+    if (result._tag === 'Unequipped') {
+      moveItemMetadata(equipmentMetadataKey(slot), String(result.slotIndex))
+      completeInventoryAction()
+    }
+    else rejectInventoryAction(action, result._tag === 'Empty'
+      ? 'Equipment slot is empty'
+      : result._tag === 'OccupiedInventorySlot'
+        ? 'Inventory slot is occupied'
+        : result._tag === 'InventoryFull'
+          ? 'Inventory is full'
+          : 'Invalid equipment action')
+  }
+
+  const equip = (
+    action: InventoryAction,
+    inventorySlot: number,
+    equipmentSlot: EquipmentSlotId,
+  ): void => {
+    const result = Effect.runSync(world.inventory.equipFromInventory(inventorySlot, equipmentSlot))
+    if (result._tag === 'Equipped') {
+      moveItemMetadata(String(inventorySlot), equipmentMetadataKey(equipmentSlot))
+      completeInventoryAction()
+    }
+    else rejectInventoryAction(action, result._tag === 'Empty'
+      ? 'Inventory slot is empty'
+      : result._tag === 'Occupied'
+        ? 'Equipment slot is occupied'
+        : result._tag === 'Incompatible'
+          ? `Item cannot be equipped in ${equipmentSlot}`
+          : 'Invalid equipment action')
+  }
+
+  const dispatchInventoryAction = (action: InventoryAction): void => {
+    if (action.kind === 'drag') {
+      if (action.source.kind === 'slot' && action.target.kind === 'equipment-slot') {
+        const sourceSlot = inventorySlotOf(action.source)
+        if (sourceSlot !== undefined) equip(action, sourceSlot, action.target.slot)
+        else rejectInventoryAction(action, 'Crafting slots cannot equip items')
+        return
+      }
+      if (action.source.kind === 'equipment-slot' && action.target.kind === 'slot') {
+        const targetSlot = inventorySlotOf(action.target)
+        if (targetSlot !== undefined) unequip(action, action.source.slot, targetSlot)
+        else rejectInventoryAction(action, 'Equipment cannot move to crafting slots')
+        return
+      }
+      rejectInventoryAction(action, 'Drag between these slots is not supported')
+      return
+    }
+    if (action.target.kind === 'equipment-slot') {
+      unequip(action, action.target.slot)
+      return
+    }
+    if (action.kind === 'shift-click') {
+      const inventorySlot = inventorySlotOf(action.target)
+      const stack = inventorySlot === undefined
+        ? undefined
+        : Effect.runSync(world.inventory.snapshot).slots[inventorySlot]
+      const equipmentSlot = stack === undefined ? undefined : equipmentDefinitionFor(stack.item)?.slot
+      if (inventorySlot === undefined || equipmentSlot === undefined) {
+        rejectInventoryAction(action, 'Item cannot be equipped')
+      } else {
+        equip(action, inventorySlot, equipmentSlot)
+      }
+      return
+    }
+    equipmentActionStatus = ''
+    activateInventoryTarget(action.target)
+  }
+
+  const removeInventoryItem = (item: ItemStack['item'], count: number): boolean => {
+    if (!Number.isSafeInteger(count) || count < 0) return false
+    if (count === 0) return true
+    let remaining = count
+    const slots = Effect.runSync(world.inventory.snapshot).slots
+    const available = slots.reduce(
+      (total, stack) => total + (stack?.item === item ? stack.count : 0),
+      0,
+    )
+    if (available < count) return false
+    for (let index = 0; index < slots.length && remaining > 0; index += 1) {
+      const stack = slots[index]
+      if (stack?.item !== item) continue
+      const removed = Math.min(stack.count, remaining)
+      Effect.runSync(world.inventory.removeAt(index, item, removed))
+      remaining -= removed
+    }
+    return remaining === 0
+  }
+
+  const activateAnvilOutput = (): void => {
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const selected = storage.inventory.slots[selectedHotbarIndex]
+    const vitals = Effect.runSync(world.vitals.snapshot)
+    const normalizedName = anvilName.trim()
+    const durability = storage.inventoryDurability[selectedHotbarIndex]
+    const hasChange = normalizedName !== (customNames.get(String(selectedHotbarIndex)) ?? '')
+      || (durability !== null && durability.current < durability.max)
+    const anvilResult = applyAnvilOperation(storage, selectedHotbarIndex, hasChange)
+    const remainingExperience = spendExperienceLevels(vitals.totalExperience, 1)
+    if (selected === undefined || anvilResult === undefined || remainingExperience === undefined) {
+      anvilStatus = 'Repair or rename requirements are not met'
+      renderPlayerUi()
+      return
+    }
+    Effect.runSync(world.inventory.restoreStorage(anvilResult))
+    Effect.runSync(world.vitals.restore(
+      addVitalsExperience(vitals, remainingExperience - vitals.totalExperience),
+    ))
+    const itemKey = String(selectedHotbarIndex)
+    const enchantedItem = enchantedItems.get(itemKey)
+    if (enchantedItem !== undefined) {
+      enchantedItems.set(itemKey, {
+        ...enchantedItem,
+        durability: anvilResult.inventoryDurability[selectedHotbarIndex] ?? null,
+      })
+    }
+    if (normalizedName.length > 0) customNames.set(itemKey, normalizedName)
+    else customNames.delete(itemKey)
+    anvilStatus = normalizedName.length > 0 ? `Renamed to ${normalizedName}` : 'Item repaired'
+    document.body.setAttribute('data-anvil-result', anvilStatus)
+    markSessionDirty()
+    renderPlayerUi()
+  }
+
+  const activateEnchantingOffer = (slot: 0 | 1 | 2): void => {
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const selected = storage.inventory.slots[selectedHotbarIndex]
+    if (selected === undefined) return
+    const lapis = storage.inventory.slots.reduce(
+      (count, stack) => count + (stack?.item === 'lapis_lazuli' ? stack.count : 0),
+      0,
+    )
+    const vitals = Effect.runSync(world.vitals.snapshot)
+    const playerLevel = Effect.runSync(world.vitals.view).experienceLevel
+    const key = String(selectedHotbarIndex)
+    const result = applyEnchantmentOffer({
+      seed: enchantmentSeed,
+      bookshelfCount: 15,
+      playerLevel,
+      lapis,
+      item: projectEnchantedItem(
+        selected,
+        storage.inventoryDurability[selectedHotbarIndex],
+        enchantedItems.get(key),
+      ),
+    }, enchantmentOffers(enchantmentSeed, 15)[slot])
+    if (!result.ok || result.state.item === null) {
+      enchantingStatus = result.ok ? 'No item selected' : result.reason
+      renderPlayerUi()
+      return
+    }
+    if (!removeInventoryItem('lapis_lazuli', lapis - result.state.lapis)) {
+      enchantingStatus = 'Lapis cost could not be consumed'
+      renderPlayerUi()
+      return
+    }
+    enchantedItems.set(key, result.state.item)
+    enchantmentSeed = result.state.seed
+    Effect.runSync(world.vitals.restore(addVitalsExperience(
+      vitals,
+      totalExperienceAtLevel(result.state.playerLevel) - vitals.totalExperience,
+    )))
+    enchantingStatus = `Applied ${result.state.item.enchantments.at(-1)?.id ?? 'enchantment'}`
+    document.body.setAttribute('data-enchanting-result', enchantingStatus)
+    markSessionDirty()
+    renderPlayerUi()
+  }
+
+  inventoryParent.addEventListener('input', (event) => {
+    if (inventoryMode !== 'anvil' || !(event.target instanceof HTMLInputElement)) return
+    if (event.target.matches('[data-operation-target="name"]')) {
+      anvilName = event.target.value.slice(0, 50)
+      renderPlayerUi()
+    }
+  })
+
   inventoryParent.addEventListener('click', (event) => {
     if (playerIsDead()) return
+    if (inventoryMode === 'anvil') {
+      const target = event.target instanceof Element
+        ? event.target.closest('[data-operation-target]')?.getAttribute('data-operation-target')
+        : null
+      if (target === 'output') activateAnvilOutput()
+      return
+    }
+    if (inventoryMode === 'enchanting') {
+      const target = event.target instanceof Element
+        ? event.target.closest('[data-operation-target]')?.getAttribute('data-operation-target')
+        : null
+      const slot = target === 'offer-1' ? 0 : target === 'offer-2' ? 1 : target === 'offer-3' ? 2 : undefined
+      if (slot !== undefined) activateEnchantingOffer(slot)
+      return
+    }
     if (inventoryMode === 'chest') {
       if (event.target instanceof Element && event.target.closest(
         '[data-interaction-target="chest-storage-close"]',
@@ -2308,20 +5045,61 @@ const bootGame = async (
       return
     }
     const target = targetOf(event.target)
-    if (target !== undefined) activateInventoryTarget(target)
+    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
+    if (actionTarget !== null) {
+      dispatchInventoryAction({
+        kind: event.shiftKey ? 'shift-click' : 'click',
+        target: actionTarget,
+      })
+    }
   })
   inventoryParent.addEventListener('contextmenu', (event) => {
     if (playerIsDead()) return
-    if (inventoryMode === 'furnace' || inventoryMode === 'chest') return
+    if (['furnace', 'chest', 'anvil', 'enchanting'].includes(inventoryMode)) return
     const target = targetOf(event.target)
     if (target === undefined) return
     event.preventDefault()
     if (target.kind !== 'slot' || target.region === 'crafting-grid') return
-    activateInventoryTarget(target, 'right')
+    if (target.region === 'armour' || target.region === 'offhand') {
+      const actionTarget = inventoryActionTarget(target)
+      if (actionTarget !== null) dispatchInventoryAction({ kind: 'click', target: actionTarget })
+    } else {
+      activateInventoryTarget(target, 'right')
+    }
+  })
+  inventoryParent.addEventListener('dragstart', (event) => {
+    if (inventoryMode !== 'player' && inventoryMode !== 'craftingTable') return
+    const target = targetOf(event.target)
+    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
+    if (actionTarget === null || actionTarget.kind === 'crafting-output') return
+    inventoryDragSource = actionTarget
+    event.dataTransfer?.setData('text/plain', 'inventory-action')
+    if (event.dataTransfer !== null) event.dataTransfer.effectAllowed = 'move'
+  })
+  inventoryParent.addEventListener('dragover', (event) => {
+    if (inventoryDragSource === undefined) return
+    const target = targetOf(event.target)
+    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
+    if (actionTarget === null || actionTarget.kind === 'crafting-output') return
+    event.preventDefault()
+    if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'move'
+  })
+  inventoryParent.addEventListener('drop', (event) => {
+    const source = inventoryDragSource
+    inventoryDragSource = undefined
+    const target = targetOf(event.target)
+    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
+    if (source === undefined || actionTarget === null || actionTarget.kind === 'crafting-output') return
+    event.preventDefault()
+    dispatchInventoryAction({ kind: 'drag', source, target: actionTarget })
+  })
+  inventoryParent.addEventListener('dragend', () => {
+    inventoryDragSource = undefined
   })
   inventoryParent.addEventListener('keydown', (event) => {
     if (playerIsDead()) return
     if (event.key !== 'Enter' && event.key !== ' ') return
+    if (inventoryMode === 'anvil' || inventoryMode === 'enchanting') return
     if (inventoryMode === 'chest') {
       if (event.target instanceof Element && event.target.closest(
         '[data-interaction-target="chest-storage-close"]',
@@ -2355,6 +5133,19 @@ const bootGame = async (
   const setInventoryOpen = (open: boolean, mode: InventoryMode = 'player'): void => {
     if (open && playerIsDead()) return
     if (open && bowInteractionLocked()) return
+    if (!open && multiplayer !== undefined && inventoryOpen && inventoryMode === 'chest' && activeChestId !== undefined) {
+      if (!sendFacilityCommand({
+        _tag: 'ContainerCommand',
+        containerId: activeChestId,
+        action: { _tag: 'close' },
+      })) {
+        chestStatus = 'Wait for the pending facility action before closing'
+        renderPlayerUi()
+        return
+      }
+    }
+    if (open && tradeOpen) setTradeOpen(false)
+    if (open && brewingOpen) setBrewingOpen(false)
     const previousOpen = inventoryOpen
     const switchingMode = open && previousOpen && inventoryMode !== mode
     if (previousOpen === open && !switchingMode) return
@@ -2387,6 +5178,11 @@ const bootGame = async (
         chestFocus = { region: 'chest', slot: 0 }
         chestSelected = undefined
         chestStatus = ''
+      } else if (mode === 'anvil') {
+        anvilName = customNames.get(String(selectedHotbarIndex)) ?? ''
+        anvilStatus = ''
+      } else if (mode === 'enchanting') {
+        enchantingStatus = ''
       } else {
         inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
       }
@@ -2408,20 +5204,46 @@ const bootGame = async (
   const respawnPlayer = (): void => {
     resetPrimaryAttackGesture()
     resetBowUse()
-    Effect.runSync(world.vitals.respawn)
-    Effect.runSync(world.entities.reset)
+    projectileRuntimeState = initialProjectileRuntimeState()
+    eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
+    if (mountedVehicleId !== undefined) {
+      const vehicle = vehicles.get(mountedVehicleId)
+      if (vehicle !== undefined) vehicles.set(mountedVehicleId, exitVehicle(vehicle).vehicle)
+      mountedVehicleId = undefined
+    }
+    if (fishingSession !== undefined) cancelFishing(fishingSession)
+    fishingSession = undefined
+    fishingWater = undefined
+    setFishingResult('idle')
+    swimmingState = initialPlayerSwimmingRuntimeState()
+    presentSwimmingState()
+    if (multiplayer === undefined) survivalHunger.respawn()
+    else sendVitalsCommand('respawn')
     Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
     Effect.runSync(Ref.set(gameplayState.playerDamages, []))
     Effect.runSync(Ref.set(gameplayState.spawnAttempts, []))
     Effect.runSync(Ref.set(gameplayState.mobDrops, []))
     observedMobDrops.splice(0)
-    Effect.runSync(world.player.restore(initialSpawnPose, initialSpawnDimension))
-    alignActiveDimension(initialSpawnDimension)
+    const validRespawn = validRespawnLocation(respawnLocation, (location) => {
+      const context = getOrCreateDimensionChunkContext(location.dimension)
+      const reading = Effect.runSync(context.chunkStore.getBlock(location.bedPosition))
+      return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'bed'
+    })
+    if (validRespawn === null) respawnLocation = null
+    sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
+    const respawnDimension = validRespawn?.dimension ?? initialSpawnDimension
+    const respawnPose = validRespawn === null
+      ? initialSpawnPose
+      : { ...initialSpawnPose, feetPosition: validRespawn.position }
+    Effect.runSync(world.player.restore(respawnPose, respawnDimension))
+    alignActiveDimension(respawnDimension)
+    deathDropDimension = undefined
     resetSimState(true)
-    setInventoryOpen(false)
-    syncTouchControls()
-    markSessionDirty()
-  }
+	setInventoryOpen(false)
+	syncTouchControls()
+	renderPlayerUi()
+	markSessionDirty()
+}
 
   hudParent.addEventListener('click', (event) => {
     if (!(event.target instanceof Element)) return
@@ -2438,18 +5260,11 @@ const bootGame = async (
   // 4a. Durable session publication
   // -------------------------------------------------------------------------
 
-  let dirtyGeneration = 0
-  let savedGeneration = 0
-  let debounceTimer: number | undefined
-
-  const requestFlush = (): Promise<void> => {
-    const requestedGeneration = dirtyGeneration
-    return saveCoordinator.requestSave().then(() => {
-      savedGeneration = Math.max(savedGeneration, requestedGeneration)
-      if (savedGeneration === dirtyGeneration) {
-        document.body.setAttribute('data-session-persistence', 'saved')
-      }
-    })
+  const requestFlush = async (): Promise<void> => {
+    const targetGeneration = dirtyGeneration
+    do {
+      await saveCoordinator.requestSave()
+    } while (savedGeneration < targetGeneration)
   }
 
   const requestBackgroundFlush = (): void => {
@@ -2519,6 +5334,14 @@ const bootGame = async (
   }
 
   const handlePauseRequest = (): void => {
+    if (brewingOpen) {
+      setBrewingOpen(false)
+      return
+    }
+    if (tradeOpen) {
+      setTradeOpen(false)
+      return
+    }
     if (inventoryOpen) {
       setInventoryOpen(false)
       return
@@ -2589,6 +5412,19 @@ const bootGame = async (
       feetPosition: entity.feetPosition,
       category: entity.kind === 'dropped_item' ? 'item' : 'hostile',
     } satisfies RenderEntity)),
+    ...[...multiplayerEntities.values()].map((entity) => ({
+      id: `authoritative:${String(entity.entityId)}`,
+      kind: entity._tag === 'living'
+        ? entity.entityType
+        : entity._tag === 'vehicle'
+          ? entity.vehicleType
+          : 'dropped_item',
+      feetPosition: entity.at,
+      category: entity._tag === 'item-drop' ? 'item' as const : 'hostile' as const,
+    } satisfies RenderEntity)),
+    ...projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
+    ...eyeOfEnderRenderDescriptors(eyeOfEnderRuntimeState, currentChunkContext.dimension),
+    ...witherRenderDescriptors(witherRuntimeState, currentChunkContext.dimension),
     ...[...(multiplayer?.players.entries() ?? [])]
       .filter(([, player]) => player.world === currentChunkContext.dimension)
       .map(([playerId, player]) => ({
@@ -2596,13 +5432,67 @@ const bootGame = async (
         kind: 'remote_player',
         feetPosition: player.at,
       } satisfies RenderEntity)),
+    ...[...villagerResidents.values()]
+      .filter((villager) => villager.dimension === currentChunkContext.dimension)
+      .filter((villager) => currentChunkContext.streamLoaded.has(chunkKeyOf({
+        cx: Math.floor(villager.feetPosition.x / 16),
+        cz: Math.floor(villager.feetPosition.z / 16),
+      })))
+      .map((villager) => ({
+        id: villager.id,
+        kind: 'villager',
+        feetPosition: villager.feetPosition,
+      } satisfies RenderEntity)),
+    ...(currentChunkContext.dimension === 'end'
+      && Effect.runSync(gameplayState.enderDragonEncounter.snapshot).phase !== 'dead'
+      ? [{
+          id: 'ender-dragon',
+          kind: 'ender_dragon',
+          category: 'hostile' as const,
+          feetPosition: endDragonPosition(),
+        } satisfies RenderEntity]
+      : []),
+    ...[...vehicles.values()]
+      .filter((vehicle) => vehicle.dimension === currentChunkContext.dimension)
+      .map((vehicle) => ({
+        id: String(vehicle.id),
+        kind: vehicle.type,
+        feetPosition: vehicle.position,
+        facingRadians: vehicle.yawRadians,
+      } satisfies RenderEntity)),
   ]
+
+  const nearestVillagerForTrade = (
+    position: SessionPosition,
+    dimension: Dimension,
+  ): PersistedVillager | undefined => {
+    let nearest: PersistedVillager | undefined
+    let nearestDistanceSquared = 16
+    for (const villager of villagerResidents.values()) {
+      if (villager.dimension !== dimension) continue
+      const dx = villager.feetPosition.x - position.x
+      const dy = villager.feetPosition.y - position.y
+      const dz = villager.feetPosition.z - position.z
+      const distanceSquared = dx * dx + dy * dy + dz * dz
+      if (
+        distanceSquared < nearestDistanceSquared
+        || (distanceSquared === nearestDistanceSquared && villager.id < (nearest?.id ?? ''))
+      ) {
+        nearest = villager
+        nearestDistanceSquared = distanceSquared
+      }
+    }
+    return nearest
+  }
 
   const gameplaySnapshot = () => {
     const pose = Effect.runSync(playerApi.pose)
     const dimension = Effect.runSync(playerApi.dimension)
     const reading = Effect.runSync(currentChunkStore.getBlock(KNOWN_TARGET_BLOCK))
     const ignitionReading = Effect.runSync(currentChunkStore.getBlock(QA_IGNITION_CELL))
+    const bedExplosionProbeReading = Effect.runSync(
+      currentChunkStore.getBlock(QA_IGNITION_HIT_BLOCK),
+    )
     const farmSoilReading = Effect.runSync(currentChunkStore.getBlock(KNOWN_TARGET_BLOCK))
     const farmCropReading = Effect.runSync(currentChunkStore.getBlock(QA_FARM_CROP_BLOCK))
     const cropSnapshot = Effect.runSync(crops.snapshot)
@@ -2641,6 +5531,10 @@ const bootGame = async (
         grounded: Effect.runSync(Ref.get(simState.isGrounded)),
         accumulatedDistance: Effect.runSync(Ref.get(simState.accumulatedFallDistance)),
       },
+      swimming: swimmingState,
+      projectiles: projectileRuntimeSnapshot(projectileRuntimeState),
+      eyesOfEnder: eyeOfEnderRuntimeSnapshot(eyeOfEnderRuntimeState),
+      wither: snapshotWitherRuntime(witherRuntimeState),
       weather: Effect.runSync(weather.snapshot),
       vitals,
       dead: vitals.healthPoints <= 0,
@@ -2650,6 +5544,10 @@ const bootGame = async (
         equipment: storage.equipment.slots,
       },
       containerStorage,
+      itemMetadata: {
+        customNames: Object.fromEntries(customNames),
+        enchantedItems: Object.fromEntries(enchantedItems),
+      },
       chestUi: {
         open: inventoryOpen && inventoryMode === 'chest',
         activeChestId: activeChestId ?? null,
@@ -2657,8 +5555,24 @@ const bootGame = async (
         focusedSlot: chestFocus,
         status: chestStatus,
       },
+      villagerUi: {
+        open: tradeOpen,
+        activeVillagerId: activeVillagerId ?? null,
+        status: tradeStatus,
+      },
+      villagers: [...villagerResidents.values()],
+      villagerTrades: Effect.runSync(snapshotVillagerTrades(gameplayState)),
+      brewing: Effect.runSync(snapshotBrewingStand(gameplayState)),
+      statusEffects: Effect.runSync(snapshotStatusEffects(gameplayState)),
+      end: {
+        frames: [...endPortalFrames.values()],
+        portalComplete: endPortalComplete,
+        dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
+        exitPortalMaterialized,
+        dragonEggRewarded,
+      },
       entityCount: entities.length,
-      renderedEntities: entityRenderProjection(),
+      renderedEntities: Effect.runSync(worldRenderer.entitySnapshot),
       mobDrops: observedMobDrops.map(({ renderId: _, ...drop }) => drop),
       itemUse: lastObservedItemUse ?? null,
       entities: entities.map((entity) => {
@@ -2668,6 +5582,7 @@ const bootGame = async (
           kind: entity.kind,
           feetPosition: entity.feetPosition,
           healthPoints: entity.healthPoints,
+          behaviour: entity.behaviour,
           ...(dropped === undefined ? {} : {
             item: dropped.item,
             count: dropped.count,
@@ -2684,6 +5599,10 @@ const bootGame = async (
         position: QA_IGNITION_CELL,
         reading: ignitionReading._tag,
         block: ignitionReading._tag === 'Block' ? ignitionReading.block : null,
+      },
+      bedExplosionProbe: {
+        reading: bedExplosionProbeReading._tag,
+        block: bedExplosionProbeReading._tag === 'Block' ? bedExplosionProbeReading.block : null,
       },
       farming: {
         soilBlock: farmSoilReading._tag === 'Block' ? farmSoilReading.block : null,
@@ -2739,6 +5658,117 @@ const bootGame = async (
     markSessionDirty()
     renderPlayerUi()
     return gameplaySnapshot()
+  }
+
+  const stickyPistonSnapshot = () => {
+    const dimension = Effect.runSync(playerApi.dimension)
+    const readBlock = (position: { readonly x: number; readonly y: number; readonly z: number }) => {
+      const reading = Effect.runSync(currentChunkStore.getBlock(position))
+      return reading._tag === 'Block' ? reading.block : null
+    }
+    return {
+      active: leverStates.get(leverKeyOf({ dimension, position: QA_PISTON_LEVER }))?.active ?? false,
+      lever: readBlock(QA_PISTON_LEVER),
+      piston: readBlock(QA_PISTON),
+      near: readBlock(QA_PISTON_NEAR),
+      far: readBlock(QA_PISTON_FAR),
+    }
+  }
+
+  const seedStickyPistonEncounter = () => {
+    respawnPlayer()
+    const dimension = Effect.runSync(playerApi.dimension)
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, dimension))
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('stone', 1))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_LEVER, 76))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON, 16))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_NEAR, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_FAR, 0))
+    leverStates.set(leverKeyOf({ dimension, position: QA_PISTON_LEVER }), {
+      dimension,
+      position: QA_PISTON_LEVER,
+      active: false,
+    })
+    pendingBlockUses.clear()
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    redstoneDirty = true
+    markSessionDirty()
+    renderPlayerUi()
+    return stickyPistonSnapshot()
+  }
+
+  const redstoneFixturesSnapshot = () => {
+    const dimension = Effect.runSync(playerApi.dimension)
+    const readBlock = (position: { readonly x: number; readonly y: number; readonly z: number }) => {
+      const reading = Effect.runSync(currentChunkStore.getBlock(position))
+      return reading._tag === 'Block' ? reading.block : null
+    }
+    return {
+      button: readBlock(QA_REDSTONE_BUTTON),
+      repeater: readBlock(QA_REDSTONE_REPEATER),
+      lamp: readBlock(QA_REDSTONE_LAMP),
+      door: readBlock(QA_REDSTONE_DOOR),
+      poweredRail: poweredRails.has(leverKeyOf({ dimension, position: QA_REDSTONE_RAIL })),
+      dispenser: readBlock(QA_REDSTONE_DISPENSER),
+      hopper: readBlock(QA_REDSTONE_HOPPER),
+      observer: readBlock(QA_REDSTONE_OBSERVER),
+      observerLamp: readBlock(QA_REDSTONE_OBSERVER_LAMP),
+      comparator: readBlock(QA_REDSTONE_COMPARATOR),
+      trigger: canvas.getAttribute('data-redstone-trigger'),
+    }
+  }
+
+  const seedRedstoneFixtures = () => {
+    respawnPlayer()
+    const dimension = Effect.runSync(playerApi.dimension)
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, dimension))
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('stone', 1))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    const fixtures = [
+      [QA_REDSTONE_BUTTON, 77],
+      [QA_REDSTONE_REPEATER, 78],
+      [QA_REDSTONE_LAMP, 79],
+      [QA_REDSTONE_BRANCH_BUTTON, 77],
+      [QA_REDSTONE_BRANCH_WIRE, 74],
+      [QA_REDSTONE_DOOR, 106],
+      [QA_REDSTONE_RAIL, 32],
+      [QA_REDSTONE_DISPENSER, 83],
+      [QA_REDSTONE_HOPPER, 84],
+      [QA_REDSTONE_OBSERVER, 81],
+      [QA_REDSTONE_OBSERVER_INPUT, 2],
+      [QA_REDSTONE_OBSERVER_LAMP, 79],
+      [QA_REDSTONE_COMPARATOR, 82],
+    ] as const
+    for (const [position, block] of fixtures) {
+      Effect.runSync(currentChunkStore.setBlock(position, block))
+    }
+    poweredRails.delete(leverKeyOf({ dimension, position: QA_REDSTONE_RAIL }))
+    canvas.removeAttribute('data-redstone-trigger')
+    redstoneDirty = true
+    markSessionDirty()
+    return redstoneFixturesSnapshot()
+  }
+
+  const pressRedstoneBranchButton = () => {
+    Effect.runSync(redstoneRuntime.pressButton(
+      Effect.runSync(playerApi.dimension),
+      QA_REDSTONE_BRANCH_BUTTON,
+    ))
+    return redstoneFixturesSnapshot()
+  }
+
+  const mutateObserverInput = () => {
+    Effect.runSync(currentChunkStore.setBlock(QA_REDSTONE_OBSERVER_INPUT, 3))
+    redstoneDirty = true
+    return redstoneFixturesSnapshot()
   }
 
   const seedWoodenPickaxeProgression = () => {
@@ -2936,6 +5966,35 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedPortalIgnitionEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('flint_and_steel', 1))
+    portalStates.delete(portalKeyOf({
+      dimension: 'overworld',
+      position: QA_IGNITION_PORTAL_LAYOUT.interior[0],
+    }))
+    Effect.runSync(syncPortalCandidatesFor('overworld'))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('stone')))
+    for (const position of QA_IGNITION_PORTAL_LAYOUT.frame) {
+      Effect.runSync(currentChunkStore.setBlock(position, OBSIDIAN_BLOCK_ID))
+    }
+    for (const position of QA_IGNITION_PORTAL_LAYOUT.interior) {
+      Effect.runSync(currentChunkStore.setBlock(position, blockIdOf('air')))
+    }
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    pendingItemUses.clear()
+    lastObservedItemUse = undefined
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
   const enterQaDimension = (dimension: Dimension) => {
     const pose = Effect.runSync(playerApi.pose)
     Effect.runSync(playerApi.restore(pose, dimension))
@@ -2948,11 +6007,604 @@ const bootGame = async (
     return gameplaySnapshot()
   }
 
+  const seedBedExplosionEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'nether'))
+    alignActiveDimension('nether')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('bed')))
+    Effect.runSync(currentChunkStore.setBlock({
+      x: QA_IGNITION_HIT_BLOCK.x,
+      y: QA_IGNITION_HIT_BLOCK.y - 1,
+      z: QA_IGNITION_HIT_BLOCK.z,
+    }, blockIdOf('stone')))
+    document.body.removeAttribute('data-bed-explosion-request')
+    document.body.removeAttribute('data-sleep-result')
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedBowProjectileEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('bow', 1))
+    Effect.runSync(world.inventory.add('arrow', 8))
+    for (let x = 6; x <= 10; x += 1) {
+      for (let y = 62; y <= 69; y += 1) {
+        Effect.runSync(currentChunkStore.setBlock({ x, y, z: 2 }, blockIdOf('stone')))
+      }
+    }
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedVillageTradingEncounter = () => {
+    let villager: PersistedVillager | undefined
+    for (let radius = 0; radius <= 64 && villager === undefined; radius += 1) {
+      for (let cx = -radius; cx <= radius && villager === undefined; cx += 1) {
+        for (const cz of new Set([-radius, radius])) {
+          const spawn = villageVillagerSpawnsForChunk(
+            activeSeed,
+            cx,
+            cz,
+            (x, z) => {
+              const surfaceY = surfaceHeightAt(activeSeed, x, z)
+              return {
+                biome: biomeFor(activeSeed, x, z, surfaceY, DEFAULT_TERRAIN_LEVELS),
+                surfaceY,
+                seaLevel: DEFAULT_TERRAIN_LEVELS.seaLevel,
+              }
+            },
+          )[0]
+          if (spawn !== undefined) {
+            Effect.runSync(streamAround(currentChunkContext, spawn.x, spawn.z))
+            villager = villagerResidents.get(spawn.id)
+            break
+          }
+        }
+      }
+      for (let cz = -radius + 1; cz < radius && villager === undefined; cz += 1) {
+        for (const cx of new Set([-radius, radius])) {
+          const spawn = villageVillagerSpawnsForChunk(
+            activeSeed,
+            cx,
+            cz,
+            (x, z) => {
+              const surfaceY = surfaceHeightAt(activeSeed, x, z)
+              return {
+                biome: biomeFor(activeSeed, x, z, surfaceY, DEFAULT_TERRAIN_LEVELS),
+                surfaceY,
+                seaLevel: DEFAULT_TERRAIN_LEVELS.seaLevel,
+              }
+            },
+          )[0]
+          if (spawn !== undefined) {
+            Effect.runSync(streamAround(currentChunkContext, spawn.x, spawn.z))
+            villager = villagerResidents.get(spawn.id)
+            break
+          }
+        }
+      }
+    }
+    if (villager === undefined) throw new Error('no village villager found near the QA origin')
+    Effect.runSync(playerApi.restore({
+      feetPosition: {
+        x: villager.feetPosition.x + 1.5,
+        y: villager.feetPosition.y,
+        z: villager.feetPosition.z,
+      },
+      yawRadians: Math.PI / 2,
+      pitchRadians: 0,
+    }, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    setTradeOpen(false)
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedBrewingEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('brewing_stand')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('blaze_powder', 2))
+    Effect.runSync(world.inventory.add('water_bottle', 1))
+    Effect.runSync(world.inventory.add('nether_wart', 1))
+    Effect.runSync(world.inventory.add('spider_eye', 1))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    Effect.runSync(restoreBrewingStand(gameplayState, emptyBrewingStandState()))
+    Effect.runSync(restoreStatusEffects(gameplayState, emptyStatusEffectState()))
+    setBrewingOpen(false)
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedItemUpgradeEncounter = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(currentChunkStore.setBlock(
+      QA_IGNITION_HIT_BLOCK,
+      blockIdOf('enchanting_table'),
+    ))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('diamond_pickaxe', 1))
+    Effect.runSync(world.inventory.add('lapis_lazuli', 3))
+    Effect.runSync(world.inventory.add('iron_ingot', 1))
+    const storage = Effect.runSync(world.inventory.storageSnapshot)
+    const durability = [...storage.inventoryDurability]
+    const pickaxeDurability = durability[0]
+    if (pickaxeDurability === null || pickaxeDurability === undefined) {
+      throw new Error('seeded diamond pickaxe has no durability')
+    }
+    durability[0] = { current: Math.floor(pickaxeDurability.max / 2), max: pickaxeDurability.max }
+    Effect.runSync(world.inventory.restoreStorage({ ...storage, inventoryDurability: durability }))
+    for (const key of [...customNames.keys(), ...enchantedItems.keys()]) {
+      if (/^\d+$/.test(key)) deleteItemMetadata(key)
+    }
+    for (let candidate = 0; candidate < 10_000; candidate += 1) {
+      const id = enchantmentOffers(candidate, 15)[0].enchantment.id
+      if (id === 'efficiency' || id === 'unbreaking' || id === 'fortune') {
+        enchantmentSeed = candidate
+        break
+      }
+    }
+    const vitals = Effect.runSync(world.vitals.snapshot)
+    Effect.runSync(world.vitals.restore(addVitalsExperience(
+      vitals,
+      totalExperienceAtLevel(30) - vitals.totalExperience,
+    )))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    setInventoryOpen(false)
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const switchItemUpgradeStationToAnvil = () => {
+    Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_IGNITION_POSE.feetPosition.x,
+        QA_IGNITION_POSE.feetPosition.z,
+      ),
+    )
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('anvil')))
+    setInventoryOpen(false)
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const poseLookingAt = (target: SessionPosition, distance: number): typeof QA_POSE => ({
+    feetPosition: {
+      x: target.x + 0.5,
+      y: target.y + 0.5 - EYE_LEVEL_OFFSET,
+      z: target.z + 0.5 + distance,
+    },
+    yawRadians: 0,
+    pitchRadians: 0,
+  })
+
+  const seedFishingEncounter = () => {
+    respawnPlayer()
+    const water = { x: QA_IGNITION_HIT_BLOCK.x, y: QA_IGNITION_HIT_BLOCK.y, z: QA_IGNITION_HIT_BLOCK.z }
+    Effect.runSync(streamAround(currentChunkContext, water.x, water.z))
+    for (let x = water.x - 2; x <= water.x + 2; x += 1) {
+      for (let z = water.z - 2; z <= water.z + 2; z += 1) {
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, water.y, z), blockIdOf('water')))
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, water.y + 1, z), blockIdOf('air')))
+      }
+    }
+    Effect.runSync(playerApi.restore(poseLookingAt(water, 3), 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('fishing_rod', 1))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    fishingSession = undefined
+    fishingWater = undefined
+    setFishingResult('idle')
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedSubmergedSwimmingEncounter = () => {
+    respawnPlayer()
+    const pool = {
+      x: QA_IGNITION_HIT_BLOCK.x,
+      y: QA_IGNITION_HIT_BLOCK.y,
+      z: QA_IGNITION_HIT_BLOCK.z,
+    }
+    Effect.runSync(streamAround(currentChunkContext, pool.x, pool.z))
+    for (let x = pool.x - 2; x <= pool.x + 2; x += 1) {
+      for (let z = pool.z - 2; z <= pool.z + 2; z += 1) {
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, pool.y - 1, z), blockIdOf('stone')))
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, pool.y, z), blockIdOf('water')))
+        for (let y = pool.y + 1; y <= pool.y + 12; y += 1) {
+          Effect.runSync(currentChunkStore.setBlock(blockPosition(x, y, z), blockIdOf('water')))
+        }
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, pool.y + 13, z), blockIdOf('air')))
+      }
+    }
+    for (let y = pool.y - 1; y <= pool.y + 13; y += 1) {
+      Effect.runSync(currentChunkStore.setBlock(blockPosition(pool.x + 3, y, pool.z), blockIdOf(
+        y === pool.y - 1 ? 'stone' : 'air',
+      )))
+    }
+    Effect.runSync(playerApi.restore({
+      feetPosition: { x: pool.x + 0.5, y: pool.y + 0.05, z: pool.z + 0.5 },
+      yawRadians: 0,
+      pitchRadians: 0,
+    }, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    swimmingState = {
+      ...initialPlayerSwimmingRuntimeState(),
+      oxygenSecs: 0.05,
+      drowningElapsedSecs: 0.95,
+    }
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const leaveSubmergedSwimmingEncounter = () => {
+    const pool = QA_IGNITION_HIT_BLOCK
+    Effect.runSync(playerApi.restore({
+      feetPosition: { x: pool.x + 3.5, y: pool.y + 0.05, z: pool.z + 0.5 },
+      yawRadians: 0,
+      pitchRadians: 0,
+    }, 'overworld'))
+    resetSimState(true)
+    return gameplaySnapshot()
+  }
+
+  const seedEndEyeCrafting = () => {
+    respawnPlayer()
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('ender_pearl', 1))
+    Effect.runSync(world.inventory.add('blaze_powder', 1))
+    inventoryInteraction.reset()
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const seedEndPortalFinalFrame = () => {
+    respawnPlayer()
+    const currentPose = Effect.runSync(playerApi.pose)
+    const site = nearestStrongholdSite(activeSeed, currentPose.feetPosition.x, currentPose.feetPosition.z)
+    if (Option.isNone(site)) throw new Error('no stronghold found near the QA player')
+    const center = endPortalCenterForStronghold(site.value)
+    const finalOffset = END_PORTAL_FRAME_OFFSETS[0]
+    if (finalOffset === undefined) throw new Error('End portal frame layout is empty')
+    Effect.runSync(streamAround(currentChunkContext, center.x, center.z))
+    endPortalFrames.clear()
+    endPortalComplete = false
+    for (const offset of END_PORTAL_FRAME_OFFSETS) {
+      const position = { x: center.x + offset.dx, y: center.y, z: center.z + offset.dz }
+      const isFinal = offset === finalOffset
+      Effect.runSync(currentChunkStore.setBlock(
+        position,
+        isFinal ? END_PORTAL_BLOCK.FRAME_EMPTY : END_PORTAL_BLOCK.FRAME_FILLED,
+      ))
+      if (!isFinal) {
+        endPortalFrames.set(endPortalFrameKey(position), {
+          position,
+          facing: offset.facing,
+          eye: true,
+        })
+      }
+    }
+    const finalPosition = {
+      x: center.x + finalOffset.dx,
+      y: center.y,
+      z: center.z + finalOffset.dz,
+    }
+    Effect.runSync(playerApi.restore(poseLookingAt(finalPosition, 3), 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('eye_of_ender', 1))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  const targetCompletedEndPortal = () => {
+    const frame = endPortalFrames.values().next().value as PersistedEndPortalFrameState | undefined
+    if (frame === undefined || !endPortalComplete) throw new Error('End portal is not complete')
+    const site = nearestStrongholdSite(activeSeed, frame.position.x, frame.position.z)
+    if (Option.isNone(site)) throw new Error('no stronghold found for the completed portal')
+    const center = endPortalCenterForStronghold(site.value)
+    Effect.runSync(playerApi.restore({
+      feetPosition: {
+        x: center.x + 0.5,
+        y: center.y + 3 - EYE_LEVEL_OFFSET,
+        z: center.z + 0.5,
+      },
+      yawRadians: 0,
+      pitchRadians: -Math.PI / 2 + 0.01,
+    }, 'overworld'))
+    resetSimState(true)
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
+  const spawnFullHealthHostile = (kind: typeof ENDERMAN_KIND | typeof BLAZE_KIND, healthPoints: number) => {
+    respawnPlayer()
+    const inventory = Effect.runSync(world.inventory.snapshot)
+    let swordSlot = inventory.slots.findIndex((slot) => slot?.item === 'diamond_sword')
+    if (swordSlot < 0) {
+      Effect.runSync(world.inventory.add('diamond_sword', 1))
+      swordSlot = Effect.runSync(world.inventory.snapshot).slots.findIndex((slot) => slot?.item === 'diamond_sword')
+    }
+    if (swordSlot >= 0 && swordSlot < 9) selectedHotbarIndex = swordSlot
+    for (const entity of Effect.runSync(world.entities.snapshot).entities) {
+      if (entity.kind === kind) Effect.runSync(world.entities.despawn(entity.id))
+    }
+    const pose = Effect.runSync(playerApi.pose)
+    const target = {
+      x: pose.feetPosition.x,
+      y: pose.feetPosition.y,
+      z: pose.feetPosition.z - 3,
+    }
+    Effect.runSync(world.entities.spawn({ kind, feetPosition: target, healthPoints, behaviour: undefined }))
+    Effect.runSync(playerApi.restore(poseLookingAt(target, 2), Effect.runSync(playerApi.dimension)))
+    resetSimState(true)
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
+  const targetNearestHostile = () => {
+    const pose = Effect.runSync(playerApi.pose)
+    const hostile = Effect.runSync(world.entities.snapshot).entities
+      .filter((entity) => entity.kind === ENDERMAN_KIND || entity.kind === BLAZE_KIND)
+      .sort((left, right) => {
+        const distance = (position: typeof left.feetPosition) => Math.hypot(
+          position.x - pose.feetPosition.x,
+          position.y - pose.feetPosition.y,
+          position.z - pose.feetPosition.z,
+        )
+        return distance(left.feetPosition) - distance(right.feetPosition)
+      })[0]
+    if (hostile === undefined) throw new Error('no hostile found')
+    Effect.runSync(playerApi.restore(
+      poseLookingAt(hostile.feetPosition, 2),
+      Effect.runSync(playerApi.dimension),
+    ))
+    resetSimState(true)
+    return gameplaySnapshot()
+  }
+
+  const targetNearestDroppedItem = () => {
+    const pose = Effect.runSync(playerApi.pose)
+    const dropped = Effect.runSync(world.entities.snapshot).entities
+      .filter((entity) => isDroppedItemBehaviour(entity.behaviour))
+      .sort((left, right) => {
+        const distance = (position: typeof left.feetPosition) => Math.hypot(
+          position.x - pose.feetPosition.x,
+          position.y - pose.feetPosition.y,
+          position.z - pose.feetPosition.z,
+        )
+        return distance(left.feetPosition) - distance(right.feetPosition)
+      })[0]
+    if (dropped === undefined) throw new Error('no dropped item found')
+    Effect.runSync(playerApi.moveTo(dropped.feetPosition))
+    resetSimState(true)
+    return gameplaySnapshot()
+  }
+
+  const targetNearestStrongholdFrame = async () => {
+    const pose = Effect.runSync(playerApi.pose)
+    const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
+    if (Option.isNone(site)) throw new Error('no stronghold found near the QA player')
+    const center = endPortalCenterForStronghold(site.value)
+    alignActiveDimension('overworld')
+    Effect.runSync(streamAround(currentChunkContext, center.x, center.z))
+    const targetOffset = END_PORTAL_FRAME_OFFSETS.find((offset) => {
+      const position = { x: center.x + offset.dx, y: center.y, z: center.z + offset.dz }
+      const reading = Effect.runSync(currentChunkStore.getBlock(position))
+      return reading._tag === 'Block' && reading.block === END_PORTAL_BLOCK.FRAME_EMPTY
+    })
+    if (targetOffset === undefined) throw new Error('no empty stronghold frame found')
+    const target = { x: center.x + targetOffset.dx, y: center.y, z: center.z + targetOffset.dz }
+    Effect.runSync(playerApi.restore({
+      feetPosition: { x: target.x + 0.5, y: target.y + 2, z: target.z + 0.5 },
+      yawRadians: 0,
+      pitchRadians: -Math.PI / 2 + 0.01,
+    }, 'overworld'))
+    resetSimState(true)
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    })
+    const normalizedPose = Effect.runSync(playerApi.pose)
+    const dx = target.x + 0.5 - normalizedPose.feetPosition.x
+    const dy = target.y + 0.5 - (normalizedPose.feetPosition.y + EYE_LEVEL_OFFSET)
+    const dz = target.z + 0.5 - normalizedPose.feetPosition.z
+    const horizontalDistance = Math.hypot(dx, dz)
+    resetSimState(false)
+    Effect.runSync(playerApi.restore({
+      ...normalizedPose,
+      yawRadians: Math.atan2(-dx, -dz),
+      pitchRadians: Math.atan2(dy, horizontalDistance),
+    }, 'overworld'))
+    const aimedTarget = await Effect.runPromise(targetedBlock())
+    if (aimedTarget?.block !== END_PORTAL_BLOCK.FRAME_EMPTY
+      || aimedTarget.position.x !== target.x
+      || aimedTarget.position.y !== target.y
+      || aimedTarget.position.z !== target.z) {
+      throw new Error(`failed to target empty stronghold frame: ${JSON.stringify(aimedTarget)}`)
+    }
+    return gameplaySnapshot()
+  }
+
+  const targetEndDragon = () => {
+    Effect.runSync(playerApi.restore(poseLookingAt(endDragonPosition(), 5), 'end'))
+    alignActiveDimension('end')
+    resetSimState(true)
+    return gameplaySnapshot()
+  }
+
+  const seedEndDragonFinalHit = () => {
+    Effect.runSync(gameplayState.enderDragonEncounter.restore({
+      phase: 'circling',
+      phaseTimerSecs: 0,
+      health: 1,
+      rewardEmitted: false,
+    }))
+    const dragon = endDragonPosition()
+    Effect.runSync(playerApi.restore(poseLookingAt(dragon, 5), 'end'))
+    alignActiveDimension('end')
+    resetSimState(true)
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
+  const targetEndExitPortal = () => {
+    if (!exitPortalMaterialized) throw new Error('End exit portal is not materialized')
+    Effect.runSync(playerApi.restore(poseLookingAt({ x: 0, y: 64, z: 0 }, 3), 'end'))
+    resetSimState(true)
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
+  const grantNearestVillagerTradeInput = () => {
+    const pose = Effect.runSync(playerApi.pose)
+    const villager = nearestVillagerForTrade(pose.feetPosition, 'overworld')
+    const trade = Effect.runSync(snapshotVillagerTrades(gameplayState)).villagers
+      .find((candidate) => candidate.id === villager?.id)
+    const offer = trade?.offers[0]
+    if (offer === undefined) throw new Error('no nearby villager trade offer')
+    Effect.runSync(world.inventory.add(offer.input.item, offer.input.count))
+    markSessionDirty()
+    renderPlayerUi()
+    return gameplaySnapshot()
+  }
+
+  let stopBrowserPreview: (() => Promise<void>) | undefined
   const registry = buildQaRegistry([
+    {
+      namespace: 'render',
+      commands: {
+        snapshotLighting: () => ({
+          ...currentChunkContext.lightingSnapshot(),
+          weatherBrightness: weatherLightScale(Effect.runSync(weather.snapshot).weather),
+        }),
+      },
+    },
     {
       namespace: 'gameplay',
       commands: {
         snapshot: gameplaySnapshot,
+        seedChestTransferMetadata: () => {
+          Effect.runSync(world.inventory.reset)
+          for (const key of [...customNames.keys(), ...enchantedItems.keys()]) {
+            if (/^\d+$/.test(key)) deleteItemMetadata(key)
+          }
+          Effect.runSync(world.inventory.add('diamond_pickaxe', 1))
+          const durability = Effect.runSync(world.inventory.storageSnapshot).inventoryDurability[0]
+          if (durability === null || durability === undefined) {
+            throw new Error('seeded diamond pickaxe has no durability')
+          }
+          customNames.set('0', 'Silk Runner')
+          enchantedItems.set('0', {
+            item: 'diamond_pickaxe',
+            durability,
+            enchantments: [{ id: 'efficiency', level: 5 }],
+          })
+          markSessionDirty()
+          renderPlayerUi()
+          return gameplaySnapshot()
+        },
+        seedChestTransferMetadataConflict: () => {
+          Effect.runSync(world.inventory.add('diamond_pickaxe', 1))
+          const durability = Effect.runSync(world.inventory.storageSnapshot).inventoryDurability[0]
+          if (durability === null || durability === undefined) {
+            throw new Error('seeded diamond pickaxe has no durability')
+          }
+          customNames.set('0', 'Fortune Runner')
+          enchantedItems.set('0', {
+            item: 'diamond_pickaxe',
+            durability,
+            enchantments: [{ id: 'fortune', level: 3 }],
+          })
+          markSessionDirty()
+          renderPlayerUi()
+          return gameplaySnapshot()
+        },
+        seedStaleCustomNames: () => {
+          customNames.set('35', 'Stale inventory name')
+          customNames.set('equipment:head', 'Stale equipment name')
+          customNames.set('unknown:slot', 'Stale unknown name')
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
         setWeather: () => {
           const qaWeather: WeatherState = { weather: 'thunder', remainingSecs: 300 }
           Effect.runSync(weather.applyTransition(qaWeather))
@@ -2967,6 +6619,35 @@ const bootGame = async (
           }
           resetSimState(true)
           markSessionDirty()
+          return gameplaySnapshot()
+        },
+        seedSmokeGroundingEncounter: () => {
+          const dimension = Effect.runSync(playerApi.dimension)
+          Effect.runSync(streamAround(currentChunkContext, QA_POSE.feetPosition.x, QA_POSE.feetPosition.z))
+          for (let x = -16; x <= 32; x += 1) {
+            for (let z = -16; z <= 32; z += 1) {
+              Effect.runSync(currentChunkStore.setBlock({ x, y: 62, z }, blockIdOf('stone')))
+              Effect.runSync(currentChunkStore.setBlock({ x, y: 63, z }, blockIdOf('stone')))
+              for (let y = 64; y <= 68; y += 1) {
+                Effect.runSync(currentChunkStore.setBlock({ x, y, z }, blockIdOf('air')))
+              }
+            }
+          }
+          Effect.runSync(playerApi.restore({
+            ...QA_POSE,
+            feetPosition: { ...QA_POSE.feetPosition, y: 66 },
+          }, dimension))
+          resetSimState(true)
+          markSessionDirty()
+          return gameplaySnapshot()
+        },
+        setMultiplayerInvalidPose: () => {
+          const pose = Effect.runSync(playerApi.pose)
+          Effect.runSync(playerApi.restore({
+            ...pose,
+            feetPosition: { ...pose.feetPosition, x: pose.feetPosition.x + 100 },
+          }, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
           return gameplaySnapshot()
         },
         seedCreativeBreakEncounter: () => {
@@ -2997,6 +6678,27 @@ const bootGame = async (
           renderPlayerUi()
           return gameplaySnapshot()
         },
+        requestMultiplayerBlockPlacement: () => {
+          if (multiplayer === undefined || !multiplayerHandshakeComplete) return gameplaySnapshot()
+          Effect.runSync(multiplayer.host.enqueueOutbound({
+            _tag: 'BlockPlace',
+            player: multiplayer.query.player,
+            world: WorldId.make(Effect.runSync(playerApi.dimension)),
+            at: QA_IGNITION_CELL,
+            block: 'stone',
+          }))
+          return gameplaySnapshot()
+        },
+        requestMultiplayerBlockBreak: () => {
+          if (multiplayer === undefined || !multiplayerHandshakeComplete) return gameplaySnapshot()
+          Effect.runSync(multiplayer.host.enqueueOutbound({
+            _tag: 'BlockBreak',
+            player: multiplayer.query.player,
+            world: WorldId.make(Effect.runSync(playerApi.dimension)),
+            at: QA_IGNITION_CELL,
+          }))
+          return gameplaySnapshot()
+        },
         returnToCraftingTable: () => {
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
@@ -3005,6 +6707,8 @@ const bootGame = async (
         },
         enterNether: () => enterQaDimension('nether'),
         enterOverworld: () => enterQaDimension('overworld'),
+        seedBedExplosionEncounter,
+        seedBowProjectileEncounter,
         breakTarget: () => {
           if (playerIsDead()) return null
           const target = Effect.runSync(
@@ -3023,7 +6727,18 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedCraftingTableEncounter,
+        seedStickyPistonEncounter,
+        stickyPistonSnapshot,
+        seedRedstoneFixtures,
+        redstoneFixturesSnapshot,
+        pressRedstoneBranchButton,
+        mutateObserverInput,
         seedFarmingEncounter,
+        seedFishingEncounter,
+        seedSubmergedSwimmingEncounter,
+        leaveSubmergedSwimmingEncounter,
+        seedVillageTradingEncounter,
+        grantNearestVillagerTradeInput,
         harvestFarmingCrop,
         seedCactusApproach: () => seedEnvironmentalContactEncounter('cactus'),
         seedDuplicateLavaContact: () => seedEnvironmentalContactEncounter('duplicateLava'),
@@ -3045,6 +6760,7 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         seedPortalEncounter,
+        seedPortalIgnitionEncounter,
         seedWoodenPickaxeProgression,
         seedIronArmor: () => {
           Effect.runSync(world.inventory.reset)
@@ -3061,6 +6777,7 @@ const bootGame = async (
               throw new Error(`failed to equip ${slot}: ${result._tag}`)
             }
           })
+          Effect.runSync(world.inventory.add('iron_sword', 1))
           inventoryInteraction.reset()
           markSessionDirty()
           renderPlayerUi()
@@ -3079,7 +6796,7 @@ const bootGame = async (
           return gameplaySnapshot()
         },
         eat: () => {
-          Effect.runSync(world.vitals.eat(4, 0.3))
+          survivalHunger.eat(4, 0.3)
           markSessionDirty()
           renderPlayerUi()
           return gameplaySnapshot()
@@ -3107,6 +6824,11 @@ const bootGame = async (
         },
         seedZombiePursuitEncounter: () => {
           respawnPlayer()
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
+          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
+          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
+          Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
           const currentPose = Effect.runSync(playerApi.pose)
           Effect.runSync(requestMobSpawn(gameplayState, {
             kind: ZOMBIE_KIND,
@@ -3129,7 +6851,16 @@ const bootGame = async (
         },
         seedLethalZombieEncounter: () => {
           respawnPlayer()
-          applyPlayerDamage({ amount: 18, cause: 'generic' })
+          Effect.runSync(world.inventory.reset)
+          Effect.runSync(world.inventory.add('stone_pickaxe', 1))
+          Effect.runSync(world.inventory.add('potato', 2))
+          Effect.runSync(world.inventory.add('torch', 8))
+          Effect.runSync(world.inventory.add('oak_planks', 4))
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
+          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
+          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
+          Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
           const currentPose = Effect.runSync(playerApi.pose)
           Effect.runSync(requestMobSpawn(gameplayState, {
             kind: ZOMBIE_KIND,
@@ -3147,11 +6878,15 @@ const bootGame = async (
               distanceToPlayerBlocksXZ: 16,
             },
           }))
+          applyPlayerDamage({ amount: 20, cause: 'mob' })
           markSessionDirty()
+          renderPlayerUi()
           return gameplaySnapshot()
         },
         seedFoodUseEncounter: () => {
           respawnPlayer()
+          Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
+          resetSimState(true)
           Effect.runSync(world.inventory.reset)
           Effect.runSync(world.inventory.add('potato', 2))
           applyPlayerDamage({ amount: 4, cause: 'generic' })
@@ -3177,6 +6912,7 @@ const bootGame = async (
             kind: 'ignition',
             slotIndex: selectedHotbarIndex,
             heldItem: 'fire_charge',
+            dimension: Effect.runSync(playerApi.dimension),
           })
           markSessionDirty()
           return gameplaySnapshot()
@@ -3229,6 +6965,28 @@ const bootGame = async (
           renderPlayerUi()
           return gameplaySnapshot()
         },
+        seedBrewingEncounter,
+        seedItemUpgradeEncounter,
+        switchItemUpgradeStationToAnvil,
+        seedEndEyeCrafting,
+        forceNextEyeOfEnderDrop: () => {
+          nextEyeOfEnderBreaks = false
+          return gameplaySnapshot()
+        },
+        forceNextEyeOfEnderBreak: () => {
+          nextEyeOfEnderBreaks = true
+          return gameplaySnapshot()
+        },
+        spawnFullHealthEnderman: () => spawnFullHealthHostile(ENDERMAN_KIND, 40),
+        spawnFullHealthBlaze: () => spawnFullHealthHostile(BLAZE_KIND, 20),
+        targetNearestHostile,
+        targetNearestDroppedItem,
+        targetNearestStrongholdFrame,
+        seedEndPortalFinalFrame,
+        targetCompletedEndPortal,
+        seedEndDragonFinalHit,
+        targetEndDragon,
+        targetEndExitPortal,
       },
     },
     {
@@ -3238,7 +6996,14 @@ const bootGame = async (
     {
       namespace: 'audio',
       commands: {
+        report: () => Effect.runSync(audioBackend.report),
         snapshot: () => audio.snapshot(Effect.runSync(browserClock.monotonicSecs)),
+      },
+    },
+    {
+      namespace: 'lifecycle',
+      commands: {
+        stop: () => stopBrowserPreview?.(),
       },
     },
   ])
@@ -3272,23 +7037,37 @@ const bootGame = async (
       : multiplayer.transport.close
     void Effect.runPromise(close)
   }
+  let runtimeDisposed = false
+  const disposeRuntime = (): void => {
+    if (runtimeDisposed) return
+    runtimeDisposed = true
+    settingsView.dispose()
+    endAudio.dispose()
+    weatherAudio.dispose()
+    for (const timeout of pendingThunder.values()) window.clearTimeout(timeout)
+    pendingThunder.clear()
+    window.removeEventListener('mousedown', queueNativeUse, true)
+    Effect.runSync(worldRenderer.dispose)
+    atlasTexture.dispose()
+    audio.close()
+  }
   // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
   // Periodic publication persists advancing time and weather without gameplay mutations.
   window.addEventListener('pagehide', (event) => {
     requestBackgroundFlush()
+    void stopBrowserPreview?.()
     disposeMultiplayer()
     if (!event.persisted) {
-      settingsView.dispose()
-      audio.close()
+      disposeRuntime()
     }
   })
   const hot = (import.meta as ImportMeta & {
     readonly hot?: { readonly dispose: (handler: () => void) => void }
   }).hot
   hot?.dispose(() => {
+    void stopBrowserPreview?.()
     disposeMultiplayer()
-    settingsView.dispose()
-    audio.close()
+    disposeRuntime()
   })
 
   // -------------------------------------------------------------------------
@@ -3302,8 +7081,6 @@ const bootGame = async (
   const readNow = (): MonotonicTimeSecs => Effect.runSync(browserClock.monotonicSecs)
 
   let previousSecs: MonotonicTimeSecs | undefined
-  let framesThisWindow = 0
-  let windowStartedAtSecs = readNow()
   let framesTotal = 0
   let renderedCaptionSignature: string | undefined
 
@@ -3319,19 +7096,23 @@ const bootGame = async (
       renderCrosshair(nowSecs)
       Effect.runSync(inputApi.endFrame(frameInput))
       previousSecs = nowSecs
-      requestAnimationFrame(tick)
       return
     }
     if (paused) {
       renderCrosshair(nowSecs)
       Effect.runSync(inputApi.endFrame(frameInput))
       previousSecs = nowSecs
-      requestAnimationFrame(tick)
       return
     }
     const raw = previousSecs === undefined ? FIRST_FRAME_SECS : nowSecs - previousSecs
     previousSecs = nowSecs
     const deltaSecs = clampDelta(raw)
+    for (const [key, expiresAt] of observerPulses) {
+      if (expiresAt <= simulationElapsedSecs) {
+        observerPulses.delete(key)
+        redstoneDirty = true
+      }
+    }
     if (redstoneDirty) syncRedstoneSnapshot(currentChunkContext)
 
     // -----------------------------------------------------------------------
@@ -3344,16 +7125,29 @@ const bootGame = async (
     // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, which keeps a
     // backgrounded tab from returning with a multi-second physics step.
     const walk = frameInput
-    const foodOutcome = isCreativeMode
-      ? { signal: 'none' as const }
-      : Effect.runSync(world.vitals.advanceFoodTimer(deltaSecs))
-    if (foodOutcome.signal !== 'none') markSessionDirty()
+    const healthBeforeHungerTick = Effect.runSync(world.vitals.view).healthPoints
+    const hungerOutcome = isCreativeMode || multiplayer !== undefined
+      ? undefined
+      : survivalHunger.tick(deltaSecs)
+    if (healthBeforeHungerTick > 0 && playerIsDead() && multiplayer === undefined) {
+      handleLocalPlayerDeath()
+    }
+    if (
+      hungerOutcome !== undefined && (
+        hungerOutcome.exhaustionAdded > 0 ||
+        hungerOutcome.foodTicks > 0 ||
+        hungerOutcome.regeneratedHealth > 0 ||
+        hungerOutcome.starvationDamage > 0
+      )
+    ) markSessionDirty()
     simulationElapsedSecs += deltaSecs
 
     const dead = playerIsDead()
+    let deadAfterFrame = dead
     syncTouchControls()
     if (dead) {
       if (inventoryOpen) setInventoryOpen(false)
+      if (brewingOpen) setBrewingOpen(false)
       if (document.pointerLockElement === canvas) document.exitPointerLock()
     }
 
@@ -3365,51 +7159,139 @@ const bootGame = async (
       setInventoryOpen(!inventoryOpen, 'player')
     }
 
-    if (!dead && !inventoryOpen) {
-      selectedHotbarIndex = selectedHotbarAfterInput(
+    if (!dead && !inventoryOpen && !tradeOpen) {
+      const nextHotbarIndex = selectedHotbarAfterInput(
         selectedHotbarIndex,
         walk.wheelSteps,
         (action) => Effect.runSync(inputApi.wasActionJustTriggered(action)),
         wrapHotbarSelection,
       )
+      if (nextHotbarIndex !== selectedHotbarIndex) {
+        if (multiplayer === undefined) selectedHotbarIndex = nextHotbarIndex
+        else sendInventorySelection(nextHotbarIndex)
+      }
     }
 
     const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
-      !dead && !inventoryOpen && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
+      !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+        && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
 
+    const queuedNativeAttack = nativeAttackQueued > 0
+    if (queuedNativeAttack) resetPrimaryAttackGesture()
     const attackTriggered =
-      !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
-    const attackHeld = held('attack') > 0
+      !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+      && (Effect.runSync(inputApi.wasActionJustTriggered('attack')) || queuedNativeAttack)
+    if (attackTriggered && !isCreativeMode) {
+      if (multiplayer === undefined) survivalHunger.submit({ _tag: 'attack', count: 1 })
+      else sendVitalsCommand({ _tag: 'activity', activity: 'attack', amount: 1 })
+    }
+    const attackHeld = held('attack') > 0 || queuedNativeAttack
+    if (queuedNativeAttack) nativeAttackQueued -= 1
     if (!attackHeld) resetPrimaryAttackGesture()
-    const useTriggered =
-      !dead && !inventoryOpen && Effect.runSync(inputApi.wasActionJustTriggered('use'))
+    const canUse = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+    const useTriggered = canUse
+      && (Effect.runSync(inputApi.wasActionJustTriggered('use')) || nativeUseQueued)
+    if (useTriggered) nativeUseQueued = false
     const useHeld = held('use') > 0
     const lookDelta = {
       x: walk.pointerDelta.x + consumedTouchLook.delta.x,
       y: walk.pointerDelta.y + consumedTouchLook.delta.y,
     }
-    const looked = !dead && !inventoryOpen && (lookDelta.x !== 0 || lookDelta.y !== 0)
-    if (!dead && !inventoryOpen) {
+    const looked = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+      && (lookDelta.x !== 0 || lookDelta.y !== 0)
+    if (!dead && !inventoryOpen && !tradeOpen && !brewingOpen) {
       Effect.runSync(playerApi.look(
         -lookDelta.x * LOOK_SENSITIVITY * playerSettings.sensitivity,
         -lookDelta.y * LOOK_SENSITIVITY * playerSettings.sensitivity,
       ))
     }
     const poseBeforeFrame = Effect.runSync(playerApi.pose)
+    const groundedBeforeFrame = Effect.runSync(Ref.get(simState.isGrounded))
     const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
+    const mountedVehicle = mountedVehicleId === undefined ? undefined : vehicles.get(mountedVehicleId)
+    const movementForward = mountedVehicle === undefined
+      ? held('moveForward') - held('moveBackward')
+      : 0
+    const movementStrafe = mountedVehicle === undefined
+      ? held('moveRight') - held('moveLeft')
+      : 0
+    const feetReading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
+      Math.floor(poseBeforeFrame.feetPosition.x),
+      Math.floor(poseBeforeFrame.feetPosition.y + 0.1),
+      Math.floor(poseBeforeFrame.feetPosition.z),
+    )))
+    const eyesReading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
+      Math.floor(poseBeforeFrame.feetPosition.x),
+      Math.floor(poseBeforeFrame.feetPosition.y + EYE_LEVEL_OFFSET),
+      Math.floor(poseBeforeFrame.feetPosition.z),
+    )))
+    const canSwim = mountedVehicle === undefined && !dead
+    const feetInWater = canSwim
+      && feetReading._tag === 'Block'
+      && blockTypeOfId(feetReading.block) === 'water'
+    const eyesInWater = canSwim
+      && eyesReading._tag === 'Block'
+      && blockTypeOfId(eyesReading.block) === 'water'
+    const sinYaw = Math.sin(poseBeforeFrame.yawRadians)
+    const cosYaw = Math.cos(poseBeforeFrame.yawRadians)
+    const wasSwimming = swimmingState.active
+    const swimmingTick = advancePlayerSwimmingRuntime(swimmingState, {
+      feetInWater,
+      eyesInWater,
+      dead,
+      horizontalInput: {
+        x: -sinYaw * movementForward + cosYaw * movementStrafe,
+        z: -cosYaw * movementForward - sinYaw * movementStrafe,
+      },
+      verticalInput: held('jump') - held('sneak'),
+      deltaSecs,
+    })
+    swimmingState = swimmingTick.state
+    presentSwimmingState()
     Effect.runSync(Ref.set(simState.movementIntent, {
-      forward: held('moveForward') - held('moveBackward'),
-      strafe: held('moveRight') - held('moveLeft'),
+      forward: swimmingState.active ? 0 : movementForward,
+      strafe: swimmingState.active ? 0 : movementStrafe,
     }))
-    Effect.runSync(Ref.set(simState.jumpIntent, held('jump') > 0))
+    Effect.runSync(Ref.set(simState.jumpIntent, mountedVehicle === undefined && held('jump') > 0))
     Effect.runSync(
-      Ref.set(simState.physicsConfig, dead ? Option.none() : Option.some(simPhysicsConfig)),
+      Ref.set(simState.physicsConfig, dead || mountedVehicle !== undefined || swimmingState.active
+        ? Option.none()
+        : Option.some({
+            ...simPhysicsConfig,
+            walkSpeed: simPhysicsConfig.walkSpeed
+              * Effect.runSync(getPlayerMovementSpeedMultiplier(gameplayState)),
+          })),
     )
     Effect.runSync(Ref.set(gameplayState.timeOfDay, Effect.runSync(time.timeOfDay)))
     const weatherBeforeFrame = Effect.runSync(weather.snapshot)
     Effect.runSync(Ref.set(gameplayState.weather, weatherBeforeFrame))
     Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
     Effect.runSync(syncPortalCandidateSnapshots())
+
+    if (fishingSession !== undefined && fishingWater !== undefined) {
+      const storage = Effect.runSync(world.inventory.storageSnapshot)
+      const held = storage.inventory.slots[selectedHotbarIndex]
+      if (held?.item !== 'fishing_rod') {
+        cancelFishing(fishingSession)
+        fishingSession = undefined
+        fishingWater = undefined
+        setFishingResult('cancelled')
+      } else {
+        const fishingContext = getOrCreateDimensionChunkContext(fishingWater.dimension)
+        const water = Effect.runSync(fishingContext.chunkStore.getBlock(fishingWater.position))
+        const advanced = advanceFishing(fishingSession, deltaSecs, {
+          hasWater: water._tag === 'Block' && blockTypeOfId(water.block) === 'water',
+        })
+        if (advanced._tag === 'Cancelled') {
+          fishingSession = undefined
+          fishingWater = undefined
+          setFishingResult('lost-water')
+        } else if (advanced._tag !== 'InvalidDuration') {
+          fishingSession = advanced.session
+          setFishingResult(advanced._tag.toLowerCase())
+        }
+      }
+    }
 
     if (multiplayer !== undefined && !multiplayerHandshakeComplete && multiplayer.transport.state() === 'open') {
       const pose = Effect.runSync(playerApi.pose)
@@ -3426,8 +7308,17 @@ const bootGame = async (
         at: pose.feetPosition,
       }))
       multiplayerHandshakeComplete = true
+      pumpPlayerDamage()
+      lastPlayerMoveSent = {
+        world: worldId,
+        at: pose.feetPosition,
+        facing: { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians },
+      }
+      lastPlayerMoveSentAt = nowSecs
       canvas.setAttribute('data-multiplayer-connection', 'connected')
       canvas.setAttribute('data-multiplayer-player-count', String(multiplayer.players.size + 1))
+      multiplayerStatus.textContent = `Connected as ${String(multiplayer.query.name)}`
+      multiplayerStatus.hidden = false
     } else if (
       multiplayer !== undefined &&
       !multiplayerClosed &&
@@ -3436,9 +7327,105 @@ const bootGame = async (
       Effect.runSync(multiplayer.host.transitionConnection({ _tag: 'PeerClosed' }))
       multiplayerClosed = true
       canvas.setAttribute('data-multiplayer-connection', 'closed')
+      multiplayerStatus.textContent = 'Multiplayer connection closed.'
+      multiplayerStatus.hidden = false
     }
 
+    if (multiplayer === undefined) {
+      for (const [key, furnace] of furnaceStates) {
+        nextItemUseRequestId += 1
+        const requestId = `furnace-advance-${String(nextItemUseRequestId)}`
+        pendingFurnaceAdvances.set(requestId, key)
+        const deferredSecs = deferredFurnaceAdvanceSecs.get(key) ?? 0
+        deferredFurnaceAdvanceSecs.delete(key)
+        Effect.runSync(requestFurnaceAdvance(
+          gameplayState,
+          requestId,
+          furnace.state,
+          deltaSecs + deferredSecs,
+        ))
+      }
+    }
+
+    drainPlayerDamageInbound()
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
+    if (swimmingState.active && mountedVehicle === undefined) {
+      Effect.runSync(Ref.set(simState.velocity, swimmingState.velocity))
+      Effect.runSync(playerApi.moveTo({
+        x: poseBeforeFrame.feetPosition.x + swimmingState.velocity.x * deltaSecs,
+        y: poseBeforeFrame.feetPosition.y + swimmingState.velocity.y * deltaSecs,
+        z: poseBeforeFrame.feetPosition.z + swimmingState.velocity.z * deltaSecs,
+      }))
+    } else if (wasSwimming) {
+      Effect.runSync(Ref.set(simState.velocity, { x: 0, y: 0, z: 0 }))
+    }
+    if (swimmingTick.drowningDamagePoints > 0) {
+      applyPlayerDamage({ amount: swimmingTick.drowningDamagePoints, cause: 'generic' })
+      markSessionDirty()
+    }
+    if (mountedVehicle !== undefined) {
+      const throttle = held('moveForward') - held('moveBackward')
+      const steering = held('moveRight') - held('moveLeft')
+      const cell = blockPosition(
+        Math.floor(mountedVehicle.position.x),
+        Math.floor(mountedVehicle.position.y),
+        Math.floor(mountedVehicle.position.z),
+      )
+      const reading = Effect.runSync(currentChunkStore.getBlock(cell))
+      const block = reading._tag === 'Block' ? blockTypeOfId(reading.block) : 'air'
+      const uncollided = mountedVehicle.type === 'boat'
+        ? stepBoat(mountedVehicle, { throttle, steering, inWater: block === 'water' }, deltaSecs)
+        : stepMinecart(mountedVehicle, {
+            kind: block === 'powered_rail' ? 'powered' : block === 'rail' ? 'normal' : 'none',
+            shape: 'north_south',
+            powered: throttle > 0 || block === 'powered_rail',
+          }, {}, deltaSecs)
+      const candidatePosition = {
+        x: uncollided.vehicle.position.x + uncollided.vehicle.velocity.x * deltaSecs,
+        y: uncollided.vehicle.position.y + uncollided.vehicle.velocity.y * deltaSecs,
+        z: uncollided.vehicle.position.z + uncollided.vehicle.velocity.z * deltaSecs,
+      }
+      const candidateReading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
+        Math.floor(candidatePosition.x),
+        Math.floor(candidatePosition.y),
+        Math.floor(candidatePosition.z),
+      )))
+      const candidateBlock = candidateReading._tag === 'Block'
+        ? blockTypeOfId(candidateReading.block)
+        : undefined
+      const collided = candidateBlock !== undefined
+        && candidateBlock !== 'air'
+        && candidateBlock !== 'water'
+        && candidateBlock !== 'rail'
+        && candidateBlock !== 'powered_rail'
+      const impactSpeed = Math.hypot(
+        uncollided.vehicle.velocity.x,
+        uncollided.vehicle.velocity.y,
+        uncollided.vehicle.velocity.z,
+      )
+      const transition = collided
+        ? mountedVehicle.type === 'boat'
+          ? stepBoat(mountedVehicle, {
+              throttle,
+              steering,
+              inWater: block === 'water',
+              collided: true,
+              impactSpeed,
+            }, deltaSecs)
+          : stepMinecart(mountedVehicle, {
+              kind: block === 'powered_rail' ? 'powered' : block === 'rail' ? 'normal' : 'none',
+              shape: 'north_south',
+              powered: throttle > 0 || block === 'powered_rail',
+            }, { collided: true, impactSpeed }, deltaSecs)
+        : uncollided
+      const moved = {
+        ...transition.vehicle,
+        position: collided ? transition.vehicle.position : candidatePosition,
+      }
+      vehicles.set(mountedVehicleId!, moved)
+      Effect.runSync(playerApi.moveTo(moved.position))
+      if (transition.exited !== undefined) mountedVehicleId = undefined
+    }
 
     if (Exit.isFailure(outcome)) {
       // A stage's error channel is `never`, so reaching here means a DEFECT.
@@ -3448,39 +7435,143 @@ const bootGame = async (
       return
     }
 
-    if (multiplayer !== undefined) {
-      for (const message of Effect.runSync(multiplayer.host.drainInbound)) {
-        applyNetworkMessage(message)
+    const activeEntities = Effect.runSync(world.entities.entities)
+    const droppedEntitiesById = new Map(
+      activeEntities
+        .filter((entity) => isDroppedItemBehaviour(entity.behaviour))
+        .map((entity) => [String(entity.id), entity]),
+    )
+    const expiredDroppedItemIds = droppedItemLifetime.advance(
+      currentChunkContext.dimension,
+      deltaSecs,
+      [...droppedEntitiesById.keys()],
+    )
+    for (const entityId of expiredDroppedItemIds) {
+      const entity = droppedEntitiesById.get(entityId)
+      if (entity === undefined) continue
+      Effect.runSync(world.entities.despawn(entity.id))
+      droppedItemMetadata.delete(droppedItemMetadataKey(currentChunkContext.dimension, entityId))
+    }
+    if (expiredDroppedItemIds.length > 0) markSessionDirty()
+
+    const playerPosition = Effect.runSync(playerApi.pose).feetPosition
+    const playerDimension = Effect.runSync(playerApi.dimension)
+    for (const entity of Effect.runSync(world.entities.entities)) {
+      if (deadAfterFrame) break
+      if (!isDroppedItemBehaviour(entity.behaviour)) continue
+      const metadataKey = droppedItemMetadataKey(playerDimension, String(entity.id))
+      const metadata = droppedItemMetadata.get(metadataKey) ?? {}
+      const dx = entity.feetPosition.x - playerPosition.x
+      const dy = entity.feetPosition.y - playerPosition.y
+      const dz = entity.feetPosition.z - playerPosition.z
+      if (dx * dx + dy * dy + dz * dz > 1.5 * 1.5) continue
+
+      const storage = Effect.runSync(world.inventory.storageSnapshot)
+      const slots = [...storage.inventory.slots]
+      const durability = [...storage.inventoryDurability]
+      const destinations: number[] = []
+      const maxCount = maxStackCountForItem(entity.behaviour.item)
+      let remaining = entity.behaviour.count
+      const sameDurability = (slot: number): boolean =>
+        JSON.stringify(durability[slot] ?? null)
+          === JSON.stringify(entity.behaviour.durability ?? null)
+      const metadataMatches = (slot: number): boolean => {
+        const key = String(slot)
+        return customNames.get(key) === metadata.customName
+          && JSON.stringify(enchantedItems.get(key) ?? null)
+            === JSON.stringify(metadata.enchantedItem ?? null)
       }
+
+      for (let slot = 0; slot < slots.length && remaining > 0; slot += 1) {
+        const current = slots[slot]
+        if (current === undefined || current.item !== entity.behaviour.item
+          || current.count >= maxCount || !sameDurability(slot) || !metadataMatches(slot)) continue
+        const accepted = Math.min(maxCount - current.count, remaining)
+        slots[slot] = itemStack(current.item, current.count + accepted)
+        destinations.push(slot)
+        remaining -= accepted
+      }
+      for (let slot = 0; slot < slots.length && remaining > 0; slot += 1) {
+        if (slots[slot] !== undefined) continue
+        const accepted = Math.min(maxCount, remaining)
+        slots[slot] = itemStack(entity.behaviour.item, accepted)
+        durability[slot] = entity.behaviour.durability ?? null
+        destinations.push(slot)
+        remaining -= accepted
+      }
+      if (remaining === entity.behaviour.count) continue
+
+      Effect.runSync(world.inventory.restoreStorage({
+        ...storage,
+        inventory: { slots },
+        inventoryDurability: durability,
+      }))
+      for (const slot of destinations) {
+        const key = String(slot)
+        if (metadata.customName === undefined) customNames.delete(key)
+        else customNames.set(key, metadata.customName)
+        if (metadata.enchantedItem === undefined) enchantedItems.delete(key)
+        else enchantedItems.set(key, metadata.enchantedItem)
+      }
+      if (remaining === 0) {
+        Effect.runSync(world.entities.despawn(entity.id))
+        droppedItemMetadata.delete(metadataKey)
+      } else {
+        Effect.runSync(world.entities.sweep((candidate) => ({
+          transition: candidate.id === entity.id && isDroppedItemBehaviour(candidate.behaviour)
+            ? changed({
+                feetPosition: candidate.feetPosition,
+                healthPoints: candidate.healthPoints,
+                behaviour: { ...candidate.behaviour, count: remaining },
+              })
+            : UNCHANGED,
+          emit: undefined,
+        })))
+      }
+      markSessionDirty()
+      renderPlayerUi()
+    }
+
+    const villagerTradeResults = multiplayer === undefined || !multiplayerHandshakeComplete
+      ? Effect.runSync(drainVillagerTradeResults(gameplayState))
+      : []
+    for (const result of villagerTradeResults) {
+      if (result.villagerId !== activeVillagerId) continue
+      tradeStatus = villagerTradeStatus(result)
+      if (result._tag === 'Traded') markSessionDirty()
+    }
+    if (villagerTradeResults.length > 0) renderTradeUi()
+
+    if (multiplayer !== undefined) {
+      drainMultiplayerInbound()
       if (multiplayerHandshakeComplete && nowSecs - lastPlayerMoveSentAt >= 0.1) {
         const pose = Effect.runSync(playerApi.pose)
-        Effect.runSync(multiplayer.host.enqueueOutbound({
-          _tag: 'PlayerMove',
-          player: multiplayer.query.player,
-          world: WorldId.make(Effect.runSync(playerApi.dimension)),
-          at: pose.feetPosition,
-          facing: { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians },
-        }))
-        lastPlayerMoveSentAt = nowSecs
+        const world = WorldId.make(Effect.runSync(playerApi.dimension))
+        const facing = { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians }
+        const changed = lastPlayerMoveSent === undefined
+          || lastPlayerMoveSent.world !== world
+          || lastPlayerMoveSent.at.x !== pose.feetPosition.x
+          || lastPlayerMoveSent.at.y !== pose.feetPosition.y
+          || lastPlayerMoveSent.at.z !== pose.feetPosition.z
+          || lastPlayerMoveSent.facing.yawRadians !== facing.yawRadians
+          || lastPlayerMoveSent.facing.pitchRadians !== facing.pitchRadians
+        if (changed || nowSecs - lastPlayerMoveSentAt >= 1) {
+          Effect.runSync(multiplayer.host.enqueueOutbound({
+            _tag: 'PlayerMove',
+            player: multiplayer.query.player,
+            world,
+            at: pose.feetPosition,
+            facing,
+          }))
+          lastPlayerMoveSent = { world, at: pose.feetPosition, facing }
+          lastPlayerMoveSentAt = nowSecs
+        }
       }
     }
 
     // Portal travel has already updated the player. Make its destination world
     // concrete before dimension alignment streams or renders that world.
     Effect.runSync(applyPortalTravels())
-
-    let furnaceStateChanged = false
-    for (const [key, furnace] of furnaceStates) {
-      const next = advanceFurnace(furnace.state, deltaSecs).state
-      if (JSON.stringify(next) !== JSON.stringify(furnace.state)) {
-        furnaceStates.set(key, { ...furnace, state: next })
-        furnaceStateChanged = true
-      }
-    }
-    if (furnaceStateChanged) {
-      markSessionDirty()
-      if (inventoryOpen && inventoryMode === 'furnace') renderPlayerUi()
-    }
 
     for (const pending of pendingBlockBreakConfirmations.splice(0)) {
       const context = dimensionContexts.get(pending.dimension)
@@ -3489,6 +7580,14 @@ const bootGame = async (
       if (reading._tag !== 'Block' || reading.block === pending.blockId) continue
       if (pending.blockId === blockIdOf('chest')) {
         const id = containerIdAt(pending.dimension, pending.position)
+        const container = Effect.runSync(world.inventory.containerStorageSnapshot).containers
+          .find((candidate) => candidate.id === id)
+        const slotMetadata = container?.slots.flatMap((stack, slot) => stack === null
+          ? []
+          : [{
+              customName: customNames.get(containerMetadataKey(id, slot)),
+              enchantedItem: enchantedItems.get(containerMetadataKey(id, slot)),
+            }]) ?? []
         const drained = Effect.runSync(world.inventory.drainContainer(id))
         if (drained._tag === 'Drained') {
           const at = {
@@ -3497,11 +7596,27 @@ const bootGame = async (
             z: pending.position.z + 0.5,
           }
           if (drained.items.length > 0) {
-            Effect.runSync(spawnDroppedItems(
+            const dropped = Effect.runSync(spawnDroppedItems(
               world.entities,
-              drained.items.map((stack) => ({ ...stack, at })),
+              drained.items.map((stack, index) => ({
+                ...stack,
+                at,
+                ...(slotMetadata[index]?.customName === undefined
+                    && slotMetadata[index]?.enchantedItem === undefined
+                  ? {}
+                  : { eligibleFromFrame: Number.MAX_SAFE_INTEGER }),
+              })),
             ))
+            dropped.forEach((entity, index) => {
+              const metadata = slotMetadata[index]
+              if (metadata?.customName === undefined && metadata?.enchantedItem === undefined) return
+              droppedItemMetadata.set(
+                droppedItemMetadataKey(playerDimension, String(entity.id)),
+                metadata,
+              )
+            })
           }
+          deleteContainerMetadata(id)
           markSessionDirty()
         }
         if (activeChestId === id && inventoryOpen && inventoryMode === 'chest') {
@@ -3546,18 +7661,41 @@ const bootGame = async (
       const selected = Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]
       if (selected?.item !== pending.item) continue
 
-      Effect.runSync(
+      const enchantedItem = projectedInventoryEnchantedItem(pending.slotIndex)
+      const appliedWear = enchantedItem === null
+        ? 1
+        : durabilityWearWithEnchantments(1, enchantedItem, [Math.random()])
+      if (appliedWear === 0) continue
+      const damageResult = Effect.runSync(
         world.inventory.damageAt(
           { _tag: 'Inventory', slotIndex: pending.slotIndex },
-          1,
+          appliedWear,
         ),
       )
-      markSessionDirty()
+      if (damageResult._tag === 'Broken') {
+        enchantedItems.delete(String(pending.slotIndex))
+        customNames.delete(String(pending.slotIndex))
+      }
+      if (damageResult._tag === 'Damaged' || damageResult._tag === 'Broken') {
+        markSessionDirty()
+      }
     }
 
     const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
     for (const event of playerDamages) {
-      applyPlayerDamage(event.damage)
+      applyPlayerDamage(
+        event.damage,
+        event._tag === 'StatusEffect' ? event.minimumHealthPoints : 0,
+      )
+    }
+    const playerHeals = Effect.runSync(drainPlayerHeals(gameplayState))
+    for (const event of playerHeals) {
+      const vitals = Effect.runSync(world.vitals.view)
+      const allowed = Math.max(
+        0,
+        Math.min(event.maximumHealthPoints, vitals.maxHealthPoints) - vitals.healthPoints,
+      )
+      if (allowed > 0) Effect.runSync(world.vitals.heal(Math.min(event.amount, allowed)))
     }
     if (playerDamages.length > 0) {
       markSessionDirty()
@@ -3566,11 +7704,10 @@ const bootGame = async (
         if (document.pointerLockElement === canvas) document.exitPointerLock()
       }
     }
-    let deadAfterFrame = playerIsDead()
+    deadAfterFrame = playerIsDead()
 
     // A portal may change dimension in the same frame that gameplay confirms a
     // attack. Settle confirmations before dimension reset clears the outboxes.
-    settleBowShotResults()
     settleMeleeAttackResults()
 
     let postFramePose = Effect.runSync(playerApi.pose)
@@ -3634,13 +7771,201 @@ const bootGame = async (
     deadAfterFrame = playerIsDead()
     syncTouchControls()
 
+    if (!deadAfterFrame && !dimensionChanged) {
+      const advancedWither = advanceWitherRuntime(
+        witherRuntimeState,
+        dimensionAfterFrame,
+        postFramePose.feetPosition,
+        Math.min(deltaSecs, 0.1),
+        (_skull, position) => isGameplayBlockSolid({
+          x: Math.floor(position.x),
+          y: Math.floor(position.y),
+          z: Math.floor(position.z),
+        }),
+      )
+      witherRuntimeState = advancedWither.state
+      if (advancedWither.meleeDamage > 0) {
+        applyPlayerDamage({ amount: advancedWither.meleeDamage, cause: 'generic' })
+      }
+      for (const explosion of advancedWither.explosions) {
+        applyWorldExplosion(
+          explosion.position,
+          explosion.power,
+          Math.floor(simulationElapsedSecs * 20),
+          explosion.destroysResistantBlocks,
+        )
+      }
+      if (advancedWither.explosions.length > 0 || advancedWither.meleeDamage > 0) markSessionDirty()
+    }
+
+    if (deadAfterFrame) {
+      projectileRuntimeState = initialProjectileRuntimeState()
+      eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
+    } else if (!dimensionChanged) {
+      const projectileEntities = Effect.runSync(world.entities.entities)
+      const projectileWorld = {
+        blockBounds: (
+          start: Readonly<{ x: number; y: number; z: number }>,
+          end: Readonly<{ x: number; y: number; z: number }>,
+        ) => {
+          const bounds = []
+          for (let x = Math.floor(Math.min(start.x, end.x)); x <= Math.floor(Math.max(start.x, end.x)); x += 1) {
+            for (let y = Math.floor(Math.min(start.y, end.y)); y <= Math.floor(Math.max(start.y, end.y)); y += 1) {
+              for (let z = Math.floor(Math.min(start.z, end.z)); z <= Math.floor(Math.max(start.z, end.z)); z += 1) {
+                if (isGameplayBlockSolid({ x, y, z })) {
+                  bounds.push({ minX: x, minY: y, minZ: z, maxX: x + 1, maxY: y + 1, maxZ: z + 1 })
+                }
+              }
+            }
+          }
+          return bounds
+        },
+        entities: [
+          ...projectileEntities
+            .filter(({ kind }) => kind !== 'dropped_item')
+            .map((entity) => ({
+              id: String(entity.id),
+              bounds: {
+                minX: entity.feetPosition.x - 0.3,
+                minY: entity.feetPosition.y,
+                minZ: entity.feetPosition.z - 0.3,
+                maxX: entity.feetPosition.x + 0.3,
+                maxY: entity.feetPosition.y + 1.8,
+                maxZ: entity.feetPosition.z + 0.3,
+              },
+            })),
+          ...witherRuntimeState.withers
+            .filter((wither) => wither.dimension === dimensionAfterFrame)
+            .map((wither) => ({
+              id: wither.id,
+              bounds: {
+                minX: wither.state.feetPosition.x - 0.75,
+                minY: wither.state.feetPosition.y,
+                minZ: wither.state.feetPosition.z - 0.75,
+                maxX: wither.state.feetPosition.x + 0.75,
+                maxY: wither.state.feetPosition.y + 3.5,
+                maxZ: wither.state.feetPosition.z + 0.75,
+              },
+            })),
+          {
+            id: 'player',
+            bounds: {
+              minX: postFramePose.feetPosition.x - PLAYER_HALF_WIDTH,
+              minY: postFramePose.feetPosition.y,
+              minZ: postFramePose.feetPosition.z - PLAYER_HALF_WIDTH,
+              maxX: postFramePose.feetPosition.x + PLAYER_HALF_WIDTH,
+              maxY: postFramePose.feetPosition.y + PLAYER_HALF_HEIGHT * 2,
+              maxZ: postFramePose.feetPosition.z + PLAYER_HALF_WIDTH,
+            },
+          },
+        ],
+        isInWater: (position: Readonly<{ x: number; y: number; z: number }>) => {
+          const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
+            Math.floor(position.x),
+            Math.floor(position.y),
+            Math.floor(position.z),
+          )))
+          return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'water'
+        },
+        bounds: {
+          minX: -30_000_000,
+          minY: -64,
+          minZ: -30_000_000,
+          maxX: 30_000_000,
+          maxY: 320,
+          maxZ: 30_000_000,
+        },
+      }
+      const advancedProjectiles = advanceProjectileRuntime(
+        projectileRuntimeState,
+        projectileWorld,
+        dimensionAfterFrame,
+        Math.min(deltaSecs, 0.1),
+      )
+      projectileRuntimeState = advancedProjectiles.state
+      for (const impact of advancedProjectiles.impacts) {
+        if (impact.hit.kind !== 'entity' || impact.hit.entityId === 'player') continue
+        const hitWither = witherRuntimeState.withers.find(({ id }) => id === impact.hit.entityId)
+        if (hitWither !== undefined) {
+          const result = damageRuntimeWither(witherRuntimeState, hitWither.id, impact.damage, 'ranged')
+          witherRuntimeState = result.state
+          if (result.death !== undefined) {
+            Effect.runSync(spawnDroppedItems(world.entities, [{
+              item: result.death.drop.item,
+              count: result.death.drop.count,
+              at: result.death.drop.position,
+            }]))
+          }
+          markSessionDirty()
+          continue
+        }
+        const target = projectileEntities.find(({ id }) => String(id) === impact.hit.entityId)
+        if (target === undefined) continue
+        Effect.runSync(resolveBowHits(world.entities, [{ id: target.id, damage: impact.damage }]))
+        const horizontalSpeed = Math.hypot(impact.velocity.x, impact.velocity.z)
+        if (horizontalSpeed > 0 && impact.knockback > 0) {
+          Effect.runSync(world.entities.sweep((entity) => ({
+            transition: entity.id === target.id
+              ? changed({
+                feetPosition: {
+                  x: entity.feetPosition.x + impact.velocity.x / horizontalSpeed * impact.knockback,
+                  y: entity.feetPosition.y,
+                  z: entity.feetPosition.z + impact.velocity.z / horizontalSpeed * impact.knockback,
+                },
+                healthPoints: entity.healthPoints,
+                behaviour: entity.behaviour,
+              })
+              : UNCHANGED,
+            emit: undefined,
+          })))
+        }
+        markSessionDirty()
+      }
+      const recovery = recoverProjectile(
+        projectileRuntimeState,
+        dimensionAfterFrame,
+        postFramePose.feetPosition,
+        1.5,
+      )
+      if (recovery.recovered !== null) {
+        const leftover = Effect.runSync(world.inventory.add('arrow', 1))
+        if (leftover === 0) {
+          projectileRuntimeState = recovery.state
+          markSessionDirty()
+        }
+      }
+    }
+    if (!deadAfterFrame && !dimensionChanged) {
+      const advancedEyes = advanceEyeOfEnderRuntime(
+        eyeOfEnderRuntimeState,
+        dimensionAfterFrame,
+        Math.min(deltaSecs, 0.1),
+      )
+      eyeOfEnderRuntimeState = advancedEyes.state
+      for (const settlement of advancedEyes.settlements) {
+        if (!settlement.breaks) {
+          Effect.runSync(spawnDroppedItems(world.entities, [{
+            item: 'eye_of_ender',
+            count: 1,
+            at: settlement.position,
+          }]))
+        }
+        markSessionDirty()
+      }
+    }
+    const activeProjectileCount = projectileRuntimeState.projectiles
+      .filter(({ dimension }) => dimension === dimensionAfterFrame)
+      .length
+    projectileHud.textContent = `Arrows ${String(activeProjectileCount)}`
+    projectileHud.hidden = activeProjectileCount === 0
+
     const bowInventory = Effect.runSync(world.inventory.snapshot)
     const selectedBowItem = bowInventory.slots[selectedHotbarIndex]?.item ?? null
     const bowAdvance = advanceBowUse({
       state: bowUseState,
       useTriggered,
       useHeld,
-      cancelled: deadAfterFrame || dimensionChanged || inventoryOpen || pendingBowShots.size > 0,
+      cancelled: deadAfterFrame || dimensionChanged || inventoryOpen,
       selectedItem: selectedBowItem,
       selectedSlotIndex: selectedHotbarIndex,
       arrowCount: bowInventory.slots.reduce(
@@ -3650,24 +7975,57 @@ const bootGame = async (
       deltaSecs,
     })
     bowUseState = bowAdvance.state
-    if (bowAdvance.release !== null) {
-      nextBowShotRequestId += 1
-      const requestId = `bow-shot-${String(nextBowShotRequestId)}`
-      pendingBowShots = new Map(pendingBowShots).set(requestId, {
-        bowSlotIndex: bowAdvance.release.bowSlotIndex,
-      })
-      const horizontal = Math.cos(postFramePose.pitchRadians)
-      Effect.runSync(requestBowShot(gameplayState, requestId, {
-        origin: {
-          x: postFramePose.feetPosition.x,
-          y: postFramePose.feetPosition.y + EYE_LEVEL_OFFSET,
-          z: postFramePose.feetPosition.z,
-        },
-        dirX: -Math.sin(postFramePose.yawRadians) * horizontal,
-        dirY: Math.sin(postFramePose.pitchRadians),
-        dirZ: -Math.cos(postFramePose.yawRadians) * horizontal,
-        chargeSecs: bowAdvance.release.chargeSecs,
-      }))
+    if (
+      bowAdvance.release !== null &&
+      canFireBow(bowAdvance.release.chargeSecs) &&
+      bowInventory.slots[bowAdvance.release.bowSlotIndex]?.item === 'bow'
+    ) {
+      const enchantedBow = projectedInventoryEnchantedItem(bowAdvance.release.bowSlotIndex)
+      const appliedWear = enchantedBow === null
+        ? 1
+        : durabilityWearWithEnchantments(1, enchantedBow, [Math.random()])
+      const settlement = appliedWear === 0
+        ? (() => {
+            const arrowSlotIndex = bowInventory.slots.findIndex((slot) => slot?.item === 'arrow')
+            if (arrowSlotIndex < 0) return { _tag: 'MissingConsumable' } as const
+            const result = Effect.runSync(world.inventory.removeAt(arrowSlotIndex, 'arrow', 1))
+            return result._tag === 'Removed'
+              ? { _tag: 'Applied' } as const
+              : { _tag: 'MissingConsumable' } as const
+          })()
+        : Effect.runSync(world.inventory.consumeAndDamageAt({
+            consume: { item: 'arrow', count: 1 },
+            damage: {
+              location: { _tag: 'Inventory', slotIndex: bowAdvance.release.bowSlotIndex },
+              expectedItem: 'bow',
+              amount: appliedWear,
+            },
+          }))
+      if (settlement._tag === 'Applied') {
+        if ('damage' in settlement && settlement.damage._tag === 'Broken') {
+          enchantedItems.delete(String(bowAdvance.release.bowSlotIndex))
+          customNames.delete(String(bowAdvance.release.bowSlotIndex))
+        }
+        const charge = bowCharge(bowAdvance.release.chargeSecs)
+        const baseDamage = bowDamage(charge)
+        projectileRuntimeState = launchRuntimeProjectile(projectileRuntimeState, {
+          dimension: dimensionAfterFrame,
+          position: {
+            x: postFramePose.feetPosition.x,
+            y: postFramePose.feetPosition.y + EYE_LEVEL_OFFSET,
+            z: postFramePose.feetPosition.z,
+          },
+          yawRadians: postFramePose.yawRadians,
+          pitchRadians: -postFramePose.pitchRadians,
+          speed: 8 + 24 * charge,
+          damage: enchantedBow === null
+            ? baseDamage
+            : bowDamageWithEnchantments(baseDamage, enchantedBow),
+          knockback: 0.35 + 0.65 * charge,
+          shooterId: 'player',
+        })
+        markSessionDirty()
+      }
     }
 
     const groundedAfterFrame = Effect.runSync(Ref.get(simState.isGrounded))
@@ -3681,12 +8039,107 @@ const bootGame = async (
         postFramePose.feetPosition.x - poseBeforeFrame.feetPosition.x,
         postFramePose.feetPosition.z - poseBeforeFrame.feetPosition.z,
       )
+      const footstepBlock = Effect.runSync(currentChunkStore.getBlock({
+        x: Math.floor(postFramePose.feetPosition.x),
+        y: Math.floor(postFramePose.feetPosition.y - 0.1),
+        z: Math.floor(postFramePose.feetPosition.z),
+      }))
+      footstepRuntimeState = advanceFootstepRuntime(footstepRuntimeState, {
+        grounded: groundedAfterFrame && !swimmingState.active,
+        horizontalDistance,
+        surface: surfaceForBlockType(
+          footstepBlock._tag === 'Block' ? blockTypeOfId(footstepBlock.block) : 'air',
+        ),
+        sneaking: held('sneak') > 0,
+        dead: deadAfterFrame,
+        dimensionChanged,
+        position: postFramePose.feetPosition,
+        play: (cueId, options) => audio.play(cueId, options),
+      })
       if (!isCreativeMode && horizontalDistance > 0) {
-        Effect.runSync(world.vitals.addExhaustion(horizontalDistance * WALK_EXHAUSTION_PER_METRE))
+        if (multiplayer === undefined) survivalHunger.submit(swimmingState.active
+          ? { _tag: 'swim', distance: horizontalDistance }
+          : { _tag: 'walk', distance: horizontalDistance })
+        else sendVitalsCommand({ _tag: 'activity', activity: swimmingState.active ? 'swim' : 'walk', amount: horizontalDistance })
       }
+      if (
+        !isCreativeMode && groundedBeforeFrame &&
+        !groundedAfterFrame && held('jump') > 0
+      ) {
+        if (multiplayer === undefined) survivalHunger.submit({ _tag: 'jump', count: 1 })
+          else sendVitalsCommand({ _tag: 'activity', activity: 'jump', amount: 1 })
+      }
+    } else {
+      footstepRuntimeState = initialFootstepRuntimeState()
     }
     if (looked || moved) markSessionDirty()
     Effect.runSync(Ref.set(gameplayState.targetPosition, postFramePose.feetPosition))
+
+    if (attackTriggered && !primaryAttackGestureConsumed) {
+      const eye = { ...postFramePose.feetPosition, y: postFramePose.feetPosition.y + EYE_LEVEL_OFFSET }
+      const horizontal = Math.cos(postFramePose.pitchRadians)
+      const forward = {
+        x: -Math.sin(postFramePose.yawRadians) * horizontal,
+        y: Math.sin(postFramePose.pitchRadians),
+        z: -Math.cos(postFramePose.yawRadians) * horizontal,
+      }
+      const target = witherRuntimeState.withers
+        .filter((wither) => wither.dimension === dimensionAfterFrame)
+        .map((wither) => {
+          const center = { ...wither.state.feetPosition, y: wither.state.feetPosition.y + 1.75 }
+          const dx = center.x - eye.x
+          const dy = center.y - eye.y
+          const dz = center.z - eye.z
+          const distance = Math.hypot(dx, dy, dz)
+          const alignment = distance === 0 ? 1 : (dx * forward.x + dy * forward.y + dz * forward.z) / distance
+          return { wither, distance, alignment }
+        })
+        .filter(({ distance, alignment }) => distance <= DEFAULT_BLOCK_REACH && alignment >= 0.8)
+        .sort((left, right) => left.distance - right.distance)[0]
+      if (target !== undefined) {
+        const result = damageRuntimeWither(
+          witherRuntimeState,
+          target.wither.id,
+          Math.max(1, inventoryMeleeDamage(selectedHotbarIndex)),
+          'melee',
+        )
+        witherRuntimeState = result.state
+        if (result.death !== undefined) {
+          Effect.runSync(spawnDroppedItems(world.entities, [{
+            item: result.death.drop.item,
+            count: result.death.drop.count,
+            at: result.death.drop.position,
+          }]))
+        }
+        primaryAttackGestureConsumed = true
+        markSessionDirty()
+      }
+    }
+
+    if (
+      attackTriggered
+      && dimensionAfterFrame === 'end'
+      && !primaryAttackGestureConsumed
+    ) {
+      const dragonPosition = endDragonPosition()
+      const dx = dragonPosition.x - postFramePose.feetPosition.x
+      const dy = dragonPosition.y - (postFramePose.feetPosition.y + EYE_LEVEL_OFFSET)
+      const dz = dragonPosition.z - postFramePose.feetPosition.z
+      const distance = Math.hypot(dx, dy, dz)
+      const horizontal = Math.cos(postFramePose.pitchRadians)
+      const forward = {
+        x: -Math.sin(postFramePose.yawRadians) * horizontal,
+        y: Math.sin(postFramePose.pitchRadians),
+        z: -Math.cos(postFramePose.yawRadians) * horizontal,
+      }
+      const alignment = distance === 0 ? 1 : (dx * forward.x + dy * forward.y + dz * forward.z) / distance
+      if (distance <= DEFAULT_BLOCK_REACH + 3 && alignment >= 0.8) {
+        const damage = inventoryMeleeDamage(selectedHotbarIndex)
+        Effect.runSync(gameplayState.enderDragonEncounter.damageByPlayer(Math.max(1, damage)))
+        primaryAttackGestureConsumed = true
+        markSessionDirty()
+      }
+    }
 
     // Resolve click rays from the authoritative post-simulation pose. Requests
     // enter gameplay's inbox and are consumed by the next frame.
@@ -3694,15 +8147,23 @@ const bootGame = async (
       if (primaryAttackGestureConsumed) {
         miningProgress = null
       } else {
-        const inventorySnapshot = Effect.runSync(world.inventory.snapshot)
+        const inventoryStorage = Effect.runSync(world.inventory.storageSnapshot)
+        const inventorySnapshot = inventoryStorage.inventory
         const selectedSlotIndex = selectedHotbarIndex
         const selectedItem = inventorySnapshot.slots[selectedSlotIndex]?.item ?? null
+        const enchantedMiningItem = projectEnchantedItem(
+          inventorySnapshot.slots[selectedSlotIndex],
+          inventoryStorage.inventoryDurability[selectedSlotIndex],
+          enchantedItems.get(String(selectedSlotIndex)),
+        )
         const resolution = Effect.runSync(
           resolveTargetedPrimaryAttack(
             currentChunkStore,
             world.entities,
             playerApi,
-            { meleeDamage: meleeDamageForItem(selectedItem) },
+            {
+              meleeDamage: inventoryMeleeDamage(selectedSlotIndex),
+            },
           ),
         )
         if (resolution._tag === 'Melee') {
@@ -3746,11 +8207,18 @@ const bootGame = async (
             target,
             isMining: true,
             selectedItem: miningItem,
+            efficiencyLevel: enchantedMiningItem === null
+              ? 0
+              : enchantmentLevel(enchantedMiningItem, 'efficiency'),
             deltaSecs,
           })
           miningProgress = isCreativeMode ? null : advancement.nextProgress
           const shouldBreak = isCreativeMode ? attackTriggered : advancement.shouldBreak
           if (shouldBreak && target !== null) {
+            if (!isCreativeMode) {
+              if (multiplayer === undefined) survivalHunger.submit({ _tag: 'mine', blocks: 1 })
+              else sendVitalsCommand({ _tag: 'activity', activity: 'mine', amount: 1 })
+            }
             const dimension = Effect.runSync(playerApi.dimension)
             if (multiplayer !== undefined) {
               Effect.runSync(multiplayer.host.enqueueOutbound({
@@ -3779,7 +8247,12 @@ const bootGame = async (
                 requestBlockBreak(
                   gameplayState,
                   target.position,
-                  miningLootContextForItem(miningItem),
+                  {
+                    ...miningLootContextForItem(miningItem),
+                    fortuneLevel: enchantedMiningItem === null
+                      ? 0
+                      : enchantmentLevel(enchantedMiningItem, 'fortune'),
+                  },
                 ),
               )
               pendingBlockBreakConfirmations.push({
@@ -3818,12 +8291,256 @@ const bootGame = async (
       resetPrimaryAttackGesture()
     }
 
-    if (!deadAfterFrame && useTriggered && !bowAdvance.capturedUse && pendingBowShots.size === 0) {
-      const route = Effect.runSync(
-        targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH),
-      )
-      if (route?.kind === 'craftingTable') {
+    let nearbyVillager: PersistedVillager | undefined
+    try {
+      nearbyVillager = !deadAfterFrame && !dimensionChanged && useTriggered
+        ? nearestVillagerForTrade(postFramePose.feetPosition, currentChunkContext.dimension)
+        : undefined
+    } catch (error) {
+      console.warn('Unable to resolve nearby villager for interaction', error)
+    }
+    if (nearbyVillager !== undefined && !bowAdvance.capturedUse) {
+      setTradeOpen(true, nearbyVillager.id)
+    }
+
+    if (
+      nearbyVillager === undefined
+      && !deadAfterFrame
+      && useTriggered
+      && !bowAdvance.capturedUse
+    ) {
+      let usedSpecialItem = false
+      const fishingStorage = Effect.runSync(world.inventory.storageSnapshot)
+      const fishingHeld = fishingStorage.inventory.slots[selectedHotbarIndex]
+      const fishingDurability = fishingStorage.inventoryDurability[selectedHotbarIndex]
+      if (fishingSession !== undefined) {
+        const result = reelFishing(fishingSession)
+        Effect.runSync(world.inventory.damageAt(
+          { _tag: 'Inventory', slotIndex: selectedHotbarIndex },
+          1,
+        ))
+        if (result._tag === 'Caught') {
+          Effect.runSync(world.inventory.add(result.loot.item, result.loot.count))
+          setFishingResult(`caught-${result.loot.item}`)
+        } else {
+          setFishingResult(result._tag === 'ReeledTooEarly' ? 'too-early' : 'too-late')
+        }
+        fishingSession = undefined
+        fishingWater = undefined
+        document.body.setAttribute('data-fishing-phase', 'idle')
+        markSessionDirty()
+        renderPlayerUi()
+        usedSpecialItem = true
+      } else if (fishingHeld?.item === 'fishing_rod' && fishingDurability !== null) {
+        const target = Effect.runSync(targetedBlock())
+        const dimension = Effect.runSync(playerApi.dimension)
+        const environment = target === undefined
+          ? { hasWater: false, hasSkyAccess: false, isRaining: false, isOpenWater: false }
+          : Effect.runSync(fishingEnvironmentAt(
+              target.position,
+              weatherBeforeFrame.weather === 'rain' || weatherBeforeFrame.weather === 'thunder',
+            ))
+        const serial = nextFishingRoll++
+        const cast = castFishing({
+          item: 'fishing_rod',
+          count: 1,
+          durability: fishingDurability,
+        } satisfies FishingRod, environment, {
+          wait: ((serial * 37) % 997) / 997,
+          category: ((serial * 101) % 997) / 997,
+          item: ((serial * 211) % 997) / 997,
+        })
+        if (cast._tag === 'Cast' && target !== undefined) {
+          fishingSession = cast.session
+          fishingWater = { dimension, position: target.position }
+          setFishingResult('cast')
+        } else {
+          setFishingResult(cast._tag === 'NoWater' ? 'no-water' : 'invalid-rod')
+        }
+        usedSpecialItem = true
+      }
+      if (!usedSpecialItem && mountedVehicleId !== undefined) {
+        const vehicle = vehicles.get(mountedVehicleId)
+        if (vehicle !== undefined) vehicles.set(mountedVehicleId, exitVehicle(vehicle).vehicle)
+        mountedVehicleId = undefined
+        usedSpecialItem = true
+      } else if (!usedSpecialItem) {
+        const pose = Effect.runSync(playerApi.pose)
+        const nearbyVehicle = [...vehicles.values()]
+          .filter((vehicle) => vehicle.dimension === currentChunkContext.dimension && vehicle.occupant === undefined)
+          .map((vehicle) => ({ vehicle, distance: Math.hypot(
+            vehicle.position.x - pose.feetPosition.x,
+            vehicle.position.y - pose.feetPosition.y,
+            vehicle.position.z - pose.feetPosition.z,
+          ) }))
+          .filter(({ distance }) => distance <= 2)
+          .sort((left, right) => left.distance - right.distance)[0]
+        if (nearbyVehicle !== undefined) {
+          const boarded = boardVehicle(nearbyVehicle.vehicle, localVehicleOccupant, nearbyVehicle.distance)
+          vehicles.set(String(boarded.id), boarded)
+          mountedVehicleId = String(boarded.id)
+          usedSpecialItem = true
+        }
+      }
+      const specialInventory = Effect.runSync(world.inventory.snapshot)
+      const specialSelected = specialInventory.slots[selectedHotbarIndex]
+      if (!usedSpecialItem && specialSelected?.item === 'ender_pearl') {
+        const pose = Effect.runSync(playerApi.pose)
+        const horizontal = Math.cos(pose.pitchRadians)
+        const origin = {
+          x: pose.feetPosition.x,
+          y: pose.feetPosition.y + EYE_LEVEL_OFFSET,
+          z: pose.feetPosition.z,
+        }
+        const target = Effect.runSync(targetedBlock())
+        const hitDistance = target === undefined
+          ? undefined
+          : Math.hypot(
+              target.position.x + 0.5 - origin.x,
+              target.position.y + 0.5 - origin.y,
+              target.position.z + 0.5 - origin.z,
+            )
+        Effect.runSync(Ref.update(gameplayState.pendingPearlThrows, (requests) => [
+          ...requests,
+          {
+            origin,
+            dirX: -Math.sin(pose.yawRadians) * horizontal,
+            dirY: Math.sin(pose.pitchRadians),
+            dirZ: -Math.cos(pose.yawRadians) * horizontal,
+            ...(hitDistance === undefined ? {} : { hitDistance }),
+          },
+        ]))
+        if (!isCreativeMode) {
+          Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, 'ender_pearl', 1))
+        }
+        markSessionDirty()
+        renderPlayerUi()
+        usedSpecialItem = true
+      }
+      if (!usedSpecialItem && specialSelected !== undefined && isBucketItem(specialSelected.item)) {
+        const target = Effect.runSync(targetedBlock())
+        if (target !== undefined) {
+          const dimension = Effect.runSync(playerApi.dimension)
+          const result = Effect.runSync(useBucket(
+            currentChunkStore,
+            world.inventory,
+            gameplayState.fluidFrontier,
+            {
+              activeDimension: dimension,
+              targetDimension: dimension,
+              position: specialSelected.item === 'bucket' ? target.position : target.adjacentPosition,
+              heldItem: specialSelected.item,
+            },
+          ))
+          document.body.setAttribute('data-bucket-result', result._tag)
+          usedSpecialItem = true
+          if (result._tag === 'Collected' || result._tag === 'Placed') {
+            markSessionDirty()
+            renderPlayerUi()
+          }
+        }
+      }
+      if (!usedSpecialItem && specialSelected !== undefined
+        && (specialSelected.item === 'boat' || specialSelected.item === 'minecart')) {
+        const target = Effect.runSync(targetedBlock())
+        if (target !== undefined) {
+          const type = specialSelected.item
+          const at = type === 'minecart' && (blockTypeOfId(target.block) === 'rail' || blockTypeOfId(target.block) === 'powered_rail')
+            ? target.position
+            : target.adjacentPosition
+          const removed = Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, type, 1))
+          if (removed._tag === 'Removed') {
+            const id = VehicleId(`vehicle-${String(nextVehicleSerial++)}`)
+            vehicles.set(String(id), {
+              id,
+              type,
+              dimension: Effect.runSync(playerApi.dimension),
+              position: { x: at.x + 0.5, y: at.y, z: at.z + 0.5 },
+              velocity: type === 'minecart' ? { x: 0, y: 0, z: -0.25 } : { x: 0, y: 0, z: 0 },
+              yawRadians: poseBeforeFrame.yawRadians,
+            })
+            document.body.setAttribute('data-vehicle-result', `placed-${type}`)
+            markSessionDirty()
+            renderPlayerUi()
+          }
+          usedSpecialItem = true
+        }
+      }
+      const shouldAttemptEndFeature = currentChunkContext.dimension === 'end'
+        || endPortalComplete
+        || specialSelected?.item === 'eye_of_ender'
+      const usedEndFeature = usedSpecialItem
+        || (shouldAttemptEndFeature && Effect.runSync(useEndFeature()))
+      const opensBrewing = usedEndFeature ? false : Effect.runSync(targetedBrewingStand())
+      const route = usedEndFeature || opensBrewing
+        ? undefined
+        : Effect.runSync(targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH))
+      if (usedEndFeature) {
+        renderPlayerUi()
+      } else if (opensBrewing) {
+        setBrewingOpen(true)
+      } else if (route?.kind === 'craftingTable') {
         setInventoryOpen(true, 'craftingTable')
+      } else if (route?.kind === 'anvil') {
+        setInventoryOpen(true, 'anvil')
+      } else if (route?.kind === 'enchantingTable') {
+        setInventoryOpen(true, 'enchanting')
+      } else if (route?.kind === 'bed') {
+        const bedPosition = {
+          x: Math.floor(route.at.x),
+          y: Math.floor(route.at.y),
+          z: Math.floor(route.at.z),
+        }
+        const currentDimension = Effect.runSync(playerApi.dimension)
+        if (currentDimension !== 'overworld') {
+          sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
+          Effect.runSync(currentChunkStore.setBlock(bedPosition, blockIdOf('air')))
+          applyWorldExplosion(
+            { x: bedPosition.x + 0.5, y: bedPosition.y + 0.5, z: bedPosition.z + 0.5 },
+            5,
+            Math.floor(simulationElapsedSecs * 20),
+            false,
+          )
+          document.body.setAttribute(
+            'data-bed-explosion-request',
+            `${currentDimension}:${bedPosition.x},${bedPosition.y},${bedPosition.z}`,
+          )
+          document.body.setAttribute('data-sleep-result', 'exploded')
+        } else {
+          const hostilePositions = Effect.runSync(world.entities.snapshot).entities
+            .filter((entity) => entity.kind !== 'dropped_item')
+            .map((entity) => entity.feetPosition)
+          const decision = resolveBedSleep({
+            bedPosition,
+            dangerNearby: isDangerNearby(bedPosition, hostilePositions),
+            dimension: currentDimension,
+            timeOfDay: Effect.runSync(time.timeOfDay),
+            weather: Effect.runSync(weather.snapshot).weather,
+          })
+          if (decision._tag === 'SleepAccepted') {
+            respawnLocation = { ...decision.respawnLocation, bedPosition }
+            if (multiplayer === undefined) {
+              sleepRuntimeState = enterSleep(sleepRuntimeState, 'local', respawnLocation)
+              document.body.setAttribute('data-sleep-result', 'accepted')
+            } else {
+              const command: SleepCommand = {
+                _tag: 'EnterSleep',
+                actor: multiplayer.query.player,
+                session: String(multiplayer.query.player),
+                requestId: `sleep-${String(nextSleepRequest++)}`,
+                expectedRevision: networkSleepState.revision,
+                clientTick: Math.floor(performance.now()),
+                bed: bedPosition,
+              }
+              networkSleepState = queueSleepCommand(networkSleepState, command)
+              Effect.runFork(multiplayer.transport.sendSleep({ _tag: 'SleepCommand', command }))
+              document.body.setAttribute('data-sleep-result', 'pending')
+            }
+            markSessionDirty()
+          } else {
+            document.body.setAttribute('data-sleep-result', decision.reason)
+          }
+        }
       } else if (route?.kind === 'furnace') {
         const dimension = Effect.runSync(playerApi.dimension)
         const position = {
@@ -3832,12 +8549,16 @@ const bootGame = async (
           z: Math.floor(route.at.z),
         }
         const key = furnaceKeyOf({ dimension, position })
-        if (!furnaceStates.has(key)) {
+        if (multiplayer === undefined && !furnaceStates.has(key)) {
           furnaceStates.set(key, { dimension, position, state: emptyFurnaceState() })
           markSessionDirty()
         }
-        activeFurnaceKey = key
-        setInventoryOpen(true, 'furnace')
+        if (multiplayer === undefined || furnaceStates.has(key)) {
+          activeFurnaceKey = key
+          setInventoryOpen(true, 'furnace')
+        } else {
+          multiplayerRejection = 'Furnace is not present in the authoritative snapshot.'
+        }
       } else if (route?.kind === 'storage') {
         const dimension = Effect.runSync(playerApi.dimension)
         const position = {
@@ -3846,16 +8567,29 @@ const bootGame = async (
           z: Math.floor(route.at.z),
         }
         const id = containerIdAt(dimension, position)
-        const created = Effect.runSync(world.inventory.createContainer(id))
-        if (created._tag === 'Created') markSessionDirty()
-        if (created._tag !== 'InvalidContainerId') {
-          activeChestId = id
-          setInventoryOpen(true, 'chest')
+        if (multiplayer !== undefined) {
+          const container = Effect.runSync(world.inventory.containerSnapshot(id))
+          if (container !== undefined && sendFacilityCommand({
+            _tag: 'ContainerCommand',
+            containerId: id,
+            action: { _tag: 'open' },
+          })) {
+            activeChestId = id
+            setInventoryOpen(true, 'chest')
+          }
+        } else {
+          const created = Effect.runSync(world.inventory.createContainer(id))
+          if (created._tag === 'Created') markSessionDirty()
+          if (created._tag !== 'InvalidContainerId') {
+            activeChestId = id
+            setInventoryOpen(true, 'chest')
+          }
         }
       } else {
         const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
         const selected = inventoryBeforeUse.slots[selectedHotbarIndex]
-        let shouldAttemptPlacement = selected === undefined
+        let shouldAttemptPlacement = selected !== undefined
+          && !isGameplayUseItemType(selected.item)
 
         if (selected !== undefined && isGameplayUseItemType(selected.item)) {
           nextItemUseRequestId += 1
@@ -3885,7 +8619,10 @@ const bootGame = async (
               )
               pendingItemUses.set(requestId, { kind: 'eat', slotIndex: selectedHotbarIndex })
             }
-          } else if (isLegacyGameplayItemType(selected.item) && isHoeItem(selected.item)) {
+          } else if (
+            isLegacyGameplayItemType(selected.item) &&
+            isGameplayHoeItem(selected.item)
+          ) {
             const target = Effect.runSync(
               requestTargetedSoilTill(
                 gameplayState,
@@ -3902,7 +8639,27 @@ const bootGame = async (
                 heldItem: selected.item,
               })
             }
-          } else if (isLegacyGameplayItemType(selected.item) && isIgnitionItem(selected.item)) {
+          } else if (selected.item === 'bone_meal') {
+            const target = Effect.runSync(
+              requestTargetedBoneMeal(
+                gameplayState,
+                currentChunkStore,
+                playerApi,
+                requestId,
+              ),
+            )
+            if (Option.isSome(target)) {
+              pendingItemUses.set(requestId, {
+                kind: 'bone-meal',
+                slotIndex: selectedHotbarIndex,
+                dimension: Effect.runSync(playerApi.dimension),
+                position: target.value.position,
+              })
+            }
+          } else if (
+            isLegacyGameplayItemType(selected.item) &&
+            isGameplayIgnitionItem(selected.item)
+          ) {
             const target = Effect.runSync(
               requestTargetedItemUse(
                 gameplayState,
@@ -3917,6 +8674,7 @@ const bootGame = async (
                 kind: 'ignition',
                 slotIndex: selectedHotbarIndex,
                 heldItem: selected.item,
+                dimension: Effect.runSync(playerApi.dimension),
               })
             }
           } else {
@@ -3925,6 +8683,7 @@ const bootGame = async (
         }
 
         if (shouldAttemptPlacement) {
+          placementAudio.request()
           requestPlacementFromSelectedSlot(
             inventoryBeforeUse.slots,
             selectedHotbarIndex,
@@ -3949,6 +8708,7 @@ const bootGame = async (
                     block: heldItem,
                   }))
                   placementsRequested += 1
+                  placementAudio.request(target.value.adjacentPosition)
                   canvas.setAttribute('data-placements-requested', String(placementsRequested))
                 }
                 return
@@ -3971,8 +8731,38 @@ const bootGame = async (
                     dimension: currentChunkContext.dimension,
                     position: target.value.position,
                   })
+                } else if (reading._tag === 'Block' && reading.block === 77) {
+                  Effect.runSync(redstoneRuntime.pressButton(
+                    currentChunkContext.dimension,
+                    target.value.position,
+                  ))
+                } else if (reading._tag === 'Block' && reading.block === 82) {
+                  const key = leverKeyOf({
+                    dimension: currentChunkContext.dimension,
+                    position: target.value.position,
+                  })
+                  comparatorModes.set(
+                    key,
+                    comparatorModes.get(key) === 'subtract' ? 'compare' : 'subtract',
+                  )
+                  redstoneDirty = true
                 } else {
+                  Effect.runSync(Ref.set(gameplayState.pendingPlacements, []))
+                  nextBlockPlacementRequestId += 1
+                  const placementRequestId = `block-placement-${String(nextBlockPlacementRequestId)}`
+                  Effect.runSync(requestBlockPlacementCommand(gameplayState, {
+                    requestId: placementRequestId,
+                    positionKey: `${target.value.adjacentPosition.x},${target.value.adjacentPosition.y},${target.value.adjacentPosition.z}` as Parameters<typeof requestBlockPlacementCommand>[1]['positionKey'],
+                    heldItem,
+                    mode: isCreativeMode ? 'creative' : 'survival',
+                  }))
+                  pendingBlockPlacements.set(placementRequestId, {
+                    dimension: currentChunkContext.dimension,
+                    item: heldItem,
+                    position: target.value.adjacentPosition,
+                  })
                   placementsRequested += 1
+                  placementAudio.request(target.value.adjacentPosition)
                   canvas.setAttribute('data-placements-requested', String(placementsRequested))
                 }
                 markSessionDirty()
@@ -3982,11 +8772,40 @@ const bootGame = async (
         }
       }
     }
+    for (const outcome of Effect.runSync(Ref.getAndSet(gameplayState.enderPearlOutcomes, []))) {
+      const pose = Effect.runSync(playerApi.pose)
+      Effect.runSync(playerApi.moveTo({
+        x: pose.feetPosition.x + outcome.displacement.x,
+        y: pose.feetPosition.y + outcome.displacement.y,
+        z: pose.feetPosition.z + outcome.displacement.z,
+      }))
+      applyPlayerDamage(outcome.damage)
+      markSessionDirty()
+    }
+    const confirmedPlacementItems: GameplayItemType[] = []
+    const reservedPlacementItems: GameplayItemType[] = []
+    for (const result of Effect.runSync(drainBlockPlacementResults(gameplayState))) {
+      const pending = pendingBlockPlacements.get(result.requestId)
+      pendingBlockPlacements.delete(result.requestId)
+      if (pending === undefined || !result.success) continue
+      confirmedPlacementItems.push(pending.item)
+      if (result.consumed) reservedPlacementItems.push(pending.item)
+      markSessionDirty()
+      if (REDSTONE_PLACEMENT_ITEMS.has(pending.item)) redstoneDirty = true
+      if (pending.item === 'wither_skeleton_skull') {
+        pendingWitherSummonChecks.push(pending as {
+          readonly dimension: Dimension
+          readonly item: 'wither_skeleton_skull'
+          readonly position: { readonly x: number; readonly y: number; readonly z: number }
+        })
+      }
+    }
 
     // Placement requests are serviced after the frame-start redstone sync.
     // Only the success outbox proves that a component now exists in the store.
-    const consumedPlacements = Effect.runSync(
-      Ref.getAndSet(gameplayState.consumedItems, []),
+    const consumedPlacements = excludeReservedPlacementConsumptions(
+      Effect.runSync(Ref.getAndSet(gameplayState.consumedItems, [])),
+      reservedPlacementItems,
     )
     for (const item of consumedPlacements) {
       if (isCreativeMode) {
@@ -3997,8 +8816,44 @@ const bootGame = async (
           Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, item, 1))
         }
       }
+      let summonCheckIndex = -1
+      for (let index = pendingWitherSummonChecks.length - 1; index >= 0; index -= 1) {
+        if (pendingWitherSummonChecks[index]?.item === item) {
+          summonCheckIndex = index
+          break
+        }
+      }
+      if (summonCheckIndex >= 0) {
+        const [pending] = pendingWitherSummonChecks.splice(summonCheckIndex, 1)
+        for (let index = pendingWitherSummonChecks.length - 1; index >= 0; index -= 1) {
+          if (pendingWitherSummonChecks[index]?.item === item) {
+            pendingWitherSummonChecks.splice(index, 1)
+          }
+        }
+        if (pending !== undefined) {
+          const context = dimensionContexts.get(pending.dimension)
+          const match = context === undefined ? undefined : matchRuntimeWitherSummon(
+            pending.position,
+            (cell) => {
+              const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(cell.x, cell.y, cell.z)))
+              return reading._tag === 'Block' ? blockTypeOfId(reading.block) : undefined
+            },
+          )
+          if (match !== undefined && context !== undefined) {
+            for (const position of match.consumedBlocks) {
+              Effect.runSync(context.chunkStore.setBlock(blockPosition(position.x, position.y, position.z), 0))
+            }
+            witherRuntimeState = summonRuntimeWither(
+              witherRuntimeState,
+              pending.dimension,
+              match.spawnPosition,
+            )
+            markSessionDirty()
+          }
+        }
+      }
     }
-    announceConfirmedPlacements(audio, consumedPlacements)
+    placementAudio.confirm([...consumedPlacements, ...confirmedPlacementItems])
     if (consumedPlacements.some((item) => REDSTONE_PLACEMENT_ITEMS.has(item))) {
       redstoneDirty = true
     }
@@ -4031,6 +8886,32 @@ const bootGame = async (
       Effect.runSync(context.chunkStore.setBlock(transition.position, transition.lit ? 80 : 79))
       markSessionDirty()
     }
+    for (const transition of Effect.runSync(redstoneRuntime.drainPistonTransitions)) {
+      applyPoweredPistonTransition(transition)
+    }
+    for (const event of Effect.runSync(redstoneRuntime.drainTriggerEvents)) {
+      canvas.setAttribute(
+        'data-redstone-trigger',
+        `${event.kind}:${event.dimension}:${event.position.x},${event.position.y},${event.position.z}`,
+      )
+      markSessionDirty()
+    }
+    for (const transition of Effect.runSync(redstoneRuntime.drainPoweredComponentTransitions)) {
+      const context = dimensionContexts.get(transition.dimension as Dimension)
+      if (context === undefined) continue
+      const key = leverKeyOf({
+        dimension: transition.dimension as Dimension,
+        position: transition.position,
+      })
+      if (transition.kind === 'door') {
+        Effect.runSync(context.chunkStore.setBlock(transition.position, transition.powered ? 107 : 106))
+      } else if (transition.kind === 'powered-rail') {
+        if (transition.powered) poweredRails.add(key)
+        else poweredRails.delete(key)
+        canvas.setAttribute('data-powered-rail', `${key}:${String(transition.powered)}`)
+      }
+      markSessionDirty()
+    }
 
     // Portal stages can replace both dimension and pose. Stream and present
     // only after the frame so the renderer never meshes the destination pose
@@ -4054,15 +8935,111 @@ const bootGame = async (
       presentWeather(weatherAdvanced)
       if (weatherAdvanced.weather !== weatherBeforeFrame.weather) markSessionDirty()
     }
+    const localSleepPlayerId = String(multiplayer?.query.player ?? 'local')
+    const connectedSurvivalPlayers = new Set<string>([
+      localSleepPlayerId,
+      ...[...(multiplayer?.players.keys() ?? [])].map(String),
+    ])
+    if (multiplayer === undefined && (deadAfterFrame || dimensionChanged)) {
+      sleepRuntimeState = leaveSleep(sleepRuntimeState, localSleepPlayerId)
+    } else if (multiplayer !== undefined && (deadAfterFrame || dimensionChanged) && networkSleepState.sleepers.has(multiplayer.query.player)) {
+      const command: SleepCommand = {
+        _tag: 'LeaveSleep',
+        actor: multiplayer.query.player,
+        session: String(multiplayer.query.player),
+        requestId: `sleep-${String(nextSleepRequest++)}`,
+        expectedRevision: networkSleepState.revision,
+        clientTick: Math.floor(performance.now()),
+      }
+      networkSleepState = queueSleepCommand(networkSleepState, command)
+      Effect.runFork(multiplayer.transport.sendSleep({ _tag: 'SleepCommand', command }))
+    }
+    if (multiplayer === undefined) sleepRuntimeState = reconcileSleepers(
+      sleepRuntimeState,
+      connectedSurvivalPlayers,
+      (location) => {
+        const context = getOrCreateDimensionChunkContext(location.dimension)
+        const reading = Effect.runSync(context.chunkStore.getBlock(location.bedPosition))
+        return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'bed'
+      },
+    )
+    const sleepAdvance = multiplayer === undefined ? advanceSleep(
+      sleepRuntimeState,
+      deltaSecs,
+      connectedSurvivalPlayers.size,
+      requiredSleepRatio,
+      2,
+    ) : {
+      state: sleepRuntimeState,
+      skipToMorning: networkSleepState.skippedRevision === networkSleepState.revision
+        && appliedNightSkipRevision !== networkSleepState.revision,
+    }
+    sleepRuntimeState = sleepAdvance.state
+    const requiredSleepers = requiredSleeperCount(connectedSurvivalPlayers.size, requiredSleepRatio)
+    sleepHud.textContent = `Sleeping ${String(sleepRuntimeState.sleepers.length)}/${String(requiredSleepers)}`
+    sleepHud.hidden = sleepRuntimeState.sleepers.length === 0
+    document.body.setAttribute('data-sleeping-players', String(sleepRuntimeState.sleepers.length))
+    document.body.setAttribute('data-sleep-required', String(requiredSleepers))
+    if (sleepAdvance.skipToMorning) {
+      appliedNightSkipRevision = multiplayer === undefined ? null : networkSleepState.revision
+      if (multiplayer === undefined) {
+        const clearWeather: WeatherState = { weather: 'clear', remainingSecs: 300 }
+        Effect.runSync(time.setTimeOfDay(0.25))
+        Effect.runSync(weather.applyTransition(clearWeather))
+        presentWeather(clearWeather)
+        markSessionDirty()
+      }
+      sleepRuntimeState = initialSleepRuntimeState()
+      sleepHud.hidden = true
+      document.body.setAttribute('data-sleep-result', 'morning-skipped')
+    }
+    presentWeatherRuntime(
+      weatherAdvanced ?? Effect.runSync(weather.snapshot),
+      postFramePose,
+      nowSecs,
+    )
 
     const itemUseResults = Effect.runSync(drainItemUseResults(gameplayState))
     for (const result of itemUseResults) {
+      if ('action' in result && result.action === 'AdvanceFurnace') {
+        const key = pendingFurnaceAdvances.get(result.requestId)
+        pendingFurnaceAdvances.delete(result.requestId)
+        const furnace = key === undefined ? undefined : furnaceStates.get(key)
+        if (key !== undefined && furnace !== undefined) {
+          const applied = advanceFurnaceRuntime(furnace.state, result.plan)
+          if (applied.deferredSecs > 0) {
+            deferredFurnaceAdvanceSecs.set(
+              key,
+              (deferredFurnaceAdvanceSecs.get(key) ?? 0) + applied.deferredSecs,
+            )
+          }
+          if (applied.changed) {
+            furnaceStates.set(key, { ...furnace, state: applied.state })
+            markSessionDirty()
+            if (inventoryOpen && inventoryMode === 'furnace') renderPlayerUi()
+          }
+        }
+        continue
+      }
       lastObservedItemUse = result
       const pending = pendingItemUses.get(result.requestId)
       pendingItemUses.delete(result.requestId)
       if (pending === undefined || !result.success) continue
 
       if (!('action' in result) && pending.kind === 'ignition' && pending.heldItem === result.heldItem) {
+        if (
+          result.outcome._tag === 'Portal'
+          && result.outcome.outcome._tag === 'Lit'
+          && result.outcome.outcome.cells.length === result.outcome.outcome.frame.interior.length
+          && result.outcome.outcome.cells.length > 0
+        ) {
+          const anchor = [...result.outcome.outcome.cells].sort((left, right) =>
+            left.y - right.y || left.x - right.x || left.z - right.z
+          )[0]
+          if (anchor !== undefined) {
+            registerPortal({ dimension: pending.dimension, position: anchor })
+          }
+        }
         if (result.heldItem === 'fire_charge') {
           Effect.runSync(world.inventory.removeAt(pending.slotIndex, pending.heldItem, 1))
         } else if (Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]?.item === 'flint_and_steel') {
@@ -4070,6 +9047,17 @@ const bootGame = async (
         }
       } else if ('action' in result) {
         switch (result.action) {
+          case 'ApplyBoneMeal':
+            if (pending.kind === 'bone-meal' && result.outcome._tag === 'applied') {
+              const advanced = Effect.runSync(crops.advanceByBoneMeal({
+                dimension: pending.dimension,
+                position: pending.position,
+              }))
+              if (advanced) {
+                Effect.runSync(world.inventory.removeAt(pending.slotIndex, 'bone_meal', result.consumedCount))
+              }
+            }
+            break
           case 'TillSoil':
             if (
               pending.kind === 'till'
@@ -4115,15 +9103,17 @@ const bootGame = async (
             break
           case 'EatPotato':
             if (pending.kind === 'eat' && result.outcome._tag === 'consume') {
+              if (multiplayer !== undefined) {
+                sendVitalsCommand({ _tag: 'eat', item: 'potato' })
+                break
+              }
               const removal = Effect.runSync(
                 world.inventory.removeAt(pending.slotIndex, 'potato', result.consumedCount),
               )
               if (removal._tag === 'Removed') {
-                Effect.runSync(
-                  world.vitals.eat(
-                    result.outcome.foodPoints,
-                    result.outcome.saturationModifier,
-                  ),
+                survivalHunger.eat(
+                  result.outcome.foodPoints,
+                  result.outcome.saturationModifier,
                 )
               }
             }
@@ -4142,8 +9132,81 @@ const bootGame = async (
       nextMobDropId += 1
       observedMobDrops.push({ ...drop, renderId: `mob-drop-${nextMobDropId}` })
     }
+    const mobExperience = Effect.runSync(drainMobExperience(gameplayState))
+    for (const event of mobExperience) {
+      const currentVitals = Effect.runSync(world.vitals.snapshot)
+      Effect.runSync(world.vitals.restore(addVitalsExperience(currentVitals, event.amount)))
+    }
+    if (mobExperience.length > 0 || playerHeals.length > 0) markSessionDirty()
 
+    const dragonEvents = Effect.runSync(gameplayState.enderDragonEncounter.drainEvents)
+    for (const event of dragonEvents) {
+      switch (event._tag) {
+        case 'PlayerDamaged': {
+          if (dimensionAfterFrame !== 'end') break
+          const dragon = endDragonPosition()
+          const player = Effect.runSync(playerApi.pose).feetPosition
+          if (Math.hypot(dragon.x - player.x, dragon.y - player.y, dragon.z - player.z) <= 6) {
+            applyPlayerDamage({ amount: event.amount, cause: 'generic' })
+            queueEndAudio('playerHit', player)
+          }
+          break
+        }
+        case 'ExperienceRewarded': {
+          const currentVitals = Effect.runSync(world.vitals.snapshot)
+          Effect.runSync(world.vitals.restore(addVitalsExperience(currentVitals, event.amount)))
+          queueEndAudio('dragonReward', endDragonPosition())
+          break
+        }
+        case 'DragonEggRewarded':
+          if (!dragonEggRewarded) {
+            Effect.runSync(spawnDroppedItems(world.entities, [{
+              item: event.item,
+              count: event.count,
+              at: endDragonPosition(),
+            }]))
+            dragonEggRewarded = true
+          }
+          break
+        case 'ExitPortalMaterializationRequested':
+          if (!exitPortalMaterialized) {
+            const portalY = 64
+            for (let x = -1; x <= 1; x += 1) {
+              for (let z = -1; z <= 1; z += 1) {
+                Effect.runSync(currentChunkStore.setBlock({ x, y: portalY, z }, END_PORTAL_BLOCK.PORTAL))
+              }
+            }
+            exitPortalMaterialized = true
+            queueEndAudio('exitPortal', { x: 0, y: portalY, z: 0 })
+          }
+          break
+        case 'DragonDamagedByPlayer':
+          queueEndAudio('dragonHurt', endDragonPosition())
+          break
+      }
+    }
+    if (dragonEvents.length > 0) markSessionDirty()
+    const dragonSnapshot = Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
+    canvas.setAttribute('data-end-dragon-phase', dragonSnapshot.phase)
+    canvas.setAttribute('data-end-dragon-health', String(dragonSnapshot.health))
+    endAudio.update({
+      dimension: dimensionAfterFrame,
+      phase: dragonSnapshot.phase === 'dead' ? 'defeated' : 'active',
+      nowSecs,
+      listener: postFramePose.feetPosition,
+      listenerForward: readAudioListenerForward(),
+      events: pendingEndAudioEvents.splice(0),
+    })
+
+    if ('advanceFrame' in worldRenderer) {
+      Effect.runSync(worldRenderer.advanceFrame({
+        elapsedSecs: simulationElapsedSecs,
+        deltaSecs,
+        cameraPosition: postFramePose.feetPosition,
+      }))
+    }
     Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
+    if (brewingOpen) renderBrewingUi()
     renderPlayerUi()
     renderCrosshair(nowSecs)
     const captions = playerSettings.captionsEnabled ? audio.visible(nowSecs) : []
@@ -4161,31 +9224,53 @@ const bootGame = async (
     }
 
     framesTotal += 1
-    framesThisWindow += 1
-
-    const windowSecs = nowSecs - windowStartedAtSecs
-    if (windowSecs >= FPS_WINDOW_SECS) {
-      fpsValue.textContent = String(Math.round(framesThisWindow / windowSecs))
-      framesThisWindow = 0
-      windowStartedAtSecs = nowSecs
-    }
+    fpsValue.textContent = String(Math.round(Effect.runSync(Ref.get(uiFrameState.fpsCounter)).fps))
 
     // Readable by a test without a QA command: the frame count IS the claim
     // that the loop is running, and docs/e2e-triage.md #4 is exactly that claim.
     document.body.setAttribute('data-frames', String(framesTotal))
 
-    requestAnimationFrame(tick)
   }
 
-  requestAnimationFrame(tick)
+  const preview = Effect.runSync(makeBrowserPreview({
+    container: gameShell,
+    canvas,
+    startRuntime: (surface) => Effect.sync(() => {
+      const hiddenNetworkPump = window.setInterval(() => {
+        if (document.visibilityState !== 'hidden' || multiplayerInboundStage === undefined) return
+        drainPlayerDamageInbound()
+        Effect.runSync(multiplayerInboundStage.run(0))
+        drainMultiplayerInbound()
+      }, 100)
+      surface.onCleanup(() => {
+        window.clearInterval(hiddenNetworkPump)
+        Reflect.deleteProperty(globalThis, QA_GLOBAL_KEY)
+        document.body.setAttribute('data-mc-compose-boot', 'stopped')
+      })
+      return {
+        frame: () => Effect.sync(tick),
+        stop: Effect.sync(() => {
+          requestBackgroundFlush()
+          disposeMultiplayer()
+          disposeRuntime()
+        }),
+      }
+    }),
+  }))
+  const previewHandle = await Effect.runPromise(preview.start)
+  stopBrowserPreview = () => Effect.runPromise(previewHandle.stop)
 }
 
 const boot = (): Promise<void> => {
   const route = readSessionRoute(window.location.search)
   if (route === undefined) return bootTitle()
-  return bootGame(route.sessionId, route.kind === 'create' ? route.metadata : undefined)
+  return bootGame(route)
 }
 
 boot().catch((error: unknown) => {
+  if (error instanceof RequestedSessionNotFoundError) {
+    window.location.replace('/?loadError=missing-session')
+    return
+  }
   failBoot('boot threw', error)
 })

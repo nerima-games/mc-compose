@@ -140,7 +140,7 @@ export const STAGE_PHASE_INPUT: StagePhase = stagePhase('input', 'input')
 export const STAGE_PHASE_NETWORK_INBOUND: StagePhase = stagePhase('network:inbound', 'inbound')
 
 /**
- * Simulation, in six phases.
+ * Simulation, in nine phases.
  *
  * `physics` first: interactions and entities both need this frame's resolved
  * positions. plan.md §3.4 records that in the reference implementation the
@@ -159,8 +159,23 @@ export const STAGE_PHASE_SIM_INTERACTIONS: StagePhase = stagePhase(
   'interactions',
 )
 
+/** Fire spread and block ignition after player interactions have settled. */
+export const STAGE_PHASE_SIM_FIRE: StagePhase = stagePhase('simulation:fire', 'fire')
+
+/** Hunger, regeneration, and starvation after environmental fire damage. */
+export const STAGE_PHASE_SIM_SURVIVAL_HUNGER: StagePhase = stagePhase(
+  'simulation:survival-hunger',
+  'survival-hunger',
+)
+
 /** Mob AI, projectiles, vehicles. After interactions, so mobs see this frame's world. */
 export const STAGE_PHASE_SIM_ENTITIES: StagePhase = stagePhase('simulation:entities', 'entities')
+
+/** Ender Dragon encounter logic after the general entity simulation. */
+export const STAGE_PHASE_SIM_ENDER_DRAGON: StagePhase = stagePhase(
+  'simulation:ender-dragon',
+  'ender-dragon',
+)
 
 /**
  * Fluid propagation. After entities so that a mob that just broke a dam is
@@ -277,7 +292,8 @@ export const STAGE_PHASE_HUD_SYNC: StagePhase = stagePhase('hud-sync', 'hud-sync
  *
  *   input
  *   -> network:inbound                                          [EXTENSION]
- *   -> simulation (physics -> interactions -> entities -> fluids -> redstone -> time/weather)
+ *   -> simulation (physics -> interactions -> fire -> survival/hunger -> entities
+ *                  -> ender dragon -> fluids -> redstone -> time/weather)
  *   -> network:outbound                                         [EXTENSION]
  *   -> camera-mirror
  *   -> chunk-sync
@@ -299,7 +315,10 @@ export const STANDARD_STAGE_SKELETON: ReadonlyArray<StagePhase> = [
   STAGE_PHASE_NETWORK_INBOUND,
   STAGE_PHASE_SIM_PHYSICS,
   STAGE_PHASE_SIM_INTERACTIONS,
+  STAGE_PHASE_SIM_FIRE,
+  STAGE_PHASE_SIM_SURVIVAL_HUNGER,
   STAGE_PHASE_SIM_ENTITIES,
+  STAGE_PHASE_SIM_ENDER_DRAGON,
   STAGE_PHASE_SIM_FLUIDS,
   STAGE_PHASE_SIM_REDSTONE,
   STAGE_PHASE_SIM_TIME_WEATHER,
@@ -311,11 +330,14 @@ export const STANDARD_STAGE_SKELETON: ReadonlyArray<StagePhase> = [
   STAGE_PHASE_HUD_SYNC,
 ]
 
-/** The six simulation phases, for tests and for documentation generation. */
+/** The nine simulation phases, for tests and for documentation generation. */
 export const SIMULATION_PHASES: ReadonlyArray<StagePhase> = [
   STAGE_PHASE_SIM_PHYSICS,
   STAGE_PHASE_SIM_INTERACTIONS,
+  STAGE_PHASE_SIM_FIRE,
+  STAGE_PHASE_SIM_SURVIVAL_HUNGER,
   STAGE_PHASE_SIM_ENTITIES,
+  STAGE_PHASE_SIM_ENDER_DRAGON,
   STAGE_PHASE_SIM_FLUIDS,
   STAGE_PHASE_SIM_REDSTONE,
   STAGE_PHASE_SIM_TIME_WEATHER,

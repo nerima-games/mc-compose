@@ -143,10 +143,10 @@ describe('the roster resolves into plan.md §4.2’s frame', () => {
     }),
   )
 
-  it.effect('composes all sixteen registrations and drops none of them', () =>
+  it.effect('composes all nineteen registrations and drops none of them', () =>
     Effect.gen(function* () {
       const { game } = yield* composeRoster()
-      expect(game.plan.order).toHaveLength(16)
+      expect(game.plan.order).toHaveLength(19)
       expect([...game.plan.order].sort()).toStrictEqual([...ROSTER_STAGE_IDS].sort())
       expect(game.moduleNames).toStrictEqual([
         'mx-gameplay',
@@ -297,7 +297,7 @@ describe('every stage lands in the phase its owner said it would', () => {
       ).map((phase) => phase.name)
 
       expect(empty).toStrictEqual([])
-      expect(STANDARD_STAGE_SKELETON).toHaveLength(14)
+      expect(STANDARD_STAGE_SKELETON).toHaveLength(17)
     }),
   )
 })
@@ -501,8 +501,8 @@ describe('the cross-repository edges — every one of them now binds', () => {
         (edge) => namespaceOf(edge.stage) === namespaceOf(edge.missing),
       )
 
-      expect(declared).toHaveLength(13)
-      expect(intraModule).toHaveLength(8)
+      expect(declared).toHaveLength(16)
+      expect(intraModule).toHaveLength(11)
       expect(crossModule).toHaveLength(5)
       expect(new Set(crossModule.map((edge) => edge.missing))).toStrictEqual(
         new Set(['sim:physics']),
@@ -717,7 +717,7 @@ describe('what the roster does not register', () => {
       const withoutNetworkPhases = STANDARD_STAGE_SKELETON.filter(
         (phase) => phase.name !== 'network:inbound' && phase.name !== 'network:outbound',
       )
-      expect(withoutNetworkPhases).toHaveLength(12)
+      expect(withoutNetworkPhases).toHaveLength(15)
 
       const { game } = yield* composeRoster({ skeleton: withoutNetworkPhases })
 
@@ -731,8 +731,8 @@ describe('what the roster does not register', () => {
       ])
       // The indices mx-multiplayer measured from its side and wrote down at
       // `stages/stage-ids.ts:38-39`, reproduced here against the real resolver.
-      expect(positionIn(game.plan.order, 'multiplayer:inbound')).toBe(14)
-      expect(positionIn(game.plan.order, 'multiplayer:outbound')).toBe(15)
+      expect(positionIn(game.plan.order, 'multiplayer:inbound')).toBe(17)
+      expect(positionIn(game.plan.order, 'multiplayer:outbound')).toBe(18)
 
       // The two defects, stated as orderings rather than as indices.
       expect(

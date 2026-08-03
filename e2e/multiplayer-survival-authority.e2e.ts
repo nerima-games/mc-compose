@@ -1,0 +1,340 @@
+import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
+const PLAYER_AT = { x: 8.5, y: 65, z: 10.5 } as const
+const BOOT_TIMEOUT_MS = 15_000
+const LEGACY_SECRETS = {
+  'survival-alice': 'survival-alice-registration-secret',
+  'survival-bob': 'survival-bob-registration-secret',
+} as const
+
+const claimsFor = (players: Record<string, string>) => ({
+  format: 1,
+  players: Object.fromEntries(Object.entries(players).map(([player, secret]) => [
+    player,
+    createHash('sha256').update(secret).digest('hex'),
+  ])),
+})
+
+type GameplaySnapshot = {
+  readonly mode: 'survival' | 'creative'
+  readonly vitals: {
+    readonly healthPoints: number
+  }
+  readonly inventory: {
+    readonly slots: ReadonlyArray<{ readonly item: string; readonly count: number } | null>
+  }
+  readonly renderedEntities: ReadonlyArray<{
+    readonly id: string
+    readonly kind: string
+    readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
+  }>
+}
+
+type PlayerSession = {
+  readonly context: BrowserContext
+  readonly page: Page
+  readonly url: string
+  readonly sessionId: string
+}
+
+const emptySlots = (): ReadonlyArray<null> => Array.from({ length: 36 }, () => null)
+
+const initialState = {
+  revision: 4,
+  blocks: [],
+  inventories: [
+    {
+      player: 'survival-alice',
+      state: { slots: [{ item: 'potato', count: 2 }, ...emptySlots().slice(1)], selectedSlot: 0 },
+    },
+    {
+      player: 'survival-bob',
+      state: { slots: emptySlots(), selectedSlot: 0 },
+    },
+  ],
+  vitals: [
+    { player: 'survival-alice', state: { health: 13, hunger: 11, experience: 7 } },
+    { player: 'survival-bob', state: { health: 18, hunger: 16, experience: 3 } },
+  ],
+  playerPositions: [
+    { player: 'survival-alice', at: PLAYER_AT, facing: { yawRadians: 0, pitchRadians: 0 } },
+    { player: 'survival-bob', at: PLAYER_AT, facing: { yawRadians: 0, pitchRadians: 0 } },
+  ],
+  timeWeather: { timeOfDay: 6_000, weather: 'clear' },
+  containers: [],
+  furnaces: [],
+  villagerTrades: [],
+  entities: [
+    {
+      _tag: 'living',
+      entityId: 'survival-zombie',
+      entityType: 'zombie',
+      at: { x: PLAYER_AT.x + 1, y: PLAYER_AT.y, z: PLAYER_AT.z },
+      health: 8,
+      maxHealth: 20,
+    },
+    {
+      _tag: 'vehicle',
+      entityId: 'survival-boat',
+      vehicleType: 'boat',
+      at: { x: PLAYER_AT.x, y: PLAYER_AT.y, z: PLAYER_AT.z + 1 },
+      occupant: null,
+    },
+  ],
+}
+
+const callQa = <A>(page: Page, command: string): Promise<A> =>
+  page.evaluate(async ({ key, commandName }) => {
+    const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+      | Record<string, () => unknown>
+      | undefined
+    const operation = surface?.[commandName]
+    if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+    return await operation()
+  }, { key: QA_GLOBAL_KEY, commandName: command }) as Promise<A>
+
+const snapshot = (page: Page): Promise<GameplaySnapshot> => callQa(page, 'gameplay.snapshot')
+
+const revision = async (page: Page): Promise<number> =>
+  Number(await page.locator('#game-canvas').getAttribute('data-multiplayer-revision'))
+
+const createSurvivalWorld = async (page: Page, name: string): Promise<string> => {
+  await page.goto('/')
+  await page.locator('[data-menu-entry="new-world"]').click()
+  await page.locator('[data-mx-ui="menu-world-name"]').fill(name)
+  await expect(page.locator('[data-mx-ui="menu-game-mode"]')).toHaveAttribute(
+    'aria-label',
+    'Game mode: Survival',
+  )
+  await page.locator('[data-menu-action="confirm"]').click()
+  await expect(page.locator('body')).toHaveAttribute(
+    'data-mc-compose-boot',
+    'running',
+    { timeout: BOOT_TIMEOUT_MS },
+  )
+  await callQa(page, 'gameplay.seedCreativePlacementEncounter')
+  await page.keyboard.press('Escape')
+  await callQa(page, 'persistence.flush')
+  await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+  expect((await snapshot(page)).mode).toBe('survival')
+  return page.url()
+}
+
+const connectPlayer = async (
+  browser: Browser,
+  serverUrl: string,
+  player: string,
+  name: string,
+  registrationToken: string,
+): Promise<PlayerSession> => {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const sessionUrl = await createSurvivalWorld(page, `${name} Survival Authority E2E`)
+  const url = new URL(sessionUrl)
+  url.searchParams.set('multiplayer', serverUrl)
+  url.searchParams.set('player', player)
+  url.searchParams.set('multiplayerName', name)
+  const sessionId = await page.locator('body').getAttribute('data-session-id')
+  if (sessionId === null) throw new Error('multiplayer session lacks an id')
+  const registrationTokenKey = `mc-compose:multiplayer-registration:${JSON.stringify([serverUrl, sessionId, player])}`
+  await page.evaluate(({ key, token }) => {
+    window.sessionStorage.setItem(key, token)
+  }, { key: registrationTokenKey, token: registrationToken })
+  await page.goto(url.href)
+  await expect(page.locator('body')).toHaveAttribute(
+    'data-mc-compose-boot',
+    'running',
+    { timeout: BOOT_TIMEOUT_MS },
+  )
+  await expect(page.locator('#game-canvas')).toHaveAttribute(
+    'data-multiplayer-connection',
+    'connected',
+    { timeout: BOOT_TIMEOUT_MS },
+  )
+  return { context, page, url: url.href, sessionId }
+}
+
+const entityCommand = (
+  page: Page,
+  detail: {
+    readonly entityId: string
+    readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'
+    readonly at?: { readonly x: number; readonly y: number; readonly z: number }
+  },
+): Promise<void> => page.evaluate((command) => {
+  document.dispatchEvent(new CustomEvent('mc-entity-command', { detail: command }))
+}, detail)
+
+const authoritativeEntity = (page: Page, entityId: string) =>
+  snapshot(page).then((state) => state.renderedEntities.find(
+    (entity) => entity.id === `authoritative:${entityId}`,
+  ))
+
+let serverProcess: ChildProcess | undefined
+let serverUrl: string
+let stateDirectory: string | undefined
+
+const startServer = (stateFile: string, claimsFile: string): Promise<{ process: ChildProcess; url: string }> =>
+  new Promise((resolve, reject) => {
+    const child = spawn(join(process.cwd(), 'node_modules/.bin/tsx'), [
+      'apps/multiplayer-server/main.ts',
+      '--host', '127.0.0.1',
+      '--port', '0',
+      '--state-file', stateFile,
+      '--legacy-player-claims-file', claimsFile,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stderr = ''
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM')
+      reject(new Error(`multiplayer server start timed out: ${stderr}`))
+    }, 10_000)
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    child.once('error', (error) => {
+      clearTimeout(timeout)
+      reject(error)
+    })
+    child.once('exit', (code) => {
+      clearTimeout(timeout)
+      reject(new Error(`multiplayer server exited with ${String(code)}: ${stderr}`))
+    })
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const match = /multiplayer server listening on (ws:\/\/[^\s]+)/.exec(chunk.toString())
+      if (match?.[1] === undefined) return
+      clearTimeout(timeout)
+      resolve({ process: child, url: match[1] })
+    })
+  })
+
+test.beforeAll(async () => {
+  stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-survival-e2e-'))
+  const stateFile = join(stateDirectory, 'state.json')
+  const claimsFile = join(stateDirectory, 'claims.json')
+  await writeFile(stateFile, `${JSON.stringify({
+    format: 1,
+    worldId: 'overworld',
+    seed: 0,
+    state: initialState,
+  })}\n`, 'utf8')
+  await writeFile(claimsFile, `${JSON.stringify(claimsFor(LEGACY_SECRETS))}\n`, 'utf8')
+  const started = await startServer(stateFile, claimsFile)
+  serverProcess = started.process
+  serverUrl = started.url
+})
+
+test.afterAll(async () => {
+  serverProcess?.kill('SIGTERM')
+  if (stateDirectory !== undefined) {
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state authoritative', async ({ browser }) => {
+  const alice = await connectPlayer(browser, serverUrl, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
+  const bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
+
+  try {
+    await expect(alice.page.locator('#game-canvas')).toHaveAttribute('data-multiplayer-player-count', '2')
+    await expect(bob.page.locator('#game-canvas')).toHaveAttribute('data-multiplayer-player-count', '2')
+    await expect.poll(async () => (await snapshot(alice.page)).vitals.healthPoints).toBe(13)
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots[0]).toEqual({
+      item: 'potato', count: 2,
+    })
+    await expect.poll(async () => (await snapshot(bob.page)).vitals.healthPoints).toBe(18)
+    await expect.poll(async () => (await snapshot(bob.page)).inventory.slots[0]).toBeNull()
+    await expect.poll(() => authoritativeEntity(bob.page, 'survival-zombie')).toMatchObject({ kind: 'zombie' })
+
+    await entityCommand(alice.page, { entityId: 'survival-zombie', action: 'attack' })
+    await expect.poll(() => revision(bob.page)).toBe(5)
+    await expect.poll(() => revision(alice.page)).toBe(5)
+    await entityCommand(alice.page, { entityId: 'survival-zombie', action: 'attack' })
+    await expect.poll(() => authoritativeEntity(bob.page, 'survival-zombie')).toBeUndefined()
+
+    await expect.poll(async () => (await snapshot(bob.page)).renderedEntities.find(
+      (entity) => entity.kind === 'dropped_item',
+    )).not.toBeUndefined()
+    await expect.poll(async () => (await snapshot(alice.page)).renderedEntities.find(
+      (entity) => entity.kind === 'dropped_item',
+    )).not.toBeUndefined()
+    const dropEntity = (await snapshot(alice.page)).renderedEntities.find(
+      (entity) => entity.kind === 'dropped_item',
+    )
+    expect(dropEntity).toBeDefined()
+    await entityCommand(alice.page, {
+      entityId: dropEntity?.id.replace('authoritative:', '') ?? '',
+      action: 'pickup',
+    })
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
+      expect.arrayContaining([{ item: 'rotten_flesh', count: 2 }]),
+    )
+    await expect.poll(async () => (await snapshot(bob.page)).renderedEntities.some(
+      (entity) => entity.kind === 'dropped_item',
+    )).toBe(false)
+
+    await Promise.all([alice.page, bob.page].map((page) => page.evaluate(() => {
+      const canvas = document.querySelector('#game-canvas')
+      const rejections: string[] = []
+      ;(globalThis as unknown as { multiplayerRejections: string[] }).multiplayerRejections = rejections
+      new MutationObserver(() => {
+        const rejection = canvas?.getAttribute('data-multiplayer-rejection') ?? ''
+        if (rejection !== '') rejections.push(rejection)
+      }).observe(canvas ?? document.body, { attributes: true, attributeFilter: ['data-multiplayer-rejection'] })
+    })))
+    await Promise.all([
+      entityCommand(alice.page, { entityId: 'survival-boat', action: 'mount' }),
+      entityCommand(bob.page, { entityId: 'survival-boat', action: 'mount' }),
+    ])
+    const mountRejection = (page: Page): Promise<boolean> => page.evaluate(() =>
+      (globalThis as unknown as { multiplayerRejections: string[] }).multiplayerRejections.some(
+        (rejection) => rejection === 'stale-revision' || rejection === 'vehicle-occupied',
+      ))
+    await expect.poll(async () => {
+      const rejected = await Promise.all([mountRejection(alice.page), mountRejection(bob.page)])
+      return rejected.filter(Boolean).length
+    }).toBe(1)
+    const aliceRejected = await mountRejection(alice.page)
+    const rider = aliceRejected ? bob.page : alice.page
+    const movedTo = { x: PLAYER_AT.x + 3, y: PLAYER_AT.y, z: PLAYER_AT.z + 1 }
+    await entityCommand(rider, { entityId: 'survival-boat', action: 'move', at: movedTo })
+    await expect.poll(() => authoritativeEntity(alice.page, 'survival-boat')).toMatchObject({ feetPosition: movedTo })
+    await expect.poll(() => authoritativeEntity(bob.page, 'survival-boat')).toMatchObject({ feetPosition: movedTo })
+    await entityCommand(rider, { entityId: 'survival-boat', action: 'dismount' })
+    await expect.poll(() => revision(alice.page)).toBeGreaterThanOrEqual(10)
+
+    await bob.page.close()
+    await expect(alice.page.locator('#game-canvas')).toHaveAttribute('data-multiplayer-player-count', '1')
+    const reconnectedBob = await bob.context.newPage()
+    const bobUrl = new URL(bob.url)
+    const bobRegistrationTokenKey = `mc-compose:multiplayer-registration:${JSON.stringify([serverUrl, bob.sessionId, 'survival-bob'])}`
+    await reconnectedBob.goto(bobUrl.origin)
+    await reconnectedBob.evaluate(({ key, token }) => {
+      window.sessionStorage.setItem(key, token)
+    }, { key: bobRegistrationTokenKey, token: LEGACY_SECRETS['survival-bob'] })
+    await reconnectedBob.goto(bobUrl.href)
+    await expect(reconnectedBob.locator('body')).toHaveAttribute(
+      'data-mc-compose-boot',
+      'running',
+      { timeout: BOOT_TIMEOUT_MS },
+    )
+    await expect(reconnectedBob.locator('#game-canvas')).toHaveAttribute(
+      'data-multiplayer-connection',
+      'connected',
+      { timeout: BOOT_TIMEOUT_MS },
+    )
+    await expect.poll(() => authoritativeEntity(reconnectedBob, 'survival-boat')).toMatchObject({ feetPosition: movedTo })
+    await expect.poll(async () => (await snapshot(reconnectedBob)).renderedEntities.some(
+      (entity) => entity.id === 'authoritative:survival-zombie' || entity.kind === 'dropped_item',
+    )).toBe(false)
+    await expect.poll(async () => (await snapshot(reconnectedBob)).vitals.healthPoints).toBe(18)
+    await expect.poll(async () => (await snapshot(reconnectedBob)).inventory.slots[0]).toBeNull()
+  } finally {
+    await Promise.all([alice.context.close(), bob.context.close()])
+  }
+})

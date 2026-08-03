@@ -139,7 +139,8 @@ const STAGE_HUD_SYNC           // 'hud-sync'
 ```
 input
   -> network:inbound                                                          ★
-  -> simulation (physics -> interactions -> entities -> fluids -> redstone -> time/weather)
+  -> simulation (physics -> interactions -> fire -> survival/hunger -> entities
+                 -> ender-dragon -> fluids -> redstone -> time/weather)
   -> network:outbound                                                         ★
   -> camera-mirror
   -> chunk-sync
@@ -194,7 +195,7 @@ type StageRegistration = {
   readonly after?: ReadonlyArray<StageId>
   readonly run: (dt: DeltaTimeSecs) => Effect<void, never, FrameServices>
 }
-type ModuleLayer = Layer<any, any, never>               // RIn だけは never に締めてある
+type ModuleLayer = Layer<never, unknown, never>         // erased module boundary
 const EMPTY_MODULE_LAYER: ModuleLayer
 
 type GameModule = {
@@ -298,30 +299,65 @@ delta はクランプせずそのまま渡す
 実モジュールの Layer はすべて問題なく代入できる。空 Layer だけが例外であり、
 この定数がその例外の封じ込め場所である。
 
-### `ModuleLayer` の `RIn` は `never` に締めた。`ROut` は締められていない
+### `ModuleLayer` の `RIn` は `never`。合成時は提供サービスの union を保持する
 
 以前は `Layer<any, any, any>` だった。`RIn` が `any` だと `Effect.provide(game.layer)` は
 要求を **discharge するのではなく消去する** — どのモジュールも提供していないサービスを要求する
 Effect が型検査を通り、実行時に `Service not found` で落ちる。
 `tsc` はこれを `exactOptionalPropertyTypes` 経由で偶発的にしか捕まえない。
 
-`Layer` の `RIn` は共変(`out RIn`)なので、`Layer<X, E, R>` が `Layer<any, any, never>` に
+`Layer` の `RIn` は共変(`out RIn`)なので、`Layer<X, E, R>` が `Layer<never, unknown, never>` に
 代入できるのは `R` が `never` のときだけである。つまり**モジュールは自己完結して届かなければならない**。
 これは新しい規則ではない。モジュールは対等であり(`Layer.merge`、`Layer.provide` ではない)、
 他モジュールのサービスを構築に要求するモジュールは plan.md §2.3-1 が禁じる依存エッジそのものである。
 プラットフォームハンドルを要求するモジュールは、`composeGame` に渡す**前に**それを受け取る
 ——ホスト側にはまだそれを満たす型がある。
 
-**残る不健全さを明記しておく**: `ROut` は依然として `any` である。`composeGame` は
-サービス型の異なるモジュールの異種配列を取るので、その和を正確に書くには可変長タプル型が要る。
-したがって `Effect.provide(game.layer)` は「要求されたサービスをどれかのモジュールが提供しているか」を
-検査できない。**ただしこの穴はフレームの経路には無い** — `runFrame` は `FrameServices` を自分の型に
+`composeGame` は const generic の異種配列から提供サービスの union を推論する。
+型を保持した `GameModule<ROut>` を渡せば `Effect.provide(game.layer)` はその union を要求から
+除去し、未提供のサービスは型検査に残る。`GameModule` として明示的に消去された配列だけは
+`ROut = never` となる。**フレームの経路にも穴は無い** — `runFrame` は `FrameServices` を自分の型に
 書いており、`runFrameWith` は正確に型付けされた Layer に対して discharge する。
-`test/composition.test.ts` の
-`KNOWN LIMIT: ROut stays erased, so a missing service still fails at runtime, not at tsc`
-が、これを驚きではなく既知の穴として固定している。
 
-## 4. セッションライフサイクル(`domain/session.ts`)
+## 4. ブラウザ composition root(`domain/browser-session.ts`)
+
+```typescript
+type BrowserRuntimeModule = {
+  readonly name: string
+  readonly start: Effect<GameModule, unknown>
+  readonly stop: Effect<void, unknown>
+}
+
+type BrowserSession = {
+  readonly game: ComposedGame
+  readonly stop: Effect<void, BrowserSessionStopError>
+}
+
+const startBrowserSession: (
+  runtimes: ReadonlyArray<BrowserRuntimeModule>,
+  options?: { readonly compose?: ComposeOptions },
+) => Effect<BrowserSession, BrowserSessionStartError>
+```
+
+具体的な DOM、WebGL、音声、ネットワーク実装はホストが sibling package の公開 API から構築する。
+mc-compose はそれらを `BrowserRuntimeModule` として受け取り、ブラウザセッションのライフサイクルと
+`GameModule` の stage 合成だけを所有する。この注入境界により sibling package への依存方向を逆転させず、
+同じ composition root をテスト用 adapter にも使用できる。
+
+### ライフサイクル契約
+
+| 操作 | 保証 |
+| --- | --- |
+| start | 入力配列の宣言順に直列実行する。各 runtime が返す登録済み `GameModule` を `composeGame` に渡す |
+| start 失敗 | その時点までに成功した runtime を逆順ですべて rollback する |
+| compose 失敗 | 成功した runtime を逆順ですべて rollback し、`StageOrderError` を保持する |
+| stop | 成功した runtime を逆順ですべて停止する。複数の停止失敗を集約し、残りの停止を妨げない |
+| stop 再実行 | 最初の呼び出しだけが teardown を所有し、以後は成功する no-op になる |
+
+rollback 中の停止失敗は元の start/compose 失敗を上書きせず、
+`BrowserSessionStartError.rollbackFailures` に併記される。
+
+## 5. セッションライフサイクル(`domain/session.ts`)
 
 ```typescript
 type SessionState = Title | Loading | InGame | Paused | Unloading
@@ -348,7 +384,7 @@ const roundTripEvents: (world: WorldId) => ReadonlyArray<SessionEvent>
 
 **このモジュールは fiber を止めない。** *いつ*ティアダウンするかを言い、*何が*ティアダウンかは言わない。
 
-## 5. QA / デバッグ API(`domain/qa-api.ts`)
+## 6. QA / デバッグ API(`domain/qa-api.ts`)
 
 ```typescript
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
@@ -371,7 +407,7 @@ const describeQaApiError: (error) => string
 
 **compose は QA コマンドを書かない。** 所有モジュールが名前空間ごと提供し、compose はマージするだけである。
 
-## 6. Modding 入口(`domain/modding.ts`)
+## 7. Modding 入口(`domain/modding.ts`)
 
 ```typescript
 const MODDING_API_VERSION = 1
@@ -395,47 +431,22 @@ mod 専用フックも優先度も pre/post パスも無い。
 「redstone の後に走る」と書いた mod は正当であり、dangling として報告される。
 拒否すると mod がビルドのモジュール集合に依存してしまう。
 
-## 7. まだ無いもの
+## 8. ブラウザ composition root と E2E
 
-| 未実装 | 追加時期 |
+公開 API の `startBrowserSession` は、ホストから注入された runtime の起動、`GameModule` の合成、
+失敗時 rollback、冪等な停止を担う。具体的な実行エントリは `apps/web/main.ts` にあり、
+DOM、WebGL、音声、保存、ネットワーク adapter を sibling package の公開 API から構築する。
+authoritative WebSocket サーバーの実行エントリは `apps/multiplayer-server/main.ts` である。
+
+| 境界 | 実装と検証 |
 | --- | --- |
-| mc-kernel の型の re-export(`StageId` / `DeltaTimeSecs` / `GameModule`) | mc-kernel 公開後。現在はローカル宣言 |
-| 4 つの体験モジュールの実際の合成 | 各モジュール公開後 |
-| ブラウザエントリポイント | 縦切りスパイク後 |
-| **E2E スイート** | 合成できる中身ができてから。[testing.md](./testing.md) |
-| `ModuleLayer` の精密な型 | 縦切りスパイクで実サービス集合が出てから |
+| セッション | 起動、逆順 rollback、停止失敗の集約、冪等な stop を unit test で固定 |
+| ブラウザ起動 | smoke E2E が起動、frame、QA、描画・音声、teardown を検証 |
+| プレイ経路 | creative、survival、採掘・inventory、保存と再開を専用 E2E で検証 |
+| multiplayer | 基本同期、authoritative survival、戦闘、乗物、Wither、再接続を検証 |
+| progression | Nether / End と dragon progression を実ブラウザ経路で検証 |
 
-**API ロックファイルはこの表から外れた。** plan.md §9 の未決事項
-「API ロックファイルのツール選定（api-extractor 相当の Effect-TS 互換手段）」は決着し、
-実装されている。
-
-| 項目 | 内容 |
-| --- | --- |
-| 生成物 | リポジトリ直下の `api-lock.md`（公開宣言 84 件 + 参照されている非 export 宣言 7 件。コミット対象） |
-| 生成器 | `scripts/api-lock.ts`（16 リポジトリに byte-identical で vendor。`scripts/check-dependency-whitelist.ts` と同じ方式で、編集してよいのは `REPOSITORY_POLICY` だけ） |
-| 検査 | `pnpm api:check` — `api-lock.md` が実際の公開 API と食い違えば非ゼロ終了 |
-| 更新 | `pnpm api:update` |
-| 配線 | `pnpm verify` の `check:deps` と `test` の間、および CI の `API lock` ステップ |
-| 追加依存 | **なし**（`typescript` は既に devDependency） |
-
-理由と実測の正本は mc-kernel の `docs/versioning.md` §7。
-`@microsoft/api-extractor` は「`Context.Tag` のサービスクラスが写らない」ことを決め手に却下されている。
-16 リポジトリの全サービスがその形で宣言されており、合成する側の本リポジトリは
-その Tag 識別子文字列が正しいことに全面的に依存している。
-
-**mc-compose 固有で効くのは §6 の modding 契約である。** `api-lock.md` には
-
-```ts
-const MODDING_API_VERSION = 1;
-```
-
-がリテラルとして記録されている。`GameModule` / `ModManifest` の形も同様に写る。
-サードパーティが書いた mod を黙って壊す変更 —— `GameModule` にフィールドを足す、
-`ModManifest.apiVersion` の意味を変える —— は、レビューの前に diff として目に見える。
-`composeGame` / `resolveStageOrder` のシグネチャも同じ扱いである。
-
-**写らないものは正直に書く。** `STAGE_INPUT` などの stage id 定数は `StageId` としか写らず、
-**文字列そのものはロックに出ない**。§2 の stage 順序表（`SIMULATION_STAGES` などの並び）も
-`ReadonlyArray<StageId>` としか写らない。順序は本リポジトリの中核であり、
-守るのは引き続き `domain/stage-skeleton.ts` に対するテストである。
-**ロックは形を、テストは順序と挙動を見る。**
+`pnpm e2e:browser` は `e2e/*.e2e.ts` の全 Playwright スイートを Chromium で実行する。
+main への push と pull request では `.github/workflows/browser-regression.yml` が代表的な機能回帰を実行し、
+`.github/workflows/browser-performance.yml` は frame-time budget だけを独立して検証する。
+性能測定を機能回帰から分離することで、性能専用条件の変動を通常の動作保証に混ぜない。

@@ -69,6 +69,29 @@ const framesDrawn = async (page: Page): Promise<number> => {
   return raw === null ? 0 : Number(raw)
 }
 
+const settleOnSmokeTerrain = async (page: Page): Promise<void> => {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          ([key, command]) =>
+            typeof (globalThis as Record<string, Record<string, unknown>>)[key]?.[command],
+          [QA_GLOBAL_KEY, 'gameplay.seedSmokeGroundingEncounter'] as const,
+        ),
+      { timeout: 15_000 },
+    )
+    .toBe('function')
+  await page.evaluate(async (key) => {
+    const qa = (globalThis as Record<string, unknown>)[key] as Record<string, () => unknown>
+    await qa['gameplay.seedSmokeGroundingEncounter']()
+  }, QA_GLOBAL_KEY)
+  await expect
+    .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
+      timeout: 15_000,
+    })
+    .toBe('true')
+}
+
 test.describe('smoke — the composed frame in a real browser', () => {
   /**
    * #1 `WebGL2 canvas is present and active`.
@@ -142,6 +165,8 @@ test.describe('smoke — the composed frame in a real browser', () => {
         bufferHeight: canvas.height,
         layoutWidth: canvas.clientWidth,
         layoutHeight: canvas.clientHeight,
+        audioSamples: Number(canvas.dataset.audioSamples),
+        atlasSize: canvas.dataset.atlasSize,
         hasWebgl2: gl !== null,
         lost: gl === null || gl.isContextLost(),
       }
@@ -153,6 +178,8 @@ test.describe('smoke — the composed frame in a real browser', () => {
     expect(probe?.bufferWidth).toBe(probe?.layoutWidth)
     expect(probe?.bufferHeight).toBe(probe?.layoutHeight)
     expect(probe?.layoutWidth).toBeGreaterThan(0)
+    expect(probe?.audioSamples).toBeGreaterThan(0)
+    expect(probe?.atlasSize).toBe('512x512')
     // The naive pair, kept because they are what the row is named after — but
     // they are a postscript to the two above, not the claim.
     expect(probe?.hasWebgl2).toBe(true)
@@ -217,7 +244,10 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'render:input',
       'sim:physics',
       'gameplay:interactions',
+      'gameplay:fire',
+      'gameplay:survival-hunger',
       'gameplay:entities',
+      'gameplay:ender-dragon',
       'gameplay:fluids',
       'redstone:power',
       'redstone:effects',
@@ -244,11 +274,12 @@ test.describe('smoke — the composed frame in a real browser', () => {
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
 
-    // The FPS readout is recomputed on a 0.5s window, so the first value takes
-    // that long to appear. Waiting for the DOM rather than sleeping.
-    await expect(page.locator('#fps-value')).not.toHaveText('0', { timeout: 10_000 })
+    // mx-ui publishes after frame-supplied dt accumulates to its one-second
+    // window. The source marker ensures the host is projecting that state.
+    const fpsReadout = page.locator('#fps-value[data-fps-source="mx-ui-frame-dt"]')
+    await expect(fpsReadout).not.toHaveText('0', { timeout: 10_000 })
 
-    const fps = Number(await page.locator('#fps-value').textContent())
+    const fps = Number(await fpsReadout.textContent())
     expect(fps).toBeGreaterThan(0)
 
     const before = await framesDrawn(page)
@@ -281,42 +312,116 @@ test.describe('smoke — the composed frame in a real browser', () => {
     )
 
     expect(surface?.sort()).toEqual([
+      'audio.report',
       'audio.snapshot',
       'gameplay.breakTarget',
       'gameplay.damage',
       'gameplay.eat',
       'gameplay.enterNether',
       'gameplay.enterOverworld',
+      'gameplay.forceNextEyeOfEnderBreak',
+      'gameplay.forceNextEyeOfEnderDrop',
+      'gameplay.grantNearestVillagerTradeInput',
       'gameplay.harvestFarmingCrop',
       'gameplay.heal',
+      'gameplay.leaveSubmergedSwimmingEncounter',
+      'gameplay.mutateObserverInput',
       'gameplay.preparePotatoEating',
+      'gameplay.pressRedstoneBranchButton',
+      'gameplay.redstoneFixturesSnapshot',
+      'gameplay.requestMultiplayerBlockBreak',
+      'gameplay.requestMultiplayerBlockPlacement',
       'gameplay.respawn',
       'gameplay.returnToCraftingTable',
       'gameplay.returnToFarmingPlot',
+      'gameplay.seedBedExplosionEncounter',
+      'gameplay.seedBowProjectileEncounter',
+      'gameplay.seedBrewingEncounter',
       'gameplay.seedCactusApproach',
+      'gameplay.seedChestTransferMetadata',
+      'gameplay.seedChestTransferMetadataConflict',
       'gameplay.seedCraftingLog',
       'gameplay.seedCraftingTableEncounter',
+      'gameplay.seedCreativeBreakEncounter',
+      'gameplay.seedCreativePlacementEncounter',
       'gameplay.seedDamagingFall',
       'gameplay.seedDuplicateLavaContact',
+      'gameplay.seedEndDragonFinalHit',
+      'gameplay.seedEndEyeCrafting',
+      'gameplay.seedEndPortalFinalFrame',
       'gameplay.seedFarmingEncounter',
       'gameplay.seedFireChargeIgnition',
+      'gameplay.seedFishingEncounter',
       'gameplay.seedFlintAndSteelIgnition',
       'gameplay.seedFoodUseEncounter',
       'gameplay.seedIronArmor',
+      'gameplay.seedItemUpgradeEncounter',
       'gameplay.seedLethalFall',
       'gameplay.seedLethalMixedContact',
       'gameplay.seedLethalZombieEncounter',
       'gameplay.seedMeleeDropEncounter',
       'gameplay.seedPortalEncounter',
+      'gameplay.seedPortalIgnitionEncounter',
+      'gameplay.seedRedstoneFixtures',
       'gameplay.seedRefusedFireChargeIgnition',
       'gameplay.seedSafeFall',
+      'gameplay.seedSmokeGroundingEncounter',
+      'gameplay.seedStaleCustomNames',
+      'gameplay.seedStickyPistonEncounter',
+      'gameplay.seedSubmergedSwimmingEncounter',
+      'gameplay.seedVillageTradingEncounter',
       'gameplay.seedWoodenPickaxeProgression',
+      'gameplay.seedZombiePursuitEncounter',
+      'gameplay.setMultiplayerInvalidPose',
       'gameplay.setPose',
       'gameplay.setWeather',
       'gameplay.shoot',
       'gameplay.snapshot',
+      'gameplay.spawnFullHealthBlaze',
+      'gameplay.spawnFullHealthEnderman',
+      'gameplay.stickyPistonSnapshot',
+      'gameplay.switchItemUpgradeStationToAnvil',
+      'gameplay.targetCompletedEndPortal',
+      'gameplay.targetEndDragon',
+      'gameplay.targetEndExitPortal',
+      'gameplay.targetNearestDroppedItem',
+      'gameplay.targetNearestHostile',
+      'gameplay.targetNearestStrongholdFrame',
+      'lifecycle.stop',
       'persistence.flush',
+      'render.snapshotLighting',
     ])
+  })
+
+  test('#4c audio QA exposes the camera-derived listener orientation', async ({ page }) => {
+    await startGameSession(page)
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+    const snapshots = await page.evaluate(async (key) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const audioSnapshot = surface?.['audio.snapshot']
+      const gameplaySnapshot = surface?.['gameplay.snapshot']
+      if (audioSnapshot === undefined) throw new Error('missing QA command: audio.snapshot')
+      if (gameplaySnapshot === undefined) throw new Error('missing QA command: gameplay.snapshot')
+      return { audio: await audioSnapshot(), gameplay: await gameplaySnapshot() }
+    }, QA_GLOBAL_KEY) as {
+      readonly audio: {
+        readonly listener: { readonly x: number; readonly y: number; readonly z: number }
+        readonly listenerForward: { readonly x: number; readonly y: number; readonly z: number }
+      }
+      readonly gameplay: {
+        readonly pose: {
+          readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
+        }
+      }
+    }
+
+    expect(snapshots.audio.listener).toEqual(snapshots.gameplay.pose.feetPosition)
+    expect(snapshots.audio.listenerForward.x).toBeCloseTo(0)
+    expect(snapshots.audio.listenerForward.y).toBe(0)
+    expect(snapshots.audio.listenerForward.z).toBeCloseTo(-1)
   })
 
   /**
@@ -371,6 +476,24 @@ test.describe('smoke — the composed frame in a real browser', () => {
     await expect(page.locator('[data-mx-ui="vitals"] [data-icon="heart"]')).toHaveCount(10)
     await expect(page.locator('[data-mx-ui="vitals"] [data-icon="shank"]')).toHaveCount(10)
   })
+})
+
+test('published browser lifecycle owns RAF and tears the QA surface down', async ({ page }) => {
+  await startGameSession(page)
+  await expect.poll(() => framesDrawn(page)).toBeGreaterThan(1)
+
+  await page.evaluate(async (key) => {
+    const qa = (globalThis as Record<string, unknown>)[key] as {
+      'lifecycle.stop': () => Promise<void>
+    }
+    await qa['lifecycle.stop']()
+  }, QA_GLOBAL_KEY)
+
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'stopped')
+  const stoppedAt = await framesDrawn(page)
+  await page.waitForTimeout(250)
+  expect(await framesDrawn(page)).toBe(stoppedAt)
+  expect(await page.evaluate((key) => key in globalThis, QA_GLOBAL_KEY)).toBe(false)
 })
 
 test.describe('the composed game has a world in it', () => {
@@ -436,12 +559,7 @@ test.describe('the player', () => {
     // forever; neither is visible in a screenshot of the first frame.
     await startGameSession(page)
     await expect(page.locator('#game-canvas')).toHaveAttribute('data-world-source', 'generated')
-
-    await expect
-      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
-        timeout: 15_000,
-      })
-      .toBe('true')
+    await settleOnSmokeTerrain(page)
 
     const feet = await page.locator('#game-canvas').getAttribute('data-player-feet')
     const y = Number(feet?.split(',')[1])
@@ -453,11 +571,7 @@ test.describe('the player', () => {
 
   test('#9 holding W moves the player, and the ground still holds', async ({ page }) => {
     await startGameSession(page)
-    await expect
-      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
-        timeout: 15_000,
-      })
-      .toBe('true')
+    await settleOnSmokeTerrain(page)
 
     const before = await page.locator('#game-canvas').getAttribute('data-player-feet')
 
@@ -510,11 +624,7 @@ test.describe('sustained play', () => {
     // the world by what fits in memory at once and never releases anything.
     // What this asserts is `syncWorld`'s ADD and its REMOVE.
     await startGameSession(page)
-    await expect
-      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
-        timeout: 15_000,
-      })
-      .toBe('true')
+    await settleOnSmokeTerrain(page)
 
     const residentAtSpawn = Number(
       await page.locator('#game-canvas').getAttribute('data-chunks-meshed'),
@@ -565,11 +675,7 @@ test.describe('sustained play', () => {
     page.on('pageerror', (error) => fatal.push(String(error)))
 
     await startGameSession(page)
-    await expect
-      .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
-        timeout: 15_000,
-      })
-      .toBe('true')
+    await settleOnSmokeTerrain(page)
 
     const framesAtStart = Number(await page.locator('body').getAttribute('data-frames'))
 

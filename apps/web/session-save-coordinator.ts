@@ -17,9 +17,10 @@ export type SessionSaveCoordinator = {
 export type SessionSaveCoordinatorOptions<State> = {
   readonly initialKnownChunks: Iterable<DimensionChunk>
   readonly snapshotResidents: () => Promise<ReadonlyArray<DimensionChunk>>
+  readonly currentGeneration: () => number
   readonly snapshotState: () => State
   readonly publish: (publication: SessionSavePublication<State>) => Promise<void>
-  readonly onPublished?: () => void
+  readonly onPublished?: (generation: number) => void
   readonly onFailure?: (error: unknown) => void
 }
 
@@ -54,8 +55,35 @@ export const createSessionSaveCoordinator = <State>(
   }
 
   const publishOnce = async (): Promise<void> => {
-    const retainedCapture = [...retainedChunks.entries()]
-    const residents = await options.snapshotResidents()
+    type ValidatedSnapshot = {
+      readonly retainedCapture: Array<
+        [string, { readonly chunk: DimensionChunk; readonly version: number }]
+      >
+      readonly state: State
+      readonly stateGeneration: number
+      readonly residents: ReadonlyArray<DimensionChunk>
+    }
+    const maxSnapshotAttempts = 8
+    let validatedSnapshot: ValidatedSnapshot | undefined
+    for (let attempt = 0; attempt < maxSnapshotAttempts; attempt += 1) {
+      const stateGeneration = options.currentGeneration()
+      const retainedGeneration = retainedVersion
+      const retainedCapture = [...retainedChunks.entries()]
+      const state = options.snapshotState()
+      const residents = await options.snapshotResidents()
+      if (
+        options.currentGeneration() === stateGeneration &&
+        retainedVersion === retainedGeneration
+      ) {
+        validatedSnapshot = { retainedCapture, state, stateGeneration, residents }
+        break
+      }
+    }
+    if (!validatedSnapshot) {
+      throw new Error(`Unable to capture a consistent save snapshot after ${maxSnapshotAttempts} attempts`)
+    }
+    const { retainedCapture, state, stateGeneration, residents } = validatedSnapshot
+
     const merged = new Map<string, DimensionChunk>()
     for (const [key, chunk] of knownChunks) merged.set(key, dimensionChunkSnapshotOf(chunk))
     for (const [key, retained] of retainedCapture) {
@@ -63,7 +91,7 @@ export const createSessionSaveCoordinator = <State>(
     }
     for (const chunk of residents) merged.set(coordId(chunk), dimensionChunkSnapshotOf(chunk))
 
-    await options.publish({ state: options.snapshotState(), chunks: [...merged.values()] })
+    await options.publish({ state, chunks: [...merged.values()] })
 
     knownChunks = new Map(
       [...merged.entries()].map(([key, chunk]) => [key, dimensionChunkSnapshotOf(chunk)]),
@@ -71,7 +99,7 @@ export const createSessionSaveCoordinator = <State>(
     for (const [key, captured] of retainedCapture) {
       if (retainedChunks.get(key)?.version === captured.version) retainedChunks.delete(key)
     }
-    options.onPublished?.()
+    options.onPublished?.(stateGeneration)
   }
 
   const drainSaves = async (): Promise<void> => {

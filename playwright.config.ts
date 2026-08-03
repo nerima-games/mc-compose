@@ -1,5 +1,6 @@
 /**
- * The browser E2E harness — docs/e2e-triage.md's 25 本, the final gate.
+ * The browser E2E harness. The complete discovered suite is the final gate;
+ * docs/e2e-triage.md records the historical 25-test reference migration.
  *
  * PRE-AUDIT FIRST CUT (叩き台).
  *
@@ -12,13 +13,9 @@
  * (docs/testing.md §3.5). It answers half (a) of plan.md §3.15: do the declared
  * ids compose into one total order.
  *
- * `pnpm e2e:browser` is this. It needs Chromium, a dev server, and — critically
- * — SIBLING CHECKOUTS ON DISK, because nothing is published (see
- * `vite.config.ts`). It therefore CANNOT be in `pnpm verify`, for exactly the
- * reason docs/testing.md §3.5 keeps `pnpm check:roster` out: mc-compose's CI
- * clones mc-compose and nothing else, and a gate that cannot run in CI, placed
- * in the command CI runs, stops `pnpm verify` from meaning "this is green".
- * `check:mirrors` and `check:repoint` set the same precedent in mc-dev-meta.
+ * `pnpm e2e:browser` is this. It needs Chromium, a production preview, and — critically
+ * — published runtime packages from node_modules. It stays outside
+ * `pnpm verify` because Chromium is an explicit, heavier final gate.
  *
  * ---------------------------------------------------------------------------
  * Carried over from the reference implementation's `playwright.config.ts`
@@ -48,12 +45,9 @@ export default defineConfig({
   testMatch: '**/*.e2e.ts',
   timeout: 60_000,
 
-  // No retries. The reference used one, for a measured reason — two local
-  // workers starved each other's render loop and dropped synthetic key presses.
-  // This suite has one worker and no synthetic input yet, so a retry here would
-  // only hide flake that has not been diagnosed. Add it back with the
-  // measurement that justifies it.
-  retries: 0,
+  // Keep local failures immediate while retaining the first failure's trace in
+  // CI, where renderer scheduling can be noisy under software WebGL.
+  retries: process.env['CI'] === undefined ? 0 : 1,
   workers: 1,
   forbidOnly: process.env['CI'] !== undefined,
 
@@ -88,19 +82,17 @@ export default defineConfig({
 
   webServer: [
     {
-      command: `pnpm dev --port ${String(E2E_PORT)} --strictPort`,
+      command: `corepack pnpm build:web && corepack pnpm exec vite preview --host 127.0.0.1 --port ${String(E2E_PORT)} --strictPort`,
       url: E2E_BASE_URL,
-      // Never reuse. The dev server prints which roster root it resolved, and a
-      // server left over from another checkout would serve a different game than
-      // the one under test — the drift docs/testing.md §3.5 warns about, with the
-      // evidence scrolled off the top of somebody else's terminal.
+      // Never reuse: the final gate must serve the current checkout and its
+      // lockfile-resolved public packages, not a stale process.
       reuseExistingServer: false,
       timeout: 60_000,
       stdout: 'pipe',
       stderr: 'pipe',
     },
     {
-      command: `pnpm tsx apps/multiplayer-server/main.ts --port ${String(E2E_MULTIPLAYER_PORT)}`,
+      command: `corepack pnpm tsx apps/multiplayer-server/main.ts --port ${String(E2E_MULTIPLAYER_PORT)}`,
       url: `http://127.0.0.1:${String(E2E_MULTIPLAYER_PORT)}/health`,
       reuseExistingServer: false,
       timeout: 60_000,

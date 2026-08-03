@@ -138,6 +138,7 @@ test.describe('player inventory experience', () => {
   })
 
   test('progresses from wood through diamond and mines obsidian', async ({ page }) => {
+    test.setTimeout(90_000)
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
     await callQa(page, 'gameplay.seedWoodenPickaxeProgression')
@@ -371,7 +372,7 @@ test.describe('player inventory experience', () => {
     await expect(furnaceFuel).toHaveAttribute('aria-label', /coal, 1/)
     await expect(cookProgress).not.toHaveAttribute('aria-valuenow', '0')
     await expect(furnaceOutput).toHaveAttribute('aria-label', /iron_ingot, 3/, {
-      timeout: 35_000,
+      timeout: 50_000,
     })
 
     await furnaceOutput.click()

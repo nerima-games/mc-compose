@@ -199,7 +199,8 @@ const main = async (): Promise<void> => {
 
   // REAL GENERATED TERRAIN, loaded as data. See this file's header on why it
   // arrives as JSON rather than as a call into mc-worldgen.
-  const fixture = (await (await fetch('./terrain-fixture.json')).json()) as TerrainFixture
+  const fixtureUrl = new URL('./terrain-fixture.json', import.meta.url)
+  const fixture = (await (await fetch(fixtureUrl)).json()) as TerrainFixture
 
   const quadsByKey = new Map<string, ReadonlyArray<FixtureQuad>>(
     fixture.chunks.map((chunk) => [chunkKeyOf(chunk), chunk.quads]),

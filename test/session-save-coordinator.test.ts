@@ -57,6 +57,7 @@ describe('session save coordinator', () => {
     const coordinator = createSessionSaveCoordinator({
       initialKnownChunks: [],
       snapshotResidents: async () => [],
+      currentGeneration: () => 0,
       snapshotState: () => publications.length,
       publish: (publication) => {
         publications.push(publication)
@@ -87,6 +88,7 @@ describe('session save coordinator', () => {
     const coordinator = createSessionSaveCoordinator({
       initialKnownChunks: [dimensionChunk('overworld', 0, 0, 1)],
       snapshotResidents: async () => [],
+      currentGeneration: () => 0,
       snapshotState: () => 1,
       publish: async (publication) => {
         publications.push(publication)
@@ -112,6 +114,7 @@ describe('session save coordinator', () => {
     const coordinator = createSessionSaveCoordinator({
       initialKnownChunks: [],
       snapshotResidents: async () => [],
+      currentGeneration: () => 0,
       snapshotState: () => 1,
       publish: (publication) => {
         publications.push(publication)
@@ -131,11 +134,124 @@ describe('session save coordinator', () => {
     expect(coordinator.retainedChunkCount()).toBe(0)
   })
 
+  it('retries instead of publishing a mixed cut when mutation occurs during resident snapshot', async () => {
+    const firstResidents = deferred<ReadonlyArray<DimensionChunk>>()
+    const publications: Array<SessionSavePublication<number>> = []
+    let state = 1
+    let residentMarker = 1
+    let snapshotCount = 0
+    const coordinator = createSessionSaveCoordinator({
+      initialKnownChunks: [],
+      snapshotResidents: () => {
+        snapshotCount += 1
+        return snapshotCount === 1
+          ? firstResidents.promise
+          : Promise.resolve([dimensionChunk('overworld', 0, 0, residentMarker)])
+      },
+      currentGeneration: () => state,
+      snapshotState: () => state,
+      publish: async (publication) => { publications.push(publication) },
+    })
+
+    const save = coordinator.requestSave()
+    await Promise.resolve()
+    state = 2
+    residentMarker = 2
+    coordinator.retainChunk(dimensionChunk('overworld', 1, 0, 2))
+    firstResidents.resolve([dimensionChunk('overworld', 0, 0, 1)])
+    await save
+
+    expect(snapshotCount).toBe(2)
+    expect(publications).toHaveLength(1)
+    expect(publications[0]!.state).toBe(2)
+    expect(markerOf(publications[0]!, 'overworld', 0, 0)).toBe(2)
+    expect(markerOf(publications[0]!, 'overworld', 1, 0)).toBe(2)
+  })
+
+  it('retries when only state changes during resident snapshot', async () => {
+    const firstResidents = deferred<ReadonlyArray<DimensionChunk>>()
+    const publications: Array<SessionSavePublication<number>> = []
+    const publishedGenerations: number[] = []
+    let state = 1
+    let generation = 1
+    let snapshotCount = 0
+    const coordinator = createSessionSaveCoordinator({
+      initialKnownChunks: [],
+      snapshotResidents: () => {
+        snapshotCount += 1
+        return snapshotCount === 1 ? firstResidents.promise : Promise.resolve([])
+      },
+      currentGeneration: () => generation,
+      snapshotState: () => state,
+      publish: async (publication) => { publications.push(publication) },
+      onPublished: (publishedGeneration) => { publishedGenerations.push(publishedGeneration) },
+    })
+
+    const save = coordinator.requestSave()
+    await Promise.resolve()
+    state = 2
+    generation += 1
+    firstResidents.resolve([])
+    await save
+
+    expect(snapshotCount).toBe(2)
+    expect(publications).toEqual([{ state: 2, chunks: [] }])
+    expect(publishedGenerations).toEqual([2])
+  })
+
+  it('rejects after bounded snapshot retries and allows a later save', async () => {
+    const publications: Array<SessionSavePublication<number>> = []
+    let generation = 0
+    let keepMutating = true
+    let snapshotCount = 0
+    const coordinator = createSessionSaveCoordinator({
+      initialKnownChunks: [],
+      snapshotResidents: async () => {
+        snapshotCount += 1
+        if (keepMutating) generation += 1
+        return []
+      },
+      currentGeneration: () => generation,
+      snapshotState: () => generation,
+      publish: async (publication) => { publications.push(publication) },
+    })
+
+    await expect(coordinator.requestSave()).rejects.toThrow(
+      'Unable to capture a consistent save snapshot after 8 attempts',
+    )
+    expect(snapshotCount).toBe(8)
+    expect(publications).toHaveLength(0)
+
+    keepMutating = false
+    await coordinator.requestSave()
+
+    expect(snapshotCount).toBe(9)
+    expect(publications).toEqual([{ state: 8, chunks: [] }])
+  })
+
+  it('publishes the validated state without snapshotting it again', async () => {
+    const publications: Array<SessionSavePublication<number>> = []
+    let stateSnapshotCount = 0
+    const coordinator = createSessionSaveCoordinator({
+      initialKnownChunks: [],
+      snapshotResidents: async () => [],
+      currentGeneration: () => 4,
+      snapshotState: () => ++stateSnapshotCount,
+      publish: async (publication) => { publications.push(publication) },
+    })
+
+    await coordinator.requestSave()
+
+    expect(stateSnapshotCount).toBe(1)
+    expect(publications).toEqual([{ state: 1, chunks: [] }])
+  })
+
   it('carries an unloaded far chunk into the next save', async () => {
     const publications: Array<SessionSavePublication<number>> = []
     const coordinator = createSessionSaveCoordinator({
       initialKnownChunks: [],
       snapshotResidents: async () => [],
+      currentGeneration: () => 0,
       snapshotState: () => 1,
       publish: async (publication) => { publications.push(publication) },
     })
@@ -154,6 +270,7 @@ describe('session save coordinator', () => {
         dimensionChunk('overworld', 1, 1, 8),
         dimensionChunk('overworld', 2, 2, 7),
       ],
+      currentGeneration: () => 0,
       snapshotState: () => 1,
       publish: async (saved) => { publication = saved },
     })
@@ -170,6 +287,7 @@ describe('session save coordinator', () => {
     const coordinator = createSessionSaveCoordinator({
       initialKnownChunks: [dimensionChunk('overworld', 3, -4, 2)],
       snapshotResidents: async () => [dimensionChunk('nether', 3, -4, 8)],
+      currentGeneration: () => 0,
       snapshotState: () => 1,
       publish: async (saved) => { publication = saved },
     })

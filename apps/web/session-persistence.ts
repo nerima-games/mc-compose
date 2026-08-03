@@ -1,4 +1,5 @@
 import { Data, Effect, Option, Schema } from 'effect'
+import type { WitherRuntimeSnapshot } from './wither-runtime'
 
 import {
   loadFrom,
@@ -43,18 +44,169 @@ import {
   type Dimension,
 } from '@nerima-games/mc-worldgen'
 import {
+  emptyVillagerTradeState,
+  emptyBrewingStandState,
+  emptyStatusEffectState,
   isValidPlayerVitals,
+  decodeEnchantedItem,
   SPAWN_PLAYER_VITALS,
+  EnderDragonEncounterSnapshotSchema,
+  initialEnderDragonEncounter,
+  type EnderDragonEncounterSnapshot,
+  type Enchantment,
   type PlayerVitals,
+  type BrewingStandState,
+  type StatusEffectState,
+  type VillagerProfession,
+  type VillagerTradeState,
 } from '@nerima-games/mx-gameplay'
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
-export const SESSION_FORMAT_VERSION = 12
+export const SESSION_FORMAT_VERSION = 17
 
 export type SessionPosition = {
   readonly x: number
   readonly y: number
   readonly z: number
+}
+
+export type PersistedEntity = {
+  readonly id: string
+  readonly kind: string
+  readonly feetPosition: SessionPosition
+  readonly healthPoints: number
+  readonly behaviour: unknown
+}
+
+export type PersistedItemDropLifetime = {
+  readonly elapsedSecs: number
+}
+
+export type PersistedItemDropMetadata = {
+  readonly customName?: string
+  readonly enchantments?: ReadonlyArray<Enchantment>
+}
+
+export const persistedItemDropMetadata = (behaviour: unknown): PersistedItemDropMetadata => {
+  const drop = asRecord(behaviour)
+  if (drop === undefined) return {}
+
+  const customName = drop['customName']
+  const enchantedItem = decodeEnchantedItem({
+    item: drop['item'],
+    durability: drop['durability'] ?? null,
+    enchantments: drop['enchantments'],
+  })
+  return {
+    ...(typeof customName === 'string' && customName.trim().length > 0 ? { customName } : {}),
+    ...(enchantedItem.ok
+      ? { enchantments: enchantedItem.value.enchantments.map((enchantment) => ({ ...enchantment })) }
+      : {}),
+  }
+}
+
+const normalizePersistedEntityBehaviour = (kind: string, behaviour: unknown): unknown => {
+  if (kind !== 'dropped_item') return behaviour
+  const drop = asRecord(behaviour)
+  if (drop === undefined) return behaviour
+  const { customName: _customName, enchantments: _enchantments, ...base } = drop
+  return { ...base, ...persistedItemDropMetadata(drop) }
+}
+
+export const persistedItemDropLifetime = (behaviour: unknown): PersistedItemDropLifetime => {
+  const elapsedSecs = asRecord(behaviour)?.['elapsedSecs']
+  return {
+    elapsedSecs: typeof elapsedSecs === 'number' && Number.isFinite(elapsedSecs)
+      ? Math.max(0, elapsedSecs)
+      : 0,
+  }
+}
+
+export type PersistedEntityRoster = {
+  readonly entities: ReadonlyArray<PersistedEntity>
+  readonly nextSerial: number
+}
+
+export type PersistedEntityRosters = Readonly<Record<Dimension, PersistedEntityRoster>>
+
+export const EMPTY_ENTITY_ROSTER: PersistedEntityRoster = { entities: [], nextSerial: 0 }
+
+export const EMPTY_ENTITY_ROSTERS: PersistedEntityRosters = {
+  overworld: EMPTY_ENTITY_ROSTER,
+  nether: EMPTY_ENTITY_ROSTER,
+  end: EMPTY_ENTITY_ROSTER,
+}
+
+export type PersistedVillager = {
+  readonly id: string
+  readonly profession: VillagerProfession
+  readonly dimension: Dimension
+  readonly feetPosition: SessionPosition
+}
+
+export type PersistedVillagerState = {
+  readonly residents: ReadonlyArray<PersistedVillager>
+  readonly trades: VillagerTradeState
+}
+
+export const EMPTY_VILLAGER_STATE: PersistedVillagerState = {
+  residents: [],
+  trades: emptyVillagerTradeState(),
+}
+
+export const normalizePersistedEntityRoster = (value: unknown): PersistedEntityRoster => {
+  const roster = asRecord(value)
+  if (roster === undefined || !Array.isArray(roster['entities'])) return EMPTY_ENTITY_ROSTER
+
+  const entities: Array<PersistedEntity> = []
+  for (const value of roster['entities']) {
+    const entity = asRecord(value)
+    const feetPosition = asRecord(entity?.['feetPosition'])
+    const kind = entity?.['kind']
+    const id = entity?.['id']
+    const x = feetPosition?.['x']
+    const y = feetPosition?.['y']
+    const z = feetPosition?.['z']
+    const healthPoints = entity?.['healthPoints']
+    if (
+      entity === undefined
+      || typeof kind !== 'string'
+      || kind.trim().length === 0
+      || typeof id !== 'string'
+      || typeof x !== 'number'
+      || !Number.isFinite(x)
+      || typeof y !== 'number'
+      || !Number.isFinite(y)
+      || typeof z !== 'number'
+      || !Number.isFinite(z)
+      || typeof healthPoints !== 'number'
+      || !Number.isFinite(healthPoints)
+    ) continue
+    entities.push({
+      id,
+      kind,
+      feetPosition: { x, y, z },
+      healthPoints,
+      behaviour: normalizePersistedEntityBehaviour(kind, entity['behaviour']),
+    })
+  }
+
+  const nextSerial = roster['nextSerial']
+  return {
+    entities,
+    nextSerial: typeof nextSerial === 'number' && Number.isFinite(nextSerial)
+      ? Math.max(0, Math.floor(nextSerial))
+      : 0,
+  }
+}
+
+export const normalizePersistedEntityRosters = (value: unknown): PersistedEntityRosters => {
+  const rosters = asRecord(value)
+  return {
+    overworld: normalizePersistedEntityRoster(rosters?.['overworld']),
+    nether: normalizePersistedEntityRoster(rosters?.['nether']),
+    end: normalizePersistedEntityRoster(rosters?.['end']),
+  }
 }
 
 export type PersistedLeverState = {
@@ -72,6 +224,28 @@ export type PersistedFurnaceState = {
 export type PersistedPortalState = {
   readonly dimension: Dimension
   readonly position: SessionPosition
+}
+
+export type PersistedEndPortalFrameState = {
+  readonly position: SessionPosition
+  readonly facing: 'north' | 'south' | 'east' | 'west'
+  readonly eye: boolean
+}
+
+export type PersistedEndState = {
+  readonly frames: ReadonlyArray<PersistedEndPortalFrameState>
+  readonly portalComplete: boolean
+  readonly dragon: EnderDragonEncounterSnapshot
+  readonly exitPortalMaterialized: boolean
+  readonly dragonEggRewarded: boolean
+}
+
+export const EMPTY_END_STATE: PersistedEndState = {
+  frames: [],
+  portalComplete: false,
+  dragon: initialEnderDragonEncounter(),
+  exitPortalMaterialized: false,
+  dragonEggRewarded: false,
 }
 
 const PositionSchema: Schema.Schema<SessionPosition> = Schema.Struct({
@@ -110,6 +284,22 @@ export type SessionState = {
   readonly furnaces: ReadonlyArray<PersistedFurnaceState>
   readonly portals: ReadonlyArray<PersistedPortalState>
   readonly crops: CropSnapshot
+  readonly entities: PersistedEntityRosters
+  readonly villagers: PersistedVillagerState
+  readonly brewing: BrewingStandState
+  readonly statusEffects: StatusEffectState
+  readonly end: PersistedEndState
+  readonly workstations?: {
+    readonly enchantmentSeed: number
+    readonly customNames: Readonly<Record<string, string>>
+    readonly enchantedItems: Readonly<Record<string, string>>
+    readonly deathDropDimension?: Dimension | undefined
+    readonly respawn: {
+      readonly dimension: 'overworld'
+      readonly position: SessionPosition
+    } | null
+  } | undefined
+  readonly wither?: WitherRuntimeSnapshot | undefined
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -249,6 +439,18 @@ const PersistedPortalsSchema: Schema.Schema<ReadonlyArray<PersistedPortalState>>
   }),
 )
 
+const PersistedEndStateSchema: Schema.Schema<PersistedEndState> = Schema.Struct({
+  frames: Schema.Array(Schema.Struct({
+    position: BlockPositionSchema,
+    facing: Schema.Literal('north', 'south', 'east', 'west'),
+    eye: Schema.Boolean,
+  })),
+  portalComplete: Schema.Boolean,
+  dragon: EnderDragonEncounterSnapshotSchema,
+  exitPortalMaterialized: Schema.Boolean,
+  dragonEggRewarded: Schema.Boolean,
+})
+
 const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   seed: Schema.Number,
   dimension: DimensionSchema,
@@ -272,6 +474,22 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
   furnaces: PersistedFurnacesSchema,
   portals: PersistedPortalsSchema,
   crops: CropSnapshotSchema,
+  entities: Schema.Unknown as unknown as Schema.Schema<PersistedEntityRosters>,
+  villagers: Schema.Unknown as unknown as Schema.Schema<PersistedVillagerState>,
+  brewing: Schema.Unknown as unknown as Schema.Schema<BrewingStandState>,
+  statusEffects: Schema.Unknown as unknown as Schema.Schema<StatusEffectState>,
+  end: PersistedEndStateSchema,
+  workstations: Schema.optional(Schema.Struct({
+    enchantmentSeed: Schema.Number,
+    customNames: Schema.Record({ key: Schema.String, value: Schema.String }),
+    enchantedItems: Schema.Record({ key: Schema.String, value: Schema.String }),
+    deathDropDimension: Schema.optional(DimensionSchema),
+    respawn: Schema.NullOr(Schema.Struct({
+      dimension: Schema.Literal('overworld'),
+      position: PositionSchema,
+    })),
+  })),
+  wither: Schema.optional(Schema.Unknown as unknown as Schema.Schema<WitherRuntimeSnapshot>),
 })
 
 export type SessionChunkManifestEntry = {
@@ -569,6 +787,112 @@ const migrateSessionV11ToV12: Migration = {
   },
 }
 
+const migrateSessionV12ToV13: Migration = {
+  from: 12,
+  describe: 'add dynamic entity roster',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v12 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'entities')
+        ? state
+        : { ...state, entities: EMPTY_ENTITY_ROSTER },
+    })
+  },
+}
+
+const migrateSessionV13ToV14: Migration = {
+  from: 13,
+  describe: 'add village residents and trade state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v13 payload must contain an object state')
+    }
+
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'villagers')
+        ? state
+        : { ...state, villagers: EMPTY_VILLAGER_STATE },
+    })
+  },
+}
+
+const migrateSessionV14ToV15: Migration = {
+  from: 14,
+  describe: 'add brewing stand and player status effects',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v14 payload must contain an object state')
+    }
+    return Effect.succeed({
+      ...head,
+      state: {
+        ...state,
+        brewing: Object.prototype.hasOwnProperty.call(state, 'brewing')
+          ? state['brewing']
+          : emptyBrewingStandState(),
+        statusEffects: Object.prototype.hasOwnProperty.call(state, 'statusEffects')
+          ? state['statusEffects']
+          : emptyStatusEffectState(),
+      },
+    })
+  },
+}
+
+const migrateSessionV15ToV16: Migration = {
+  from: 15,
+  describe: 'add End portal and dragon encounter state',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v15 payload must contain an object state')
+    }
+    return Effect.succeed({
+      ...head,
+      state: Object.prototype.hasOwnProperty.call(state, 'end')
+        ? state
+        : { ...state, end: EMPTY_END_STATE },
+    })
+  },
+}
+
+const migrateSessionV16ToV17: Migration = {
+  from: 16,
+  describe: 'scope dynamic entity rosters by dimension',
+  migrate: (payload) => {
+    const head = asRecord(payload)
+    const state = asRecord(head?.['state'])
+    if (head === undefined || state === undefined) {
+      return Effect.fail('Session v16 payload must contain an object state')
+    }
+    const dimension = state['dimension']
+    const activeDimension: Dimension = dimension === 'nether' || dimension === 'end'
+      ? dimension
+      : 'overworld'
+    return Effect.succeed({
+      ...head,
+      state: {
+        ...state,
+        entities: {
+          ...EMPTY_ENTITY_ROSTERS,
+          [activeDimension]: normalizePersistedEntityRoster(state['entities']),
+        },
+      },
+    })
+  },
+}
+
 export const SESSION_FORMAT = defineFormat({
   name: SESSION_FORMAT_NAME,
   version: SESSION_FORMAT_VERSION,
@@ -585,6 +909,11 @@ export const SESSION_FORMAT = defineFormat({
     migrateSessionV9ToV10,
     migrateSessionV10ToV11,
     migrateSessionV11ToV12,
+    migrateSessionV12ToV13,
+    migrateSessionV13ToV14,
+    migrateSessionV14ToV15,
+    migrateSessionV15ToV16,
+    migrateSessionV16ToV17,
   ],
 })
 
@@ -617,7 +946,15 @@ export const sessionChunkKey = (
 export const loadSession = (
   sessionId: string,
 ): Effect.Effect<Option.Option<SessionHead>, SessionPersistenceError, StoragePort> =>
-  loadFrom(SESSION_FORMAT, sessionHeadKey(sessionId))
+  loadFrom(SESSION_FORMAT, sessionHeadKey(sessionId)).pipe(
+    Effect.map(Option.map((head) => ({
+      ...head,
+      state: {
+        ...head.state,
+        entities: normalizePersistedEntityRosters(head.state.entities),
+      },
+    }))),
+  )
 
 const SESSION_KEY_PREFIX = 'mc-compose/session/'
 const SESSION_HEAD_KEY_PATTERN = /^mc-compose\/session\/([^/]+)\/head$/u

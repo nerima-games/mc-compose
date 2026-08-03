@@ -67,6 +67,7 @@ test('player settings persist and preserve Escape priority from title and pause'
   await page.keyboard.press('KeyS')
   await expect(forwardBinding).toHaveText('KeyS')
   await expect(backwardBinding).toHaveText('KeyW')
+  await expect(page.locator('body')).toHaveAttribute('data-player-settings-persistence', 'saved')
 
   await page.keyboard.press('Escape')
   await expect(settingsRoot).toBeHidden()

@@ -21,9 +21,9 @@ plan.md §3.15 検証:
 | 公開 API ロック | スナップショット生成・差分描画 | `test/api-lock.test.ts`(26 tests) |
 | **ロスター実在性ゲート** | 転記が兄弟リポジトリの実ソースと一致するか | `test/check-roster-manifest.test.ts`(19 tests) |
 | **モジュール間相互作用 — フレーム側** | **E2E** | `test/e2e/roster-frame-order.test.ts`(18 tests)。§3 |
-| **モジュール間相互作用 — 振る舞い側** | **E2E** | **未実装、かつ今日は実装できない**。§3.4 |
+| **モジュール間相互作用 — 振る舞い側** | **E2E** | `e2e/`。採掘・inventoryとbrowser lifecycleを公開package境界で検証。§3.4 |
 
-現在 **241 tests / 11 files**、`pnpm test` で 1.3〜1.6 秒。
+現在 **319 tests / 22 files**、`pnpm test` で約 2 秒。
 
 ## 2. 主 API は `@effect/vitest` の `it.effect`
 
@@ -34,7 +34,7 @@ Effect ランタイム上で走ることを既定にしておくと、後から 
 > **例外**(参照実装で確立、plan.md §3.13): DOM イベントフローのテストで
 > `Effect.fork` + `Deferred.await` を `it.effect` の中に書くとデッドロックする。
 > その場合はプレーンな `it` + `Effect.runPromise` を使う。
-> compose がブラウザエントリポイントを持つ日に必要になる。
+> browser session とイベント駆動の結合テストではこの例外を適用する。
 
 ## 3. E2E — 最終ゲート、かつ**それ以外の何かにしない**
 
@@ -164,8 +164,8 @@ mc-render が登録するのは `render:input` / `render:camera-mirror` / `rende
 | --- | --- | --- |
 | `pnpm e2e`(= `vitest run test/e2e`) | マニフェストが §4.2 のフレームに合成されるか | **入る**。`effect` と自分の `domain/` しか要らない純粋なテストで、`pnpm test` のグロブが既に拾う |
 | `pnpm check:roster` | マニフェストが兄弟リポジトリの**実ソース**と一致するか(id・`after`・`file:line` の 26 箇所すべて) | **入らない**。兄弟リポジトリのチェックアウトが要る |
-| `pnpm e2e:browser`(= `playwright test`) | **合成済みのゲームが実ブラウザで起動し、フレームが回るか**([e2e-triage.md](./e2e-triage.md) §3.1) | **入らない**。Chromium と dev サーバと**兄弟リポジトリのチェックアウト**が要る |
-| `pnpm typecheck:preview` | `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) | **入らない**。同上 — 兄弟の `index.ts` を `paths` で解決する |
+| `pnpm e2e:browser`(= `playwright test`) | **公開パッケージ群を合成したゲームが実ブラウザで起動し、フレームが回り、停止できるか**([e2e-triage.md](./e2e-triage.md) §3.1) | **入らない**。Chromium と dev サーバを要るが、兄弟checkoutは不要 |
+| `pnpm typecheck:preview` | 公開パッケージ境界で `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) | **入らない**。browser専用の型ゲートとして明示実行する |
 
 `pnpm check:roster` を `verify` に入れない理由は 1 つで、
 **mc-compose の CI は mc-compose しか clone しない**からである。
@@ -189,55 +189,24 @@ CI で走れないゲートを CI が走らせるゲートに入れると、`pnp
 ファイルシステムで検証しており、これは CI で走る。
 **テストされていない腐り検出器は、それが守るはずだった腐ったマニフェストと同じ価値しか無い。**
 
-`pnpm e2e:browser` と `pnpm typecheck:preview` が `verify` の外にあるのは
-**`check:roster` と同じ 1 つの理由**である。`check:mirrors` / `check:repoint` が
-mc-dev-meta で置いた先例もこれと同じ形で、そちらは
-`mc-dev-meta/scripts/check-repoint.ts` のヘッダが理由を書いている。
+`pnpm e2e:browser` はChromiumを要するため `verify` の外に置く。
+`pnpm typecheck:preview` もbrowser専用ゲートとして明示実行するが、どちらも
+公開済みpackageを `node_modules` から解決し、兄弟checkoutには依存しない。
 
-### 3.5.1 publish されていない兄弟をどう解決したか、そして何を諦めたか
+### 3.5.1 公開package境界での最終ゲート
 
 ブラウザエントリポイント(`apps/web/main.ts` + `index.html` + `vite.config.ts`)は
-**本物の mc-render / mx-ui / mx-redstone を import する。** 偽物を 3 つ作って合成すれば
-検証されるのは偽物である(§3.4)。だが 1 つも publish されていないので、
-`node_modules` に `@nerima-games/*` は無い。
+**本物の公開済み mc-render / mx-ui / mx-redstone などを import する。** 偽物を作らず、
+consumerと同じ `node_modules` 境界を通す。
 
-**解決した方法**: `vite.config.ts` の `resolve.alias` が**ディスク上のチェックアウト**を指す。
-探索順は `check:roster` と同一 — `MC_ROSTER_ROOT` → `..` → `../mc-dev-meta/repos` — で、
-**選んだルートを必ず印字する**。理由も同じである(上の欄外: 2 つのチェックアウトはずれる)。
-ただし 1 点だけ厳しくしてある: **全モジュールが揃っているルートを 1 つ選ぶ**。
-モジュールごとに探すと、**別々のリビジョンの寄せ集めでゲームが組み上がる**からである。
+`@nerima-games/mc-playground-kit` はdevDependencyとしてのみ使い、
+`makeBrowserPreview` がcanvas・RAF・AbortSignal・cleanupを一世代として所有する。
+Playwrightは起動後のframe増加をQAで観測し、`lifecycle.stop` 後にframeが固定され、
+QA surfaceが解放されるところまでを最終ゲートとする。
 
-**やらなかった方法**: `package.json` に `@nerima-games/*` を足すこと。
-`mc-dev-meta/scripts/check-repoint.ts` のヘッダが組織全体の制約を述べている —
-16 リポジトリはそれぞれ**単独の CI でもビルドされ**、そこでは `workspace:*` は解決しない。
-だから「publish 前の兄弟が downstream の `package.json` に載ってはならない」。
-載せれば mc-compose 自身の CI の `pnpm install` が壊れる。**dev サーバが兄弟の
-チェックアウトを要ることより、install が壊れることのほうが厳密に悪い。**
-
-**その選択の代償が 1 つあり、ゲートを 1 箇所直した。** `check:deps` の規則 5
-(DECLARED == IMPORTED)は、宣言することが禁じられている import に対して
-**満たしようがない**。`SCAN_ROOTS` は最初から `apps` を挙げていた(=エントリポイントを
-予期していた)のに、規則 5 はその場合と突き合わされたことが無かった。
-そこで `REPOSITORY_POLICY.devServerResolved` を足し、
-**`apps/` からの import に限り、宣言の要求だけを免除する**ようにした。免除していないもの:
-
-- 規則 3(推移的 import 禁止)は**先に**評価される。`apps/` から `mc-sim` を import すれば
-  今でも `transitive-import` で落ちる — prime directive を担っているのはこちら側である。
-- 規則 7(生の時計読み禁止)はそのまま効く。**これがエントリポイントを
-  スキャン外へ移動させて解決しなかった一番の理由である** — フレームループは
-  `performance.now()` が紛れ込む場所そのものだからである。
-- 免除は宣言だけで、**到達範囲は 1 mm も広がっていない**。
-
-3 つともミューテーションで確認してある(mc-sim を import する / フレームループで
-`performance.now()` を読む / ホワイトリスト外の mc-audio を import する — 3 つとも赤)。
-
-> **`scripts/check-dependency-whitelist.ts` は「フェンスから下は 16 リポジトリで
-> byte-for-byte」という規約を持つ。** 今回の変更はフェンスより下に 1 条件だけ入る。
-> ただし**その規約は既に守られていない**: 実測(2026-07-28)で mc-compose / mc-render /
-> mx-ui / mx-gameplay / mc-kernel / mc-sim の 6 つは `SCAN_ROOTS` 以降が
-> **6 通りとも異なるハッシュ**で、行数も 977〜1030 と割れている。
-> **データ(どのパッケージを免除するか)はフェンスの中の `REPOSITORY_POLICY` に置いた**ので、
-> 他リポジトリがこの条件を取り込んでも、集合が空である限り挙動は変わらない。
+公開packageだけを直接依存・devDependencyに宣言するため、単独checkoutの
+`pnpm install --frozen-lockfile` とconsumer相当の解決を同時に検証できる。
+`workspace:*`、兄弟source alias、未公開packageへの参照はこのゲートに持ち込まない。
 
 ### 3.5.2 `three` はホストが渡す —— それがなぜ prime directive 違反でないか
 
@@ -345,9 +314,7 @@ it.effect('has no edge from InGame straight to Title', ...)
 
 | テスト | 前提 |
 | --- | --- |
-| **E2E の (b) 側 — 振る舞いの相互作用** | mc-sim と 4 体験モジュールの publish。§3.4 |
-| 実モジュールの合成テスト(本物の Layer / 本物の `run`) | 同上 |
+| 公開package横断の追加プレイヤー経路 | 所有packageの公開APIが揃った経路から追加する。§3.4 |
+| 実モジュールの Layer 合成テスト | 対象packageが公開する Layer / `run` 契約 |
 | stage 順序解決のプロパティテスト(任意の DAG で全順序が制約を満たす) | `effect/FastCheck`。`.npmrc` の hoist は用意済み |
-| セッションのティアダウン実測(fiber が本当に止まるか) | 実サービスが存在してから。**これは E2E マター** |
-| ブラウザエントリポイントのスモーク | エントリポイント実装後 |
-| 参照実装 E2E の NEEDS-BROWSER 群 | ブラウザエントリポイント + Playwright。[e2e-triage.md](./e2e-triage.md) |
+| 参照実装 E2E の残りの NEEDS-BROWSER 群 | 所有packageの公開API + Playwright。[e2e-triage.md](./e2e-triage.md) |

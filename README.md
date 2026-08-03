@@ -24,7 +24,7 @@ plan.md §3.15:
 | セッションライフサイクル(タイトル ⇄ ゲーム) | `src/domain/session.ts` |
 | QA / デバッグ API | `src/domain/qa-api.ts` |
 | Modding 入口 | `src/domain/modding.ts` |
-| **E2E**(最終ゲート) | 未実装 |
+| **E2E**(最終ゲート) | `e2e/`。公開パッケージ群を実ブラウザで合成し、起動・RAF・QA観測・teardownまで検証 |
 
 **ゲームルールは 1 行も持たない。**
 
@@ -74,7 +74,7 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 | [docs/public-api.md](./docs/public-api.md) | 公開 API と契約 |
 | [docs/design-notes.md](./docs/design-notes.md) | 参照実装の実測知見(回帰テスト名付き)。**必読** |
 | [docs/porting.md](./docs/porting.md) | 移植計画。LOC は実測値 |
-| [docs/testing.md](./docs/testing.md) | テスト戦略。E2E が**今日どちらの半分を検証していて、どちらをしていないか** |
+| [docs/testing.md](./docs/testing.md) | テスト戦略。公開package境界の実ブラウザ最終ゲートを含む |
 | [docs/e2e-triage.md](./docs/e2e-triage.md) | **参照実装 E2E 70 本の 1 本ずつの判定。** compose に 25 本 / 降ろす 43 本 / 消える 2 本 |
 | [docs/versioning.md](./docs/versioning.md) | 0.x → 1.0.0、GitHub Packages、modding API バージョン |
 
@@ -142,13 +142,16 @@ pnpm lint`)で実行すること。
 | `pnpm test:coverage` | カバレッジ計測 + 4 指標 99% ゲート。`verify` には含まれない別ゲート(TEST_STANDARD.md §1/§3) |
 | `pnpm e2e` | E2E だけを走らせる(`vitest run test/e2e`)。純粋なので `pnpm test` も `pnpm verify` も既に拾っている |
 | `pnpm check:roster` | `test/e2e/roster.ts` の転記が兄弟リポジトリの実ソースと一致するかを照合。**`verify` に入っていない** — 兄弟のチェックアウトが要り、CI には無いため([docs/testing.md](./docs/testing.md) §3.5) |
-| `pnpm typecheck:preview` | `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`)。**`verify` に入っていない** — 同上、兄弟のチェックアウトが要る |
+| `pnpm typecheck:preview` | 公開済みパッケージ境界で `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) |
+| `pnpm e2e:browser` | Chromium で全 Playwright E2E を実行 |
 | `pnpm changeset` | ユーザー向け変更に `.changeset/*.md` を追加する(RELEASE_STANDARD.md §1) |
 | `pnpm verify` | `typecheck && lint && test`。CI と同じ内容 |
 
 ## 現状
 
-**このリポジトリはまだ叩き台(pre-audit first cut)である。**
+このリポジトリには、公開済み sibling package を実際に合成するブラウザ composition root がある。
+`apps/web/main.ts` が DOM、WebGL、音声、保存、ネットワーク adapter を構築し、
+`startBrowserSession` を通して各 `GameModule` の起動・合成・停止を管理する。
 
 確定している **仕組み**:
 
@@ -177,19 +180,19 @@ pnpm lint`)で実行すること。
   これは **plan.md §4.2 の拡張であって転記ではない** — §4.2 はネットワークに触れていない
   ([docs/architecture.md](./docs/architecture.md) §4.5、DN-15)
 
-確定していない:
+実装済みの体験と検証:
 
-- **4 つの体験モジュールの実合成**(全モジュール未公開)
-- **mc-kernel の契約型への切り替え**。現在 `StageId` / `DeltaTimeSecs` / `GameModule` /
-  `StageRegistration` / `WorldId` はローカル宣言のミラーである
-- **E2E の振る舞い側**(「採掘 → インベントリ」)。合成できる中身がまだ無い。
-  フレーム側は済んでいる — 半分ずつの区別は [docs/testing.md](./docs/testing.md) §3.4
-- **ブラウザエントリポイント**
-- `ModuleLayer` の精密な型(現在 `Layer<any, any, any>`)
-- **mc-sim の `GameModule` を誰がホストに渡すのか**。mc-sim は `sim:physics` を登録したが、
-  mc-compose は mc-sim を import できない(rule 3)。stage を登録することと import 可能で
-  あることは別の性質である([docs/design-notes.md](./docs/design-notes.md) DN-14)
-- ビルド / publish。`package.json` の `exports` は TypeScript ソースを直接指している
+- survival / creative の両モード、チャンク生成と描画、original terrain atlas と audio bank、
+  inventory / crafting / furnace / storage / farming / redstone、保存と再開をブラウザホストで合成する
+- Nether / End と dragon progression、multiplayer の authoritative entity と combat、
+  drop / vehicle / Wither / reconnect 経路を Playwright E2E で検証する
+- `pnpm e2e:browser` は全ブラウザ E2E を実行する。main への push と pull request では
+  `.github/workflows/browser-regression.yml` が代表的な機能回帰を必須チェックとして実行する
+- frame-time budget は機能回帰と混ぜず、`.github/workflows/browser-performance.yml` が独立して検証する
+
+mc-compose が所有するのはホスト配線、stage 順序、セッションライフサイクルであり、
+各ゲーム規則や adapter 実装そのものではない。公開 API の境界は
+[docs/public-api.md](./docs/public-api.md) を参照する。
 
 確定している **仕組み(org 標準への移行)**:
 
