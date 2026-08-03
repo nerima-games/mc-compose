@@ -17,6 +17,8 @@ import {
   equipFromInventory,
   itemStack,
   storageFromInventory,
+  OccupantId,
+  VehicleId,
   type CropLocation,
   type Inventory,
 } from '@nerima-games/mc-sim'
@@ -401,6 +403,16 @@ describe('session persistence', () => {
           deathDropDimension: 'nether' as const,
           respawn: null,
         },
+        vehicles: [{
+          id: VehicleId('v:7'),
+          type: 'boat' as const,
+          dimension: 'overworld' as const,
+          position: { x: 4.5, y: 65, z: -2.5 },
+          velocity: { x: 0.25, y: 0, z: -0.5 },
+          yawRadians: 1.25,
+          occupant: OccupantId('local-player'),
+        }],
+        mountedVehicleId: 'v:7',
       }
       const saved = yield* saveSession({
         sessionId: 'primary world',
@@ -424,6 +436,8 @@ describe('session persistence', () => {
         Option.getOrThrow(loaded).state.entities.overworld.entities[0]?.behaviour,
       )).toEqual({ elapsedSecs: 123.5 })
       expect(saved.state.workstations?.deathDropDimension).toBe('nether')
+      expect(saved.state.vehicles?.[0]?.occupant).toBe(OccupantId('local-player'))
+      expect(saved.state.mountedVehicleId).toBe('v:7')
       expect(saved.chunks.map(({ coord }) => coord)).toEqual([chunkCoord(0, 0), chunkCoord(-1, 2)])
       expect(storage.envelope(sessionHeadKey('primary world'))).toMatchObject({
         format: SESSION_FORMAT_NAME,

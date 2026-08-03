@@ -33,6 +33,8 @@ import {
   type PlayerStorage,
   type TimeState,
   type WeatherState,
+  type Vehicle,
+  validateVehicleSnapshot,
 } from '@nerima-games/mc-sim'
 import {
   CHUNK_FORMAT,
@@ -301,6 +303,8 @@ export type SessionState = {
     } | null
   } | undefined
   readonly wither?: WitherRuntimeSnapshot | undefined
+  readonly vehicles?: ReadonlyArray<Vehicle> | undefined
+  readonly mountedVehicleId?: string | null | undefined
 }
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
@@ -452,7 +456,23 @@ const PersistedEndStateSchema: Schema.Schema<PersistedEndState> = Schema.Struct(
   dragonEggRewarded: Schema.Boolean,
 })
 
-const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
+const PersistedVehiclesSchema = Schema.optional(
+  Schema.Unknown.pipe(
+    Schema.filter((value): value is ReadonlyArray<Vehicle> => {
+      if (!Array.isArray(value)) return false
+      const highestSerial = value.reduce((highest, vehicle) => {
+        if (typeof vehicle !== 'object' || vehicle === null) return highest
+        const candidate = vehicle as { readonly id?: unknown }
+        if (typeof candidate.id !== 'string') return highest
+        const match = /^v:(\d+)$/.exec(candidate.id)
+        return match === null ? highest : Math.max(highest, Number(match[1]))
+      }, -1)
+      return validateVehicleSnapshot({ vehicles: value, nextSerial: highestSerial + 1 })._tag === 'Valid'
+    }, { message: () => 'Vehicles violate simulation invariants' }),
+  ) as unknown as Schema.Schema<ReadonlyArray<Vehicle>>,
+) as unknown as Schema.Schema<ReadonlyArray<Vehicle> | undefined>
+
+const SessionStateSchema = Schema.Struct({
   seed: Schema.Number,
   dimension: DimensionSchema,
   player: Schema.Struct({
@@ -491,7 +511,9 @@ const SessionStateSchema: Schema.Schema<SessionState> = Schema.Struct({
     })),
   })),
   wither: Schema.optional(Schema.Unknown as unknown as Schema.Schema<WitherRuntimeSnapshot>),
-})
+  vehicles: PersistedVehiclesSchema,
+  mountedVehicleId: Schema.optional(Schema.NullOr(Schema.String)),
+}) as unknown as Schema.Schema<SessionState>
 
 export type SessionChunkManifestEntry = {
   readonly dimension: Dimension

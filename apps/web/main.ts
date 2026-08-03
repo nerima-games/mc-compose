@@ -117,6 +117,7 @@ import {
   makeSimFrameState,
   makeTimeService,
   makeWeatherService,
+  makeVehicleService,
   planExplosion,
   maxStackCountForItem,
   totalExperienceAtLevel,
@@ -129,7 +130,6 @@ import {
   STARTER_SMELTING_RECIPES,
   targetBlockFromPlayerPose,
   OccupantId,
-  VehicleId,
   type FurnaceState,
   type CropLocation,
   type ItemStack,
@@ -1775,10 +1775,29 @@ const bootGame = async (
   const observerInputs = new Map<string, number>()
   const observerPulses = new Map<string, number>()
   const poweredRails = new Set<string>()
-  const vehicles = new Map<string, Vehicle>()
+  const restoredVehicles = Option.isSome(loadedSession) ? loadedSession.value.state.vehicles ?? [] : []
+  const vehicleNextSerial = restoredVehicles.reduce((nextSerial, vehicle) => {
+    const match = /^v:(\d+)$/.exec(String(vehicle.id))
+    return match === null ? nextSerial : Math.max(nextSerial, Number(match[1]) + 1)
+  }, 0)
+  const vehicleService = Effect.runSync(makeVehicleService({
+    vehicles: restoredVehicles,
+    nextSerial: vehicleNextSerial,
+  }))
+  const vehicleList = (): ReadonlyArray<Vehicle> => Effect.runSync(vehicleService.vehicles)
+  const vehicleById = (id: string): Vehicle | undefined => vehicleList().find((vehicle) => String(vehicle.id) === id)
+  const replaceVehicle = (vehicle: Vehicle): void => {
+    Effect.runSync(vehicleService.updateState(vehicle.id, {
+      dimension: vehicle.dimension,
+      position: vehicle.position,
+      velocity: vehicle.velocity,
+      yawRadians: vehicle.yawRadians,
+    }))
+}
   const localVehicleOccupant = OccupantId('local-player')
-  let mountedVehicleId: string | undefined
-  let nextVehicleSerial = 1
+  let mountedVehicleId: string | undefined = Option.isSome(loadedSession)
+    ? loadedSession.value.state.mountedVehicleId ?? undefined
+    : undefined
   let fishingSession: FishingSession | undefined
   let fishingWater: { readonly dimension: Dimension; readonly position: SessionPosition } | undefined
   let fishingResult = 'idle'
@@ -1883,7 +1902,7 @@ const bootGame = async (
         phase: fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
         water: fishingWater ?? null,
       },
-      vehicles: [...vehicles.values()],
+      vehicles: vehicleList(),
       mountedVehicleId: mountedVehicleId ?? null,
       end: {
         frames: [...endPortalFrames.values()],
@@ -5223,8 +5242,8 @@ const bootGame = async (
     projectileRuntimeState = initialProjectileRuntimeState()
     eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
     if (mountedVehicleId !== undefined) {
-      const vehicle = vehicles.get(mountedVehicleId)
-      if (vehicle !== undefined) vehicles.set(mountedVehicleId, exitVehicle(vehicle).vehicle)
+      const vehicle = vehicleById(mountedVehicleId)
+      if (vehicle !== undefined) Effect.runSync(vehicleService.dismount(vehicle.id, localVehicleOccupant))
       mountedVehicleId = undefined
     }
     if (fishingSession !== undefined) cancelFishing(fishingSession)
@@ -5468,7 +5487,7 @@ const bootGame = async (
           feetPosition: endDragonPosition(),
         } satisfies RenderEntity]
       : []),
-    ...[...vehicles.values()]
+    ...vehicleList()
       .filter((vehicle) => vehicle.dimension === currentChunkContext.dimension)
       .map((vehicle) => ({
         id: String(vehicle.id),
@@ -7225,7 +7244,7 @@ const bootGame = async (
     const poseBeforeFrame = Effect.runSync(playerApi.pose)
     const groundedBeforeFrame = Effect.runSync(Ref.get(simState.isGrounded))
     const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
-    const mountedVehicle = mountedVehicleId === undefined ? undefined : vehicles.get(mountedVehicleId)
+    const mountedVehicle = mountedVehicleId === undefined ? undefined : vehicleById(mountedVehicleId)
     const movementForward = mountedVehicle === undefined
       ? held('moveForward') - held('moveBackward')
       : 0
@@ -7439,7 +7458,7 @@ const bootGame = async (
         ...transition.vehicle,
         position: collided ? transition.vehicle.position : candidatePosition,
       }
-      vehicles.set(mountedVehicleId!, moved)
+      replaceVehicle(moved)
       Effect.runSync(playerApi.moveTo(moved.position))
       if (transition.exited !== undefined) mountedVehicleId = undefined
     }
@@ -8398,13 +8417,13 @@ const bootGame = async (
         usedSpecialItem = true
       }
       if (!usedSpecialItem && mountedVehicleId !== undefined) {
-        const vehicle = vehicles.get(mountedVehicleId)
-        if (vehicle !== undefined) vehicles.set(mountedVehicleId, exitVehicle(vehicle).vehicle)
+        const vehicle = vehicleById(mountedVehicleId)
+        if (vehicle !== undefined) Effect.runSync(vehicleService.dismount(vehicle.id, localVehicleOccupant))
         mountedVehicleId = undefined
         usedSpecialItem = true
       } else if (!usedSpecialItem) {
         const pose = Effect.runSync(playerApi.pose)
-        const nearbyVehicle = [...vehicles.values()]
+        const nearbyVehicle = vehicleList()
           .filter((vehicle) => vehicle.dimension === currentChunkContext.dimension && vehicle.occupant === undefined)
           .map((vehicle) => ({ vehicle, distance: Math.hypot(
             vehicle.position.x - pose.feetPosition.x,
@@ -8415,7 +8434,7 @@ const bootGame = async (
           .sort((left, right) => left.distance - right.distance)[0]
         if (nearbyVehicle !== undefined) {
           const boarded = boardVehicle(nearbyVehicle.vehicle, localVehicleOccupant, nearbyVehicle.distance)
-          vehicles.set(String(boarded.id), boarded)
+          if (boarded.occupant !== undefined) Effect.runSync(vehicleService.mount(boarded.id, localVehicleOccupant))
           mountedVehicleId = String(boarded.id)
           usedSpecialItem = true
         }
@@ -8493,14 +8512,15 @@ const bootGame = async (
             : target.adjacentPosition
           const removed = Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, item, 1))
           if (removed._tag === 'Removed') {
-            const id = VehicleId(`vehicle-${String(nextVehicleSerial++)}`)
-            vehicles.set(String(id), {
-              id,
+            const spawned = Effect.runSync(vehicleService.spawn(
               type,
-              dimension: Effect.runSync(playerApi.dimension),
-              position: { x: at.x + 0.5, y: at.y, z: at.z + 0.5 },
+              Effect.runSync(playerApi.dimension),
+              { x: at.x + 0.5, y: at.y, z: at.z + 0.5 },
+              poseBeforeFrame.yawRadians,
+            ))
+            replaceVehicle({
+              ...spawned,
               velocity: type === 'minecart' ? { x: 0, y: 0, z: -0.25 } : { x: 0, y: 0, z: 0 },
-              yawRadians: poseBeforeFrame.yawRadians,
             })
             document.body.setAttribute('data-vehicle-result', `placed-${type}`)
             markSessionDirty()
