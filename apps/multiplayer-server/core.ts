@@ -24,6 +24,9 @@ import { planExplosion, type FurnaceState as SimFurnaceState } from '@nerima-gam
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
+  bowCharge,
+  bowDamage,
+  canFireBow,
   CREEPER_KIND,
   CREEPER_XP_REWARD,
   DORMANT_FUSE,
@@ -98,6 +101,22 @@ const playerDamageFingerprint = (command: PlayerDamageCommand): string => JSON.s
   command.amount,
   command.minimumHealthPoints,
 ])
+
+const arrowHitsLivingEntity = (
+  from: Readonly<{ x: number; y: number; z: number }>,
+  to: Readonly<{ x: number; y: number; z: number }>,
+  target: Readonly<{ x: number; y: number; z: number }>,
+): boolean => {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  const dz = to.z - from.z
+  const lengthSquared = dx ** 2 + dy ** 2 + dz ** 2
+  const projection = lengthSquared === 0
+    ? 0
+    : Math.min(1, Math.max(0, ((target.x - from.x) * dx + (target.y - from.y) * dy + (target.z - from.z) * dz) / lengthSquared))
+  const nearest = { x: from.x + dx * projection, y: from.y + dy * projection, z: from.z + dz * projection }
+  return (target.x - nearest.x) ** 2 + (target.y - nearest.y) ** 2 + (target.z - nearest.z) ** 2 <= 0.81
+}
 
 export interface MultiplayerServerOptions {
   readonly worldId: string
@@ -305,6 +324,8 @@ const DEFAULT_TIME_WEATHER: TimeWeatherState = { timeOfDay: 6_000, weather: 'cle
 const MINECRAFT_DAY_TICKS = 24_000
 const MINECRAFT_TICK_MS = 50
 const ITEM_DROP_LIFESPAN_TICKS = 6_000
+const ARROW_LIFESPAN_TICKS = 1_200
+const ARROW_GRAVITY = 9.8
 const PLAYER_HALF_WIDTH = 0.3
 const PLAYER_HEIGHT = 1.8
 const COLLISION_EPSILON = 1e-9
@@ -364,6 +385,7 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'VillagerTradeCommand' ||
   message._tag === 'EntityAttackCommand' ||
   message._tag === 'EntityPickupCommand' ||
+  message._tag === 'BowUseCommand' ||
   message._tag === 'VehicleCommand'
 
 const moveStack = (
@@ -413,6 +435,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const entities = new Map<string, AuthoritativeEntityState>(
     (options.initialState?.entities ?? []).map((entity) => [entity.entityId, entity]),
   )
+  const bowDrawStartedAt = new Map<PlayerId, number>()
   const inventories = new Map<PlayerId, MutableInventoryState>(
     (options.initialState?.inventories ?? []).map(({ player, state }) => [player, cloneInventory(state)]),
   )
@@ -777,6 +800,48 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (inventory === undefined) return { accepted: false, reason: 'resource-not-found' }
 
     switch (message._tag) {
+      case 'BowUseCommand': {
+        const actor = players.get(message.player)
+        if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+        const selected = inventory.slots[inventory.selectedSlot]
+        if (selected?.item !== 'bow') return { accepted: false, reason: 'invalid-command' }
+        if (message.action === 'start') {
+          bowDrawStartedAt.set(message.player, options.now?.() ?? Date.now())
+          return { accepted: true, deltas: () => [] }
+        }
+        const startedAt = bowDrawStartedAt.get(message.player)
+        bowDrawStartedAt.delete(message.player)
+        if (startedAt === undefined) return { accepted: false, reason: 'invalid-command' }
+        const heldSecs = Math.max(0, (options.now?.() ?? Date.now()) - startedAt) / 1_000
+        const charge = bowCharge(heldSecs)
+        if (!canFireBow(heldSecs)) {
+          return { accepted: true, deltas: () => [] }
+        }
+        const arrowSlot = inventory.slots.findIndex((stack) => stack?.item === 'arrow')
+        const arrowStack = arrowSlot < 0 ? undefined : inventory.slots[arrowSlot]
+        if (arrowStack?.item !== 'arrow') return { accepted: false, reason: 'insufficient-items' }
+        inventory.slots[arrowSlot] = arrowStack.count === 1 ? null : { ...arrowStack, count: arrowStack.count - 1 }
+        const horizontal = Math.cos(actor.facing.pitchRadians)
+        const speed = 8 + 24 * charge
+        const arrow: AuthoritativeEntityState = {
+          _tag: 'arrow',
+          entityId: `${message.commandId}:arrow` as AuthoritativeEntityState['entityId'],
+          at: { x: actor.at.x, y: actor.at.y + 1.5, z: actor.at.z },
+          velocity: {
+            x: -Math.sin(actor.facing.yawRadians) * horizontal * speed,
+            y: -Math.sin(actor.facing.pitchRadians) * speed,
+            z: -Math.cos(actor.facing.yawRadians) * horizontal * speed,
+          },
+          damage: bowDamage(charge),
+          owner: message.player,
+          ageTicks: 0,
+        }
+        entities.set(arrow.entityId, arrow)
+        return { accepted: true, deltas: (nextRevision) => [
+          { _tag: 'PlayerInventoryDelta', world: actor.world, revision: nextRevision, player: message.player, state: inventorySnapshot(inventory) },
+          { _tag: 'EntitySpawnDelta', world: worldId, revision: nextRevision, entity: arrow },
+        ] }
+      }
       case 'EntityAttackCommand': {
         const entity = entities.get(message.entityId)
         if (entity === undefined) return { accepted: false, reason: 'resource-not-found' }
@@ -1155,7 +1220,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
     const decision = decideCommand(message)
     if (!decision.accepted) return rejectCommand(client, message, decision.reason)
-    revision += 1
+    const deltas = decision.deltas(revision + 1)
+    if (deltas.length > 0) revision += 1
     const result: AuthoritativeCommandResult = {
       _tag: 'AuthoritativeCommandAccepted',
       commandId: message.commandId,
@@ -1163,7 +1229,6 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       revision,
     }
     cacheCommandResult(message, result)
-    const deltas = decision.deltas(revision)
     notifyStateChanged()
     sendMessage(client, result)
     for (const delta of deltas) broadcast(delta)
@@ -1647,6 +1712,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     const playerId = client.playerId
     removePlayer(clientId, client)
     if (playerId !== null) {
+      bowDrawStartedAt.delete(playerId)
       const events = sleepAuthority.disconnect(playerId)
       if (events.length > 0) broadcastSleep({ _tag: 'SleepEvents', revision: sleepAuthority.snapshot().revision, events })
     }
@@ -1724,6 +1790,65 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       const deadPlayers = new Set<PlayerId>()
       let worldChanged = false
       for (const entity of entities.values()) {
+        if (entity._tag === 'arrow') {
+          const ageTicks = entity.ageTicks + elapsedTicks
+          const at = {
+            x: entity.at.x + entity.velocity.x * elapsedSecs,
+            y: entity.at.y + entity.velocity.y * elapsedSecs,
+            z: entity.at.z + entity.velocity.z * elapsedSecs,
+          }
+          const velocity = { ...entity.velocity, y: entity.velocity.y - ARROW_GRAVITY * elapsedSecs }
+          const block = isInBounds({ x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) })
+            ? blockAt({ x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) })
+            : 'bedrock'
+          const hit = [...entities.values()]
+            .filter((candidate): candidate is Extract<AuthoritativeEntityState, { readonly _tag: 'living' }> => candidate._tag === 'living')
+            .find((candidate) => arrowHitsLivingEntity(entity.at, at, { ...candidate.at, y: candidate.at.y + 0.9 }))
+          if (ageTicks >= ARROW_LIFESPAN_TICKS || (block !== null && options.passableBlocks?.has(block) !== true) || hit !== undefined) {
+            entities.delete(entity.entityId)
+            movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
+            if (hit !== undefined) {
+              const health = hit.health - entity.damage
+              if (health > 0) {
+                const updated = { ...hit, health }
+                entities.set(updated.entityId, updated)
+                movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
+              } else {
+                entities.delete(hit.entityId)
+                movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: hit.entityId })
+                const kind = supportedMobKind(hit.entityType)
+                const experienceReward = kind === undefined ? 0 : mobXpReward({ _tag: 'Slain', lootingLevel: 0 }, mobExperienceReward(kind))
+                const ownerVitals = vitals.get(entity.owner)
+                const owner = players.get(entity.owner)
+                if (experienceReward > 0 && ownerVitals !== undefined) {
+                  ownerVitals.experience += experienceReward
+                  if (owner !== undefined) movedEntities.push({
+                    _tag: 'PlayerVitalsDelta', world: owner.world, revision: 0, player: entity.owner, state: vitalsSnapshot(ownerVitals),
+                  })
+                }
+                const loot = kind === undefined ? [] : rollDropsOfKind(kind, { _tag: 'Slain', lootingLevel: 0 }, Array.from(
+                  { length: dropRollsNeeded(kind) },
+                  (_, index) => deterministicRoll(`${String(options.seed)}:${String(entity.owner)}:${String(entity.entityId)}:${String(hit.entityId)}:${String(index)}`),
+                ))
+                for (const [index, stack] of loot.entries()) {
+                  const drop: AuthoritativeEntityState = {
+                    _tag: 'item-drop',
+                    entityId: `${hit.entityId}:drop:${String(revision + 1)}:${String(index)}` as AuthoritativeEntityState['entityId'],
+                    at: hit.at,
+                    stack,
+                  }
+                  entities.set(drop.entityId, drop)
+                  movedEntities.push({ _tag: 'EntitySpawnDelta', world: worldId, revision: 0, entity: drop })
+                }
+              }
+            }
+            continue
+          }
+          const updated = { ...entity, at, velocity, ageTicks }
+          entities.set(updated.entityId, updated)
+          movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
+          continue
+        }
         if (entity._tag !== 'living') continue
         const targetEntry = [...players.entries()]
           .filter(([player, presence]) => presence.world === worldId && (vitals.get(player)?.health ?? 0) > 0)

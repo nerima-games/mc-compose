@@ -2966,7 +2966,7 @@ const bootGame = async (
   }
 
   const sendEntityCommand = (
-    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'VehicleCommand' }>>,
+    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'VehicleCommand' }>>,
   ): void => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete) return
     nextEntityCommand += 1
@@ -5488,9 +5488,11 @@ const bootGame = async (
         ? entity.entityType
         : entity._tag === 'vehicle'
           ? entity.vehicleType
-          : 'dropped_item',
+          : entity._tag === 'arrow'
+            ? 'arrow'
+            : 'dropped_item',
       feetPosition: entity.at,
-      category: entity._tag === 'item-drop' ? 'item' as const : 'hostile' as const,
+      category: entity._tag === 'item-drop' || entity._tag === 'arrow' ? 'item' as const : 'hostile' as const,
     } satisfies RenderEntity)),
     ...projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
     ...eyeOfEnderRenderDescriptors(eyeOfEnderRuntimeState, currentChunkContext.dimension),
@@ -7824,7 +7826,7 @@ const bootGame = async (
     if (deadAfterFrame) {
       projectileRuntimeState = initialProjectileRuntimeState()
       eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
-    } else if (!dimensionChanged) {
+    } else if (!dimensionChanged && multiplayer === undefined) {
       const projectileEntities = Effect.runSync(world.entities.entities)
       const projectileWorld = {
         blockBounds: (
@@ -7998,8 +8000,16 @@ const bootGame = async (
       ),
       deltaSecs,
     })
+    const previousBowUseState = bowUseState
     bowUseState = bowAdvance.state
+    if (multiplayer !== undefined) {
+      if (previousBowUseState._tag === 'Idle' && (bowUseState._tag === 'Drawing' || bowAdvance.release !== null)) {
+        sendEntityCommand({ _tag: 'BowUseCommand', action: 'start' })
+      }
+      if (bowAdvance.release !== null) sendEntityCommand({ _tag: 'BowUseCommand', action: 'release' })
+    }
     if (
+      multiplayer === undefined &&
       bowAdvance.release !== null &&
       canFireBow(bowAdvance.release.chargeSecs) &&
       bowInventory.slots[bowAdvance.release.bowSlotIndex]?.item === 'bow'

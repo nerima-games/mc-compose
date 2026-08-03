@@ -117,7 +117,7 @@ const makeFixture = (
   state: MultiplayerServerState = initialState(),
   joinAt: Readonly<{ x: number; y: number; z: number }> = { x: 0, y: 64, z: 0 },
   difficulty: 'peaceful' | 'easy' | 'normal' | 'hard' = 'normal',
-  serverOptions: Partial<Pick<MultiplayerServerOptions, 'generatedBlockAt' | 'passableBlocks'>> = {},
+  serverOptions: Partial<Pick<MultiplayerServerOptions, 'generatedBlockAt' | 'now' | 'passableBlocks'>> = {},
 ) => {
   const sent: Array<WireText> = []
   const persisted: Array<MultiplayerServerState> = []
@@ -153,6 +153,62 @@ const makeFixture = (
 }
 
 describe('multiplayer server authoritative state', () => {
+  it('resolves bow charge, arrow consumption, and projectile damage on the server', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 2 }, null], selectedSlot: 0 },
+      }],
+      entities: [{
+        _tag: 'living', entityId: entityId('bow-target'), entityType: 'zombie',
+        at: { x: 0, y: 64, z: -3.2 }, health: 20, maxHealth: 20,
+      }],
+    }, undefined, 'normal', {
+      now: () => now,
+      generatedBlockAt: (position) => position.y === 63 ? 'stone' : null,
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('bow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('bow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'bow-start', revision: 4 }),
+      expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'bow-release', revision: 5 }),
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 1 }, null], selectedSlot: 0 },
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({ _tag: 'arrow', owner: 'alice', damage: expect.any(Number) }),
+      }),
+    ]))
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'bow-release:arrow' }),
+      expect.objectContaining({
+        _tag: 'EntityUpdateDelta',
+        entity: expect.objectContaining({ entityId: 'bow-target', health: expect.any(Number) }),
+      }),
+    ]))
+    expect(fixture.persisted.at(-1)?.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityId: 'bow-target', health: expect.any(Number) }),
+    ]))
+  })
+
   it.each([
     ['horizontal boundary', 'zombie', { x: 8, y: 64, z: 8 }],
     ['vertical boundary', 'blaze', { x: 0, y: 69, z: 0 }],
