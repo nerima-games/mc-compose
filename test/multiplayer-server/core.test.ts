@@ -235,6 +235,31 @@ describe('authoritative multiplayer server core', () => {
     ])
   })
 
+  it('rejects pathing through terrain even when the reported destination is clear', () => {
+    const fixture = makeFixture(({ x, y, z }) => x === 1 && y === 64 && z === 0 ? 'stone' : null)
+    fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+
+    expect(fixture.receive('socket-a', {
+      _tag: 'PlayerMove', player: playerId('alice'), at: { x: 3, y: 64, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-movement' })
+    expect(fixture.server.snapshot().players[0]?.at).toEqual({ x: 0, y: 64, z: 0 })
+  })
+
+  it('limits consecutive player movement by server elapsed time', () => {
+    const fixture = makeFixture()
+    fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+    const move = (at: { x: number; y: number; z: number }): ReceiveResult => fixture.receive('socket-a', {
+      _tag: 'PlayerMove', player: playerId('alice'), at, facing: { yawRadians: 0, pitchRadians: 0 },
+    })
+
+    expect(move({ x: 6, y: 64, z: 0 })).toEqual(expect.objectContaining({ accepted: true }))
+    expect(move({ x: 10, y: 64, z: 0 })).toEqual({ accepted: false, reason: 'invalid-movement' })
+    fixture.advanceTime(500)
+    expect(move({ x: 10, y: 64, z: 0 })).toEqual(expect.objectContaining({ accepted: true }))
+  })
+
   it('rejects a spoofed mutation without changing authoritative state', () => {
     const fixture = makeFixture()
     const bobFrames = fixture.connect('socket-b')
@@ -531,6 +556,7 @@ describe('authoritative multiplayer server core', () => {
       })
     }
     fixture.server.tick(10_000)
+    fixture.advanceTime(1_000)
     for (const [socket, player] of [['socket-a', 'alice'], ['socket-b', 'bob']] as const) {
       fixture.receive(socket, {
         _tag: 'PlayerMove', player: playerId(player), at: { x: 0, y: 64, z: 0 },
@@ -620,6 +646,7 @@ describe('authoritative multiplayer server core', () => {
       facing: { yawRadians: 0, pitchRadians: 0 },
     })
     valid.server.tick(10_000)
+    valid.advanceTime(1_000)
     valid.receive('socket-a', {
       _tag: 'PlayerMove', player: playerId('alice'), at: { x: 0, y: 64, z: 0 },
       facing: { yawRadians: 0, pitchRadians: 0 },

@@ -191,6 +191,11 @@ interface MutablePlayer {
   facing: Orientation
 }
 
+interface MovementBudget {
+  readonly updatedAtMs: number
+  readonly availableDistance: number
+}
+
 type InventoryState = AuthoritativeSnapshot['inventories'][number]['state']
 type VitalsState = AuthoritativeSnapshot['vitals'][number]['state']
 type TimeWeatherState = AuthoritativeSnapshot['timeWeather']
@@ -339,6 +344,8 @@ const DEFAULT_FACING: Orientation = { yawRadians: 0, pitchRadians: 0 }
 const DEFAULT_MAX_MOVE_DISTANCE = 8
 const DEFAULT_MAX_VEHICLE_MOVE_DISTANCE = 4
 const VEHICLE_MOVE_DISTANCE = 1
+const PLAYER_MOVE_SPEED_BLOCKS_PER_SECOND = 8
+const MOVEMENT_COLLISION_SAMPLE_DISTANCE = 0.25
 const DEFAULT_INVENTORY_SLOTS = 36
 const DEFAULT_VITALS: VitalsState = { health: 20, hunger: 20, experience: 0 }
 const DEFAULT_TIME_WEATHER: TimeWeatherState = { timeOfDay: 6_000, weather: 'clear' }
@@ -486,6 +493,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     }]),
   )
   const playerClients = new Map<PlayerId, ClientId>()
+  const movementBudgets = new Map<PlayerId, MovementBudget>()
   const blocks = new Map<string, Readonly<{ at: BlockPos; block: string | null }>>(
     (options.initialState?.blocks ?? []).map((mutation) => [positionKey(mutation.at), mutation]),
   )
@@ -1370,6 +1378,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             z: entity.at.z + direction * VEHICLE_MOVE_DISTANCE * forward.z / horizontalLength,
           }
           if (!isValidVehicleMovement(entity.at, at)) return { accepted: false, reason: 'out-of-range' }
+          if (!tryConsumeMovementBudget(message.player, movementDistance(entity.at, at))) return { accepted: false, reason: 'out-of-range' }
           updated = { ...entity, at }
           actor.at = at
           playerPositions.set(message.player, { at: { ...at }, facing: { ...actor.facing } })
@@ -1651,14 +1660,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return { accepted: true, message }
   }
 
-  const isValidMovement = (player: MutablePlayer, at: PlayerSnapshot['at']): boolean => {
-    if (![at.x, at.y, at.z].every(Number.isFinite)) return false
-    const dx = at.x - player.at.x
-    const dy = at.y - player.at.y
-    const dz = at.z - player.at.z
-    const maximum = options.maxMoveDistance ?? DEFAULT_MAX_MOVE_DISTANCE
-    if (dx * dx + dy * dy + dz * dz > maximum * maximum) return false
+  const movementDistance = (from: PlayerSnapshot['at'], at: PlayerSnapshot['at']): number =>
+    Math.hypot(at.x - from.x, at.y - from.y, at.z - from.z)
 
+  const isPlayerPositionPassable = (at: PlayerSnapshot['at']): boolean => {
     const minX = Math.floor(at.x - PLAYER_HALF_WIDTH)
     const maxX = Math.floor(at.x + PLAYER_HALF_WIDTH - COLLISION_EPSILON)
     const minY = Math.floor(at.y)
@@ -1678,21 +1683,57 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
+  const isVehiclePositionPassable = (at: PlayerSnapshot['at']): boolean => {
+    const position = { x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) }
+    if (!isInBounds(position)) return false
+    const block = blockAt(position)
+    return block === null || options.passableBlocks?.has(block) === true
+  }
+
+  const isMovementPathPassable = (
+    from: PlayerSnapshot['at'],
+    at: PlayerSnapshot['at'],
+    isPositionPassable: (position: PlayerSnapshot['at']) => boolean,
+  ): boolean => {
+    const samples = Math.max(1, Math.ceil(movementDistance(from, at) / MOVEMENT_COLLISION_SAMPLE_DISTANCE))
+    for (let sample = 1; sample <= samples; sample += 1) {
+      const ratio = sample / samples
+      if (!isPositionPassable({
+        x: from.x + (at.x - from.x) * ratio,
+        y: from.y + (at.y - from.y) * ratio,
+        z: from.z + (at.z - from.z) * ratio,
+      })) return false
+    }
+    return true
+  }
+
+  const isValidMovement = (player: MutablePlayer, at: PlayerSnapshot['at']): boolean => {
+    if (![at.x, at.y, at.z].every(Number.isFinite)) return false
+    const maximum = options.maxMoveDistance ?? DEFAULT_MAX_MOVE_DISTANCE
+    if (movementDistance(player.at, at) > maximum) return false
+    return isMovementPathPassable(player.at, at, isPlayerPositionPassable)
+  }
+
   const isValidVehicleMovement = (
     from: PlayerSnapshot['at'],
     at: PlayerSnapshot['at'],
   ): boolean => {
     if (![at.x, at.y, at.z].every(Number.isFinite)) return false
-    const dx = at.x - from.x
-    const dy = at.y - from.y
-    const dz = at.z - from.z
     const maximum = Math.min(options.maxMoveDistance ?? DEFAULT_MAX_MOVE_DISTANCE, DEFAULT_MAX_VEHICLE_MOVE_DISTANCE)
-    if (dx * dx + dy * dy + dz * dz > maximum * maximum) return false
+    if (movementDistance(from, at) > maximum) return false
+    return isMovementPathPassable(from, at, isVehiclePositionPassable)
+  }
 
-    const position = { x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) }
-    if (!isInBounds(position)) return false
-    const block = blockAt(position)
-    return block === null || options.passableBlocks?.has(block) === true
+  const tryConsumeMovementBudget = (player: PlayerId, distance: number): boolean => {
+    const nowMs = options.now?.() ?? Date.now()
+    const maximum = options.maxMoveDistance ?? DEFAULT_MAX_MOVE_DISTANCE
+    const previous = movementBudgets.get(player) ?? { updatedAtMs: nowMs, availableDistance: maximum }
+    const elapsedSeconds = Math.max(0, nowMs - previous.updatedAtMs) / 1_000
+    const availableDistance = Math.min(maximum, previous.availableDistance + elapsedSeconds * PLAYER_MOVE_SPEED_BLOCKS_PER_SECOND)
+    movementBudgets.set(player, { updatedAtMs: nowMs, availableDistance })
+    if (distance > availableDistance + COLLISION_EPSILON) return false
+    movementBudgets.set(player, { updatedAtMs: nowMs, availableDistance: availableDistance - distance })
+    return true
   }
 
   const rejectMutation = (
@@ -1717,6 +1758,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (playerId === null) return
     client.playerId = null
     fishingSessions.delete(playerId)
+    movementBudgets.delete(playerId)
     players.delete(playerId)
     playerClients.delete(playerId)
     broadcast({ _tag: 'PlayerLeave', player: playerId }, clientId)
@@ -1995,6 +2037,16 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const player = players.get(message.player)
         if (player === undefined) return { accepted: false, reason: 'join-required' }
         if (!isValidMovement(player, message.at)) {
+          sendMessage(client, {
+            _tag: 'PlayerMove',
+            player: player.player,
+            world: worldId,
+            at: player.at,
+            facing: player.facing,
+          })
+          return { accepted: false, reason: 'invalid-movement' }
+        }
+        if (!tryConsumeMovementBudget(message.player, movementDistance(player.at, message.at))) {
           sendMessage(client, {
             _tag: 'PlayerMove',
             player: player.player,
