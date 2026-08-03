@@ -1792,6 +1792,26 @@ const bootGame = async (
       yawRadians: vehicle.yawRadians,
     }))
 }
+  const applyAuthoritativeVehicle = (
+    entity: Extract<AuthoritativeEntityState, { readonly _tag: 'vehicle' }>,
+  ): void => {
+    const current = vehicleById(String(entity.entityId))
+    if (current === undefined) return
+    const occupant = entity.occupant === null
+      ? undefined
+      : OccupantId(String(entity.occupant))
+    Effect.runSync(vehicleService.updateState(current.id, {
+      dimension: current.dimension,
+      position: entity.at,
+      velocity: current.velocity,
+      yawRadians: current.yawRadians,
+      occupant,
+    }))
+    if (entity.occupant === null && mountedVehicleId === String(current.id)) {
+      mountedVehicleId = undefined
+    }
+    if (entity.occupant === multiplayer?.query.player) mountedVehicleId = String(current.id)
+  }
   const localVehicleOccupant = OccupantId('local-player')
   let mountedVehicleId: string | undefined = Option.isSome(loadedSession)
     ? loadedSession.value.state.mountedVehicleId ?? undefined
@@ -3227,7 +3247,10 @@ const bootGame = async (
           setInventoryOpen(false)
         }
         multiplayerEntities.clear()
-        for (const entity of message.entities ?? []) multiplayerEntities.set(entity.entityId, entity)
+        for (const entity of message.entities ?? []) {
+          multiplayerEntities.set(entity.entityId, entity)
+          if (entity._tag === 'vehicle') applyAuthoritativeVehicle(entity)
+        }
         if (playerDamageResyncPending) {
           playerDamageResyncPending = false
           pendingPlayerDamage = null
@@ -3242,11 +3265,14 @@ const bootGame = async (
         if (message.revision < multiplayerRevision) return
         multiplayerRevision = message.revision
         multiplayerEntities.set(message.entity.entityId, message.entity)
+        if (message.entity._tag === 'vehicle') applyAuthoritativeVehicle(message.entity)
         break
       case 'EntityDespawnDelta':
         if (message.revision < multiplayerRevision) return
         multiplayerRevision = message.revision
         multiplayerEntities.delete(message.entityId)
+        const existingVehicle = vehicleById(String(message.entityId))
+        if (existingVehicle !== undefined) Effect.runSync(vehicleService.despawn(existingVehicle.id))
         break
       case 'PlayerInventoryDelta':
         if (message.revision < multiplayerRevision) return
