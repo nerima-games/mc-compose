@@ -247,6 +247,27 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await expect.poll(async () => (await snapshot(alice.page)).inventory.slots[0]).toEqual({
       item: 'potato', count: 2,
     })
+    const aliceInventory = alice.page.locator('#inventory-root')
+    const alicePotatoes = aliceInventory.locator('[data-region="hotbar"] [data-slot-index="0"]')
+    const aliceMainSlot = aliceInventory.locator('[data-region="main"] [data-slot-index="0"]')
+    await alice.page.keyboard.press('KeyE')
+    await expect(aliceInventory).toBeVisible()
+    await alicePotatoes.click({ button: 'right' })
+    await aliceMainSlot.click({ button: 'right' })
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots.slice(0, 10)).toEqual([
+      { item: 'potato', count: 1 },
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      { item: 'potato', count: 1 },
+    ])
+    await alice.page.keyboard.press('KeyE')
+    await expect(aliceInventory).toBeHidden()
     await expect.poll(async () => (await snapshot(bob.page)).vitals.healthPoints).toBe(18)
     await expect.poll(async () => (await snapshot(bob.page)).inventory.slots[0]).toBeNull()
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-zombie')).toMatchObject({ kind: 'zombie' })

@@ -761,6 +761,30 @@ describe('multiplayer server authoritative state', () => {
       }),
     }))
 
+    const splitState = initialState()
+    const splitFixture = makeFixture({
+      ...splitState,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'stone', count: 5 }, null], selectedSlot: 0 },
+      }],
+    })
+    splitFixture.sent.length = 0
+    expect(splitFixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('split-inventory-1'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'move-item', source: 0, destination: 1, count: 1 },
+    }).accepted).toBe(true)
+    expect(messages(splitFixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      state: expect.objectContaining({
+        slots: [{ item: 'stone', count: 4 }, { item: 'stone', count: 1 }],
+      }),
+    }))
+
     const overflowState = initialState()
     const overflowFixture = makeFixture({
       ...overflowState,

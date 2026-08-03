@@ -2826,7 +2826,12 @@ const bootGame = async (
   } | null = null
   let pendingVillagerTradeCommand: CommandId | null = null
   let queuedHotbarSelection: number | null = null
-  let multiplayerInventorySource: number | null = null
+type MultiplayerInventorySelection = Readonly<{
+  source: number
+  remaining: number
+  mode: 'all' | 'split'
+}>
+  let multiplayerInventorySelection: MultiplayerInventorySelection | null = null
   type QueuedPlayerDamage = Readonly<{
     readonly amount: number
     readonly minimumHealthPoints: number
@@ -4904,26 +4909,36 @@ const bootGame = async (
         ? 9 + target.index
         : undefined
     if (multiplayer !== undefined && inventorySlot !== undefined) {
-      if (button === 'right') {
-        equipmentActionStatus = 'Right-click splitting is not available in multiplayer'
-        document.body.setAttribute('data-equipment-action', 'rejected:right-click-splitting')
-      } else if (multiplayerInventorySource === null) {
-        if (Effect.runSync(world.inventory.snapshot).slots[inventorySlot] === undefined) {
+      const selection = multiplayerInventorySelection
+      const sourceStack = Effect.runSync(world.inventory.snapshot).slots[inventorySlot]
+      if (selection === null) {
+        if (sourceStack === undefined) {
           equipmentActionStatus = 'Source slot is empty'
           document.body.setAttribute('data-equipment-action', 'rejected:source-empty')
         } else {
-          multiplayerInventorySource = inventorySlot
-          equipmentActionStatus = 'Select an inventory destination'
+          multiplayerInventorySelection = {
+            source: inventorySlot,
+            remaining: button === 'right' ? Math.ceil(sourceStack.count / 2) : sourceStack.count,
+            mode: button === 'right' ? 'split' : 'all',
+          }
+          equipmentActionStatus = button === 'right'
+            ? 'Select destinations to place one item each'
+            : 'Select an inventory destination'
           document.body.setAttribute('data-equipment-action', 'selecting')
         }
       } else {
-        const source = multiplayerInventorySource
-        multiplayerInventorySource = null
-        if (source === inventorySlot) {
+        if (selection.source === inventorySlot) {
+          multiplayerInventorySelection = null
           equipmentActionStatus = ''
           document.body.setAttribute('data-equipment-action', 'accepted')
         } else {
-          moveInventoryItem({ kind: 'click', target }, source, inventorySlot)
+          const moved = selection.mode === 'split'
+            ? button === 'right' ? 1 : selection.remaining
+            : undefined
+          if (moveInventoryItem({ kind: 'click', target }, selection.source, inventorySlot, moved)) {
+            const remaining = moved === undefined ? 0 : selection.remaining - moved
+            multiplayerInventorySelection = remaining > 0 ? { ...selection, remaining } : null
+          }
         }
       }
       renderPlayerUi()
@@ -5004,49 +5019,60 @@ const bootGame = async (
     action: InventoryAction,
     source: number,
     destination: number,
-  ): void => {
+    requestedCount?: number,
+  ): boolean => {
     if (source === destination) {
       rejectInventoryAction(action, 'Source and destination are the same slot')
-      return
+      return false
     }
     const inventory = Effect.runSync(world.inventory.snapshot)
     const sourceStack = inventory.slots[source]
     const destinationStack = inventory.slots[destination]
     if (sourceStack === undefined) {
       rejectInventoryAction(action, 'Source slot is empty')
-      return
+      return false
     }
     if (multiplayer !== undefined) {
-      const command = destinationStack !== undefined && destinationStack.item !== sourceStack.item
+      if (requestedCount !== undefined && destinationStack !== undefined && destinationStack.item !== sourceStack.item) {
+        rejectInventoryAction(action, 'Destination contains another item')
+        return false
+      }
+      const count = Math.min(
+        requestedCount ?? sourceStack.count,
+        sourceStack.count,
+        destinationStack === undefined
+          ? sourceStack.count
+          : maxStackCountForItem(sourceStack.item) - destinationStack.count,
+      )
+      const command = requestedCount === undefined && destinationStack !== undefined && destinationStack.item !== sourceStack.item
         ? { _tag: 'swap-items' as const, source, destination }
         : {
           _tag: 'move-item' as const,
           source,
           destination,
-          count: destinationStack === undefined
-            ? sourceStack.count
-            : Math.min(sourceStack.count, maxStackCountForItem(sourceStack.item) - destinationStack.count),
+          count,
         }
       if ('count' in command && command.count <= 0) {
         rejectInventoryAction(action, 'Destination stack is full')
-        return
+        return false
       }
       if (!sendInventoryCommand(command)) {
         rejectInventoryAction(action, 'Inventory update is pending')
-        return
+        return false
       }
       equipmentActionStatus = ''
       document.body.setAttribute('data-equipment-action', 'pending')
       renderPlayerUi()
-      return
+      return true
     }
     if (inventoryInteraction.state().inventoryCarried !== undefined) {
       rejectInventoryAction(action, 'Place the carried stack first')
-      return
+      return false
     }
     Effect.runSync(inventoryInteraction.clickInventoryItem(source, 'left'))
     Effect.runSync(inventoryInteraction.clickInventoryItem(destination, 'left'))
     completeInventoryAction()
+    return true
   }
 
   const dispatchInventoryAction = (action: InventoryAction): void => {
@@ -5343,6 +5369,7 @@ const bootGame = async (
     const switchingMode = open && previousOpen && inventoryMode !== mode
     if (previousOpen === open && !switchingMode) return
     resetPrimaryAttackGesture()
+    if (!open) multiplayerInventorySelection = null
 
     if (
       previousOpen
