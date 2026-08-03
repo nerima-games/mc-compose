@@ -742,6 +742,47 @@ describe('multiplayer server authoritative state', () => {
     ])
   })
 
+  it('swaps inventory stacks while enforcing stack capacity for moves', () => {
+    const fixture = makeFixture()
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('swap-inventory-1'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'swap-items', source: 0, destination: 1 },
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      state: expect.objectContaining({
+        slots: expect.arrayContaining([{ item: 'coal', count: 3 }, { item: 'stone', count: 5 }]),
+      }),
+    }))
+
+    const overflowState = initialState()
+    const overflowFixture = makeFixture({
+      ...overflowState,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'stone', count: 1 }, { item: 'stone', count: 64 }, null],
+          selectedSlot: 0,
+        },
+      }],
+    })
+    overflowFixture.sent.length = 0
+    expect(overflowFixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('overflow-inventory-1'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'move-item', source: 0, destination: 1, count: 1 },
+    }).accepted).toBe(false)
+  })
+
   it('drops inventory items at the authoritative player position exactly once', () => {
     const fixture = makeFixture(initialState(), { x: 7, y: 70, z: -3 })
     fixture.sent.length = 0

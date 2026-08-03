@@ -2826,6 +2826,7 @@ const bootGame = async (
   } | null = null
   let pendingVillagerTradeCommand: CommandId | null = null
   let queuedHotbarSelection: number | null = null
+  let multiplayerInventorySource: number | null = null
   type QueuedPlayerDamage = Readonly<{
     readonly amount: number
     readonly minimumHealthPoints: number
@@ -4895,6 +4896,39 @@ const bootGame = async (
   ): void => {
     if (playerIsDead() || bowInteractionLocked()) return
     inventoryFocus = target
+    const inventorySlot = target.kind !== 'slot'
+      ? undefined
+      : target.region === 'hotbar'
+      ? target.index
+      : target.region === 'main'
+        ? 9 + target.index
+        : undefined
+    if (multiplayer !== undefined && inventorySlot !== undefined) {
+      if (button === 'right') {
+        equipmentActionStatus = 'Right-click splitting is not available in multiplayer'
+        document.body.setAttribute('data-equipment-action', 'rejected:right-click-splitting')
+      } else if (multiplayerInventorySource === null) {
+        if (Effect.runSync(world.inventory.snapshot).slots[inventorySlot] === undefined) {
+          equipmentActionStatus = 'Source slot is empty'
+          document.body.setAttribute('data-equipment-action', 'rejected:source-empty')
+        } else {
+          multiplayerInventorySource = inventorySlot
+          equipmentActionStatus = 'Select an inventory destination'
+          document.body.setAttribute('data-equipment-action', 'selecting')
+        }
+      } else {
+        const source = multiplayerInventorySource
+        multiplayerInventorySource = null
+        if (source === inventorySlot) {
+          equipmentActionStatus = ''
+          document.body.setAttribute('data-equipment-action', 'accepted')
+        } else {
+          moveInventoryItem({ kind: 'click', target }, source, inventorySlot)
+        }
+      }
+      renderPlayerUi()
+      return
+    }
     if (target.kind === 'crafting-output') {
       Effect.runSync(inventoryInteraction.craftOnce())
     } else if (target.region === 'crafting-grid') {
@@ -4982,17 +5016,22 @@ const bootGame = async (
       rejectInventoryAction(action, 'Source slot is empty')
       return
     }
-    if (destinationStack !== undefined && destinationStack.item !== sourceStack.item) {
-      rejectInventoryAction(action, 'Destination must be empty or contain the same item')
-      return
-    }
     if (multiplayer !== undefined) {
-      if (!sendInventoryCommand({
-        _tag: 'move-item',
-        source,
-        destination,
-        count: sourceStack.count,
-      })) {
+      const command = destinationStack !== undefined && destinationStack.item !== sourceStack.item
+        ? { _tag: 'swap-items' as const, source, destination }
+        : {
+          _tag: 'move-item' as const,
+          source,
+          destination,
+          count: destinationStack === undefined
+            ? sourceStack.count
+            : Math.min(sourceStack.count, maxStackCountForItem(sourceStack.item) - destinationStack.count),
+        }
+      if ('count' in command && command.count <= 0) {
+        rejectInventoryAction(action, 'Destination stack is full')
+        return
+      }
+      if (!sendInventoryCommand(command)) {
         rejectInventoryAction(action, 'Inventory update is pending')
         return
       }

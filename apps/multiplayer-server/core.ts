@@ -443,10 +443,30 @@ const moveStack = (
   if (source === null || source === undefined || source.count < count) return 'insufficient-items'
   const destination = destinationSlots[destinationIndex]
   if (destination !== null && destination !== undefined && destination.item !== source.item) return 'invalid-command'
+  if (
+    destination !== null
+    && destination !== undefined
+    && isItemType(source.item)
+    && destination.count + count > maxStackCountOfItem(source.item)
+  ) return 'invalid-command'
   sourceSlots[sourceIndex] = source.count === count ? null : { ...source, count: source.count - count }
   destinationSlots[destinationIndex] = destination === null || destination === undefined
     ? { item: source.item, count }
     : { ...destination, count: destination.count + count }
+  return null
+}
+
+const swapStacks = (
+  slots: Array<ItemStack | null>,
+  sourceIndex: number,
+  destinationIndex: number,
+): CommandRejectionReason | null => {
+  if (sourceIndex === destinationIndex) return 'invalid-command'
+  if (sourceIndex >= slots.length || destinationIndex >= slots.length) return 'invalid-command'
+  if (slots[sourceIndex] === null || slots[sourceIndex] === undefined) return 'insufficient-items'
+  const source = slots[sourceIndex]
+  slots[sourceIndex] = slots[destinationIndex] ?? null
+  slots[destinationIndex] = source
   return null
 }
 
@@ -1420,6 +1440,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
               { _tag: 'EntitySpawnDelta', world: worldId, revision: nextRevision, entity },
             ],
           }
+        } else if (message.action._tag === 'swap-items') {
+          const reason = swapStacks(
+            inventory.slots,
+            message.action.source,
+            message.action.destination,
+          )
+          if (reason !== null) return { accepted: false, reason }
         } else {
           const reason = moveStack(
             inventory.slots,
