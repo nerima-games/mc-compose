@@ -1,12 +1,21 @@
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
+
+const audioSource = ['../mc-audio/src/index.ts', '../../../../mc-audio/src/index.ts']
+  .map((relativePath) => new URL(relativePath, import.meta.url))
+  .find((url) => existsSync(url))
+
+if (!audioSource) {
+  throw new Error('Unable to locate the mc-audio source checkout')
+}
 
 export default defineConfig({
   resolve: {
     alias: {
       // mc-audio migrated its entry point to src/index.ts (PACKAGE_STANDARD.md);
       // this alias follows it there rather than the pre-migration path.
-      '@nerima-games/mc-audio': fileURLToPath(new URL('../../../../mc-audio/src/index.ts', import.meta.url)),
+      '@nerima-games/mc-audio': fileURLToPath(audioSource),
     },
   },
   test: {
