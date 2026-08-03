@@ -255,7 +255,17 @@ describe('multiplayer server authoritative state', () => {
     expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
       expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'ignite-tnt:tnt' }),
       expect.objectContaining({ _tag: 'WorldSnapshot' }),
+      expect.objectContaining({
+        _tag: 'PlayerVitalsDelta',
+        player: playerId('alice'),
+        state: { health: 0, hunger: 20, experience: 0 },
+      }),
     ]))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      player: playerId('alice'),
+      state: { selectedSlot: 0, slots: [null, null, null] },
+    }))
     expect(fixture.persisted.at(-1)?.entities).not.toContainEqual(expect.objectContaining({
       entityId: 'ignite-tnt:tnt',
     }))

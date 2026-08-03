@@ -49,6 +49,7 @@ import {
   blockLoot,
   isBucketItem,
   dropRollsNeeded,
+  explosionDamageAt,
   despawnVerdict,
   enderPearlDisplacement,
   reelFishing,
@@ -73,6 +74,7 @@ import {
   type BucketItemType,
   type EcosystemMobState,
   type EndermanTeleportCell,
+  type Explosion,
   type FishingRod,
   type FishingSession,
 } from '@nerima-games/mx-gameplay'
@@ -2331,7 +2333,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       let worldChanged = false
       const applyExplosion = (
         center: Readonly<{ x: number; y: number; z: number }>,
-        power: number,
+        explosion: Explosion,
       ): void => {
         // Explosion resolution always needs a snapshot, including an empty crater.
         worldChanged = true
@@ -2345,7 +2347,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
         const plan = planExplosion({
           center,
-          radius: power,
+          radius: explosion.power,
           seed: revision,
           blocks: blockReader,
           entities: [],
@@ -2362,12 +2364,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             presence.at.y + 0.9 - center.y,
             presence.at.z - center.z,
           )
-          if (distance >= power) continue
-          const exposure = 1 - distance / power
+          const damage = explosionDamageAt(explosion, distance)
+          if (damage.amount <= 0) continue
           const playerVitals = vitals.get(player)
           if (playerVitals === undefined) continue
           const wasAlive = playerVitals.health > 0
-          playerVitals.health = Math.max(0, playerVitals.health - (((exposure * exposure + exposure) / 2) * 7 * power + 1))
+          playerVitals.health = Math.max(0, playerVitals.health - damage.amount)
           const hungerActor = hungerActors.get(player)
           if (hungerActor !== undefined) hungerActors.set(player, {
             ...hungerActor,
@@ -2442,7 +2444,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           if (burnedSecs >= PRIMED_TNT_FUSE_SECS) {
             entities.delete(entity.entityId)
             movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
-            applyExplosion(entity.at, TNT_EXPLOSION_POWER)
+            applyExplosion(entity.at, { source: 'tnt', power: TNT_EXPLOSION_POWER })
             continue
           }
           const updated = { ...entity, burnedSecs }
@@ -2488,7 +2490,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           if (step.explosion !== undefined) {
             entities.delete(entity.entityId)
             movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
-            applyExplosion(entity.at, step.explosion.power)
+            applyExplosion(entity.at, step.explosion)
             continue
           }
           const mobState = creeperWireState(step.fuse, hostileMobState)
