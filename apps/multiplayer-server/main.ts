@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { createServer, type RequestListener, type Server as HttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { dirname } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 
 import { blockTypeOfId } from '@nerima-games/mc-kernel'
@@ -536,13 +537,19 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   })
 
   const port = await listen(server, options.port, options.host)
-  const hungerTimer = setInterval(() => core.tick(4_000), 4_000)
+  let lastTickAt = performance.now()
+  const serverTickTimer = setInterval(() => {
+    const now = performance.now()
+    const elapsedMs = Math.max(0, now - lastTickAt)
+    lastTickAt = now
+    core.tick(elapsedMs)
+  }, 50)
   let closing: Promise<void> | undefined
   const signalHandlers = new Map<NodeJS.Signals, () => void>()
   const close = (): Promise<void> => {
     if (closing !== undefined) return closing
     closing = new Promise<void>((resolve, reject) => {
-      clearInterval(hungerTimer)
+      clearInterval(serverTickTimer)
       for (const [signal, handler] of signalHandlers) process.off(signal, handler)
       for (const socket of sockets.clients) socket.close(1001, 'server shutting down')
       sockets.close()

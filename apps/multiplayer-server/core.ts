@@ -215,6 +215,8 @@ const DEFAULT_MAX_VEHICLE_MOVE_DISTANCE = 4
 const DEFAULT_INVENTORY_SLOTS = 36
 const DEFAULT_VITALS: VitalsState = { health: 20, hunger: 20, experience: 0 }
 const DEFAULT_TIME_WEATHER: TimeWeatherState = { timeOfDay: 6_000, weather: 'clear' }
+const MINECRAFT_DAY_TICKS = 24_000
+const MINECRAFT_TICK_MS = 50
 const PLAYER_HALF_WIDTH = 0.3
 const PLAYER_HEIGHT = 1.8
 const COLLISION_EPSILON = 1e-9
@@ -367,6 +369,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (oldestKey !== undefined) commandResults.delete(oldestKey)
   }
   let revision = options.initialState?.revision ?? 0
+  let timeTickRemainderMs = 0
   let witherRevision = options.initialState?.witherRevision ?? 0
   let witherState: WitherRuntimeState = restoreWitherRuntime(options.initialState?.wither)
   const witherCommandResults = new Map<string, Extract<WitherWireMessage, { readonly _tag: 'WitherCommandResult' }>>()
@@ -1560,6 +1563,16 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     const postPersistenceDeltas: AuthoritativeDelta[] = []
     const changedFurnaces: MutableFurnaceState[] = []
     const elapsedSecs = Number.isFinite(elapsedMs) && elapsedMs > 0 ? elapsedMs / 1_000 : 0
+    const validElapsedMs = elapsedSecs * 1_000
+    const elapsedTicks = Math.floor((timeTickRemainderMs + validElapsedMs) / MINECRAFT_TICK_MS)
+    timeTickRemainderMs = timeTickRemainderMs + validElapsedMs - elapsedTicks * MINECRAFT_TICK_MS
+    const timeChanged = elapsedTicks > 0
+    if (timeChanged) {
+      timeWeather = {
+        ...timeWeather,
+        timeOfDay: (timeWeather.timeOfDay + elapsedTicks) % MINECRAFT_DAY_TICKS,
+      }
+    }
     if (elapsedSecs > 0) {
       for (const furnace of furnaces.values()) {
         let current = furnaceSimulationState(furnace)
@@ -1578,9 +1591,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         applyFurnaceSimulationState(furnace, current)
         changedFurnaces.push(furnace)
       }
-      if (changedFurnaces.length > 0) {
+      if (timeChanged || changedFurnaces.length > 0) {
         revision += 1
         stateChanged = true
+        if (timeChanged) postPersistenceDeltas.push({ _tag: 'WorldTimeWeatherDelta', world: worldId, revision, state: { ...timeWeather } })
         for (const furnace of changedFurnaces) {
           broadcast({ _tag: 'FurnaceDelta', world: worldId, revision, state: furnaceSnapshot(furnace) })
         }

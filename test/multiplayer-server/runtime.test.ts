@@ -225,7 +225,7 @@ describe('multiplayer WebSocket runtime', () => {
     }))
     await expect(restoredSnapshot).resolves.toMatchObject({
       _tag: 'WorldSnapshot',
-      revision: 1,
+      revision: expect.any(Number),
       blocks: [{ at: block, block: null }],
       players: [expect.objectContaining({ player: 'persistent-player', at: fractionalAt })],
     })

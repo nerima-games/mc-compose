@@ -593,16 +593,27 @@ describe('multiplayer server authoritative state', () => {
     }).accepted).toBe(true)
     fixture.sent.length = 0
     fixture.server.tick(2_000)
-    expect(messages(fixture.sent)).toEqual([])
-    fixture.server.tick(2_000)
     expect(messages(fixture.sent)).toEqual([
       expect.objectContaining({
-        _tag: 'PlayerVitalsDelta',
+        _tag: 'WorldTimeWeatherDelta',
         revision: 6,
+        state: { timeOfDay: 6_040, weather: 'clear' },
+      }),
+    ])
+    fixture.server.tick(2_000)
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'WorldTimeWeatherDelta',
+        revision: 7,
+        state: { timeOfDay: 6_080, weather: 'clear' },
+      }),
+      expect.objectContaining({
+        _tag: 'PlayerVitalsDelta',
+        revision: 8,
         player: 'alice',
         state: { health: 3, hunger: 2, experience: 7 },
       }),
-    ])
+    ]))
 
     fixture.server.disconnect('socket-a')
     fixture.sent.length = 0
@@ -615,7 +626,7 @@ describe('multiplayer server authoritative state', () => {
     })).accepted).toBe(true)
     expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
       _tag: 'AuthoritativeSnapshot',
-      revision: 6,
+      revision: 8,
       vitals: [{ player: 'alice', state: { health: 3, hunger: 2, experience: 7 } }],
     }))
   })
@@ -1054,6 +1065,11 @@ describe('multiplayer server authoritative state', () => {
           cookTicks: 0,
         }),
       }),
+      expect.objectContaining({
+        _tag: 'WorldTimeWeatherDelta',
+        revision: 5,
+        state: { timeOfDay: 6_200, weather: 'clear' },
+      }),
     ])
     expect(fixture.persisted).toHaveLength(1)
     expect(fixture.persisted[0]).toMatchObject({
@@ -1066,6 +1082,30 @@ describe('multiplayer server authoritative state', () => {
         cookTicks: 0,
       }],
     })
+  })
+
+  it('advances world time at 50ms per game tick, preserves remainder, and wraps a day', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      timeWeather: { timeOfDay: 23_999, weather: 'clear' },
+    })
+    fixture.sent.length = 0
+
+    fixture.server.tick(25)
+    expect(messages(fixture.sent)).not.toContainEqual(expect.objectContaining({ _tag: 'WorldTimeWeatherDelta' }))
+
+    fixture.server.tick(25)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'WorldTimeWeatherDelta',
+      state: { timeOfDay: 0, weather: 'clear' },
+    }))
+
+    fixture.sent.length = 0
+    fixture.server.tick(50)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'WorldTimeWeatherDelta',
+      state: { timeOfDay: 1, weather: 'clear' },
+    }))
   })
 
   it('rejects unauthorized and missing-resource commands without advancing revision', () => {
