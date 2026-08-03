@@ -9,9 +9,9 @@ import {
   encodePlayerDamageCommand,
   type PlayerDamageCommand,
   type PlayerDamageWireMessage,
-} from './player-damage-network'
-import { decodeSleepWireMessage, type SleepWireMessage } from './sleep-network'
-import { decodeWitherWireMessage, type WitherWireMessage } from './wither-network'
+} from '../multiplayer-shared/player-damage-network'
+import { decodeSleepWireMessage, type SleepWireMessage } from '../multiplayer-shared/sleep-network'
+import { decodeWitherWireMessage, type WitherWireMessage } from '../multiplayer-shared/wither-network'
 
 export type WebSocketTransportState = 'connecting' | 'open' | 'closed'
 

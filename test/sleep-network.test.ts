@@ -9,7 +9,7 @@ import {
   queueSleepCommand,
   sleepClientFromSnapshot,
   type SleepCommand,
-} from '../apps/web/sleep-network'
+} from '../apps/multiplayer-shared/sleep-network'
 
 const alice = PlayerId.make('alice')
 const bob = PlayerId.make('bob')

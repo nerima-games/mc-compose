@@ -27,9 +27,9 @@ import {
   PLAYER_DAMAGE_MAX_MINIMUM_HEALTH_POINTS,
   PLAYER_DAMAGE_MAX_WIRE_LENGTH,
   type PlayerDamageCommand,
-} from '../../apps/web/player-damage-network'
-import { decodeSleepWireMessage } from '../../apps/web/sleep-network'
-import { decodeWitherWireMessage } from '../../apps/web/wither-network'
+} from '../../apps/multiplayer-shared/player-damage-network'
+import { decodeSleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
+import { decodeWitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
 
 const playerId = (value: string): PlayerId => value as PlayerId
 const playerName = (value: string): PlayerName => value as PlayerName

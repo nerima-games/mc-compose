@@ -1,6 +1,6 @@
 import { Data, Effect, Option, Schema } from 'effect'
 import type { YieldableError } from 'effect/Cause'
-import type { WitherRuntimeSnapshot } from './wither-runtime'
+import type { WitherRuntimeSnapshot } from '../multiplayer-shared/wither-runtime'
 
 import {
   loadFrom,

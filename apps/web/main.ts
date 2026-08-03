@@ -371,7 +371,7 @@ import {
 import {
   type PlayerDamageCommand,
   type PlayerDamageCommandResult,
-} from './player-damage-network'
+} from '../multiplayer-shared/player-damage-network'
 import {
   advanceEyeOfEnderRuntime,
   eyeOfEnderRenderDescriptors,
@@ -387,7 +387,7 @@ import {
   snapshotWitherRuntime,
   summonRuntimeWither,
   witherRenderDescriptors,
-} from './wither-runtime'
+} from '../multiplayer-shared/wither-runtime'
 import {
   composeGame,
   EMPTY_MODULE_LAYER,
@@ -449,7 +449,7 @@ import {
   sleepClientFromSnapshot,
   type SleepClientState,
   type SleepCommand,
-} from './sleep-network'
+} from '../multiplayer-shared/sleep-network'
 import {
   DEFAULT_PLAYER_SETTINGS,
   PLAYER_BINDING_ACTIONS,

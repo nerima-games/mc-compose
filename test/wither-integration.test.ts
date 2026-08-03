@@ -8,7 +8,7 @@ import {
   initialWitherRuntimeState,
   matchRuntimeWitherSummon,
   summonRuntimeWither,
-} from '../apps/web/wither-runtime'
+} from '../apps/multiplayer-shared/wither-runtime'
 
 describe('wither gameplay integration', () => {
   it('exposes wither structure blocks through the host placement vocabulary', () => {

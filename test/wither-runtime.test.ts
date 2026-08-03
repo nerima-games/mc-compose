@@ -8,7 +8,7 @@ import {
   restoreWitherRuntime,
   snapshotWitherRuntime,
   summonRuntimeWither,
-} from '../apps/web/wither-runtime'
+} from '../apps/multiplayer-shared/wither-runtime'
 
 describe('wither runtime', () => {
   it('matches either horizontal summon orientation from the placed skull', () => {

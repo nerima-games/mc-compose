@@ -84,7 +84,7 @@ import {
   SleepAuthority,
   decodeSleepWireMessage,
   type SleepWireMessage,
-} from '../web/sleep-network'
+} from '../multiplayer-shared/sleep-network'
 import {
   advanceWitherRuntime,
   damageRuntimeWither,
@@ -94,15 +94,15 @@ import {
   summonRuntimeWither,
   type WitherRuntimeSnapshot,
   type WitherRuntimeState,
-} from '../web/wither-runtime'
-import { decodeWitherWireMessage, type WitherWireMessage } from '../web/wither-network'
+} from '../multiplayer-shared/wither-runtime'
+import { decodeWitherWireMessage, type WitherWireMessage } from '../multiplayer-shared/wither-network'
 import {
   decodePlayerDamageWireMessage,
   PLAYER_DAMAGE_MAX_WIRE_LENGTH,
   type PlayerDamageCommand,
   type PlayerDamageCommandResult,
   type PlayerDamageWireMessage,
-} from '../web/player-damage-network'
+} from '../multiplayer-shared/player-damage-network'
 
 export type ClientId = string
 export type SendFrame = (frame: WireText) => void

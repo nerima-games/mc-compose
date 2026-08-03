@@ -13,8 +13,8 @@ import { Either } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { makeMultiplayerServerCore, type ReceiveResult } from '../../apps/multiplayer-server/core'
-import { decodeSleepWireMessage, type SleepWireMessage } from '../../apps/web/sleep-network'
-import { decodeWitherWireMessage, type WitherWireMessage } from '../../apps/web/wither-network'
+import { decodeSleepWireMessage, type SleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
+import { decodeWitherWireMessage, type WitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
 
 const playerId = (value: string): PlayerId => value as PlayerId
 const playerName = (value: string): PlayerName => value as PlayerName

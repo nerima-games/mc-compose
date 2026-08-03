@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   decodePlayerDamageWireMessage,
   PLAYER_DAMAGE_MAX_MINIMUM_HEALTH_POINTS,
-} from '../apps/web/player-damage-network'
+} from '../apps/multiplayer-shared/player-damage-network'
 
 const wire = (value: unknown): WireText => JSON.stringify(value) as WireText
 
