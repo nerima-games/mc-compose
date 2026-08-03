@@ -1,4 +1,5 @@
 import { Data, Effect, Option, Schema } from 'effect'
+import type { YieldableError } from 'effect/Cause'
 import type { WitherRuntimeSnapshot } from './wither-runtime'
 
 import {
@@ -917,18 +918,24 @@ export const SESSION_FORMAT = defineFormat({
   ],
 })
 
-export class SessionManifestError extends Data.TaggedError('SessionManifestError')<{
+type SessionManifestErrorFields = {
   readonly reason: 'duplicate-coordinate' | 'missing-chunk'
   readonly dimension: Dimension
   readonly coord: ChunkCoord
   readonly key: string
-}> {}
+}
+
+export type SessionManifestError = YieldableError &
+  SessionManifestErrorFields & { readonly _tag: 'SessionManifestError' }
+
+export const SessionManifestError: new (fields: SessionManifestErrorFields) => SessionManifestError =
+  Data.TaggedError('SessionManifestError')
 
 export type SessionPersistenceError =
   | StorageError
   | SaveDecodeError
   | MigrationError
-  | SessionManifestError
+  | InstanceType<typeof SessionManifestError>
 
 export const sessionHeadKey = (sessionId: string): SaveKey =>
   SaveKey(`mc-compose/session/${encodeURIComponent(sessionId)}/head`)

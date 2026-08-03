@@ -7,7 +7,26 @@ import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { WebSocket } from 'ws'
 
-type WireMessage = { readonly _tag: string; readonly [key: string]: unknown }
+type WireMessage = {
+  readonly _tag: string
+  readonly token?: string
+  readonly snapshot?: WireMessage
+  readonly state?: WireMessage
+  readonly entity?: WireMessage
+  readonly stack?: WireMessage
+  readonly item?: string
+  readonly count?: number
+  readonly accepted?: boolean
+  readonly commandId?: string
+  readonly requestId?: string
+  readonly revision?: number
+  readonly blocks?: ReadonlyArray<unknown>
+  readonly entities?: ReadonlyArray<WireMessage>
+  readonly phase?: string
+  readonly chargeRemainingSecs?: number
+  readonly position?: { readonly x: number; readonly y: number; readonly z: number }
+  readonly [key: string]: unknown
+}
 
 const encodeProtocol = (message: WireMessage): string =>
   JSON.stringify({ protocolVersion: 1, message })

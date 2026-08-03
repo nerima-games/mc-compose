@@ -51,9 +51,11 @@ test('catches fishing loot and consumes rod durability during the bite window', 
 
   const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedFishingEncounter')
   const rodSlot = seeded.inventory.slots.findIndex((slot) => slot?.item === 'fishing_rod')
-  expect(rodSlot).toBeGreaterThanOrEqual(0)
+  if (rodSlot < 0) throw new Error('seeded fishing encounter has no fishing rod')
   const durabilityBefore = seeded.inventory.durability[rodSlot]
-  expect(durabilityBefore).not.toBeNull()
+  if (durabilityBefore === null || durabilityBefore === undefined) {
+    throw new Error('seeded fishing rod has no durability')
+  }
 
   await grantPointerLock(page)
   const canvas = page.locator('#game-canvas')
@@ -74,8 +76,8 @@ test('catches fishing loot and consumes rod durability during the bite window', 
   expect(caughtItem).toBeTruthy()
 
   const caught = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
-  expect(caught.inventory.slots.some((slot) => slot?.item === caughtItem && slot.count === 1)).toBe(true)
-  expect(caught.inventory.durability[rodSlot]?.current).toBe(durabilityBefore!.current - 1)
+  expect(caught.inventory.slots.some((slot) => slot !== null && slot.item === caughtItem && slot.count === 1)).toBe(true)
+  expect(caught.inventory.durability[rodSlot]?.current).toBe(durabilityBefore.current - 1)
   expect(consoleErrors).toEqual([])
   expect(pageErrors).toEqual([])
 })

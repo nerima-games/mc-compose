@@ -75,15 +75,17 @@ const settleOnSmokeTerrain = async (page: Page): Promise<void> => {
       () =>
         page.evaluate(
           ([key, command]) =>
-            typeof (globalThis as Record<string, Record<string, unknown>>)[key]?.[command],
+            typeof (globalThis as unknown as Record<string, Record<string, unknown>>)[key]?.[command],
           [QA_GLOBAL_KEY, 'gameplay.seedSmokeGroundingEncounter'] as const,
         ),
       { timeout: 15_000 },
     )
     .toBe('function')
   await page.evaluate(async (key) => {
-    const qa = (globalThis as Record<string, unknown>)[key] as Record<string, () => unknown>
-    await qa['gameplay.seedSmokeGroundingEncounter']()
+    const qa = (globalThis as unknown as Record<string, unknown>)[key] as Record<string, unknown>
+    const operation = qa['gameplay.seedSmokeGroundingEncounter']
+    if (typeof operation !== 'function') throw new Error('smoke grounding QA operation is unavailable')
+    await operation()
   }, QA_GLOBAL_KEY)
   await expect
     .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
@@ -165,8 +167,8 @@ test.describe('smoke — the composed frame in a real browser', () => {
         bufferHeight: canvas.height,
         layoutWidth: canvas.clientWidth,
         layoutHeight: canvas.clientHeight,
-        audioSamples: Number(canvas.dataset.audioSamples),
-        atlasSize: canvas.dataset.atlasSize,
+        audioSamples: Number(canvas.dataset['audioSamples']),
+        atlasSize: canvas.dataset['atlasSize'],
         hasWebgl2: gl !== null,
         lost: gl === null || gl.isContextLost(),
       }

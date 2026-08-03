@@ -48,6 +48,7 @@ type GameplaySnapshot = {
     readonly [key: string]: unknown
   }
   readonly inventory: { readonly slots: ReadonlyArray<InventorySlot> }
+  readonly villagerTrades: { readonly restockElapsedSecs: number }
   readonly itemMetadata: {
     readonly customNames: Readonly<Record<string, string>>
     readonly enchantedItems: Readonly<Record<string, {
