@@ -549,19 +549,24 @@ describe('authoritative multiplayer server core', () => {
       },
     })
 
-    for (const [socket, player] of [['socket-a', 'alice'], ['socket-b', 'bob']] as const) {
-      fixture.receive(socket, {
-        _tag: 'PlayerMove', player: playerId(player), at: { x: 8, y: 64, z: 0 },
-        facing: { yawRadians: 0, pitchRadians: 0 },
-      })
+    for (const at of [{ x: 0, y: 72, z: 0 }, { x: 5, y: 78, z: 0 }, { x: 8, y: 81, z: 0 }]) {
+      for (const [socket, player] of [['socket-a', 'alice'], ['socket-b', 'bob']] as const) {
+        fixture.receive(socket, {
+          _tag: 'PlayerMove', player: playerId(player), at,
+          facing: { yawRadians: 0, pitchRadians: 0 },
+        })
+      }
+      fixture.advanceTime(1_000)
     }
     fixture.server.tick(10_000)
-    fixture.advanceTime(1_000)
-    for (const [socket, player] of [['socket-a', 'alice'], ['socket-b', 'bob']] as const) {
-      fixture.receive(socket, {
-        _tag: 'PlayerMove', player: playerId(player), at: { x: 0, y: 64, z: 0 },
-        facing: { yawRadians: 0, pitchRadians: 0 },
-      })
+    for (const at of [{ x: 5, y: 78, z: 0 }, { x: 0, y: 72, z: 0 }, { x: 0, y: 64, z: 0 }]) {
+      fixture.advanceTime(1_000)
+      for (const [socket, player] of [['socket-a', 'alice'], ['socket-b', 'bob']] as const) {
+        fixture.receive(socket, {
+          _tag: 'PlayerMove', player: playerId(player), at,
+          facing: { yawRadians: 0, pitchRadians: 0 },
+        })
+      }
     }
     aliceFrames.length = 0
     bobFrames.length = 0
@@ -641,16 +646,21 @@ describe('authoritative multiplayer server core', () => {
         dimension: 'world-1', position: { x: 1, y: 66, z: 0 },
       },
     })
-    valid.receive('socket-a', {
-      _tag: 'PlayerMove', player: playerId('alice'), at: { x: 8, y: 64, z: 0 },
-      facing: { yawRadians: 0, pitchRadians: 0 },
-    })
+    for (const at of [{ x: 0, y: 72, z: 0 }, { x: 5, y: 78, z: 0 }, { x: 8, y: 81, z: 0 }]) {
+      valid.receive('socket-a', {
+        _tag: 'PlayerMove', player: playerId('alice'), at,
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      })
+      valid.advanceTime(1_000)
+    }
     valid.server.tick(10_000)
-    valid.advanceTime(1_000)
-    valid.receive('socket-a', {
-      _tag: 'PlayerMove', player: playerId('alice'), at: { x: 0, y: 64, z: 0 },
-      facing: { yawRadians: 0, pitchRadians: 0 },
-    })
+    for (const at of [{ x: 5, y: 78, z: 0 }, { x: 0, y: 72, z: 0 }, { x: 0, y: 64, z: 0 }]) {
+      valid.advanceTime(1_000)
+      valid.receive('socket-a', {
+        _tag: 'PlayerMove', player: playerId('alice'), at,
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      })
+    }
     valid.receiveWither('socket-a', {
       _tag: 'WitherCommand',
       command: {

@@ -4174,6 +4174,12 @@ type MultiplayerInventorySelection = Readonly<{
   })
 
   const useEndFeature = (): Effect.Effect<boolean> => Effect.gen(function* () {
+    if (multiplayer !== undefined) {
+      multiplayerRejection = 'End travel is unavailable in this multiplayer world.'
+      multiplayerStatus.textContent = multiplayerRejection
+      multiplayerStatus.hidden = false
+      return true
+    }
     const dimension = yield* playerApi.dimension
     const pose = yield* playerApi.pose
     if (dimension === 'end' && exitPortalMaterialized) {
