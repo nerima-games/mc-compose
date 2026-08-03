@@ -2213,6 +2213,156 @@ const bootGame = async (
     redstoneDirty = false
   }
 
+  const containerIdForStorageBlock = (
+    dimension: Dimension,
+    position: { readonly x: number; readonly y: number; readonly z: number },
+  ): string | undefined => {
+    const context = dimensionContexts.get(dimension)
+    if (context === undefined) return undefined
+
+    const reading = Effect.runSync(context.chunkStore.getBlock(position))
+    if (reading._tag !== 'Block') return undefined
+
+    const type = blockTypeOfId(reading.block)
+    if (
+      type !== 'chest' &&
+      type !== 'shulker_box' &&
+      type !== 'dispenser' &&
+      type !== 'hopper'
+    ) {
+      return undefined
+    }
+
+    const id = containerIdAt(dimension, position)
+    const created = Effect.runSync(world.inventory.createContainer(id))
+    if (created._tag === 'Created') markSessionDirty()
+    return created._tag === 'InvalidContainerId' ? undefined : id
+  }
+
+  const moveOneContainerItem = (
+    sourceContainerId: string,
+    destinationContainerId: string,
+  ): boolean => {
+    const source = Effect.runSync(world.inventory.containerSnapshot(sourceContainerId))
+    const destination = Effect.runSync(
+      world.inventory.containerSnapshot(destinationContainerId),
+    )
+    if (source === null || destination === null) return false
+
+    const sourceSlot = source.slots.findIndex((stack) => stack !== null)
+    const destinationSlot = destination.slots.findIndex((stack) => stack === null)
+    if (sourceSlot < 0 || destinationSlot < 0) return false
+
+    const sourceMetadataKey = containerMetadataKey(sourceContainerId, sourceSlot)
+    const destinationMetadataKey = containerMetadataKey(
+      destinationContainerId,
+      destinationSlot,
+    )
+    const moved = Effect.runSync(
+      world.inventory.moveContainerItem({
+        sourceContainerId,
+        sourceSlot,
+        destinationContainerId,
+        destinationSlot,
+        count: 1,
+      }),
+    )
+    if (moved._tag !== 'Moved') return false
+
+    copyItemMetadata(sourceMetadataKey, destinationMetadataKey)
+    const updatedSource = Effect.runSync(
+      world.inventory.containerSnapshot(sourceContainerId),
+    )
+    if (updatedSource?.slots[sourceSlot] === null) {
+      deleteItemMetadata(sourceMetadataKey)
+    }
+    markSessionDirty()
+    return true
+  }
+
+  const applyHopperTransfer = (
+    dimension: Dimension,
+    position: { readonly x: number; readonly y: number; readonly z: number },
+  ): void => {
+    if (multiplayer !== undefined) return
+
+    const hopperId = containerIdForStorageBlock(dimension, position)
+    if (hopperId === undefined) return
+
+    const belowId = containerIdForStorageBlock(dimension, {
+      x: position.x,
+      y: position.y - 1,
+      z: position.z,
+    })
+    if (belowId !== undefined && moveOneContainerItem(hopperId, belowId)) return
+
+    const aboveId = containerIdForStorageBlock(dimension, {
+      x: position.x,
+      y: position.y + 1,
+      z: position.z,
+    })
+    if (aboveId !== undefined) moveOneContainerItem(aboveId, hopperId)
+  }
+
+  const applyDispenserTrigger = (
+    dimension: Dimension,
+    position: { readonly x: number; readonly y: number; readonly z: number },
+  ): void => {
+    if (multiplayer !== undefined) return
+
+    const containerId = containerIdForStorageBlock(dimension, position)
+    if (containerId === undefined) return
+
+    const container = Effect.runSync(world.inventory.containerSnapshot(containerId))
+    const slot = container?.slots.findIndex((stack) => stack !== null) ?? -1
+    if (slot < 0) return
+
+    const metadataKey = containerMetadataKey(containerId, slot)
+    const extracted = Effect.runSync(
+      world.inventory.extractContainerItem({
+        containerId,
+        containerSlot: slot,
+        count: 1,
+      }),
+    )
+    if (extracted._tag !== 'Extracted') return
+
+    const metadata = {
+      customName: customNames.get(metadataKey),
+      enchantedItem: enchantedItems.get(metadataKey),
+    }
+    const spawned = Effect.runSync(
+      spawnDroppedItems(world.entities, [
+        {
+          ...extracted.stack,
+          at: {
+            x: position.x + 0.5,
+            y: position.y + 0.5,
+            z: position.z - 0.25,
+          },
+          ...(metadata.customName === undefined &&
+          metadata.enchantedItem === undefined
+            ? {}
+            : { eligibleFromFrame: Number.MAX_SAFE_INTEGER }),
+        },
+      ]),
+    )
+    const entity = spawned[0]
+    if (entity !== undefined) {
+      const itemMetadataKey = droppedItemMetadataKey(dimension, String(entity.id))
+      if (metadata.customName !== undefined) {
+        customNames.set(itemMetadataKey, metadata.customName)
+      }
+      if (metadata.enchantedItem !== undefined) {
+        enchantedItems.set(itemMetadataKey, metadata.enchantedItem)
+      }
+    }
+
+    const updated = Effect.runSync(world.inventory.containerSnapshot(containerId))
+    if (updated?.slots[slot] === null) deleteItemMetadata(metadataKey)
+    markSessionDirty()
+  }
+
   const applyPoweredPistonTransition = (transition: PoweredPistonTransition): void => {
     const context = dimensionContexts.get(transition.dimension as Dimension)
     if (context === undefined) return
@@ -7817,7 +7967,12 @@ type MultiplayerInventorySelection = Readonly<{
       if (context === undefined) continue
       const reading = Effect.runSync(context.chunkStore.getBlock(pending.position))
       if (reading._tag !== 'Block' || reading.block === pending.blockId) continue
-      if (pending.blockId === blockIdOf('chest')) {
+      if (
+        pending.blockId === blockIdOf('chest') ||
+        pending.blockId === blockIdOf('shulker_box') ||
+        pending.blockId === blockIdOf('dispenser') ||
+        pending.blockId === blockIdOf('hopper')
+      ) {
         const id = containerIdAt(pending.dimension, pending.position)
         const container = Effect.runSync(world.inventory.containerStorageSnapshot).containers
           .find((candidate) => candidate.id === id)
@@ -7850,7 +8005,7 @@ type MultiplayerInventorySelection = Readonly<{
               const metadata = slotMetadata[index]
               if (metadata?.customName === undefined && metadata?.enchantedItem === undefined) return
               droppedItemMetadata.set(
-                droppedItemMetadataKey(playerDimension, String(entity.id)),
+                droppedItemMetadataKey(pending.dimension, String(entity.id)),
                 {
                   ...(metadata.customName === undefined ? {} : { customName: metadata.customName }),
                   ...(metadata.enchantedItem === undefined
@@ -9182,7 +9337,13 @@ type MultiplayerInventorySelection = Readonly<{
         'data-redstone-trigger',
         `${event.kind}:${event.dimension}:${event.position.x},${event.position.y},${event.position.z}`,
       )
+      if (event.kind === 'dispenser') {
+        applyDispenserTrigger(event.dimension as Dimension, event.position)
+      }
       markSessionDirty()
+    }
+    for (const event of Effect.runSync(redstoneRuntime.drainHopperTransferEvents)) {
+      applyHopperTransfer(event.dimension as Dimension, event.position)
     }
     for (const transition of Effect.runSync(redstoneRuntime.drainPoweredComponentTransitions)) {
       const context = dimensionContexts.get(transition.dimension as Dimension)
