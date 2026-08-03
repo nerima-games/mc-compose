@@ -842,7 +842,7 @@ const migrateSessionV11ToV12: Migration = {
       ...head,
       state: Object.prototype.hasOwnProperty.call(state, 'containerStorage')
         ? state
-        : { ...state, containerStorage: { version: 1, containers: [] } },
+        : { ...state, containerStorage: { version: 2, containers: [] } },
     })
   },
 }

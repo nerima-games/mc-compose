@@ -130,6 +130,7 @@ import {
   STARTER_SMELTING_RECIPES,
   targetBlockFromPlayerPose,
   OccupantId,
+  type ContainerKind,
   type FurnaceState,
   type CropLocation,
   type ItemStack,
@@ -183,6 +184,7 @@ import {
   chestStorageCloseIntent,
   chestStorageSlotClickIntent,
   chestStorageViewModel,
+  type ChestStorageSlotCount,
   createAnvilView,
   createChestStorageView,
   createEnchantingTableView,
@@ -2213,6 +2215,26 @@ const bootGame = async (
     redstoneDirty = false
   }
 
+  const containerKindForStorageBlock = (
+    type: ReturnType<typeof blockTypeOfId>,
+  ): ContainerKind | undefined => {
+    switch (type) {
+      case 'chest':
+        return 'chest'
+      case 'shulker_box':
+        return 'shulker_box'
+      case 'dispenser':
+        return 'dispenser'
+      case 'hopper':
+        return 'hopper'
+      default:
+        return undefined
+    }
+  }
+
+  const chestStorageSlotCount = (slotCount: number | undefined): ChestStorageSlotCount =>
+    slotCount === 5 || slotCount === 9 ? slotCount : 27
+
   const containerIdForStorageBlock = (
     dimension: Dimension,
     position: { readonly x: number; readonly y: number; readonly z: number },
@@ -2223,18 +2245,13 @@ const bootGame = async (
     const reading = Effect.runSync(context.chunkStore.getBlock(position))
     if (reading._tag !== 'Block') return undefined
 
-    const type = blockTypeOfId(reading.block)
-    if (
-      type !== 'chest' &&
-      type !== 'shulker_box' &&
-      type !== 'dispenser' &&
-      type !== 'hopper'
-    ) {
+    const kind = containerKindForStorageBlock(blockTypeOfId(reading.block))
+    if (kind === undefined) {
       return undefined
     }
 
     const id = containerIdAt(dimension, position)
-    const created = Effect.runSync(world.inventory.createContainer(id))
+    const created = Effect.runSync(world.inventory.createContainer(id, kind))
     if (created._tag === 'Created') markSessionDirty()
     return created._tag === 'InvalidContainerId' ? undefined : id
   }
@@ -3361,9 +3378,10 @@ type MultiplayerInventorySelection = Readonly<{
 
   const applyNetworkContainers = (states: ReadonlyArray<NetworkContainerState>): void => {
     Effect.runSync(world.inventory.restoreContainerStorage({
-      version: 1,
+      version: 2,
       containers: states.map((state) => ({
         id: state.containerId,
+        kind: 'chest',
         slots: Array.from({ length: 27 }, (_, index) => {
           const stack = state.slots[index]
           return stack == null
@@ -4787,6 +4805,7 @@ type MultiplayerInventorySelection = Readonly<{
           : playerSlots[chestSelected.slot]
       chestView.render(chestStorageViewModel({
         chest: chestSlots,
+        chestSlotCount: chestStorageSlotCount(container?.slots.length),
         playerInventory: playerSlots,
         cursor: selectedStack,
         selectedSlot: chestSelected,
@@ -4868,7 +4887,13 @@ type MultiplayerInventorySelection = Readonly<{
     const region = interactive.dataset['interactionRegion']
     const slot = Number(interactive.dataset['interactionSlot'])
     if ((region !== 'chest' && region !== 'player') || !Number.isInteger(slot)) return undefined
-    const intent = chestStorageSlotClickIntent({ region, slot })
+    const container = activeChestId === undefined
+      ? null
+      : Effect.runSync(world.inventory.containerSnapshot(activeChestId))
+    const intent = chestStorageSlotClickIntent(
+      { region, slot },
+      chestStorageSlotCount(container?.slots.length),
+    )
     return intent?._tag === 'SlotClicked' ? intent.target : undefined
   }
 
@@ -9021,10 +9046,9 @@ type MultiplayerInventorySelection = Readonly<{
             setInventoryOpen(true, 'chest')
           }
         } else {
-          const created = Effect.runSync(world.inventory.createContainer(id))
-          if (created._tag === 'Created') markSessionDirty()
-          if (created._tag !== 'InvalidContainerId') {
-            activeChestId = id
+          const localContainerId = containerIdForStorageBlock(dimension, position)
+          if (localContainerId !== undefined) {
+            activeChestId = localContainerId
             setInventoryOpen(true, 'chest')
           }
         }

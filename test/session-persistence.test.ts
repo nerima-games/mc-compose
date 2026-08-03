@@ -89,9 +89,10 @@ const sessionState = (seed: number): SessionState => {
       slots: Array.from({ length: INVENTORY_SLOT_COUNT }, (_, index) => inventory.slots[index]),
     } as Inventory),
     containerStorage: {
-      version: 1,
+      version: 2,
       containers: [{
         id: 'overworld:4,65,-2',
+        kind: 'chest',
         slots: Array.from(
           { length: 27 },
           (_, index) => index === 0
@@ -620,7 +621,7 @@ describe('session persistence', () => {
     return Effect.gen(function* () {
       const loaded = Option.getOrThrow(yield* loadSession('legacy-v11'))
 
-      expect(loaded.state.containerStorage).toEqual({ version: 1, containers: [] })
+      expect(loaded.state.containerStorage).toEqual({ version: 2, containers: [] })
       expect(storage.envelope(key)?.version).toBe(11)
     }).pipe(Effect.provide(storage.layer))
   })
@@ -724,8 +725,8 @@ describe('session persistence', () => {
         state: {
           ...sessionState(42),
           containerStorage: {
-            version: 1,
-            containers: [{ id: '', slots: [] }],
+            version: 2,
+            containers: [{ id: '', kind: 'chest', slots: [] }],
           },
         },
         chunks: [],
