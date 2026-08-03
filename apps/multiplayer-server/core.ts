@@ -23,9 +23,13 @@ import { blockIdOf, isBlockType, isItemType, maxStackCountOfItem } from '@nerima
 import { planExplosion, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
+  BLAZE_XP_REWARD,
   CREEPER_KIND,
+  CREEPER_XP_REWARD,
   ENDERMAN_KIND,
+  ENDERMAN_XP_REWARD,
   ZOMBIE_KIND,
+  ZOMBIE_XP_REWARD,
   applyFurnaceAdvance,
   blockLoot,
   dropRollsNeeded,
@@ -33,6 +37,7 @@ import {
   miningLootContextForItem,
   planFurnaceAdvance,
   rollDropsOfKind,
+  mobXpReward,
 } from '@nerima-games/mx-gameplay'
 import { Either } from 'effect'
 import {
@@ -147,6 +152,14 @@ const supportedMobKind = (entityType: string) => {
   if (entityType === ENDERMAN_KIND) return ENDERMAN_KIND
   if (entityType === BLAZE_KIND) return BLAZE_KIND
   return undefined
+}
+
+const mobExperienceReward = (kind: ReturnType<typeof supportedMobKind>): number => {
+  if (kind === ZOMBIE_KIND) return ZOMBIE_XP_REWARD
+  if (kind === CREEPER_KIND) return CREEPER_XP_REWARD
+  if (kind === ENDERMAN_KIND) return ENDERMAN_XP_REWARD
+  if (kind === BLAZE_KIND) return BLAZE_XP_REWARD
+  return 0
 }
 
 const deterministicRoll = (input: string): number => {
@@ -688,6 +701,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
         entities.delete(entity.entityId)
         const kind = supportedMobKind(entity.entityType)
+        const experienceReward = kind === undefined
+          ? 0
+          : mobXpReward({ _tag: 'Slain', lootingLevel: 0 }, mobExperienceReward(kind))
+        const playerVitals = vitals.get(message.player)
+        const player = players.get(message.player)
+        if (experienceReward > 0 && playerVitals !== undefined) playerVitals.experience += experienceReward
         const loot = kind === undefined ? [] : rollDropsOfKind(
           kind,
           { _tag: 'Slain', lootingLevel: 0 },
@@ -705,6 +724,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         return { accepted: true, deltas: (nextRevision) => [
           { _tag: 'EntityDespawnDelta', world: worldId, revision: nextRevision, entityId: entity.entityId },
           ...drops.map((entity) => ({ _tag: 'EntitySpawnDelta' as const, world: worldId, revision: nextRevision, entity })),
+          ...(experienceReward > 0 && player !== undefined && playerVitals !== undefined ? [{
+            _tag: 'PlayerVitalsDelta' as const,
+            world: player.world,
+            revision: nextRevision,
+            player: message.player,
+            state: vitalsSnapshot(playerVitals),
+          }] : []),
         ] }
       }
       case 'EntityPickupCommand': {

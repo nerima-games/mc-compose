@@ -1119,6 +1119,9 @@ describe('multiplayer server authoritative state', () => {
     send({ _tag: 'EntityAttackCommand', commandId: commandId('attack-2'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 5, entityId: entityId('zombie-1') })
     const drop = messages(observer).find((message) => message._tag === 'EntitySpawnDelta')
     expect(drop).toMatchObject({ _tag: 'EntitySpawnDelta', entity: { _tag: 'item-drop', stack: { item: 'rotten_flesh', count: 1 } } })
+    expect(messages(observer)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'PlayerVitalsDelta', player: 'alice', state: { health: 3, hunger: 2, experience: 12 } }),
+    ]))
     if (drop?._tag !== 'EntitySpawnDelta') throw new Error('missing item drop')
     send({ _tag: 'EntityPickupCommand', commandId: commandId('pickup-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 6, entityId: drop.entity.entityId })
     send({ _tag: 'VehicleCommand', commandId: commandId('mount-1'), player: playerId('alice'), world: worldId('world-1'), expectedRevision: 7, entityId: entityId('boat-1'), action: 'mount' })
@@ -1156,6 +1159,7 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'unknown-1' }),
     ]))
     expect(messages(fixture.sent).some((message) => message._tag === 'EntitySpawnDelta')).toBe(false)
+    expect(messages(fixture.sent).some((message) => message._tag === 'PlayerVitalsDelta')).toBe(false)
   })
 
   it('rejects invalid entity authority requests and deduplicates accepted commands', () => {
