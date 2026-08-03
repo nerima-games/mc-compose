@@ -26,8 +26,12 @@ import {
   BLAZE_XP_REWARD,
   CREEPER_KIND,
   CREEPER_XP_REWARD,
+  CHICKEN_KIND,
+  COW_KIND,
   ENDERMAN_KIND,
   ENDERMAN_XP_REWARD,
+  PIG_KIND,
+  SHEEP_KIND,
   ZOMBIE_KIND,
   ZOMBIE_XP_REWARD,
   applyFurnaceAdvance,
@@ -38,6 +42,9 @@ import {
   planFurnaceAdvance,
   rollDropsOfKind,
   mobXpReward,
+  initialEcosystemMobState,
+  repairEcosystemMobState,
+  stepEcosystemMob,
 } from '@nerima-games/mx-gameplay'
 import { Either } from 'effect'
 import {
@@ -151,6 +158,14 @@ const supportedMobKind = (entityType: string) => {
   if (entityType === CREEPER_KIND) return CREEPER_KIND
   if (entityType === ENDERMAN_KIND) return ENDERMAN_KIND
   if (entityType === BLAZE_KIND) return BLAZE_KIND
+  return undefined
+}
+
+const supportedPassiveMobKind = (entityType: string) => {
+  if (entityType === String(COW_KIND)) return COW_KIND
+  if (entityType === String(PIG_KIND)) return PIG_KIND
+  if (entityType === String(SHEEP_KIND)) return SHEEP_KIND
+  if (entityType === String(CHICKEN_KIND)) return CHICKEN_KIND
   return undefined
 }
 
@@ -1621,6 +1636,35 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         revision += 1
         stateChanged = true
         postPersistenceDeltas.push(...agedEntities.map((delta) => ({ ...delta, revision })))
+      }
+    }
+
+    if (elapsedSecs > 0) {
+      const movedEntities: AuthoritativeDelta[] = []
+      for (const entity of entities.values()) {
+        if (entity._tag !== 'living') continue
+        const kind = supportedPassiveMobKind(entity.entityType)
+        if (kind === undefined) continue
+        const state = repairEcosystemMobState(entity.mobState) ?? initialEcosystemMobState()
+        const step = stepEcosystemMob(kind, state, entity.at, undefined, elapsedSecs)
+        const at = {
+          ...step.feetPosition,
+          x: Math.min(bounds.maxX, Math.max(bounds.minX, step.feetPosition.x)),
+          z: Math.min(bounds.maxZ, Math.max(bounds.minZ, step.feetPosition.z)),
+        }
+        const mobState = {
+          attackCooldownSecs: step.state.attackCooldownSecs,
+          motionPhase: step.state.motionPhase,
+          provoked: step.state.provoked,
+        }
+        const updated = { ...entity, at, mobState }
+        entities.set(entity.entityId, updated)
+        movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
+      }
+      if (movedEntities.length > 0) {
+        revision += 1
+        stateChanged = true
+        postPersistenceDeltas.push(...movedEntities.map((delta) => ({ ...delta, revision })))
       }
     }
 

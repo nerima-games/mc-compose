@@ -1144,6 +1144,33 @@ describe('multiplayer server authoritative state', () => {
     }))
   })
 
+  it('advances passive mob movement and persists its AI state authoritatively', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      entities: [{
+        _tag: 'living', entityId: entityId('cow-1'), entityType: 'cow',
+        at: { x: 0, y: 64, z: 0 }, health: 10, maxHealth: 10,
+      }],
+    })
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(1_000)
+
+    const update = messages(fixture.sent).find((message) => message._tag === 'EntityUpdateDelta')
+    expect(update).toMatchObject({
+      entity: {
+        entityId: 'cow-1',
+        at: { x: expect.closeTo(Math.cos(1) * 1, 10), z: expect.closeTo(Math.sin(1) * 1, 10) },
+        mobState: { motionPhase: 1, attackCooldownSecs: 0, provoked: false },
+      },
+    })
+    expect(fixture.persisted.at(-1)?.entities).toContainEqual(expect.objectContaining({
+      entityId: 'cow-1',
+      mobState: { motionPhase: 1, attackCooldownSecs: 0, provoked: false },
+    }))
+  })
+
   it('rejects unauthorized and missing-resource commands without advancing revision', () => {
     const fixture = makeFixture()
     fixture.sent.length = 0
