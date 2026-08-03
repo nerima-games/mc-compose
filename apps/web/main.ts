@@ -310,8 +310,6 @@ import {
   solidityFromStore,
   spawnDroppedItems,
   spawnMobDrops,
-  stepBoat,
-  stepMinecart,
   snapshotVillagerTrades,
   snapshotBrewingStand,
   snapshotStatusEffects,
@@ -1798,6 +1796,7 @@ const bootGame = async (
   let mountedVehicleId: string | undefined = Option.isSome(loadedSession)
     ? loadedSession.value.state.mountedVehicleId ?? undefined
     : undefined
+  let vehicleControls = { throttle: 0, steering: 0 }
   let fishingSession: FishingSession | undefined
   let fishingWater: { readonly dimension: Dimension; readonly position: SessionPosition } | undefined
   let fishingResult = 'idle'
@@ -3467,6 +3466,10 @@ const bootGame = async (
           {
             isActiveDimension: (dimension) => dimension === currentChunkContext.dimension,
             isPoweredRailAt: (dimension, position) => poweredRails.has(leverKeyOf({ dimension, position })),
+            controlsForVehicle: (vehicle) => String(vehicle.id) === mountedVehicleId ? vehicleControls : { throttle: 0, steering: 0 },
+            onVehicleExit: (vehicle) => {
+              if (String(vehicle.id) === mountedVehicleId) mountedVehicleId = undefined
+            },
           },
         ),
       ),
@@ -7160,8 +7163,8 @@ const bootGame = async (
     // The player, moved and stopped by the world
     // -----------------------------------------------------------------------
     //
-    // WIRING, NOT A RULE. mc-sim owns motion and collision; this loop supplies
-    // input intent before the frame and mirrors its authoritative state after.
+    // WIRING, NOT A RULE. mx-gameplay owns vehicle motion and collision; this
+    // loop supplies input intent before the frame and mirrors its authoritative state after.
     //
     // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, which keeps a
     // backgrounded tab from returning with a multi-second physics step.
@@ -7216,6 +7219,10 @@ const bootGame = async (
     const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
       !dead && !inventoryOpen && !tradeOpen && !brewingOpen
         && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
+    vehicleControls = {
+      throttle: held('moveForward') - held('moveBackward'),
+      steering: held('moveRight') - held('moveLeft'),
+    }
 
     const queuedNativeAttack = nativeAttackQueued > 0
     if (queuedNativeAttack) resetPrimaryAttackGesture()
@@ -7405,67 +7412,8 @@ const bootGame = async (
       markSessionDirty()
     }
     if (mountedVehicle !== undefined) {
-      const throttle = held('moveForward') - held('moveBackward')
-      const steering = held('moveRight') - held('moveLeft')
-      const cell = blockPosition(
-        Math.floor(mountedVehicle.position.x),
-        Math.floor(mountedVehicle.position.y),
-        Math.floor(mountedVehicle.position.z),
-      )
-      const reading = Effect.runSync(currentChunkStore.getBlock(cell))
-      const block = reading._tag === 'Block' ? blockTypeOfId(reading.block) : 'air'
-      const uncollided = mountedVehicle.type === 'boat'
-        ? stepBoat(mountedVehicle, { throttle, steering, inWater: block === 'water' }, deltaSecs)
-        : stepMinecart(mountedVehicle, {
-            kind: block === 'powered_rail' ? 'powered' : block === 'rail' ? 'normal' : 'none',
-            shape: 'ns',
-            powered: throttle > 0 || block === 'powered_rail',
-          }, {}, deltaSecs)
-      const candidatePosition = {
-        x: uncollided.vehicle.position.x + uncollided.vehicle.velocity.x * deltaSecs,
-        y: uncollided.vehicle.position.y + uncollided.vehicle.velocity.y * deltaSecs,
-        z: uncollided.vehicle.position.z + uncollided.vehicle.velocity.z * deltaSecs,
-      }
-      const candidateReading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
-        Math.floor(candidatePosition.x),
-        Math.floor(candidatePosition.y),
-        Math.floor(candidatePosition.z),
-      )))
-      const candidateBlock = candidateReading._tag === 'Block'
-        ? blockTypeOfId(candidateReading.block)
-        : undefined
-      const collided = candidateBlock !== undefined
-        && candidateBlock !== 'air'
-        && candidateBlock !== 'water'
-        && candidateBlock !== 'rail'
-        && candidateBlock !== 'powered_rail'
-      const impactSpeed = Math.hypot(
-        uncollided.vehicle.velocity.x,
-        uncollided.vehicle.velocity.y,
-        uncollided.vehicle.velocity.z,
-      )
-      const transition = collided
-        ? mountedVehicle.type === 'boat'
-          ? stepBoat(mountedVehicle, {
-              throttle,
-              steering,
-              inWater: block === 'water',
-              collided: true,
-              impactSpeed,
-            }, deltaSecs)
-          : stepMinecart(mountedVehicle, {
-              kind: block === 'powered_rail' ? 'powered' : block === 'rail' ? 'normal' : 'none',
-              shape: 'ns',
-              powered: throttle > 0 || block === 'powered_rail',
-            }, { collided: true, impactSpeed }, deltaSecs)
-        : uncollided
-      const moved = {
-        ...transition.vehicle,
-        position: collided ? transition.vehicle.position : candidatePosition,
-      }
-      replaceVehicle(moved)
-      Effect.runSync(playerApi.moveTo(moved.position))
-      if (transition.exited !== undefined) mountedVehicleId = undefined
+      const moved = vehicleById(String(mountedVehicle.id))
+      if (moved !== undefined) Effect.runSync(playerApi.moveTo(moved.position))
     }
 
     if (Exit.isFailure(outcome)) {
