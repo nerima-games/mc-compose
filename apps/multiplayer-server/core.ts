@@ -71,6 +71,7 @@ import {
   TNT_EXPLOSION_POWER,
   type CreeperFuse,
   type BucketItemType,
+  type EcosystemMobState,
   type EndermanTeleportCell,
   type FishingRod,
   type FishingSession,
@@ -203,6 +204,10 @@ type ContainerState = AuthoritativeSnapshot['containers'][number]
 type FurnaceState = AuthoritativeSnapshot['furnaces'][number]
 type ItemStack = NonNullable<InventoryState['slots'][number]>
 type MobWireState = NonNullable<Extract<AuthoritativeEntityState, { readonly _tag: 'living' }>['mobState']>
+type UnknownRecord = Readonly<Record<string, unknown>>
+
+const unknownRecord = (value: unknown): UnknownRecord | undefined =>
+  typeof value === 'object' && value !== null ? value as UnknownRecord : undefined
 
 const supportedMobKind = (entityType: string) => {
   if (entityType === ZOMBIE_KIND) return ZOMBIE_KIND
@@ -233,10 +238,10 @@ const isAuthoritativeHostileMob = (entityType: string): boolean =>
   entityType === CREEPER_KIND || entityType === ENDERMAN_KIND || supportedHostileEcosystemMobKind(entityType) !== undefined
 
 const mobWireState = (value: unknown): MobWireState => {
-  if (typeof value !== 'object' || value === null) {
+  const state = unknownRecord(value)
+  if (state === undefined) {
     return { attackCooldownSecs: 0, motionPhase: 0, provoked: false }
   }
-  const state = value as Record<string, unknown>
   return {
     attackCooldownSecs: typeof state['attackCooldownSecs'] === 'number' && Number.isFinite(state['attackCooldownSecs']) && state['attackCooldownSecs'] >= 0
       ? state['attackCooldownSecs']
@@ -252,17 +257,18 @@ const mobWireState = (value: unknown): MobWireState => {
   }
 }
 
-const ecosystemMobStateForSimulation = (value: unknown) => {
-  if (typeof value !== 'object' || value === null) return undefined
-  return repairEcosystemMobState({ ...value, _tag: 'EcosystemMob' })
+const ecosystemMobStateForSimulation = (value: unknown): EcosystemMobState | undefined => {
+  const state = unknownRecord(value)
+  return state === undefined ? undefined : repairEcosystemMobState({ ...state, _tag: 'EcosystemMob' })
 }
 
 const creeperFuseForSimulation = (value: unknown): CreeperFuse => {
-  if (typeof value !== 'object' || value === null) return DORMANT_FUSE
-  const state = value as { readonly motionPhase?: unknown; readonly provoked?: unknown }
-  if (state.provoked !== true || typeof state.motionPhase !== 'number') return DORMANT_FUSE
-  return Number.isFinite(state.motionPhase) && state.motionPhase >= 0
-    ? { _tag: 'Lit', burnedSecs: state.motionPhase }
+  const state = unknownRecord(value)
+  if (state === undefined) return DORMANT_FUSE
+  const motionPhase = state['motionPhase']
+  if (state['provoked'] !== true || typeof motionPhase !== 'number') return DORMANT_FUSE
+  return Number.isFinite(motionPhase) && motionPhase >= 0
+    ? { _tag: 'Lit', burnedSecs: motionPhase }
     : DORMANT_FUSE
 }
 
