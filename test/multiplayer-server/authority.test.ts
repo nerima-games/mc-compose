@@ -2,6 +2,7 @@ import {
   decodeFrame,
   encodeFrame,
   type CommandId,
+  type ContainerKind,
   type EntityId,
   type NetworkMessage,
   type PlayerId,
@@ -74,7 +75,7 @@ const initialState = (): MultiplayerServerState => ({
   }],
   vitals: [{ player: playerId('alice'), state: { health: 3, hunger: 2, experience: 7 } }],
   timeWeather: { timeOfDay: 6_000, weather: 'clear' },
-  containers: [{ containerId: 'world-1:1,64,0', slots: [null, { item: 'apple', count: 2 }] }],
+  containers: [{ containerId: 'world-1:1,64,0', kind: 'chest', slots: [null, { item: 'apple', count: 2 }] }],
   furnaces: [{
     furnaceId: '["world-1",2,64,0]',
     input: null,
@@ -117,7 +118,7 @@ const makeFixture = (
   state: MultiplayerServerState = initialState(),
   joinAt: Readonly<{ x: number; y: number; z: number }> = { x: 0, y: 64, z: 0 },
   difficulty: 'peaceful' | 'easy' | 'normal' | 'hard' = 'normal',
-  serverOptions: Partial<Pick<MultiplayerServerOptions, 'generatedBlockAt' | 'now' | 'passableBlocks' | 'spawnAt'>> = {},
+  serverOptions: Partial<Pick<MultiplayerServerOptions, 'allowedBlocks' | 'generatedBlockAt' | 'now' | 'passableBlocks' | 'spawnAt'>> = {},
 ) => {
   const sent: Array<WireText> = []
   const persisted: Array<MultiplayerServerState> = []
@@ -1522,7 +1523,7 @@ describe('multiplayer server authoritative state', () => {
     expect(output).toContainEqual(expect.objectContaining({
       _tag: 'ContainerDelta',
       revision: 6,
-      state: { containerId: 'world-1:1,64,0', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] },
+      state: { containerId: 'world-1:1,64,0', kind: 'chest', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] },
     }))
     expect(output).toContainEqual(expect.objectContaining({
       _tag: 'FurnaceDelta',
@@ -1536,7 +1537,7 @@ describe('multiplayer server authoritative state', () => {
         player: 'alice',
         state: { slots: [{ item: 'stone', count: 3 }, { item: 'coal', count: 2 }, { item: 'iron-ingot', count: 1 }] },
       }],
-      containers: [{ containerId: 'world-1:1,64,0', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] }],
+      containers: [{ containerId: 'world-1:1,64,0', kind: 'chest', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] }],
       furnaces: [{ furnaceId: '["world-1",2,64,0]', fuel: { item: 'coal', count: 1 }, output: { item: 'iron-ingot', count: 1 } }],
     })
   })
@@ -2048,7 +2049,7 @@ describe('multiplayer server authoritative state', () => {
         { at: { x: 20, y: 64, z: 0 }, block: 'chest' },
         { at: { x: 21, y: 64, z: 0 }, block: 'furnace' },
       ],
-      containers: [{ containerId: 'world-1:20,64,0', slots: [] }],
+      containers: [{ containerId: 'world-1:20,64,0', kind: 'chest', slots: [] }],
       furnaces: [{
         furnaceId: '["world-1",21,64,0]',
         input: null,
@@ -2225,7 +2226,7 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted.at(-1)).toMatchObject({
       revision: 7,
       inventories: [{ player: 'alice', state: { slots: [null, null] } }],
-      containers: [{ containerId: 'world-1:1,64,0', slots: [] }],
+      containers: [{ containerId: 'world-1:1,64,0', kind: 'chest', slots: Array.from({ length: 27 }, () => null) }],
       furnaces: [{
         furnaceId: '["world-1",2,64,0]',
         input: null,
@@ -2240,7 +2241,7 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({
         _tag: 'AuthoritativeSnapshot',
         revision: 5,
-        containers: [{ containerId: 'world-1:1,64,0', slots: [] }],
+        containers: [{ containerId: 'world-1:1,64,0', kind: 'chest', slots: Array.from({ length: 27 }, () => null) }],
       }),
       expect.objectContaining({
         _tag: 'AuthoritativeSnapshot',
@@ -2274,6 +2275,45 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 8, containers: [] }),
       expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 9, containers: [], furnaces: [] }),
     ]))
+  })
+
+  it('creates each storage block with its typed capacity', () => {
+    const storageCases: ReadonlyArray<readonly [ContainerKind, number]> = [
+      ['chest', 27],
+      ['shulker_box', 27],
+      ['dispenser', 9],
+      ['hopper', 5],
+    ]
+
+    for (const [kind, capacity] of storageCases) {
+      const fixture = makeFixture({
+        ...initialState(),
+        blocks: [],
+        containers: [],
+        furnaces: [],
+        inventories: [{
+          player: playerId('alice'),
+          state: { slots: [{ item: kind, count: 1 }], selectedSlot: 0 },
+        }],
+      }, undefined, 'normal', { allowedBlocks: new Set([kind]) })
+      fixture.sent.length = 0
+
+      expect(fixture.receive({
+        _tag: 'BlockPlace',
+        player: playerId('alice'),
+        world: worldId('world-1'),
+        at: { x: 1, y: 64, z: 0 },
+        block: kind,
+      }).accepted).toBe(true)
+      expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+        _tag: 'AuthoritativeSnapshot',
+        containers: [{
+          containerId: 'world-1:1,64,0',
+          kind,
+          slots: Array.from({ length: capacity }, () => null),
+        }],
+      }))
+    }
   })
 
   it('consumes placed blocks and rejects placement without inventory', () => {

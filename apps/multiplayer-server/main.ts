@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 
 import { blockTypeOfId } from '@nerima-games/mc-kernel'
+import { CHEST_CONTAINER_CAPACITY } from '@nerima-games/mc-sim'
 import {
   blockPosition,
   CHUNK_HEIGHT,
@@ -215,7 +216,17 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     inventories: state['inventories'] ?? [],
     vitals: state['vitals'] ?? [],
     timeWeather: state['timeWeather'] ?? { timeOfDay: 6_000, weather: 'clear' },
-    containers: state['containers'] ?? [],
+    containers: Array.isArray(state['containers'])
+      ? state['containers'].map((container) => {
+          if (!isRecord(container) || container['kind'] !== undefined) return container
+          const slots = Array.isArray(container['slots']) ? container['slots'] : []
+          return {
+            ...container,
+            kind: 'chest',
+            slots: [...slots, ...Array.from({ length: Math.max(0, CHEST_CONTAINER_CAPACITY - slots.length) }, () => null)],
+          }
+        })
+      : [],
     furnaces: state['furnaces'] ?? [],
     villagerTrades: state['villagerTrades'] ?? [],
     entities: state['entities'] ?? [],

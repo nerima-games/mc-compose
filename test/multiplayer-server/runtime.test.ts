@@ -43,6 +43,22 @@ const nextMessage = (socket: WebSocket): Promise<NetworkMessage> => new Promise(
   socket.on('message', handleMessage)
 })
 
+const nextAuthoritativeSnapshot = (socket: WebSocket): Promise<Extract<NetworkMessage, { readonly _tag: 'AuthoritativeSnapshot' }>> => new Promise((resolve, reject) => {
+  const handleError = (error: Error): void => {
+    socket.off('message', handleMessage)
+    reject(error)
+  }
+  const handleMessage = (data: WebSocket.RawData): void => {
+    const decoded = decodeFrame(data.toString() as never)
+    if (Either.isLeft(decoded) || decoded.right._tag !== 'AuthoritativeSnapshot') return
+    socket.off('message', handleMessage)
+    socket.off('error', handleError)
+    resolve(decoded.right)
+  }
+  socket.once('error', handleError)
+  socket.on('message', handleMessage)
+})
+
 const connect = async (runtime: MultiplayerRuntime): Promise<WebSocket> => {
   const socket = new WebSocket(`ws://${runtime.host}:${String(runtime.port)}/ws`)
   await new Promise<void>((resolve, reject) => {
@@ -435,6 +451,46 @@ describe('multiplayer WebSocket runtime', () => {
     }))
     await expect(snapshot).resolves.toMatchObject({
       _tag: 'WorldSnapshot', revision: 2, blocks: [{ at: { x: 1, y: 64, z: 1 }, block: null }],
+    })
+    socket.close()
+  })
+
+  it('migrates legacy containers to full chest state', async () => {
+    const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-server-')), 'state.json')
+    await writeFile(stateFile, JSON.stringify({
+      format: 1,
+      worldId: 'legacy-container-world',
+      seed: 73,
+      state: {
+        revision: 2,
+        blocks: [{ at: { x: 1, y: 64, z: 1 }, block: 'chest' }],
+        containers: [{ containerId: 'legacy-container-world:1,64,1', slots: [{ item: 'apple', count: 2 }] }],
+      },
+    }), 'utf8')
+
+    const runtime = await startMultiplayerServer({
+      host: '127.0.0.1',
+      port: 0,
+      worldId: 'legacy-container-world',
+      seed: 73,
+      stateFile,
+      installSignalHandlers: false,
+    })
+    runtimes.push(runtime)
+
+    const socket = await connect(runtime)
+    await authenticate(socket, 'legacy-container-player')
+    const authoritativeSnapshot = nextAuthoritativeSnapshot(socket)
+    socket.send(encode({
+      _tag: 'PlayerJoin', player: 'legacy-container-player' as PlayerId, name: 'Legacy Container Player' as PlayerName,
+      at: { x: 0, y: 200, z: 0 },
+    }))
+    await expect(authoritativeSnapshot).resolves.toMatchObject({
+      containers: [{
+        containerId: 'legacy-container-world:1,64,1',
+        kind: 'chest',
+        slots: [{ item: 'apple', count: 2 }, ...Array.from({ length: 26 }, () => null)],
+      }],
     })
     socket.close()
   })

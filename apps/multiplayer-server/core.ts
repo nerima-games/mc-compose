@@ -17,11 +17,12 @@ import {
   type WireText,
   type WorldId,
   type WorldSnapshot,
+  type ContainerKind,
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem } from '@nerima-games/mc-kernel'
 import type { Dimension } from '@nerima-games/mc-worldgen'
-import { EYE_LEVEL_OFFSET, durabilityForItem, forwardVector, isValidDurabilityForItem, planExplosion, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
+import { EYE_LEVEL_OFFSET, containerCapacity, durabilityForItem, forwardVector, isValidDurabilityForItem, planExplosion, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
@@ -211,6 +212,21 @@ type ItemStack = NonNullable<InventoryState['slots'][number]>
 type MobWireState = NonNullable<Extract<AuthoritativeEntityState, { readonly _tag: 'living' }>['mobState']>
 type UnknownRecord = Readonly<Record<string, unknown>>
 
+const containerKindForBlock = (block: string): ContainerKind | undefined => {
+  switch (block) {
+    case 'chest':
+    case 'shulker_box':
+    case 'dispenser':
+    case 'hopper':
+      return block
+    default:
+      return undefined
+  }
+}
+
+const emptyContainerSlots = (kind: ContainerKind): Array<ItemStack | null> =>
+  Array.from({ length: containerCapacity(kind) }, () => null)
+
 const unknownRecord = (value: unknown): UnknownRecord | undefined =>
   typeof value === 'object' && value !== null ? value as UnknownRecord : undefined
 
@@ -321,6 +337,7 @@ interface MutableVitalsState {
 
 interface MutableContainerState {
   readonly containerId: string
+  readonly kind: ContainerKind
   readonly slots: Array<ItemStack | null>
 }
 
@@ -396,6 +413,7 @@ const inventorySnapshot = (state: MutableInventoryState): InventoryState => {
 const vitalsSnapshot = (state: MutableVitalsState): VitalsState => ({ ...state })
 const containerSnapshot = (state: MutableContainerState): ContainerState => ({
   containerId: state.containerId,
+  kind: state.kind,
   slots: state.slots.map(cloneStack),
 })
 const furnaceSnapshot = (state: MutableFurnaceState): FurnaceState => ({
@@ -545,6 +563,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const containers = new Map<string, MutableContainerState>(
     (options.initialState?.containers ?? []).map((state) => [state.containerId, {
       containerId: state.containerId,
+      kind: state.kind,
       slots: state.slots.map(cloneStack),
     }]),
   )
@@ -788,7 +807,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const facilityIsAccessible = (
     player: PlayerId,
     at: BlockPos,
-    expectedBlock: 'chest' | 'furnace',
+    expectedBlock: ContainerKind | 'furnace',
   ): CommandRejectionReason | null => {
     const actor = players.get(player)
     if (actor === undefined) return 'resource-not-found'
@@ -1518,10 +1537,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       case 'ContainerCommand': {
         const at = parseContainerId(message.containerId)
         if (at === null) return { accepted: false, reason: 'invalid-command' }
-        const inaccessibleReason = facilityIsAccessible(message.player, at, 'chest')
-        if (inaccessibleReason !== null) return { accepted: false, reason: inaccessibleReason }
         const container = containers.get(message.containerId)
         if (container === undefined) return { accepted: false, reason: 'resource-not-found' }
+        const inaccessibleReason = facilityIsAccessible(message.player, at, container.kind)
+        if (inaccessibleReason !== null) return { accepted: false, reason: inaccessibleReason }
         if (message.action._tag === 'move-item') {
           const playerIsSource = message.action.source._tag === 'player-slot'
           const sourceSlots = playerIsSource ? inventory.slots : container.slots
@@ -2144,9 +2163,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           : { ...sourceStack, count: sourceStack.count - 1 }
         blocks.set(positionKey(message.at), { at: message.at, block: message.block })
         disturbFallingBlocks([message.at])
-        if (message.block === 'chest') {
+        const containerKind = containerKindForBlock(message.block)
+        if (containerKind !== undefined) {
           const containerId = containerIdAt(message.at)
-          containers.set(containerId, { containerId, slots: [] })
+          containers.set(containerId, { containerId, kind: containerKind, slots: emptyContainerSlots(containerKind) })
         } else if (message.block === 'furnace') {
           const furnaceId = furnaceIdAt(message.at)
           furnaces.set(furnaceId, {
@@ -2168,7 +2188,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           player: message.player,
           state: inventorySnapshot(inventory),
         })
-        if (message.block === 'chest' || message.block === 'furnace') broadcast(authoritativeSnapshot())
+        if (containerKind !== undefined || message.block === 'furnace') broadcast(authoritativeSnapshot())
         return { accepted: true, message }
       }
       case 'BlockBreak': {
@@ -2180,7 +2200,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (brokenBlock === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })
         disturbFallingBlocks([message.at])
-        if (brokenBlock === 'chest') containers.delete(containerIdAt(message.at))
+        if (containerKindForBlock(brokenBlock) !== undefined) containers.delete(containerIdAt(message.at))
         else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
         revision += 1
         const inventory = inventories.get(message.player)
@@ -2203,7 +2223,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         notifyStateChanged()
         broadcast({ ...message, world: worldId })
         for (const drop of drops) broadcast({ _tag: 'EntitySpawnDelta', world: worldId, revision, entity: drop })
-        if (brokenBlock === 'chest' || brokenBlock === 'furnace') broadcast(authoritativeSnapshot())
+        if (containerKindForBlock(brokenBlock) !== undefined || brokenBlock === 'furnace') broadcast(authoritativeSnapshot())
         {
           const events = sleepAuthority.reconcile()
           if (events.length > 0) broadcastSleep({ _tag: 'SleepEvents', revision: sleepAuthority.snapshot().revision, events })

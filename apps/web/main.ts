@@ -3381,9 +3381,8 @@ type MultiplayerInventorySelection = Readonly<{
       version: 2,
       containers: states.map((state) => ({
         id: state.containerId,
-        kind: 'chest',
-        slots: Array.from({ length: 27 }, (_, index) => {
-          const stack = state.slots[index]
+        kind: state.kind,
+        slots: state.slots.map((stack) => {
           return stack == null
             ? null
             : { item: stack.item as ItemStack['item'], count: stack.count, durability: null }
@@ -3397,7 +3396,7 @@ type MultiplayerInventorySelection = Readonly<{
     applyNetworkContainers([
       ...snapshot.containers
         .filter((container) => container.id !== state.containerId)
-        .map((container) => ({ containerId: container.id, slots: container.slots })),
+        .map((container) => ({ containerId: container.id, kind: container.kind, slots: container.slots })),
       state,
     ])
   }
