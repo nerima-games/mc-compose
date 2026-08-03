@@ -2105,6 +2105,10 @@ const bootGame = async (
                 delayTicks: 1,
               })
             } else if (kind === 'comparator') {
+              const container = Effect.runSync(world.inventory.containerSnapshotAt(
+                context.dimension,
+                { x: position.x, y, z: position.z + 1 },
+              ))
               components.push({
                 position,
                 kind,
@@ -2115,6 +2119,11 @@ const bootGame = async (
                   { x: position.x + 1, y, z: position.z },
                 ],
                 mode: comparatorModes.get(leverKeyOf({ dimension: context.dimension, position })) ?? 'compare',
+                ...(container === null ? {} : {
+                  containerSlots: container.slots.map((slot) => slot === null
+                    ? { count: 0, maxStack: 64 }
+                    : { count: slot.count, maxStack: maxStackCountForItem(slot.item) }),
+                }),
               })
             } else if (kind === 'observer') {
               const key = leverKeyOf({ dimension: context.dimension, position })
