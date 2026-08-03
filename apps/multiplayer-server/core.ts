@@ -31,9 +31,12 @@ import {
   ENDERMAN_KIND,
   ENDERMAN_XP_REWARD,
   PIG_KIND,
+  SKELETON_KIND,
+  SPIDER_KIND,
   SHEEP_KIND,
   ZOMBIE_KIND,
   ZOMBIE_XP_REWARD,
+  ZOMBIFIED_PIGLIN_KIND,
   applyFurnaceAdvance,
   blockLoot,
   dropRollsNeeded,
@@ -167,6 +170,19 @@ const supportedPassiveMobKind = (entityType: string) => {
   if (entityType === String(SHEEP_KIND)) return SHEEP_KIND
   if (entityType === String(CHICKEN_KIND)) return CHICKEN_KIND
   return undefined
+}
+
+const supportedHostileEcosystemMobKind = (entityType: string) => {
+  if (entityType === String(SKELETON_KIND)) return SKELETON_KIND
+  if (entityType === String(SPIDER_KIND)) return SPIDER_KIND
+  if (entityType === String(ZOMBIFIED_PIGLIN_KIND)) return ZOMBIFIED_PIGLIN_KIND
+  if (entityType === String(BLAZE_KIND)) return BLAZE_KIND
+  return undefined
+}
+
+const ecosystemMobStateForSimulation = (value: unknown) => {
+  if (typeof value !== 'object' || value === null) return undefined
+  return repairEcosystemMobState({ ...value, _tag: 'EcosystemMob' })
 }
 
 const mobExperienceReward = (kind: ReturnType<typeof supportedMobKind>): number => {
@@ -1641,12 +1657,27 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
     if (elapsedSecs > 0) {
       const movedEntities: AuthoritativeDelta[] = []
+      const damagedPlayers = new Set<PlayerId>()
+      const deadPlayers = new Set<PlayerId>()
       for (const entity of entities.values()) {
         if (entity._tag !== 'living') continue
-        const kind = supportedPassiveMobKind(entity.entityType)
+        const passiveKind = supportedPassiveMobKind(entity.entityType)
+        const hostileKind = supportedHostileEcosystemMobKind(entity.entityType)
+        const kind = passiveKind ?? hostileKind
         if (kind === undefined) continue
-        const state = repairEcosystemMobState(entity.mobState) ?? initialEcosystemMobState()
-        const step = stepEcosystemMob(kind, state, entity.at, undefined, elapsedSecs)
+        const targetEntry = hostileKind === undefined
+          ? undefined
+          : [...players.entries()]
+            .filter(([player, presence]) => presence.world === worldId && (vitals.get(player)?.health ?? 0) > 0)
+            .map(([player, presence]) => [player, presence, Math.hypot(
+              presence.at.x - entity.at.x,
+              presence.at.y - entity.at.y,
+              presence.at.z - entity.at.z,
+            )] as const)
+            .sort((left, right) => left[2] - right[2])[0]
+        const target = targetEntry?.[1].at
+        const state = ecosystemMobStateForSimulation(entity.mobState) ?? initialEcosystemMobState()
+        const step = stepEcosystemMob(kind, state, entity.at, target, elapsedSecs)
         const at = {
           ...step.feetPosition,
           x: Math.min(bounds.maxX, Math.max(bounds.minX, step.feetPosition.x)),
@@ -1660,11 +1691,36 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const updated = { ...entity, at, mobState }
         entities.set(entity.entityId, updated)
         movedEntities.push({ _tag: 'EntityUpdateDelta', world: worldId, revision: 0, entity: updated })
+        if (step.attack !== undefined && targetEntry !== undefined) {
+          const playerVitals = vitals.get(targetEntry[0])
+          if (playerVitals !== undefined) {
+            const wasAlive = playerVitals.health > 0
+            playerVitals.health = Math.max(0, playerVitals.health - step.attack.damage)
+            const hungerActor = hungerActors.get(targetEntry[0])
+            if (hungerActor !== undefined) hungerActors.set(targetEntry[0], {
+              ...hungerActor,
+              state: { ...hungerActor.state, health: playerVitals.health },
+            })
+            damagedPlayers.add(targetEntry[0])
+            if (wasAlive && playerVitals.health <= 0) deadPlayers.add(targetEntry[0])
+          }
+        }
       }
-      if (movedEntities.length > 0) {
+      if (movedEntities.length > 0 || damagedPlayers.size > 0) {
         revision += 1
         stateChanged = true
         postPersistenceDeltas.push(...movedEntities.map((delta) => ({ ...delta, revision })))
+        postPersistenceDeltas.push(...applyPlayerDeaths([...deadPlayers], revision))
+        for (const player of damagedPlayers) {
+          const presence = players.get(player)
+          if (presence !== undefined) postPersistenceDeltas.push({
+            _tag: 'PlayerVitalsDelta',
+            world: presence.world,
+            revision,
+            player,
+            state: vitalsSnapshot(vitals.get(player) as MutableVitalsState),
+          })
+        }
       }
     }
 

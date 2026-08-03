@@ -1171,6 +1171,45 @@ describe('multiplayer server authoritative state', () => {
     }))
   })
 
+  it('applies hostile mob attacks to the nearest player and preserves cooldown state', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      vitals: [{ player: playerId('alice'), state: { health: 20, hunger: 20, experience: 7 } }],
+      entities: [{
+        _tag: 'living', entityId: entityId('skeleton-1'), entityType: 'skeleton',
+        at: { x: 10, y: 64, z: 0 }, health: 20, maxHealth: 20,
+      }],
+    })
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(1_000)
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'EntityUpdateDelta',
+        entity: expect.objectContaining({
+          entityId: 'skeleton-1',
+          mobState: { motionPhase: 1, attackCooldownSecs: 2, provoked: false },
+        }),
+      }),
+      expect.objectContaining({ _tag: 'PlayerVitalsDelta', player: 'alice', state: expect.objectContaining({ health: 16 }) }),
+    ]))
+
+    fixture.sent.length = 0
+    fixture.server.tick(1_000)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta',
+      entity: expect.objectContaining({ mobState: expect.objectContaining({ attackCooldownSecs: 1 }) }),
+    }))
+    expect(messages(fixture.sent).some((message) => message._tag === 'PlayerVitalsDelta')).toBe(false)
+
+    fixture.sent.length = 0
+    fixture.server.tick(1_000)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', player: 'alice', state: expect.objectContaining({ health: 12 }),
+    }))
+  })
+
   it('rejects unauthorized and missing-resource commands without advancing revision', () => {
     const fixture = makeFixture()
     fixture.sent.length = 0
