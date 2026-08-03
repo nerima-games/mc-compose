@@ -15,6 +15,7 @@ import {
   getBlockAt,
   localCoordOfBlock,
   type Chunk,
+  type Dimension,
 } from '@nerima-games/mc-worldgen'
 import {
   AuthoritativeSnapshot,
@@ -47,6 +48,9 @@ const DEFAULT_BLOCKS = [
   'sand',
   'stone',
 ] as const
+
+const dimensionForWorld = (worldId: string): Dimension =>
+  worldId === 'nether' || worldId === 'end' ? worldId : 'overworld'
 
 export interface MultiplayerRuntimeOptions {
   readonly host: string
@@ -399,6 +403,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   const generatedBlockAt = makeGeneratedBlockAt(options.seed)
   const core = makeMultiplayerServerCore({
     worldId: options.worldId,
+    dimension: dimensionForWorld(options.worldId),
     seed: options.seed,
     allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
     generatedBlockAt,

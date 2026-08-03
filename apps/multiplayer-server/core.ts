@@ -20,6 +20,7 @@ import {
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem } from '@nerima-games/mc-kernel'
+import type { Dimension } from '@nerima-games/mc-worldgen'
 import { EYE_LEVEL_OFFSET, durabilityForItem, forwardVector, isValidDurabilityForItem, planExplosion, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
@@ -138,6 +139,7 @@ const arrowHitsLivingEntity = (
 
 export interface MultiplayerServerOptions {
   readonly worldId: string
+  readonly dimension?: Dimension
   readonly seed: number
   readonly allowedBlocks: ReadonlySet<string>
   readonly bounds?: Readonly<{
@@ -512,6 +514,7 @@ export interface MultiplayerServerCore {
 
 export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): MultiplayerServerCore => {
   const worldId = options.worldId as WorldId
+  const dimension = options.dimension ?? 'overworld'
   const bounds = options.bounds ?? DEFAULT_BOUNDS
   const clients = new Map<ClientId, ConnectedClient>()
   const players = new Map<PlayerId, MutablePlayer>()
@@ -619,7 +622,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         && Math.abs(entity.at.z - bed.z) <= 8)
       return {
         dimension: worldId,
-        bedValid: withinReach && blockAt(bed) === 'bed',
+        bedValid: dimension === 'overworld' && withinReach && blockAt(bed) === 'bed',
         nightOrThunder: timeWeather.weather === 'thunder' || timeWeather.timeOfDay >= 12_542,
         safe: !hostileNearby,
       }

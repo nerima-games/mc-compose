@@ -9,6 +9,7 @@ import {
   type WireText,
   type WorldId,
 } from '@nerima-games/mx-multiplayer'
+import type { Dimension } from '@nerima-games/mc-worldgen'
 import { Either } from 'effect'
 import { describe, expect, it } from 'vitest'
 
@@ -70,11 +71,13 @@ const makeFixture = (
   timeOfDay = 6_000,
   spawnAt?: { x: number; y: number; z: number },
   initialWeather: 'clear' | 'rain' | 'thunder' = 'clear',
+  dimension: Dimension = 'overworld',
 ) => {
   const sent = new Map<string, Array<WireText>>()
   let nowMs = 0
   const server = makeMultiplayerServerCore({
     worldId: 'world-1',
+    dimension,
     seed: 42,
     allowedBlocks: new Set(['stone', 'dirt']),
     bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
@@ -470,6 +473,31 @@ describe('authoritative multiplayer server core', () => {
       _tag: 'SleepEvents',
       events: expect.arrayContaining([expect.objectContaining({ _tag: 'ActorSleepChanged', sleeping: null })]),
     }))
+  })
+
+  it('rejects sleep commands outside the overworld', () => {
+    const fixture = makeFixture(
+      ({ x, y, z }) => x === 0 && y === 64 && z === 1 ? 'bed' : null,
+      13_000,
+      undefined,
+      'clear',
+      'nether',
+    )
+    const frames = fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+    frames.length = 0
+
+    expect(fixture.receiveSleep('socket-a', {
+      _tag: 'SleepCommand',
+      command: {
+        _tag: 'EnterSleep', actor: playerId('alice'), session: 'alice', requestId: 'sleep-a',
+        expectedRevision: 0, clientTick: 20, bed: { x: 0, y: 64, z: 1 },
+      },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(sleepMessages(frames)).toContainEqual(expect.objectContaining({
+      _tag: 'SleepCommandResult', result: expect.objectContaining({ accepted: false }),
+    }))
+    expect(fixture.server.snapshot().revision).toBe(0)
   })
 
   it('authoritatively advances morning and clears weather when all players sleep', () => {
