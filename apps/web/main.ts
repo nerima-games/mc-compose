@@ -3463,6 +3463,11 @@ const bootGame = async (
           world.inventory,
           world.player,
           time,
+          vehicleService,
+          {
+            isActiveDimension: (dimension) => dimension === currentChunkContext.dimension,
+            isPoweredRailAt: (dimension, position) => poweredRails.has(leverKeyOf({ dimension, position })),
+          },
         ),
       ),
     }),
