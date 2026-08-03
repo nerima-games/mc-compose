@@ -389,6 +389,66 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  it('places vehicles and consumes the selected vehicle item from the authoritative player pose', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [...state.blocks, { at: { x: 0, y: 65, z: -1 }, block: 'stone' }],
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'oak_boat', count: 1 }, null, null], selectedSlot: 0 },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'VehicleUseCommand', commandId: commandId('place-boat'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta', revision: 5, player: playerId('alice'),
+        state: expect.objectContaining({ slots: [null, null, null], selectedSlot: 0 }),
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta', revision: 5,
+        entity: expect.objectContaining({
+          _tag: 'vehicle', vehicleType: 'boat', at: { x: 0.5, y: 65, z: 0.5 }, occupant: null,
+        }),
+      }),
+    ]))
+  })
+
+  it('places minecarts on the targeted rail', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [...state.blocks, { at: { x: 0, y: 65, z: -1 }, block: 'rail' }],
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'minecart', count: 2 }, null, null], selectedSlot: 0 },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'VehicleUseCommand', commandId: commandId('place-minecart'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta', revision: 5,
+        state: expect.objectContaining({ slots: [{ item: 'minecart', count: 1 }, null, null], selectedSlot: 0 }),
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({
+          _tag: 'vehicle', vehicleType: 'minecart', at: { x: 0.5, y: 65, z: -0.5 },
+        }),
+      }),
+    ]))
+  })
+
   it('keeps fishing, rod wear, and full-inventory loot drops authoritative', () => {
     const state = initialState()
     const fixture = makeFixture({

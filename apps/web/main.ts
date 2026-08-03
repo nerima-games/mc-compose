@@ -2968,7 +2968,7 @@ const bootGame = async (
   }
 
   const sendEntityCommand = (
-    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'EnderPearlCommand' | 'BucketUseCommand' | 'FishingCommand' | 'VehicleCommand' }>>,
+    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'EnderPearlCommand' | 'BucketUseCommand' | 'VehicleUseCommand' | 'FishingCommand' | 'VehicleCommand' }>>,
   ): void => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete) return
     nextEntityCommand += 1
@@ -8529,31 +8529,35 @@ const bootGame = async (
       }
       if (!usedSpecialItem && specialSelected !== undefined
         && (specialSelected.item === 'oak_boat' || specialSelected.item === 'minecart')) {
-        const target = Effect.runSync(targetedBlock())
-        if (target !== undefined) {
-          const type = specialSelected.item === 'oak_boat' ? 'boat' : 'minecart'
-          const item = specialSelected.item
-          const at = type === 'minecart' && (blockTypeOfId(target.block) === 'rail' || blockTypeOfId(target.block) === 'powered_rail')
-            ? target.position
-            : target.adjacentPosition
-          const removed = Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, item, 1))
-          if (removed._tag === 'Removed') {
-            const spawned = Effect.runSync(vehicleService.spawn(
-              type,
-              Effect.runSync(playerApi.dimension),
-              { x: at.x + 0.5, y: at.y, z: at.z + 0.5 },
-              poseBeforeFrame.yawRadians,
-            ))
-            replaceVehicle({
-              ...spawned,
-              velocity: type === 'minecart' ? { x: 0, y: 0, z: -0.25 } : { x: 0, y: 0, z: 0 },
-            })
-            document.body.setAttribute('data-vehicle-result', `placed-${type}`)
-            markSessionDirty()
-            renderPlayerUi()
+        if (multiplayer !== undefined && multiplayerHandshakeComplete) {
+          sendEntityCommand({ _tag: 'VehicleUseCommand' })
+        } else {
+          const target = Effect.runSync(targetedBlock())
+          if (target !== undefined) {
+            const type = specialSelected.item === 'oak_boat' ? 'boat' : 'minecart'
+            const item = specialSelected.item
+            const at = type === 'minecart' && (blockTypeOfId(target.block) === 'rail' || blockTypeOfId(target.block) === 'powered_rail')
+              ? target.position
+              : target.adjacentPosition
+            const removed = Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, item, 1))
+            if (removed._tag === 'Removed') {
+              const spawned = Effect.runSync(vehicleService.spawn(
+                type,
+                Effect.runSync(playerApi.dimension),
+                { x: at.x + 0.5, y: at.y, z: at.z + 0.5 },
+                poseBeforeFrame.yawRadians,
+              ))
+              replaceVehicle({
+                ...spawned,
+                velocity: type === 'minecart' ? { x: 0, y: 0, z: -0.25 } : { x: 0, y: 0, z: 0 },
+              })
+              document.body.setAttribute('data-vehicle-result', `placed-${type}`)
+              markSessionDirty()
+              renderPlayerUi()
+            }
           }
-          usedSpecialItem = true
         }
+        usedSpecialItem = true
       }
       const shouldAttemptEndFeature = currentChunkContext.dimension === 'end'
         || endPortalComplete

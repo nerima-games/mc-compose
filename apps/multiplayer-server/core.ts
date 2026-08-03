@@ -415,10 +415,11 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'EntityAttackCommand' ||
   message._tag === 'EntityPickupCommand' ||
   message._tag === 'BowUseCommand' ||
-  message._tag === 'IgniteTntCommand' ||
-  message._tag === 'EnderPearlCommand' ||
-  message._tag === 'BucketUseCommand' ||
-  message._tag === 'FishingCommand' ||
+    message._tag === 'IgniteTntCommand' ||
+    message._tag === 'EnderPearlCommand' ||
+    message._tag === 'BucketUseCommand' ||
+    message._tag === 'VehicleUseCommand' ||
+    message._tag === 'FishingCommand' ||
   message._tag === 'VehicleCommand'
 
 const moveStack = (
@@ -1280,6 +1281,67 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           { ...entityDelta, revision: nextRevision },
           { _tag: 'PlayerInventoryDelta', world: worldId, revision: nextRevision, player: message.player, state: inventorySnapshot(inventory) },
         ] }
+      }
+      case 'VehicleUseCommand': {
+        const actor = players.get(message.player)
+        if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+
+        const selected = inventory.slots[inventory.selectedSlot]
+        const vehicleType = selected?.item === 'oak_boat'
+          ? 'boat'
+          : selected?.item === 'minecart'
+            ? 'minecart'
+            : undefined
+        if (selected === null || selected === undefined || vehicleType === undefined) {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+
+        const target = Option.getOrUndefined(targetBlockFromPlayerPose({
+          feetPosition: actor.at,
+          yawRadians: actor.facing.yawRadians,
+          pitchRadians: actor.facing.pitchRadians,
+        }, BLOCK_INTERACTION_RANGE, (x, y, z) => blockAt({ x, y, z }) !== null))
+        if (target === undefined) return { accepted: false, reason: 'invalid-command' }
+
+        const targetBlock = blockAt(target.position)
+        const placedOnRail = vehicleType === 'minecart' &&
+          (targetBlock === 'rail' || targetBlock === 'powered_rail')
+        const at = placedOnRail ? target.position : target.adjacentPosition
+        if (!isInBounds(at) || (!placedOnRail && blockAt(at) !== null)) {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+
+        inventory.slots[inventory.selectedSlot] = selected.count === 1
+          ? null
+          : { ...selected, count: selected.count - 1 }
+        if (selected.count === 1) inventory.durability[inventory.selectedSlot] = null
+
+        const entity: AuthoritativeEntityState = {
+          _tag: 'vehicle',
+          entityId: `${String(message.player)}:vehicle:${String(message.commandId)}` as AuthoritativeEntityState['entityId'],
+          vehicleType,
+          at: { x: at.x + 0.5, y: at.y, z: at.z + 0.5 },
+          occupant: null,
+        }
+        entities.set(entity.entityId, entity)
+        return {
+          accepted: true,
+          deltas: (nextRevision) => [
+            {
+              _tag: 'PlayerInventoryDelta',
+              world: actor.world,
+              revision: nextRevision,
+              player: message.player,
+              state: inventorySnapshot(inventory),
+            },
+            {
+              _tag: 'EntitySpawnDelta',
+              world: actor.world,
+              revision: nextRevision,
+              entity,
+            },
+          ],
+        }
       }
       case 'VehicleCommand': {
         const entity = entities.get(message.entityId)
