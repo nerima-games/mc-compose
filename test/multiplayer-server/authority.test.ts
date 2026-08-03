@@ -117,7 +117,7 @@ const makeFixture = (
   state: MultiplayerServerState = initialState(),
   joinAt: Readonly<{ x: number; y: number; z: number }> = { x: 0, y: 64, z: 0 },
   difficulty: 'peaceful' | 'easy' | 'normal' | 'hard' = 'normal',
-  serverOptions: Partial<Pick<MultiplayerServerOptions, 'generatedBlockAt' | 'now' | 'passableBlocks'>> = {},
+  serverOptions: Partial<Pick<MultiplayerServerOptions, 'generatedBlockAt' | 'now' | 'passableBlocks' | 'spawnAt'>> = {},
 ) => {
   const sent: Array<WireText> = []
   const persisted: Array<MultiplayerServerState> = []
@@ -672,7 +672,8 @@ describe('multiplayer server authoritative state', () => {
   })
 
   it('applies inventory and vitals commands once and rejects stale revisions', () => {
-    const fixture = makeFixture()
+    const spawnAt = { x: 6, y: 70, z: -4 }
+    const fixture = makeFixture(undefined, undefined, 'normal', { spawnAt })
     fixture.sent.length = 0
     const inventoryCommand: NetworkMessage = {
       _tag: 'PlayerInventoryCommand',
@@ -749,7 +750,17 @@ describe('multiplayer server authoritative state', () => {
         revision: 6,
         state: { health: 20, hunger: 20, experience: 0 },
       }),
+      expect.objectContaining({
+        _tag: 'PlayerMove',
+        player: 'alice',
+        world: 'world-1',
+        at: spawnAt,
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      }),
     ])
+    expect(fixture.persisted.at(-1)).toEqual(expect.objectContaining({
+      playerPositions: [expect.objectContaining({ player: 'alice', at: spawnAt })],
+    }))
   })
 
   it('swaps inventory stacks while enforcing stack capacity for moves', () => {

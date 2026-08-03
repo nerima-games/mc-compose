@@ -919,9 +919,17 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     hungerTickRemainderMs = nextSnapshot.tickRemainderMs
     for (const actor of nextSnapshot.actors) hungerActors.set(actor.player, actor)
     const { changed, deaths } = applyHungerEvents(result.events)
+    const respawnedPlayer = message.action === 'respawn' ? players.get(message.player) : undefined
     if (message.action === 'respawn') {
       const playerVitals = vitals.get(message.player)
       if (playerVitals !== undefined) playerVitals.experience = 0
+      if (respawnedPlayer !== undefined && options.spawnAt !== undefined) {
+        respawnedPlayer.at = { ...options.spawnAt }
+        playerPositions.set(message.player, {
+          at: { ...respawnedPlayer.at },
+          facing: { ...respawnedPlayer.facing },
+        })
+      }
     }
     const consumed = result.events.find((event) => event._tag === 'FoodConsumed')
     if (consumed !== undefined) {
@@ -937,7 +945,17 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         return presence === undefined ? [] : [{ _tag: 'PlayerVitalsDelta' as const, world: presence.world, revision: nextRevision, player, state: vitalsSnapshot(vitals.get(player) as MutableVitalsState) }]
       }),
       ...(consumed === undefined || players.get(consumed.player) === undefined ? [] : [{ _tag: 'PlayerInventoryDelta' as const, world: (players.get(consumed.player) as MutablePlayer).world, revision: nextRevision, player: consumed.player, state: inventorySnapshot(inventories.get(consumed.player) as MutableInventoryState) }]),
-    ] }
+    ],
+    ...(respawnedPlayer === undefined ? {} : {
+      messages: () => [{
+        _tag: 'PlayerMove' as const,
+        player: respawnedPlayer.player,
+        world: respawnedPlayer.world,
+        at: { ...respawnedPlayer.at },
+        facing: { ...respawnedPlayer.facing },
+      }],
+    }),
+    }
   }
 
   const decideCommand = (message: AuthoritativeCommand): CommandDecision => {
