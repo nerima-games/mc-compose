@@ -4,6 +4,7 @@ import {
   advanceWitherRuntime,
   damageRuntimeWither,
   initialWitherRuntimeState,
+  isValidWitherRuntimeSnapshot,
   matchRuntimeWitherSummon,
   restoreWitherRuntime,
   snapshotWitherRuntime,
@@ -41,6 +42,18 @@ describe('wither runtime', () => {
     runtime = advanceWitherRuntime(active.state, 'overworld', { x: 8, y: 64, z: 0 }, 2, () => false).state
     expect(runtime.skulls).toHaveLength(1)
     expect(restoreWitherRuntime(snapshotWitherRuntime(runtime))).toEqual(runtime)
+  })
+
+  it('rejects malformed persisted runtime snapshots', () => {
+    const runtime = summonRuntimeWither(initialWitherRuntimeState(), 'overworld', { x: 0, y: 64, z: 0 })
+    const snapshot = snapshotWitherRuntime(runtime)
+
+    expect(isValidWitherRuntimeSnapshot(snapshot)).toBe(true)
+    expect(isValidWitherRuntimeSnapshot({ ...snapshot, nextWitherId: -1 })).toBe(false)
+    expect(isValidWitherRuntimeSnapshot({
+      ...snapshot,
+      withers: [{ ...snapshot.withers[0]!, shotsFired: -1 }],
+    })).toBe(false)
   })
 
   it('ignores ranged damage after armour activates and drops a nether star on death', () => {

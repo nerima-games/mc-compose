@@ -1,6 +1,6 @@
 import { Data, Effect, Option, Schema } from 'effect'
 import type { YieldableError } from 'effect/Cause'
-import type { WitherRuntimeSnapshot } from '../multiplayer-shared/wither-runtime'
+import { isValidWitherRuntimeSnapshot, type WitherRuntimeSnapshot } from '../multiplayer-shared/wither-runtime'
 
 import {
   loadFrom,
@@ -66,6 +66,12 @@ import {
 
 export const SESSION_FORMAT_NAME = '@nerima-games/mc-compose/session'
 export const SESSION_FORMAT_VERSION = 17
+
+const WitherRuntimeSnapshotSchema = Schema.Unknown.pipe(
+  Schema.filter((value): value is WitherRuntimeSnapshot => isValidWitherRuntimeSnapshot(value), {
+    message: () => 'Wither runtime snapshot violates persistence invariants',
+  }),
+) as unknown as Schema.Schema<WitherRuntimeSnapshot>
 
 export type SessionPosition = {
   readonly x: number
@@ -510,7 +516,7 @@ const SessionStateSchema = Schema.Struct({
       position: PositionSchema,
     })),
   })),
-  wither: Schema.optional(Schema.Unknown as unknown as Schema.Schema<WitherRuntimeSnapshot>),
+  wither: Schema.optional(WitherRuntimeSnapshotSchema),
   vehicles: PersistedVehiclesSchema,
   mountedVehicleId: Schema.optional(Schema.NullOr(Schema.String)),
 }) as unknown as Schema.Schema<SessionState>

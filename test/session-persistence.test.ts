@@ -446,6 +446,41 @@ describe('session persistence', () => {
     }).pipe(Effect.provide(storage.layer))
   })
 
+  it.effect('rejects malformed persisted Wither snapshots', () => {
+    const storage = controlledStorage()
+    const sessionId = 'invalid-wither-snapshot'
+    const state = sessionState(42)
+    const wither = state.wither
+    if (wither === undefined) throw new Error('Session fixture must include a Wither runtime snapshot')
+
+    storage.setEnvelope(sessionHeadKey(sessionId), {
+      format: SESSION_FORMAT_NAME,
+      version: 17,
+      payload: {
+        sessionId,
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: {
+          ...state,
+          wither: {
+            ...wither,
+            withers: [{ ...wither.withers[0]!, rangedCooldownSecs: -1 }],
+          },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(loadSession(sessionId))
+      expect(error).toMatchObject({
+        _tag: 'SaveDecodeError',
+        format: SESSION_FORMAT_NAME,
+        version: 17,
+      })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
   it.effect('migrates a v8 session with an absent furnace registry', () => {
     const storage = controlledStorage()
     const key = sessionHeadKey('legacy-v8')

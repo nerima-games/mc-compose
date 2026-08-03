@@ -9,7 +9,9 @@ import {
   type WitherDamageKind,
   type BlockCell,
   type WitherDeathDescriptor,
+  type WitherPhase,
   type WitherSkullProjectileDescriptor,
+  type WitherSkullVariant,
   type WitherSnapshot,
   type WitherState,
 } from '@nerima-games/mc-sim'
@@ -70,6 +72,108 @@ const MELEE_INTERVAL_SECS = 1
 const MELEE_RANGE = 2.25
 const MELEE_DAMAGE = 8
 const SKULL_MAX_AGE_SECS = 12
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const hasExactlyKeys = (value: Record<string, unknown>, keys: ReadonlyArray<string>): boolean =>
+  Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+
+const isNonNegativeFiniteNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0
+
+const isNonNegativeSafeInteger = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+
+const isIdentifier = (value: unknown): value is string =>
+  typeof value === 'string' && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value)
+
+const isPosition = (value: unknown): value is Readonly<{ x: number; y: number; z: number }> =>
+  isRecord(value)
+  && hasExactlyKeys(value, ['x', 'y', 'z'])
+  && typeof value['x'] === 'number'
+  && Number.isFinite(value['x'])
+  && typeof value['y'] === 'number'
+  && Number.isFinite(value['y'])
+  && typeof value['z'] === 'number'
+  && Number.isFinite(value['z'])
+
+const isWitherPhase = (value: unknown): value is WitherPhase =>
+  value === 'charging' || value === 'airborne' || value === 'armoured' || value === 'dead'
+
+const isWitherSkullVariant = (value: unknown): value is WitherSkullVariant =>
+  value === 'normal' || value === 'blue'
+
+const isWitherSnapshot = (value: unknown): value is WitherSnapshot =>
+  isRecord(value)
+  && hasExactlyKeys(value, ['kind', 'version', 'state'])
+  && value['kind'] === 'wither'
+  && value['version'] === 1
+  && isRecord(value['state'])
+  && hasExactlyKeys(value['state'], ['phase', 'healthPoints', 'chargeRemainingSecs', 'feetPosition', 'velocity'])
+  && isWitherPhase(value['state']['phase'])
+  && isNonNegativeFiniteNumber(value['state']['healthPoints'])
+  && isNonNegativeFiniteNumber(value['state']['chargeRemainingSecs'])
+  && isPosition(value['state']['feetPosition'])
+  && isPosition(value['state']['velocity'])
+
+const isWitherSkullDescriptor = (value: unknown): value is WitherSkullProjectileDescriptor =>
+  isRecord(value)
+  && hasExactlyKeys(value, [
+    'kind',
+    'variant',
+    'origin',
+    'direction',
+    'speed',
+    'explosivePower',
+    'destroysResistantBlocks',
+  ])
+  && value['kind'] === 'wither_skull'
+  && isWitherSkullVariant(value['variant'])
+  && isPosition(value['origin'])
+  && isPosition(value['direction'])
+  && isNonNegativeFiniteNumber(value['speed'])
+  && isNonNegativeFiniteNumber(value['explosivePower'])
+  && typeof value['destroysResistantBlocks'] === 'boolean'
+
+const isRuntimeWitherSnapshot = (
+  value: unknown,
+): value is WitherRuntimeSnapshot['withers'][number] =>
+  isRecord(value)
+  && hasExactlyKeys(value, [
+    'id',
+    'dimension',
+    'snapshot',
+    'rangedCooldownSecs',
+    'meleeCooldownSecs',
+    'shotsFired',
+  ])
+  && isIdentifier(value['id'])
+  && isIdentifier(value['dimension'])
+  && isWitherSnapshot(value['snapshot'])
+  && isNonNegativeFiniteNumber(value['rangedCooldownSecs'])
+  && isNonNegativeFiniteNumber(value['meleeCooldownSecs'])
+  && isNonNegativeSafeInteger(value['shotsFired'])
+
+const isRuntimeWitherSkull = (value: unknown): value is RuntimeWitherSkull =>
+  isRecord(value)
+  && hasExactlyKeys(value, ['id', 'ownerId', 'dimension', 'descriptor', 'position', 'ageSecs'])
+  && isIdentifier(value['id'])
+  && isIdentifier(value['ownerId'])
+  && isIdentifier(value['dimension'])
+  && isWitherSkullDescriptor(value['descriptor'])
+  && isPosition(value['position'])
+  && isNonNegativeFiniteNumber(value['ageSecs'])
+
+export const isValidWitherRuntimeSnapshot = (value: unknown): value is WitherRuntimeSnapshot =>
+  isRecord(value)
+  && hasExactlyKeys(value, ['nextWitherId', 'nextSkullId', 'withers', 'skulls'])
+  && isNonNegativeSafeInteger(value['nextWitherId'])
+  && isNonNegativeSafeInteger(value['nextSkullId'])
+  && Array.isArray(value['withers'])
+  && value['withers'].every(isRuntimeWitherSnapshot)
+  && Array.isArray(value['skulls'])
+  && value['skulls'].every(isRuntimeWitherSkull)
 
 export const initialWitherRuntimeState = (): WitherRuntimeState => ({
   nextWitherId: 0,
