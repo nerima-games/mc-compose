@@ -6,8 +6,8 @@ import {
   EMPTY_MODULE_LAYER,
   type GameModule,
   type StageRegistration,
-} from '../domain/composition'
-import { EpochMillis, FixedClockLayer, MonotonicTimeSecs } from '../domain/kernel-vocabulary'
+} from '../src/domain/composition'
+import { EpochMillis, FixedClockLayer, MonotonicTimeSecs } from '../src/domain/kernel-vocabulary'
 import {
   acceptMod,
   acceptMods,
@@ -18,14 +18,14 @@ import {
   RESERVED_STAGE_PREFIXES,
   type ModdingError,
   type ModManifest,
-} from '../domain/modding'
-import { StageId } from '../domain/stage-order'
+} from '../src/domain/modding'
+import { StageId } from '../src/domain/stage-order'
 import {
   STAGE_INPUT,
   STAGE_RENDER,
   STAGE_SIM_PHYSICS,
   STANDARD_STAGE_SKELETON,
-} from '../domain/stage-skeleton'
+} from '../src/domain/stage-skeleton'
 
 const modModule = (frameStages: ReadonlyArray<StageRegistration>): GameModule => ({
   name: 'a mod',

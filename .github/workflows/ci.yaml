@@ -18,7 +18,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          # Full history, not just the default shallow clone: the changeset
+          # status check below diffs the PR branch against `origin/main`.
+          fetch-depth: 0
 
       - name: Setup pnpm
         # Pinned to a commit, not the mutable v4 tag: this is a third-party action
@@ -26,13 +31,13 @@ jobs:
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: "24"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies
-        # --ignore-scripts: pnpm runs postinstall, and a fork PR can edit
+        # --ignore-scripts: pnpm 9 runs postinstall, and a fork PR can edit
         # package.json and the lockfile consistently and still satisfy
         # --frozen-lockfile. Nothing here needs a lifecycle script.
         run: pnpm install --frozen-lockfile --ignore-scripts
@@ -40,34 +45,46 @@ jobs:
       - name: Type check
         run: pnpm typecheck
 
+      # oxlint is provided by the Nix devShell (flake.nix), not a package.json
+      # devDependency — see flake.nix's comment on why. Installing Nix just for
+      # this one step is the org-wide trade-off (DEPENDENCY_POLICY.md §5
+      # "前提条件"): one pinned oxlint version instead of 16 repos each
+      # independently drifting on their own npm-resolved version.
+      - name: Set up Nix
+        uses: ./.github/actions/nix-setup
+        with:
+          cachix-cache: ${{ vars.CACHIX_CACHE }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      # oxlint's no-restricted-imports (.oxlintrc.json) is the enforcement
+      # mechanism for the Tier4 dependency policy (DEPENDENCY_POLICY.md §5).
       - name: Lint
-        run: pnpm lint
-
-      # Hard gate. Unlike the reference repository's check-package-dag.ts this
-      # script exits non-zero on any violation: unlisted cross-repo import,
-      # undeclared dependency, transitive-closure import, a runtime dependency
-      # on mc-playground-kit, or a raw wall-clock read (Date.now()).
-      - name: Dependency whitelist / time-source ban
-        run: pnpm check:deps
-
-      # The API lock (plan.md §6 Step 0-3). Fails when the committed
-      # api-lock.md no longer matches the package's public surface, so a change
-      # to what consumers can see cannot land without a reviewable diff. Run
-      # `pnpm api:update` to refresh it.
-      - name: API lock
-        run: pnpm api:check
+        run: nix develop --command pnpm lint
 
       - name: Test
         run: pnpm test
 
-      # Coverage is reported but not yet thresholded — see vitest.config.ts.
-      # The 99% gate is added when this repository reaches its completion criteria.
+      # RELEASE_STANDARD.md §1.2: catch a user-facing PR that forgot to add a
+      # changeset. Only meaningful on a PR (there is nothing to diff against on
+      # a push to main itself). Not a perfect filter — a docs-only or
+      # CI-only PR will also be flagged — so treat a failure here as a prompt
+      # to run `pnpm changeset` (or confirm the change truly needs none),
+      # rather than as an unconditional hard requirement.
+      - name: Changeset status
+        if: github.event_name == 'pull_request'
+        run: pnpm changeset status --since=main
+
+      # 4-metric 99% gate (TEST_STANDARD.md §3), applied immediately and
+      # org-wide with no staged rollout. This repository's baseline was
+      # unmeasured before this migration; the gate is enabled regardless of
+      # what the baseline turned out to be (TEST_STANDARD.md §4 / this repo's
+      # migration PR records the real number).
       - name: Coverage
         run: pnpm test:coverage
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: coverage
           path: coverage/

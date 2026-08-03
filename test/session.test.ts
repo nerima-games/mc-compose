@@ -11,7 +11,7 @@ import {
   WorldId,
   type SessionEvent,
   type SessionState,
-} from '../domain/session'
+} from '../src/domain/session'
 
 const overworld = WorldId('overworld')
 const second = WorldId('second-world')

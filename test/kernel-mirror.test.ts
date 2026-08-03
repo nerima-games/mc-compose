@@ -21,7 +21,7 @@
  */
 import { describe, expect, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
-import { DeltaTimeSecs, type FrameServices } from '../domain/composition'
+import { DeltaTimeSecs, type FrameServices } from '../src/domain/composition'
 import {
   ClockPort,
   EpochMillis,
@@ -31,7 +31,7 @@ import {
   MonotonicTimeSecs,
   wallClockEpochMillis,
   type ClockService,
-} from '../domain/kernel-vocabulary'
+} from '../src/domain/kernel-vocabulary'
 
 const FIXED_AT = {
   monotonicSecs: MonotonicTimeSecs(1_234.5),

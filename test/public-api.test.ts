@@ -1,8 +1,8 @@
 import { describe, expect, it } from '@effect/vitest'
 import { Effect } from 'effect'
-import * as compose from '../index'
-import { resolveStageOrder } from '../domain/stage-order'
-import { STANDARD_STAGE_SKELETON } from '../domain/stage-skeleton'
+import * as compose from '../src/index'
+import { resolveStageOrder } from '../src/domain/stage-order'
+import { STANDARD_STAGE_SKELETON } from '../src/domain/stage-skeleton'
 import { ROSTER_STAGE_IDS } from './e2e/roster'
 
 describe('public API surface', () => {

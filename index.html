@@ -18,10 +18,125 @@
         font: 12px/1.4 monospace;
       }
 
+      [hidden] {
+        display: none !important;
+      }
+
+      #title-screen {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        box-sizing: border-box;
+        background:
+          radial-gradient(circle at 20% 20%, rgba(82, 122, 72, 0.22), transparent 36%),
+          linear-gradient(155deg, #182018, #0c100d 58%, #14110d);
+      }
+
+      #main-menu-root {
+        width: min(520px, 100%);
+      }
+
+      #game-shell {
+        position: fixed;
+        inset: 0;
+      }
+
       #game-canvas {
         display: block;
         width: 100vw;
         height: 100vh;
+      }
+
+      #game-canvas:focus-visible {
+        outline: 2px solid rgba(255, 255, 255, 0.8);
+        outline-offset: -4px;
+      }
+
+      #touch-controls {
+        position: fixed;
+        inset: 0;
+        z-index: 35;
+        pointer-events: none;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      #touch-look-surface {
+        position: absolute;
+        inset: 12% 0 18% 42%;
+        pointer-events: auto;
+        touch-action: none;
+      }
+
+      #touch-controls[hidden] {
+        display: none;
+      }
+
+      .touch-control-group {
+        position: absolute;
+        z-index: 1;
+        display: grid;
+        gap: 8px;
+        pointer-events: none;
+      }
+
+      .touch-control {
+        width: 58px;
+        min-height: 54px;
+        border: 2px solid rgba(255, 255, 255, 0.72);
+        border-radius: 10px;
+        background: rgba(20, 24, 18, 0.66);
+        color: #fff;
+        font: 700 12px/1 monospace;
+        text-shadow: 0 1px 2px #000;
+        box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+        pointer-events: auto;
+        touch-action: none;
+      }
+
+      .touch-control:active {
+        background: rgba(180, 196, 146, 0.72);
+        color: #10140e;
+        text-shadow: none;
+      }
+
+      .touch-movement {
+        left: max(18px, env(safe-area-inset-left));
+        bottom: max(18px, env(safe-area-inset-bottom));
+        grid-template-columns: repeat(3, 58px);
+        grid-template-areas:
+          ". forward ."
+          "left backward right";
+      }
+
+      [data-touch-action="moveForward"] { grid-area: forward; }
+      [data-touch-action="moveBackward"] { grid-area: backward; }
+      [data-touch-action="moveLeft"] { grid-area: left; }
+      [data-touch-action="moveRight"] { grid-area: right; }
+
+      .touch-actions {
+        right: max(18px, env(safe-area-inset-right));
+        bottom: max(18px, env(safe-area-inset-bottom));
+        grid-template-columns: repeat(2, 64px);
+      }
+
+      .touch-actions .touch-control {
+        width: 64px;
+      }
+
+      .touch-menu-actions {
+        top: max(14px, env(safe-area-inset-top));
+        left: max(14px, env(safe-area-inset-left));
+        grid-template-columns: repeat(2, auto);
+      }
+
+      .touch-menu-actions .touch-control {
+        width: auto;
+        min-width: 68px;
+        min-height: 42px;
+        padding: 0 12px;
       }
 
       /* The HUD and the crosshair are appended here by mx-ui. Positioned rather
@@ -31,6 +146,23 @@
         inset: 0;
         pointer-events: none;
         z-index: 10;
+      }
+
+      #hud-root [data-mx-ui="respawn"] {
+        pointer-events: auto;
+      }
+
+      #inventory-root {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        z-index: 30;
+        transform: translate(-50%, -50%);
+        pointer-events: auto;
+      }
+
+      #inventory-root[hidden] {
+        display: none;
       }
 
       #fps-counter,
@@ -63,18 +195,271 @@
       #boot-status:empty {
         display: none;
       }
+
+      #sound-captions {
+        position: fixed;
+        right: 18px;
+        bottom: 52px;
+        z-index: 25;
+        display: grid;
+        justify-items: end;
+        gap: 5px;
+        max-width: min(360px, calc(100vw - 36px));
+        pointer-events: none;
+      }
+
+      .sound-caption {
+        padding: 5px 9px;
+        border-right: 3px solid rgba(255, 255, 255, 0.75);
+        background: rgba(0, 0, 0, 0.68);
+        color: #f0f0f0;
+        text-shadow: 0 1px 1px #000;
+      }
+
+      #pause-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: grid;
+        place-items: center;
+        background: rgba(0, 0, 0, 0.72);
+      }
+
+      #pause-dialog {
+        width: min(360px, calc(100vw - 48px));
+        padding: 28px;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        background: #171914;
+        box-shadow: 0 18px 70px rgba(0, 0, 0, 0.55);
+      }
+
+      #pause-actions {
+        display: grid;
+        gap: 10px;
+      }
+
+      #pause-actions button {
+        min-height: 44px;
+        border: 1px solid #aeb89e;
+        background: #293123;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      #pause-error {
+        min-height: 1.4em;
+        color: #ff9b91;
+      }
+
+      #settings-root {
+        position: fixed;
+        inset: 0;
+        z-index: 70;
+        overflow: auto;
+        padding: clamp(18px, 4vw, 48px);
+        background:
+          linear-gradient(135deg, rgba(7, 13, 9, 0.96), rgba(25, 31, 22, 0.94)),
+          repeating-linear-gradient(45deg, transparent 0 12px, rgba(255, 255, 255, 0.025) 12px 13px);
+      }
+
+      .settings-dialog {
+        box-sizing: border-box;
+        width: min(920px, 100%);
+        margin: 0 auto;
+        padding: clamp(20px, 4vw, 38px);
+        border: 1px solid #80906f;
+        background: #151b12;
+        color: #f4f0de;
+        box-shadow: 0 24px 90px rgba(0, 0, 0, 0.68);
+        overflow-wrap: anywhere;
+      }
+
+      .settings-header,
+      .binding-row,
+      .settings-range {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .settings-header h1,
+      .settings-eyebrow {
+        margin: 0;
+      }
+
+      .settings-eyebrow {
+        color: #b9c89e;
+        font-size: 0.78rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      .settings-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(250px, 0.65fr);
+        gap: 24px;
+        margin-top: 24px;
+      }
+
+      .settings-grid fieldset {
+        min-width: 0;
+        padding: 18px;
+        border: 1px solid #59644d;
+      }
+
+      .settings-grid legend {
+        padding: 0 8px;
+        color: #d9dfbd;
+        font-weight: 700;
+      }
+
+      .settings-dialog button {
+        min-height: 38px;
+        padding: 7px 13px;
+        border: 1px solid #9bab83;
+        background: #27321f;
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .settings-dialog button:focus-visible,
+      .settings-dialog input:focus-visible {
+        outline: 3px solid #e5bd58;
+        outline-offset: 2px;
+      }
+
+      .settings-range,
+      .settings-toggle {
+        margin: 12px 0;
+      }
+
+      .settings-range input {
+        width: min(220px, 50%);
+      }
+
+      .binding-list {
+        display: grid;
+        gap: 6px;
+        margin: 16px 0;
+      }
+
+      .binding-row {
+        min-width: 0;
+        min-height: 42px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .binding-row button {
+        min-width: 150px;
+        max-width: 60%;
+      }
+
+      .settings-status {
+        min-height: 1.4em;
+        color: #e5bd58;
+      }
+
+      .settings-error {
+        min-height: 1.4em;
+        color: #ff9b91;
+      }
+
+      @media (max-width: 700px) {
+        .touch-control-group {
+          gap: 6px;
+        }
+
+        .touch-movement {
+          grid-template-columns: repeat(3, 52px);
+        }
+
+        .touch-control {
+          width: 52px;
+          min-height: 50px;
+        }
+
+        .touch-actions {
+          grid-template-columns: repeat(2, 58px);
+        }
+
+        .touch-actions .touch-control {
+          width: 58px;
+        }
+
+        #settings-root {
+          padding: 0;
+        }
+
+        .settings-dialog {
+          min-height: 100%;
+          border: 0;
+        }
+
+        .settings-grid {
+          grid-template-columns: 1fr;
+        }
+      }
     </style>
   </head>
   <body data-mc-compose-boot="starting">
-    <!-- THE drawing surface. mc-render's `makeWorldRenderer` creates the WebGL2
-         context on it (see apps/web/main.ts); this file still never calls
-         getContext, because a context created here would make
-         docs/e2e-triage.md #1 pass without mc-render drawing anything. It is
-         also the pointer-lock target and the element a click can land on. -->
-    <canvas id="game-canvas"></canvas>
-    <div id="hud-root"></div>
-    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
-    <div id="stage-order" data-stage-count="0"></div>
+    <main id="title-screen" data-testid="title-screen" hidden>
+      <div id="main-menu-root"></div>
+      <p id="title-status" role="status" aria-live="polite"></p>
+    </main>
+    <div id="game-shell" data-testid="game-shell" hidden>
+      <!-- THE drawing surface. mc-render's `makeWorldRenderer` creates the WebGL2
+           context on it (see apps/web/main.ts); this file still never calls
+           getContext, because a context created here would make
+           docs/e2e-triage.md #1 pass without mc-render drawing anything. It is
+           also the pointer-lock target and the element a click can land on. -->
+      <canvas id="game-canvas" tabindex="0" aria-label="Minecraft game world"></canvas>
+      <div id="touch-controls" data-testid="touch-controls" hidden inert>
+        <div id="touch-look-surface" data-testid="touch-look-surface" aria-hidden="true"></div>
+        <div class="touch-control-group touch-movement" aria-label="Movement controls">
+          <button class="touch-control" type="button" data-touch-action="moveForward" aria-label="Move forward">FWD</button>
+          <button class="touch-control" type="button" data-touch-action="moveLeft" aria-label="Move left">LEFT</button>
+          <button class="touch-control" type="button" data-touch-action="moveBackward" aria-label="Move backward">BACK</button>
+          <button class="touch-control" type="button" data-touch-action="moveRight" aria-label="Move right">RIGHT</button>
+        </div>
+        <div class="touch-control-group touch-actions" aria-label="Game actions">
+          <button class="touch-control" type="button" data-touch-action="jump">JUMP</button>
+          <button class="touch-control" type="button" data-touch-action="attack">ATTACK</button>
+          <button class="touch-control" type="button" data-touch-action="use">USE</button>
+          <button class="touch-control" type="button" data-touch-action="openInventory" aria-label="Open inventory">INV</button>
+        </div>
+        <div class="touch-control-group touch-menu-actions" aria-label="Session controls">
+          <button class="touch-control" type="button" data-touch-action="escape" aria-label="Pause game">PAUSE</button>
+        </div>
+      </div>
+      <div id="hud-root"></div>
+      <div id="inventory-root" hidden></div>
+      <div
+        id="sound-captions"
+        role="status"
+        aria-live="polite"
+        aria-atomic="false"
+        data-testid="sound-captions"
+      ></div>
+      <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+      <div id="stage-order" data-stage-count="0"></div>
+    </div>
+    <div id="pause-overlay" data-testid="pause-overlay" hidden>
+      <section id="pause-dialog" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+        <h1 id="pause-title">Game Paused</h1>
+        <div id="pause-actions">
+          <button id="resume-button" type="button" data-testid="resume-button">Resume</button>
+          <button id="settings-button" type="button" data-testid="settings-button">Settings</button>
+          <button id="save-quit-button" type="button" data-testid="save-quit-button">
+            Save &amp; Quit
+          </button>
+        </div>
+        <p id="pause-error" role="alert" aria-live="assertive"></p>
+      </section>
+    </div>
+    <div id="settings-root" data-testid="settings-root" hidden></div>
     <div id="boot-status" role="status" aria-live="polite"></div>
     <script type="module" src="/apps/web/main.ts"></script>
   </body>

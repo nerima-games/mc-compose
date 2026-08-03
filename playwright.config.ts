@@ -40,6 +40,8 @@ process.env['PLAYWRIGHT_USE_SWIFTSHADER'] = '1'
 
 export const E2E_PORT = 5181
 export const E2E_BASE_URL = `http://127.0.0.1:${String(E2E_PORT)}`
+export const E2E_MULTIPLAYER_PORT = 5182
+export const E2E_MULTIPLAYER_URL = `ws://127.0.0.1:${String(E2E_MULTIPLAYER_PORT)}/ws`
 
 export default defineConfig({
   testDir: './e2e',
@@ -84,16 +86,26 @@ export default defineConfig({
 
   projects: [{ name: 'chromium-webgl', use: { ...devices['Desktop Chrome'] } }],
 
-  webServer: {
-    command: `pnpm dev --port ${String(E2E_PORT)} --strictPort`,
-    url: E2E_BASE_URL,
-    // Never reuse. The dev server prints which roster root it resolved, and a
-    // server left over from another checkout would serve a different game than
-    // the one under test — the drift docs/testing.md §3.5 warns about, with the
-    // evidence scrolled off the top of somebody else's terminal.
-    reuseExistingServer: false,
-    timeout: 60_000,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  },
+  webServer: [
+    {
+      command: `pnpm dev --port ${String(E2E_PORT)} --strictPort`,
+      url: E2E_BASE_URL,
+      // Never reuse. The dev server prints which roster root it resolved, and a
+      // server left over from another checkout would serve a different game than
+      // the one under test — the drift docs/testing.md §3.5 warns about, with the
+      // evidence scrolled off the top of somebody else's terminal.
+      reuseExistingServer: false,
+      timeout: 60_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+    {
+      command: `pnpm tsx apps/multiplayer-server/main.ts --port ${String(E2E_MULTIPLAYER_PORT)}`,
+      url: `http://127.0.0.1:${String(E2E_MULTIPLAYER_PORT)}/health`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  ],
 })

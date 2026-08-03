@@ -61,5 +61,6 @@
     // build/publish pipeline is added when this repo reaches completion.
     "noEmit": true,
 
+    "baseUrl": "."
   }
 }

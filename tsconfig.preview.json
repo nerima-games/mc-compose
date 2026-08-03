@@ -8,8 +8,12 @@
   // in CI, placed in the command CI runs, stops `pnpm verify` from meaning
   // "this is green".
   //
-  // Run it with `pnpm typecheck:app` next to `pnpm e2e:browser`; both need the
-  // same thing on disk, and both need it for the same reason.
+  // Run it with `pnpm typecheck:preview` next to `pnpm e2e:browser`; both need
+  // the same thing on disk, and both need it for the same reason.
+  //
+  // Named tsconfig.preview.json (formerly tsconfig.app.json) to match the org
+  // standard's required conditional file for repositories with `apps/`
+  // (PACKAGE_STANDARD.md "必須 tsconfig ファイル").
   //
   // `paths` mirrors `vite.config.ts`'s alias table by hand, and `..` is the
   // FIRST of the roots that file searches — so a checkout under
@@ -22,10 +26,17 @@
     "types": ["node"],
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "noEmit": true,
+    "baseUrl": ".",
     "paths": {
-      "@nerima-games/mc-render": ["../mc-render/index.ts"],
-      "@nerima-games/mx-ui": ["../mx-ui/index.ts"],
-      "@nerima-games/mx-redstone": ["../mx-redstone/index.ts"]
+      "@nerima-games/mc-audio": ["../mc-audio/src/index.ts"],
+      "@nerima-games/mc-render": ["../mc-render/src/index.ts"],
+      "@nerima-games/mc-save": ["../mc-save/src/index.ts"],
+      "@nerima-games/mc-sim": ["../mc-sim/index.ts"],
+      "@nerima-games/mc-worldgen": ["../mc-worldgen/src/index.ts"],
+      "@nerima-games/mx-ui": ["../mx-ui/src/index.ts"],
+      "@nerima-games/mx-redstone": ["../mx-redstone/src/index.ts"],
+      "@nerima-games/mx-gameplay": ["../mx-gameplay/src/index.ts"],
+      "@nerima-games/mx-multiplayer": ["../mx-multiplayer/src/index.ts"]
     }
   },
   "include": ["apps/**/*.ts", "e2e/**/*.ts", "vite.config.ts", "playwright.config.ts"],

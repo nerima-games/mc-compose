@@ -73,6 +73,39 @@ per-test の判定は [e2e-triage.md](./e2e-triage.md) にある。
 - QA API のキーは `__NERIMA_GAMES_QA__`(参照実装の `__TS_MINECRAFT_QA__` ではない)。
   古い名前に固定された E2E が古いビルドに対して黙って通るのを防ぐため
 
+農業のブラウザ回帰は `e2e/farming.e2e.ts` が担当する。QA API は初期状態の設定と
+収穫要求の発火だけに使い、成熟は通常のフレーム tick、食事と再植付けは実際の
+右クリック入力で進める。単一シナリオで次の契約を固定する。
+
+- ジャガイモが通常 tick で成熟する
+- format v11 の save / reload 後も成熟 stage と成長秒数が維持される
+- 成熟作物の収穫量が 2〜5 個で、作物ブロックと registry が同時に消える
+- 収穫物を 1 個食べても 2 個以上残る
+- 残ったジャガイモを耕地へ再植付けでき、inventory と crop registry が同期する
+
+環境接触ダメージのブラウザ回帰は
+`e2e/environmental-contact-damage.e2e.ts` が担当する。QA API は接触地形とプレイヤー位置の
+初期設定にだけ使い、cactus への接近は通常の移動入力と physics で進める。スナップショットの
+接触セルはテスト側で、lava はプレイヤー AABB との体積 overlap、cactus は水平側面接触として
+再照合し、次の契約を固定する。
+
+- cactus の側面へ通常移動で到達した最初のフレームに、体積 overlap なしで 1 ダメージを受ける
+- 同時に重なる lava 2 セルは加算されず、即時に 4 ダメージだけを受ける
+- respawn による状態 reset 後も、lava の最初の 4 ダメージは 0.15 秒未満で発生する
+- lava 接触が続く場合、次の 4 ダメージは 0.5 秒以上後に発生する
+- lava と cactus の同時接触では最強の lava だけが採用され、致死原因も `lava` になる
+
+落下ダメージのブラウザ回帰は `e2e/fall-damage.e2e.ts` が担当する。QA API は着地点の
+地形と開始高度だけを設定し、落下距離の蓄積、着地信号、ダメージ適用は通常の physics と
+フレームループで進める。mc-sim の `landingImpact` は `runFrame` 後の 1 フレームだけ有効で、
+ホストは同じフレームで 1 回だけ読み、落下ダメージを環境接触ダメージより先に解決する。
+次の契約を固定する。
+
+- 3 m 以下の落下はダメージを受けない
+- 7 m の落下は `ceil(7 - 3) = 4` ダメージを 1 回だけ受け、原因は `fall` になる
+- 23 m の落下は 20 ダメージで死亡し、既存の respawn 経路で体力 20 に戻る
+- respawn と dimension 変更は落下状態を reset し、消費済みの着地信号を再適用しない
+
 ### 3.4 **今の E2E が検証していること / していないこと**
 
 plan.md §3.15 の主張には**半分が 2 つある**。それを混ぜないことが、この節の目的である。
@@ -132,7 +165,7 @@ mc-render が登録するのは `render:input` / `render:camera-mirror` / `rende
 | `pnpm e2e`(= `vitest run test/e2e`) | マニフェストが §4.2 のフレームに合成されるか | **入る**。`effect` と自分の `domain/` しか要らない純粋なテストで、`pnpm test` のグロブが既に拾う |
 | `pnpm check:roster` | マニフェストが兄弟リポジトリの**実ソース**と一致するか(id・`after`・`file:line` の 26 箇所すべて) | **入らない**。兄弟リポジトリのチェックアウトが要る |
 | `pnpm e2e:browser`(= `playwright test`) | **合成済みのゲームが実ブラウザで起動し、フレームが回るか**([e2e-triage.md](./e2e-triage.md) §3.1) | **入らない**。Chromium と dev サーバと**兄弟リポジトリのチェックアウト**が要る |
-| `pnpm typecheck:app` | `apps/` と `e2e/` が型として通るか(`tsconfig.app.json`) | **入らない**。同上 — 兄弟の `index.ts` を `paths` で解決する |
+| `pnpm typecheck:preview` | `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) | **入らない**。同上 — 兄弟の `index.ts` を `paths` で解決する |
 
 `pnpm check:roster` を `verify` に入れない理由は 1 つで、
 **mc-compose の CI は mc-compose しか clone しない**からである。
@@ -156,7 +189,7 @@ CI で走れないゲートを CI が走らせるゲートに入れると、`pnp
 ファイルシステムで検証しており、これは CI で走る。
 **テストされていない腐り検出器は、それが守るはずだった腐ったマニフェストと同じ価値しか無い。**
 
-`pnpm e2e:browser` と `pnpm typecheck:app` が `verify` の外にあるのは
+`pnpm e2e:browser` と `pnpm typecheck:preview` が `verify` の外にあるのは
 **`check:roster` と同じ 1 つの理由**である。`check:mirrors` / `check:repoint` が
 mc-dev-meta で置いた先例もこれと同じ形で、そちらは
 `mc-dev-meta/scripts/check-repoint.ts` のヘッダが理由を書いている。

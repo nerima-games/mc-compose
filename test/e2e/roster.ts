@@ -66,9 +66,9 @@
  */
 
 import { Effect, Ref } from 'effect'
-import { EMPTY_MODULE_LAYER, type GameModule, type StageRegistration } from '../../domain/composition'
-import { monotonicSecs } from '../../domain/kernel-vocabulary'
-import { StageId } from '../../domain/stage-order'
+import { EMPTY_MODULE_LAYER, type GameModule, type StageRegistration } from '../../src/domain/composition'
+import { monotonicSecs } from '../../src/domain/kernel-vocabulary'
+import { StageId } from '../../src/domain/stage-order'
 
 /** One `StageRegistration` as some repository actually writes it down. */
 export type RosterStage = {
@@ -127,28 +127,27 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
     stages: [
       {
         id: 'gameplay:interactions',
-        // Dangling. `sim:physics` is registered by nobody — see
-        // `ROSTER_REGISTERS_NOTHING` below.
+        // Binds to mc-sim's registered `sim:physics` stage below.
         after: ['sim:physics'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:826',
+        declaredAt: 'mx-gameplay/stages/registration.ts:1088',
         idAt: 'mx-gameplay/stages/stage-ids.ts:41',
       },
       {
         id: 'gameplay:entities',
         after: ['gameplay:interactions'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:1270',
+        declaredAt: 'mx-gameplay/stages/registration.ts:1621',
         idAt: 'mx-gameplay/stages/stage-ids.ts:43',
       },
       {
         id: 'gameplay:fluids',
         after: ['gameplay:entities'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:1470',
+        declaredAt: 'mx-gameplay/stages/registration.ts:1843',
         idAt: 'mx-gameplay/stages/stage-ids.ts:45',
       },
       {
         id: 'gameplay:time-weather',
         after: ['gameplay:fluids'],
-        declaredAt: 'mx-gameplay/stages/registration.ts:1485',
+        declaredAt: 'mx-gameplay/stages/registration.ts:1858',
         idAt: 'mx-gameplay/stages/stage-ids.ts:47',
       },
     ],
@@ -159,13 +158,13 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
       {
         id: 'redstone:power',
         after: ['sim:physics'],
-        declaredAt: 'mx-redstone/stages/registration.ts:128',
+        declaredAt: 'mx-redstone/stages/registration.ts:117',
         idAt: 'mx-redstone/stages/stage-ids.ts:38',
       },
       {
         id: 'redstone:effects',
         after: ['redstone:power'],
-        declaredAt: 'mx-redstone/stages/registration.ts:155',
+        declaredAt: 'mx-redstone/stages/registration.ts:144',
         idAt: 'mx-redstone/stages/stage-ids.ts:49',
       },
     ],
@@ -196,31 +195,31 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // that lands in the frame is mc-compose's to decide — its skeleton
         // claims the NAME half of this id (`input`) for the first phase."
         after: [],
-        declaredAt: 'mc-render/stages/registration.ts:243',
+        declaredAt: 'mc-render/stages/registration.ts:262',
         idAt: 'mc-render/stages/stage-ids.ts:85',
       },
       {
         id: 'render:camera-mirror',
         after: ['sim:physics'],
-        declaredAt: 'mc-render/stages/registration.ts:302',
+        declaredAt: 'mc-render/stages/registration.ts:321',
         idAt: 'mc-render/stages/stage-ids.ts:92',
       },
       {
         id: 'render:chunk-sync',
         after: ['render:camera-mirror'],
-        declaredAt: 'mc-render/stages/registration.ts:327',
+        declaredAt: 'mc-render/stages/registration.ts:346',
         idAt: 'mc-render/stages/stage-ids.ts:94',
       },
       {
         id: 'render:draw',
         after: ['render:chunk-sync'],
-        declaredAt: 'mc-render/stages/registration.ts:355',
+        declaredAt: 'mc-render/stages/registration.ts:374',
         idAt: 'mc-render/stages/stage-ids.ts:96',
       },
       {
         id: 'render:post-fx',
         after: ['render:draw'],
-        declaredAt: 'mc-render/stages/registration.ts:385',
+        declaredAt: 'mc-render/stages/registration.ts:404',
         idAt: 'mc-render/stages/stage-ids.ts:105',
       },
     ],
@@ -243,7 +242,7 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // Every cross-repository `after` edge in the roster names it, and until
         // it existed all four dangled.
         after: [],
-        declaredAt: 'mc-sim/stages/registration.ts:167',
+        declaredAt: 'mc-sim/stages/registration.ts:184',
         idAt: 'mc-sim/stages/stage-ids.ts:86',
       },
     ],
