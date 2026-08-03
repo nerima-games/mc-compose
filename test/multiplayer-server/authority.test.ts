@@ -125,7 +125,7 @@ const makeFixture = (
   const server = makeMultiplayerServerCore({
     worldId: 'world-1',
     seed: 42,
-    allowedBlocks: new Set(['stone', 'chest', 'furnace']),
+    allowedBlocks: new Set(['stone', 'sand', 'gravel', 'chest', 'furnace']),
     initialState: state,
     difficulty,
     ...serverOptions,
@@ -207,6 +207,38 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted.at(-1)?.entities).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: 'bow-target', health: expect.any(Number) }),
     ]))
+  })
+
+  it('moves unsupported sand through the server snapshot after its support is broken', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [
+        ...state.blocks,
+        { at: { x: 1, y: 65, z: 0 }, block: 'sand' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'stone' },
+      ],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BlockBreak', player: playerId('alice'), world: worldId('world-1'), at: { x: 1, y: 64, z: 0 },
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    fixture.server.tick(50)
+
+    const emitted = messages(fixture.sent)
+    expect(emitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        blocks: expect.arrayContaining([
+          expect.objectContaining({ at: { x: 1, y: 65, z: 0 }, block: null }),
+          expect.objectContaining({ at: { x: 1, y: 64, z: 0 }, block: 'sand' }),
+        ]),
+      }),
+    ]))
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({ _tag: 'WorldSnapshot', revision: 7 }))
   })
 
   it.each([

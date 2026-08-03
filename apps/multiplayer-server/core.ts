@@ -19,7 +19,7 @@ import {
   type WorldSnapshot,
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
-import { blockIdOf, isBlockType, isItemType, maxStackCountOfItem } from '@nerima-games/mc-kernel'
+import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem } from '@nerima-games/mc-kernel'
 import { planExplosion, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
@@ -49,8 +49,10 @@ import {
   ENDERMAN_TELEPORT_MAX_BLOCKS,
   endermanTeleportUrge,
   furnaceAdvanceChanged,
+  FALLING_BLOCK_MOVES_PER_TICK,
   miningLootContextForItem,
   planFurnaceAdvance,
+  planFallingBlockMoves,
   rollDropsOfKind,
   mobXpReward,
   initialEcosystemMobState,
@@ -435,6 +437,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const entities = new Map<string, AuthoritativeEntityState>(
     (options.initialState?.entities ?? []).map((entity) => [entity.entityId, entity]),
   )
+  const fallingPending = new Map<string, BlockPos>()
   const bowDrawStartedAt = new Map<PlayerId, number>()
   const inventories = new Map<PlayerId, MutableInventoryState>(
     (options.initialState?.inventories ?? []).map(({ player, state }) => [player, cloneInventory(state)]),
@@ -606,6 +609,35 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const blockAt = (at: BlockPos): string | null => {
     const override = blocks.get(positionKey(at))
     return override === undefined ? (options.generatedBlockAt?.(at) ?? null) : override.block
+  }
+
+  const disturbFallingBlocks = (positions: Iterable<BlockPos>): void => {
+    for (const at of positions) {
+      if (!isInBounds(at)) continue
+      const key = positionKey(at)
+      if (!fallingPending.has(key)) fallingPending.set(key, { ...at })
+    }
+  }
+
+  const applyPendingFallingBlocks = (): boolean => {
+    const targets = Array.from(fallingPending.values()).slice(0, FALLING_BLOCK_MOVES_PER_TICK)
+    for (const target of targets) fallingPending.delete(positionKey(target))
+    const moves = planFallingBlockMoves(targets, (at) => {
+      if (!isInBounds(at)) return undefined
+      const block = blockAt(at)
+      return block === null ? blockIdOf('air') : isBlockType(block) ? blockIdOf(block) : undefined
+    })
+    for (const move of moves) {
+      const block = blockTypeOfId(move.blockId)
+      if (block === undefined) continue
+      blocks.set(positionKey(move.source), { at: move.source, block: null })
+      blocks.set(positionKey(move.target), { at: move.target, block })
+      disturbFallingBlocks([
+        { x: move.target.x, y: move.target.y - 1, z: move.target.z },
+        move.source,
+      ])
+    }
+    return moves.length > 0
   }
 
   const containerIdAt = (at: BlockPos): string =>
@@ -1431,6 +1463,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           return rejectWither('invalid-command')
         }
         for (const position of summon.consumedBlocks) blocks.set(positionKey(position), { at: position, block: null })
+        disturbFallingBlocks(summon.consumedBlocks)
         revision += 1
         broadcast(snapshot())
         witherState = summonRuntimeWither(witherState, command.dimension, summon.spawnPosition)
@@ -1616,6 +1649,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           ? null
           : { ...sourceStack, count: sourceStack.count - 1 }
         blocks.set(positionKey(message.at), { at: message.at, block: message.block })
+        disturbFallingBlocks([message.at])
         if (message.block === 'chest') {
           const containerId = containerIdAt(message.at)
           containers.set(containerId, { containerId, slots: [] })
@@ -1651,6 +1685,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const brokenBlock = blockAt(message.at)
         if (brokenBlock === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })
+        disturbFallingBlocks([message.at])
         if (brokenBlock === 'chest') containers.delete(containerIdAt(message.at))
         else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
         revision += 1
@@ -1721,6 +1756,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
   const tick = (elapsedMs: number): void => {
     let stateChanged = false
+    let worldSnapshotRequired = false
     const postPersistenceDeltas: AuthoritativeDelta[] = []
     const changedFurnaces: MutableFurnaceState[] = []
     const elapsedSecs = Number.isFinite(elapsedMs) && elapsedMs > 0 ? elapsedMs / 1_000 : 0
@@ -1763,6 +1799,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     }
 
     if (elapsedTicks > 0) {
+      if (applyPendingFallingBlocks()) {
+        revision += 1
+        stateChanged = true
+        worldSnapshotRequired = true
+      }
+
       const agedEntities: AuthoritativeDelta[] = []
       for (const entity of entities.values()) {
         if (entity._tag !== 'item-drop') continue
@@ -1904,6 +1946,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             })
             for (const position of plan.destroyedBlocks) {
               blocks.set(positionKey(position), { at: position, block: null })
+              disturbFallingBlocks([position])
               worldChanged = true
             }
             for (const [player, presence] of players) {
@@ -2028,7 +2071,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         stateChanged = true
         postPersistenceDeltas.push(...movedEntities.map((delta) => ({ ...delta, revision })))
         postPersistenceDeltas.push(...applyPlayerDeaths([...deadPlayers], revision))
-        if (worldChanged) broadcast(snapshot())
+        if (worldChanged) worldSnapshotRequired = true
         for (const player of damagedPlayers) {
           const presence = players.get(player)
           if (presence !== undefined) postPersistenceDeltas.push({
@@ -2116,6 +2159,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           const plan = planExplosion({ center: explosion.position, radius: explosion.power, seed: revision + witherRevision, blocks: blockReader, entities: [] })
           for (const position of plan.destroyedBlocks) {
             blocks.set(positionKey(position), { at: position, block: null })
+            disturbFallingBlocks([position])
             worldChanged = true
           }
           for (const [player, presence] of players) {
@@ -2145,7 +2189,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         revision += 1
         stateChanged = true
         const deathDeltas = applyPlayerDeaths([...deadPlayers], revision)
-        if (worldChanged) broadcast(snapshot())
+        if (worldChanged) worldSnapshotRequired = true
         postPersistenceDeltas.push(...deathDeltas)
         for (const player of damagedPlayers) {
           const presence = players.get(player)
@@ -2163,6 +2207,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
     if (stateChanged) notifyStateChanged()
     for (const delta of postPersistenceDeltas) broadcast(delta)
+    if (worldSnapshotRequired) broadcast(snapshot())
   }
 
   const spawnEntity = (entity: AuthoritativeEntityState): boolean => {
