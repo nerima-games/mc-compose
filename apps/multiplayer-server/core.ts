@@ -399,10 +399,10 @@ const cloneInventory = (state: InventoryState): MutableInventoryState => ({
   slots: state.slots.map(cloneStack),
   durability: state.slots.map((stack) => {
     const durability = stack?.durability
-    if (stack?.item !== 'fishing_rod') return null
-    return durability !== undefined && isValidDurabilityForItem('fishing_rod', durability)
+    if (stack === null || !isItemType(stack.item)) return null
+    return durability !== undefined && isValidDurabilityForItem(stack.item, durability)
       ? { ...durability }
-      : durabilityForItem('fishing_rod')
+      : durabilityForItem(stack.item)
   }),
   selectedSlot: state.selectedSlot,
 })
@@ -410,7 +410,7 @@ const inventorySnapshot = (state: MutableInventoryState): InventoryState => {
   return {
     slots: state.slots.map((stack, index) => {
       const durability = state.durability[index]
-      return stack?.item === 'fishing_rod' && durability !== null && durability !== undefined
+      return stack !== null && isItemType(stack.item) && durability !== null && durability !== undefined && isValidDurabilityForItem(stack.item, durability)
         ? { ...stack, durability: { ...durability } }
         : cloneStack(stack)
     }),
@@ -1009,7 +1009,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const arrowSlot = inventory.slots.findIndex((stack) => stack?.item === 'arrow')
         const arrowStack = arrowSlot < 0 ? undefined : inventory.slots[arrowSlot]
         if (arrowStack?.item !== 'arrow') return { accepted: false, reason: 'insufficient-items' }
+        const bowDurability = inventory.durability[inventory.selectedSlot]
+        if (!isValidDurabilityForItem('bow', bowDurability)) return { accepted: false, reason: 'invalid-command' }
         inventory.slots[arrowSlot] = arrowStack.count === 1 ? null : { ...arrowStack, count: arrowStack.count - 1 }
+        if (bowDurability.current === 1) {
+          inventory.slots[inventory.selectedSlot] = null
+          inventory.durability[inventory.selectedSlot] = null
+        } else inventory.durability[inventory.selectedSlot] = { ...bowDurability, current: bowDurability.current - 1 }
         const horizontal = Math.cos(actor.facing.pitchRadians)
         const speed = 8 + 24 * charge
         const arrow: AuthoritativeEntityState = {

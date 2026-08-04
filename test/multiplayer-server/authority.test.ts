@@ -187,7 +187,10 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'bow-release', revision: 5 }),
       expect.objectContaining({
         _tag: 'PlayerInventoryDelta',
-        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 1 }, null], selectedSlot: 0 },
+        state: {
+          slots: [{ item: 'bow', count: 1, durability: { current: 383, max: 384 } }, { item: 'arrow', count: 1 }, null],
+          selectedSlot: 0,
+        },
       }),
       expect.objectContaining({
         _tag: 'EntitySpawnDelta',
@@ -207,6 +210,43 @@ describe('multiplayer server authoritative state', () => {
     ]))
     expect(fixture.persisted.at(-1)?.entities).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: 'bow-target', health: expect.any(Number) }),
+    ]))
+  })
+
+  it('breaks a bow on its final authoritative shot', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'bow', count: 1, durability: { current: 1, max: 384 } }, { item: 'arrow', count: 1 }, null],
+          selectedSlot: 0,
+        },
+      }],
+    }, undefined, 'normal', { now: () => now })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('final-bow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('final-bow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        state: { slots: [null, null, null], selectedSlot: 0 },
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({ _tag: 'arrow', owner: 'alice' }),
+      }),
     ]))
   })
 
