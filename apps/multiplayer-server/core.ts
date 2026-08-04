@@ -22,7 +22,7 @@ import {
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, StackCount } from '@nerima-games/mc-kernel'
 import type { Dimension } from '@nerima-games/mc-worldgen'
-import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, forwardVector, isValidDurabilityForItem, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
+import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
@@ -96,7 +96,6 @@ import {
   type EcosystemMobState,
   type EndermanTeleportCell,
   type Explosion,
-  type FishingRod,
   type FishingSession,
   type BrewingBottle,
   type BrewingStandState,
@@ -1310,7 +1309,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           if (active !== undefined) return { accepted: false, reason: 'invalid-command' }
           const selected = inventory.slots[inventory.selectedSlot]
           const durability = inventory.durability[inventory.selectedSlot]
-          if (selected?.item !== 'fishing_rod' || durability === null || !isValidDurabilityForItem('fishing_rod', durability)) {
+          if (selected?.item !== 'fishing_rod' || selected.count !== 1 || durability === null || !isValidDurabilityForItem('fishing_rod', durability)) {
             return { accepted: true, deltas: (nextRevision) => [{ _tag: 'PlayerFishingDelta', world: actor.world, revision: nextRevision, player: message.player, state: { phase: 'idle', result: 'invalid-rod' } }] }
           }
           const target = Option.getOrUndefined(targetBlockFromPlayerPose({
@@ -1321,7 +1320,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           if (target === undefined) {
             return { accepted: true, deltas: (nextRevision) => [{ _tag: 'PlayerFishingDelta', world: actor.world, revision: nextRevision, player: message.player, state: { phase: 'idle', result: 'no-water' } }] }
           }
-          const cast = castFishing({ ...selected, durability } as FishingRod, fishingEnvironmentAt(target.position), {
+          const rod = equipmentItem(itemStack('fishing_rod', selected.count), durability)
+          const cast = castFishing(rod, fishingEnvironmentAt(target.position), {
             wait: deterministicRoll(`${String(message.player)}:${String(message.commandId)}:wait`),
             category: deterministicRoll(`${String(message.player)}:${String(message.commandId)}:category`),
             item: deterministicRoll(`${String(message.player)}:${String(message.commandId)}:item`),

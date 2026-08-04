@@ -690,6 +690,30 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  it('rejects stacked fishing rods before simulation', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          selectedSlot: 0,
+          slots: [{ item: 'fishing_rod', count: 2, durability: { current: 64, max: 64 } }],
+        },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'FishingCommand', action: 'cast', commandId: commandId('stacked-fishing-rod'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+    }).accepted).toBe(true)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerFishingDelta', revision: 5, player: playerId('alice'), state: { phase: 'idle', result: 'invalid-rod' },
+    }))
+  })
+
   it('moves unsupported sand through the server snapshot after its support is broken', () => {
     const state = initialState()
     const fixture = makeFixture({
