@@ -109,6 +109,7 @@ import {
   addExperience as addVitalsExperience,
   containerIdAt,
   durabilityForItem,
+  equipmentItem,
   emptyFurnaceState,
   emptyPlayerStorage,
   equipmentDefinitionFor,
@@ -3484,17 +3485,30 @@ type MultiplayerInventorySelection = Readonly<{
     const slots = state.slots.map((stack) => stack === null
       ? undefined
       : { item: stack.item as ItemStack['item'], count: StackCount(stack.count) })
+    const equipmentSlots = { ...storage.equipment.slots }
+    if (state.equipment !== undefined) {
+      for (const slot of EQUIPMENT_SLOTS) {
+        const stack = state.equipment[slot]
+        equipmentSlots[slot] = stack === null
+          ? null
+          : equipmentItem(
+              { item: stack.item as ItemStack['item'], count: StackCount(stack.count) },
+              stack.durability ?? durabilityForItem(stack.item as ItemStack['item']),
+            )
+      }
+    }
     Effect.runSync(world.inventory.restoreStorage({
       ...storage,
       inventory: { slots },
       inventoryDurability: slots.map((stack, index) => {
-        const durability = state.durability?.[index]
+        const durability = state.slots[index]?.durability ?? state.durability?.[index]
         if (durability !== undefined) return durability
         const previous = storage.inventory.slots[index]
         return previous?.item === stack?.item
           ? storage.inventoryDurability[index]
           : stack === undefined ? null : durabilityForItem(stack.item)
       }),
+      equipment: { slots: equipmentSlots },
     }))
     selectedHotbarIndex = state.selectedSlot
   }
@@ -5391,6 +5405,19 @@ type MultiplayerInventorySelection = Readonly<{
     slot: EquipmentSlotId,
     inventorySlot?: number,
   ): void => {
+    if (multiplayer !== undefined) {
+      const command = inventorySlot === undefined
+        ? { _tag: 'unequip-item' as const, equipmentSlot: slot }
+        : { _tag: 'unequip-item' as const, equipmentSlot: slot, destination: inventorySlot }
+      if (!sendInventoryCommand(command)) {
+        rejectInventoryAction(action, 'Inventory update is pending')
+        return
+      }
+      equipmentActionStatus = ''
+      document.body.setAttribute('data-equipment-action', 'pending')
+      renderPlayerUi()
+      return
+    }
     const result = Effect.runSync(world.inventory.unequipToInventory(slot, inventorySlot))
     if (result._tag === 'Unequipped') {
       moveItemMetadata(equipmentMetadataKey(slot), String(result.slotIndex))
@@ -5410,6 +5437,16 @@ type MultiplayerInventorySelection = Readonly<{
     inventorySlot: number,
     equipmentSlot: EquipmentSlotId,
   ): void => {
+    if (multiplayer !== undefined) {
+      if (!sendInventoryCommand({ _tag: 'equip-item', source: inventorySlot, equipmentSlot })) {
+        rejectInventoryAction(action, 'Inventory update is pending')
+        return
+      }
+      equipmentActionStatus = ''
+      document.body.setAttribute('data-equipment-action', 'pending')
+      renderPlayerUi()
+      return
+    }
     const result = Effect.runSync(world.inventory.equipFromInventory(inventorySlot, equipmentSlot))
     if (result._tag === 'Equipped') {
       moveItemMetadata(String(inventorySlot), equipmentMetadataKey(equipmentSlot))

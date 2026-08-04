@@ -198,10 +198,10 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'bow-release', revision: 5 }),
       expect.objectContaining({
         _tag: 'PlayerInventoryDelta',
-        state: {
+        state: expect.objectContaining({
           slots: [{ item: 'bow', count: 1, durability: { current: 383, max: 384 } }, { item: 'arrow', count: 1 }, null],
           selectedSlot: 0,
-        },
+        }),
       }),
       expect.objectContaining({
         _tag: 'EntitySpawnDelta',
@@ -252,7 +252,7 @@ describe('multiplayer server authoritative state', () => {
     expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
       expect.objectContaining({
         _tag: 'PlayerInventoryDelta',
-        state: { slots: [null, null, null], selectedSlot: 0 },
+        state: expect.objectContaining({ slots: [null, null, null], selectedSlot: 0 }),
       }),
       expect.objectContaining({
         _tag: 'EntitySpawnDelta',
@@ -397,7 +397,7 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({
         _tag: 'PlayerInventoryDelta',
         player: playerId('alice'),
-        state: { selectedSlot: 0, slots: [null, null, null] },
+        state: expect.objectContaining({ selectedSlot: 0, slots: [null, null, null] }),
       }),
       expect.objectContaining({ _tag: 'EntitySpawnDelta', revision: 5, entity: expect.objectContaining({ _tag: 'primed-tnt', burnedSecs: 0 }) }),
       expect.objectContaining({
@@ -431,7 +431,7 @@ describe('multiplayer server authoritative state', () => {
     expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
       _tag: 'PlayerInventoryDelta',
       player: playerId('alice'),
-      state: { selectedSlot: 0, slots: [null, null, null] },
+      state: expect.objectContaining({ selectedSlot: 0, slots: [null, null, null] }),
     }))
     expect(fixture.persisted.at(-1)?.entities).not.toContainEqual(expect.objectContaining({
       entityId: 'ignite-tnt:tnt',
@@ -483,7 +483,7 @@ describe('multiplayer server authoritative state', () => {
         _tag: 'PlayerInventoryDelta',
         revision: 5,
         player: playerId('alice'),
-        state: { selectedSlot: 0, slots: [{ item: 'ender_pearl', count: 1 }, null, null] },
+        state: expect.objectContaining({ selectedSlot: 0, slots: [{ item: 'ender_pearl', count: 1 }, null, null] }),
       }),
       expect.objectContaining({
         _tag: 'PlayerVitalsDelta',
@@ -1020,6 +1020,58 @@ describe('multiplayer server authoritative state', () => {
       expectedRevision: 4,
       action: { _tag: 'move-item', source: 0, destination: 1, count: 1 },
     }).accepted).toBe(false)
+  })
+
+  it('moves durable equipment through authoritative inventory commands', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'iron_helmet', count: 1, durability: { current: 80, max: 165 } }, null],
+          selectedSlot: 0,
+        },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('equip-helmet'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'equip-item', source: 0, equipmentSlot: 'head' },
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: 5,
+      state: expect.objectContaining({
+        slots: [null, null],
+        equipment: expect.objectContaining({
+          head: { item: 'iron_helmet', count: 1, durability: { current: 80, max: 165 } },
+        }),
+      }),
+    }))
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('unequip-helmet'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 5,
+      action: { _tag: 'unequip-item', equipmentSlot: 'head', destination: 1 },
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: 6,
+      state: expect.objectContaining({
+        slots: [null, { item: 'iron_helmet', count: 1, durability: { current: 80, max: 165 } }],
+        equipment: expect.objectContaining({ head: null }),
+      }),
+    }))
   })
 
   it('drops inventory items at the authoritative player position exactly once', () => {

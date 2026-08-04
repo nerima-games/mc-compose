@@ -22,7 +22,7 @@ import {
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, StackCount } from '@nerima-games/mc-kernel'
 import type { Dimension } from '@nerima-games/mc-worldgen'
-import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
+import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
@@ -241,6 +241,9 @@ type TimeWeatherState = AuthoritativeSnapshot['timeWeather']
 type ContainerState = AuthoritativeSnapshot['containers'][number]
 type FurnaceState = AuthoritativeSnapshot['furnaces'][number]
 type ItemStack = NonNullable<InventoryState['slots'][number]>
+type EquipmentState = NonNullable<InventoryState['equipment']>
+type EquipmentSlot = keyof EquipmentState
+type MutableEquipmentState = { -readonly [Slot in EquipmentSlot]: EquipmentState[Slot] }
 type MobWireState = NonNullable<Extract<AuthoritativeEntityState, { readonly _tag: 'living' }>['mobState']>
 type UnknownRecord = Readonly<Record<string, unknown>>
 
@@ -358,6 +361,7 @@ const deterministicRoll = (input: string): number => {
 interface MutableInventoryState {
   readonly slots: Array<ItemStack | null>
   readonly durability: Array<{ readonly current: number; readonly max: number } | null>
+  readonly equipment: MutableEquipmentState
   selectedSlot: number
 }
 
@@ -425,15 +429,31 @@ const WITHER_TARGET_RANGE = 64
 const positionKey = ({ x, y, z }: BlockPos): string => `${String(x)},${String(y)},${String(z)}`
 
 const cloneStack = (stack: ItemStack | null): ItemStack | null => stack === null ? null : { ...stack }
+const emptyEquipmentState = (): EquipmentState => ({ head: null, chest: null, legs: null, feet: null, offhand: null })
+const cloneEquipmentStack = (stack: ItemStack | null, slot: EquipmentSlot): ItemStack | null => {
+  if (stack === null || !isItemType(stack.item) || stack.count !== 1 || equipmentDefinitionFor(stack.item)?.slot !== slot) return null
+  const durability = stack.durability ?? durabilityForItem(stack.item)
+  return durability === null || !isValidDurabilityForItem(stack.item, durability)
+    ? null
+    : { ...stack, durability: { ...durability } }
+}
+const cloneEquipment = (equipment: InventoryState['equipment']): EquipmentState => ({
+  head: cloneEquipmentStack(equipment?.head ?? null, 'head'),
+  chest: cloneEquipmentStack(equipment?.chest ?? null, 'chest'),
+  legs: cloneEquipmentStack(equipment?.legs ?? null, 'legs'),
+  feet: cloneEquipmentStack(equipment?.feet ?? null, 'feet'),
+  offhand: cloneEquipmentStack(equipment?.offhand ?? null, 'offhand'),
+})
 const cloneInventory = (state: InventoryState): MutableInventoryState => ({
   slots: state.slots.map(cloneStack),
-  durability: state.slots.map((stack) => {
-    const durability = stack?.durability
+  durability: state.slots.map((stack, index) => {
+    const durability = stack?.durability ?? state.durability?.[index]
     if (stack === null || !isItemType(stack.item)) return null
     return durability !== undefined && isValidDurabilityForItem(stack.item, durability)
       ? { ...durability }
       : durabilityForItem(stack.item)
   }),
+  equipment: cloneEquipment(state.equipment),
   selectedSlot: state.selectedSlot,
 })
 const inventorySnapshot = (state: MutableInventoryState): InventoryState => {
@@ -445,6 +465,7 @@ const inventorySnapshot = (state: MutableInventoryState): InventoryState => {
         : cloneStack(stack)
     }),
     selectedSlot: state.selectedSlot,
+    equipment: cloneEquipment(state.equipment),
   }
 }
 const vitalsSnapshot = (state: MutableVitalsState): VitalsState => ({ ...state })
@@ -531,7 +552,7 @@ const moveStack = (
   ) return 'invalid-command'
   sourceSlots[sourceIndex] = source.count === count ? null : { ...source, count: source.count - count }
   destinationSlots[destinationIndex] = destination === null || destination === undefined
-    ? { item: source.item, count }
+    ? { ...source, count }
     : { ...destination, count: destination.count + count }
   return null
 }
@@ -550,6 +571,72 @@ const swapStacks = (
   return null
 }
 
+const moveInventoryStack = (
+  inventory: MutableInventoryState,
+  sourceIndex: number,
+  destinationIndex: number,
+  count: number,
+): CommandRejectionReason | null => {
+  const sourceDurability =
+    inventory.durability[sourceIndex] ?? inventory.slots[sourceIndex]?.durability ?? null
+  const reason = moveStack(inventory.slots, sourceIndex, inventory.slots, destinationIndex, count)
+  if (reason === null && inventory.slots[sourceIndex] === null) {
+    inventory.durability[sourceIndex] = null
+    inventory.durability[destinationIndex] = sourceDurability
+  }
+  return reason
+}
+
+const swapInventoryStacks = (
+  inventory: MutableInventoryState,
+  sourceIndex: number,
+  destinationIndex: number,
+): CommandRejectionReason | null => {
+  const reason = swapStacks(inventory.slots, sourceIndex, destinationIndex)
+  if (reason === null) {
+    const sourceDurability = inventory.durability[sourceIndex] ?? null
+    inventory.durability[sourceIndex] = inventory.durability[destinationIndex] ?? null
+    inventory.durability[destinationIndex] = sourceDurability
+  }
+  return reason
+}
+
+const equipInventoryItem = (
+  inventory: MutableInventoryState,
+  sourceIndex: number,
+  equipmentSlot: EquipmentSlot,
+): CommandRejectionReason | null => {
+  if (sourceIndex >= inventory.slots.length || inventory.equipment[equipmentSlot] !== null) return 'invalid-command'
+  const source = inventory.slots[sourceIndex]
+  if (source === null || source === undefined) return 'insufficient-items'
+  if (!isItemType(source.item) || source.count !== 1 || equipmentDefinitionFor(source.item)?.slot !== equipmentSlot) return 'invalid-command'
+  const durability =
+    inventory.durability[sourceIndex] ?? source.durability ?? durabilityForItem(source.item)
+  if (durability === null) return 'invalid-command'
+  inventory.slots[sourceIndex] = null
+  inventory.durability[sourceIndex] = null
+  inventory.equipment[equipmentSlot] = { item: source.item, count: 1, durability: { ...durability } }
+  return null
+}
+
+const unequipInventoryItem = (
+  inventory: MutableInventoryState,
+  equipmentSlot: EquipmentSlot,
+  destinationIndex: number | undefined,
+): CommandRejectionReason | null => {
+  const equipped = inventory.equipment[equipmentSlot]
+  if (equipped === null) return 'insufficient-items'
+  const destination = destinationIndex ?? inventory.slots.findIndex((stack) => stack === null)
+  if (destination < 0 || destination >= inventory.slots.length || inventory.slots[destination] !== null) return 'invalid-command'
+  if (!isItemType(equipped.item) || equipped.count !== 1 || equipmentDefinitionFor(equipped.item)?.slot !== equipmentSlot) return 'invalid-command'
+  const durability = equipped.durability ?? durabilityForItem(equipped.item)
+  if (durability === null) return 'invalid-command'
+  inventory.equipment[equipmentSlot] = null
+  inventory.slots[destination] = { item: equipped.item, count: 1 }
+  inventory.durability[destination] = { ...durability }
+  return null
+}
+
 /** Adds as much of a stack as possible and returns only the unplaceable remainder. */
 const addStackToInventory = (slots: Array<ItemStack | null>, stack: ItemStack): ItemStack | null => {
   if (!isItemType(stack.item)) return stack
@@ -565,11 +652,11 @@ const addStackToInventory = (slots: Array<ItemStack | null>, stack: ItemStack): 
   for (const [index, current] of slots.entries()) {
     if (current !== null) continue
     const added = Math.min(maxStackCount, remaining)
-    slots[index] = { item: stack.item, count: added }
+    slots[index] = { ...stack, count: added }
     remaining -= added
     if (remaining === 0) return null
   }
-  return { item: stack.item, count: remaining }
+  return { ...stack, count: remaining }
 }
 
 export interface MultiplayerServerCore {
@@ -933,7 +1020,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
   const ensurePlayerState = (player: PlayerId): void => {
     if (!inventories.has(player)) {
-      inventories.set(player, { slots: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), durability: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), selectedSlot: 0 })
+      inventories.set(player, { slots: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), durability: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), equipment: emptyEquipmentState(), selectedSlot: 0 })
     }
     if (!vitals.has(player)) vitals.set(player, { ...DEFAULT_VITALS })
     if (!statusEffects.has(player)) statusEffects.set(player, emptyStatusEffectState())
@@ -1569,14 +1656,18 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             return { accepted: false, reason: 'insufficient-items' }
           }
           if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+          const durability = inventory.durability[message.action.source] ?? source.durability ?? null
           inventory.slots[message.action.source] = source.count === message.action.count
             ? null
             : { ...source, count: source.count - message.action.count }
+          if (inventory.slots[message.action.source] === null) inventory.durability[message.action.source] = null
           const entity: AuthoritativeEntityState = {
             _tag: 'item-drop',
             entityId: `${String(message.player)}:drop:${String(message.commandId)}` as AuthoritativeEntityState['entityId'],
             at: { ...actor.at },
-            stack: { ...source, count: message.action.count },
+            stack: durability === null
+              ? { ...source, count: message.action.count }
+              : { ...source, count: message.action.count, durability: { ...durability } },
           }
           entities.set(entity.entityId, entity)
           return {
@@ -1593,17 +1684,22 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             ],
           }
         } else if (message.action._tag === 'swap-items') {
-          const reason = swapStacks(
-            inventory.slots,
+          const reason = swapInventoryStacks(
+            inventory,
             message.action.source,
             message.action.destination,
           )
           if (reason !== null) return { accepted: false, reason }
+        } else if (message.action._tag === 'equip-item') {
+          const reason = equipInventoryItem(inventory, message.action.source, message.action.equipmentSlot)
+          if (reason !== null) return { accepted: false, reason }
+        } else if (message.action._tag === 'unequip-item') {
+          const reason = unequipInventoryItem(inventory, message.action.equipmentSlot, message.action.destination)
+          if (reason !== null) return { accepted: false, reason }
         } else {
-          const reason = moveStack(
-            inventory.slots,
+          const reason = moveInventoryStack(
+            inventory,
             message.action.source,
-            inventory.slots,
             message.action.destination,
             message.action.count,
           )
