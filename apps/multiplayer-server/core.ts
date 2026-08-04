@@ -2204,9 +2204,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const brokenBlock = blockAt(message.at)
         if (brokenBlock === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })
-        disturbFallingBlocks([
-          { x: message.at.x, y: message.at.y + 1, z: message.at.z },
-        ])
+        disturbFallingBlocks([message.at])
         if (containerKindForBlock(brokenBlock) !== undefined) containers.delete(containerIdAt(message.at))
         else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
         revision += 1
