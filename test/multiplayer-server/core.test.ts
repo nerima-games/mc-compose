@@ -14,6 +14,7 @@ import { Either } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import { makeMultiplayerServerCore, type ReceiveResult } from '../../apps/multiplayer-server/core'
+import { decodeBrewingWireMessage } from '../../apps/multiplayer-shared/brewing-network'
 import { decodeSleepWireMessage, type SleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage, type WitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
 
@@ -28,7 +29,7 @@ const frame = (message: NetworkMessage): WireText => {
 }
 
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
-  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined && decodeWitherWireMessage(wire) === undefined).map((wire) => {
+  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined && decodeWitherWireMessage(wire) === undefined && decodeBrewingWireMessage(wire) === undefined).map((wire) => {
     const result = decodeFrame(wire)
     if (Either.isLeft(result)) throw result.left
     return result.right

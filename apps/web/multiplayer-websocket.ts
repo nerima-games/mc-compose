@@ -11,6 +11,7 @@ import {
   type PlayerDamageWireMessage,
 } from '../multiplayer-shared/player-damage-network'
 import { decodeCraftingWireMessage, encodeCraftingCommand, type CraftingCommand, type CraftingWireMessage } from '../multiplayer-shared/crafting-network'
+import { decodeBrewingWireMessage, encodeBrewingCommand, type BrewingCommand, type BrewingWireMessage } from '../multiplayer-shared/brewing-network'
 import { decodeSleepWireMessage, type SleepWireMessage } from '../multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage, type WitherWireMessage } from '../multiplayer-shared/wither-network'
 
@@ -52,9 +53,11 @@ export interface BrowserWebSocketTransport extends TransportService {
   readonly witherInbound: Queue.Dequeue<WitherWireMessage>
   readonly playerDamageInbound: Queue.Dequeue<PlayerDamageWireMessage>
   readonly craftingInbound: Queue.Dequeue<CraftingWireMessage>
+  readonly brewingInbound: Queue.Dequeue<BrewingWireMessage>
   readonly sendSleep: (message: SleepWireMessage) => Effect.Effect<void, TransportError>
   readonly sendPlayerDamage: (command: PlayerDamageCommand) => Effect.Effect<void, TransportError>
   readonly sendCrafting: (command: CraftingCommand) => Effect.Effect<void, TransportError>
+  readonly sendBrewing: (command: BrewingCommand) => Effect.Effect<void, TransportError>
   readonly state: () => WebSocketTransportState
 }
 
@@ -134,6 +137,7 @@ export const makeBrowserWebSocketTransport = (
     const witherInbound = yield* Queue.unbounded<WitherWireMessage>()
     const playerDamageInbound = yield* Queue.unbounded<PlayerDamageWireMessage>()
     const craftingInbound = yield* Queue.unbounded<CraftingWireMessage>()
+    const brewingInbound = yield* Queue.unbounded<BrewingWireMessage>()
     const opened = yield* Deferred.make<void, TransportError>()
     const socket = yield* Effect.try({
       try: () => (options.socketFactory ?? defaultSocketFactory)(options.url),
@@ -169,6 +173,7 @@ export const makeBrowserWebSocketTransport = (
       if (shutdownInbound) Effect.runSync(Queue.shutdown(witherInbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(playerDamageInbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(craftingInbound))
+      if (shutdownInbound) Effect.runSync(Queue.shutdown(brewingInbound))
     }
 
     function handleOpen(): void {
@@ -267,6 +272,11 @@ export const makeBrowserWebSocketTransport = (
         Queue.unsafeOffer(craftingInbound, craftingMessage)
         return
       }
+      const brewingMessage = decodeBrewingWireMessage(event.data as WireText)
+      if (brewingMessage !== undefined) {
+        Queue.unsafeOffer(brewingInbound, brewingMessage)
+        return
+      }
       Queue.unsafeOffer(inbound, event.data as WireText)
     }
 
@@ -330,6 +340,7 @@ export const makeBrowserWebSocketTransport = (
       Effect.runSync(Queue.shutdown(witherInbound))
       Effect.runSync(Queue.shutdown(playerDamageInbound))
       Effect.runSync(Queue.shutdown(craftingInbound))
+      Effect.runSync(Queue.shutdown(brewingInbound))
       if (shouldCloseSocket) socket.close(1000, 'transport disposed')
     })
 
@@ -339,6 +350,8 @@ export const makeBrowserWebSocketTransport = (
       send(encodePlayerDamageCommand(command))
     const sendCrafting = (command: CraftingCommand): Effect.Effect<void, TransportError> =>
       send(encodeCraftingCommand(command))
+    const sendBrewing = (command: BrewingCommand): Effect.Effect<void, TransportError> =>
+      send(encodeBrewingCommand(command))
     return {
       send,
       inbound,
@@ -346,9 +359,11 @@ export const makeBrowserWebSocketTransport = (
       witherInbound,
       playerDamageInbound,
       craftingInbound,
+      brewingInbound,
       sendSleep,
       sendPlayerDamage,
       sendCrafting,
+      sendBrewing,
       close,
       state: () => currentState,
     }

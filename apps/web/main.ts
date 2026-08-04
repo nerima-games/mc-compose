@@ -379,6 +379,10 @@ import {
   type CraftingCommandResult,
 } from '../multiplayer-shared/crafting-network'
 import {
+  type BrewingCommand,
+  type BrewingCommandResult,
+} from '../multiplayer-shared/brewing-network'
+import {
   advanceEyeOfEnderRuntime,
   eyeOfEnderRenderDescriptors,
   eyeOfEnderRuntimeSnapshot,
@@ -2990,6 +2994,7 @@ const bootGame = async (
   let nextInventoryCommand = 0
   let nextPlayerDamageCommand = 0
   let nextCraftingCommand = 0
+  let nextBrewingCommand = 0
   let nextVillagerTradeCommand = 0
   let pendingVitalsCommand: CommandId | null = null
   let pendingInventoryCommand: {
@@ -3027,6 +3032,10 @@ type MultiplayerInventorySelection = Readonly<{
     readonly commandId: string
     readonly acceptedRevision: number | null
   } | null = null
+  let pendingBrewingCommand: {
+    readonly commandId: string
+  } | null = null
+  let activeBrewingStandAt: { readonly x: number; readonly y: number; readonly z: number } | undefined
   let pendingFacilityCommand: {
     readonly commandId: CommandId
     readonly facility: 'container' | 'furnace'
@@ -3372,6 +3381,76 @@ type MultiplayerInventorySelection = Readonly<{
     if (multiplayer === undefined) return
     for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.craftingInbound))) {
       if (message._tag === 'CraftingCommandResult') applyCraftingResult(message)
+    }
+  }
+
+  const requestBrewing = (action: BrewingCommand['action']): boolean => {
+    if (
+      multiplayer === undefined
+      || !multiplayerHandshakeComplete
+      || pendingBrewingCommand !== null
+      || activeBrewingStandAt === undefined
+    ) return false
+    nextBrewingCommand += 1
+    const commandId = `brewing-${String(nextBrewingCommand)}`
+    pendingBrewingCommand = { commandId }
+    const command: BrewingCommand = {
+      _tag: 'BrewingCommand',
+      commandId,
+      player: String(multiplayer.query.player),
+      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      expectedRevision: multiplayerRevision,
+      at: activeBrewingStandAt,
+      action,
+    }
+    Effect.runSync(multiplayer.transport.sendBrewing(command))
+    return true
+  }
+
+  const resyncBrewing = (): void => {
+    if (multiplayer === undefined) return
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'AuthoritativeResyncRequest',
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      lastKnownRevision: multiplayerRevision,
+    }))
+  }
+
+  const applyBrewingResult = (message: BrewingCommandResult): void => {
+    if (multiplayer === undefined || pendingBrewingCommand?.commandId !== message.commandId) return
+    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+    pendingBrewingCommand = null
+    if (message.accepted) return
+    brewingStatus = `Cannot brew: ${message.reason ?? 'rejected'}`
+    resyncBrewing()
+    renderBrewingUi()
+  }
+
+  const sameBrewingPosition = (
+    left: { readonly x: number; readonly y: number; readonly z: number },
+    right: { readonly x: number; readonly y: number; readonly z: number },
+  ): boolean => left.x === right.x && left.y === right.y && left.z === right.z
+
+  const drainBrewingInbound = (): void => {
+    if (multiplayer === undefined) return
+    const currentWorld = String(WorldId.make(Effect.runSync(playerApi.dimension)))
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.brewingInbound))) {
+      if (message._tag === 'BrewingCommandResult') {
+        applyBrewingResult(message)
+        continue
+      }
+      if (message.world !== currentWorld || message.revision < multiplayerRevision) continue
+      multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+      if (message._tag === 'BrewingStandDelta') {
+        if (activeBrewingStandAt !== undefined && sameBrewingPosition(activeBrewingStandAt, message.at)) {
+          Effect.runSync(restoreBrewingStand(gameplayState, message.state))
+          if (brewingOpen) renderBrewingUi()
+        }
+        continue
+      }
+      if (message.player === String(multiplayer.query.player)) {
+        Effect.runSync(restoreStatusEffects(gameplayState, message.state))
+      }
     }
   }
 
@@ -4089,6 +4168,10 @@ type MultiplayerInventorySelection = Readonly<{
     if (open && tradeOpen) setTradeOpen(false)
     if (open && inventoryOpen) setInventoryOpen(false)
     brewingOpen = open
+    if (!open) {
+      activeBrewingStandAt = undefined
+      pendingBrewingCommand = null
+    }
     brewingStatus = ''
     brewingParent.hidden = !open
     brewingParent.setAttribute('aria-hidden', String(!open))
@@ -4112,6 +4195,15 @@ type MultiplayerInventorySelection = Readonly<{
       const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
       if (selected === undefined) {
         brewingStatus = 'Select brewing fuel, a bottle, or an ingredient'
+        renderBrewingUi()
+        return
+      }
+      if (multiplayer !== undefined) {
+        if (requestBrewing({ _tag: 'insert', slot: selectedHotbarIndex })) {
+          brewingStatus = `Submitting ${selected.item}...`
+        } else {
+          brewingStatus = 'Brewing action is unavailable'
+        }
         renderBrewingUi()
         return
       }
@@ -4150,6 +4242,15 @@ type MultiplayerInventorySelection = Readonly<{
       return
     }
     if (action === 'collect') {
+      if (multiplayer !== undefined) {
+        if (requestBrewing({ _tag: 'collect' })) {
+          brewingStatus = 'Collecting bottle...'
+        } else {
+          brewingStatus = 'Brewing action is unavailable'
+        }
+        renderBrewingUi()
+        return
+      }
       const result = Effect.runSync(collectBrewingPotion(gameplayState))
       if (result._tag === 'Rejected') {
         brewingStatus = `Cannot collect bottle: ${result.reason}`
@@ -4171,6 +4272,15 @@ type MultiplayerInventorySelection = Readonly<{
       return
     }
     if (action === 'drink') {
+      if (multiplayer !== undefined) {
+        if (requestBrewing({ _tag: 'drink' })) {
+          brewingStatus = 'Drinking potion...'
+        } else {
+          brewingStatus = 'Brewing action is unavailable'
+        }
+        renderBrewingUi()
+        return
+      }
       const result = Effect.runSync(useBrewingPotion(gameplayState))
       brewingStatus = result._tag === 'Consumed'
         ? `Drank ${result.consumed.item}`
@@ -4288,35 +4398,6 @@ type MultiplayerInventorySelection = Readonly<{
   }
   const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
   const coordinateKey = (x: number, y: number, z: number): string => `${x},${y},${z}`
-  const targetedBrewingStand = (): Effect.Effect<boolean> => Effect.gen(function* () {
-    const pose = yield* playerApi.pose
-    const candidates: Array<{ x: number; y: number; z: number }> = []
-    const visited = new Set<string>()
-    targetBlockFromPlayerPose(pose, DEFAULT_BLOCK_REACH, (x, y, z) => {
-      const key = coordinateKey(x, y, z)
-      if (!visited.has(key)) {
-        visited.add(key)
-        candidates.push({ x, y, z })
-      }
-      return false
-    })
-    const targetable = new Set<string>()
-    for (const position of candidates) {
-      const reading = yield* currentChunkStore.getBlock(position)
-      if (reading._tag === 'Block' && reading.block !== 0) {
-        targetable.add(coordinateKey(position.x, position.y, position.z))
-        break
-      }
-    }
-    const target = targetBlockFromPlayerPose(
-      pose,
-      DEFAULT_BLOCK_REACH,
-      (x, y, z) => targetable.has(coordinateKey(x, y, z)),
-    )
-    if (Option.isNone(target)) return false
-    const reading = yield* currentChunkStore.getBlock(target.value.position)
-    return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'brewing_stand'
-  })
   const targetedBlock = (): Effect.Effect<{
     readonly position: SessionPosition
     readonly adjacentPosition: SessionPosition
@@ -7905,6 +7986,7 @@ type MultiplayerInventorySelection = Readonly<{
 
       if (multiplayer !== undefined) drainMultiplayerInbound()
       drainCraftingInbound()
+      drainBrewingInbound()
       drainPlayerDamageInbound()
       const outcome = Effect.runSyncExit(runFrame(deltaSecs))
       if (swimmingState.active && mountedVehicle === undefined) {
@@ -8192,22 +8274,26 @@ type MultiplayerInventorySelection = Readonly<{
       }
 
       const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
-      for (const event of playerDamages) {
-        applyPlayerDamage(
-          event.damage,
-          event._tag === 'StatusEffect' ? event.minimumHealthPoints : 0,
-        )
+      if (multiplayer === undefined) {
+        for (const event of playerDamages) {
+          applyPlayerDamage(
+            event.damage,
+            event._tag === 'StatusEffect' ? event.minimumHealthPoints : 0,
+          )
+        }
       }
       const playerHeals = Effect.runSync(drainPlayerHeals(gameplayState))
-      for (const event of playerHeals) {
-        const vitals = Effect.runSync(world.vitals.view)
-        const allowed = Math.max(
-          0,
-          Math.min(event.maximumHealthPoints, vitals.maxHealthPoints) - vitals.healthPoints,
-        )
-        if (allowed > 0) Effect.runSync(world.vitals.heal(Math.min(event.amount, allowed)))
+      if (multiplayer === undefined) {
+        for (const event of playerHeals) {
+          const vitals = Effect.runSync(world.vitals.view)
+          const allowed = Math.max(
+            0,
+            Math.min(event.maximumHealthPoints, vitals.maxHealthPoints) - vitals.healthPoints,
+          )
+          if (allowed > 0) Effect.runSync(world.vitals.heal(Math.min(event.amount, allowed)))
+        }
       }
-      if (playerDamages.length > 0) {
+      if (multiplayer === undefined && playerDamages.length > 0) {
         markSessionDirty()
         if (playerIsDead()) {
           setInventoryOpen(false)
@@ -9025,7 +9111,8 @@ type MultiplayerInventorySelection = Readonly<{
           || specialSelected?.item === 'eye_of_ender'
         const usedEndFeature = usedSpecialItem
           || (shouldAttemptEndFeature && Effect.runSync(useEndFeature()))
-        const opensBrewing = usedEndFeature ? false : Effect.runSync(targetedBrewingStand())
+        const brewingTarget = usedEndFeature ? undefined : Effect.runSync(targetedBlock())
+        const opensBrewing = brewingTarget !== undefined && blockTypeOfId(brewingTarget.block) === 'brewing_stand'
         const route = usedEndFeature || opensBrewing
           ? undefined
           : Effect.runSync(targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH))
@@ -9033,6 +9120,11 @@ type MultiplayerInventorySelection = Readonly<{
           renderPlayerUi()
         } else if (opensBrewing) {
           setBrewingOpen(true)
+          if (multiplayer !== undefined && brewingTarget !== undefined) {
+            activeBrewingStandAt = { ...brewingTarget.position }
+            if (!requestBrewing({ _tag: 'open' })) brewingStatus = 'Brewing stand is unavailable'
+            renderBrewingUi()
+          }
         } else if (route?.kind === 'craftingTable') {
           setInventoryOpen(true, 'craftingTable')
         } else if (route?.kind === 'anvil') {
@@ -9691,7 +9783,7 @@ type MultiplayerInventorySelection = Readonly<{
         const currentVitals = Effect.runSync(world.vitals.snapshot)
         Effect.runSync(world.vitals.restore(addVitalsExperience(currentVitals, event.amount)))
       }
-      if (mobExperience.length > 0 || playerHeals.length > 0) markSessionDirty()
+      if (mobExperience.length > 0 || (multiplayer === undefined && playerHeals.length > 0)) markSessionDirty()
 
       const dragonEvents = Effect.runSync(gameplayState.enderDragonEncounter.drainEvents)
       for (const event of dragonEvents) {
@@ -9790,6 +9882,7 @@ type MultiplayerInventorySelection = Readonly<{
         Effect.runSync(multiplayerInboundStage.run(DeltaTimeSecs(0)))
         drainMultiplayerInbound()
         drainCraftingInbound()
+        drainBrewingInbound()
         drainPlayerDamageInbound()
       }, 100)
       surface.onCleanup(() => {

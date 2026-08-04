@@ -35,6 +35,7 @@ import {
   encodeCraftingCommand,
   type CraftingCommand,
 } from '../../apps/multiplayer-shared/crafting-network'
+import { decodeBrewingWireMessage } from '../../apps/multiplayer-shared/brewing-network'
 import { decodeSleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
 
@@ -57,7 +58,8 @@ const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage
   frames.filter((wire) => decodeSleepWireMessage(wire) === undefined
     && decodeWitherWireMessage(wire) === undefined
     && decodePlayerDamageWireMessage(wire) === undefined
-    && decodeCraftingWireMessage(wire) === undefined).map((wire) => {
+    && decodeCraftingWireMessage(wire) === undefined
+    && decodeBrewingWireMessage(wire) === undefined).map((wire) => {
     const decoded = decodeFrame(wire)
     if (Either.isLeft(decoded)) throw decoded.left
     return decoded.right

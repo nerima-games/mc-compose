@@ -48,6 +48,24 @@ import {
   ZOMBIE_XP_REWARD,
   ZOMBIFIED_PIGLIN_KIND,
   applyFurnaceAdvance,
+  applyStatusEffect,
+  acceptBrewingBottle,
+  acceptBrewingFuel,
+  acceptBrewingIngredient,
+  collectBrewingBottle,
+  copyBrewingStandState,
+  copyStatusEffectState,
+  drinkBrewingPotion,
+  emptyBrewingStandState,
+  emptyStatusEffectState,
+  isValidBrewingStandState,
+  isValidStatusEffectState,
+  POISON_DAMAGE_POINTS,
+  POISON_MINIMUM_HEALTH_POINTS,
+  REGENERATION_HEAL_POINTS,
+  PLAYER_MAXIMUM_HEALTH_POINTS,
+  tickBrewingStand,
+  tickStatusEffects,
   blockLoot,
   isBucketItem,
   dropRollsNeeded,
@@ -80,8 +98,12 @@ import {
   type Explosion,
   type FishingRod,
   type FishingSession,
+  type BrewingBottle,
+  type BrewingStandState,
+  type StatusEffectState,
 } from '@nerima-games/mx-gameplay'
 import { Either, Option } from 'effect'
+import { DeltaTimeSecs } from '../../src/domain/kernel-vocabulary'
 import {
   SleepAuthority,
   decodeSleepWireMessage,
@@ -106,6 +128,7 @@ import {
   type PlayerDamageWireMessage,
 } from '../multiplayer-shared/player-damage-network'
 import { CRAFTING_MAX_WIRE_LENGTH, decodeCraftingWireMessage, type CraftingCommand, type CraftingCommandResult } from '../multiplayer-shared/crafting-network'
+import { BREWING_MAX_WIRE_LENGTH, decodeBrewingWireMessage, type BrewingCommand, type BrewingCommandResult, type BrewingWireMessage } from '../multiplayer-shared/brewing-network'
 
 export type ClientId = string
 export type SendFrame = (frame: WireText) => void
@@ -125,6 +148,8 @@ const playerDamageFingerprint = (command: PlayerDamageCommand): string => JSON.s
 
 export const craftingResultKey = (player: PlayerId, commandId: string): string => JSON.stringify([player, commandId])
 const craftingFingerprint = (command: CraftingCommand): string => JSON.stringify(command)
+export const brewingResultKey = (player: PlayerId, commandId: string): string => JSON.stringify([player, commandId])
+const brewingFingerprint = (command: BrewingCommand): string => JSON.stringify(command)
 
 const arrowHitProjection = (
   from: Readonly<{ x: number; y: number; z: number }>,
@@ -185,10 +210,12 @@ export interface MultiplayerServerState {
   }>>
   readonly wither?: WitherRuntimeSnapshot
   readonly witherRevision?: number
+  readonly brewingStands?: ReadonlyArray<Readonly<{ at: BlockPos; state: BrewingStandState }>>
+  readonly statusEffects?: ReadonlyArray<Readonly<{ player: PlayerId; state: StatusEffectState }>>
 }
 
 export type ReceiveResult =
-  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | PlayerDamageWireMessage | CraftingCommand }>
+  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | PlayerDamageWireMessage | CraftingCommand | BrewingCommand }>
   | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' | 'invalid-command' }>
 
 interface ConnectedClient {
@@ -586,6 +613,16 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       output: cloneStack(state.output),
     }]),
   )
+  const brewingStands = new Map<string, Readonly<{ at: BlockPos; state: BrewingStandState }>>(
+    (options.initialState?.brewingStands ?? [])
+      .filter(({ state }) => isValidBrewingStandState(state))
+      .map(({ at, state }) => [positionKey(at), { at: { ...at }, state: copyBrewingStandState(state) }]),
+  )
+  const statusEffects = new Map<PlayerId, StatusEffectState>(
+    (options.initialState?.statusEffects ?? [])
+      .filter(({ state }) => isValidStatusEffectState(state))
+      .map(({ player, state }) => [player, copyStatusEffectState(state)]),
+  )
   let villagerTrades: AuthoritativeSnapshot['villagerTrades'] = (options.initialState?.villagerTrades ?? []).map((state) => ({
     ...state,
     offers: state.offers.map((offer) => ({
@@ -618,6 +655,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     result: PlayerDamageCommandResult
   }>>()
   const craftingResults = new Map<string, Readonly<{ fingerprint: string; result: CraftingCommandResult }>>()
+  const brewingResults = new Map<string, Readonly<{ fingerprint: string; result: BrewingCommandResult }>>()
   const cachePlayerDamageResult = (
     key: string,
     fingerprint: string,
@@ -633,6 +671,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (craftingResults.size <= commandResultLimit) return
     const oldestKey = craftingResults.keys().next().value
     if (oldestKey !== undefined) craftingResults.delete(oldestKey)
+  }
+  const cacheBrewingResult = (key: string, fingerprint: string, result: BrewingCommandResult): void => {
+    brewingResults.set(key, { fingerprint, result })
+    if (brewingResults.size <= commandResultLimit) return
+    const oldestKey = brewingResults.keys().next().value
+    if (oldestKey !== undefined) brewingResults.delete(oldestKey)
   }
   const lastWitherAttackMs = new Map<PlayerId, number>()
   const hungerActors = new Map<PlayerId, HungerActor>()
@@ -695,9 +739,15 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const sendCrafting = (client: ConnectedClient, message: CraftingCommandResult): void => {
     client.send(JSON.stringify(message) as WireText)
   }
+  const sendBrewing = (client: ConnectedClient, message: BrewingWireMessage): void => {
+    client.send(JSON.stringify(message) as WireText)
+  }
 
   const broadcastWither = (message: WitherWireMessage): void => {
     for (const client of clients.values()) if (client.playerId !== null) sendWither(client, message)
+  }
+  const broadcastBrewing = (message: BrewingWireMessage): void => {
+    for (const client of clients.values()) if (client.playerId !== null) sendBrewing(client, message)
   }
 
   const witherSnapshot = (): WitherWireMessage => ({
@@ -828,12 +878,21 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const facilityIsAccessible = (
     player: PlayerId,
     at: BlockPos,
-    expectedBlock: ContainerKind | 'furnace',
+    expectedBlock: ContainerKind | 'furnace' | 'brewing_stand',
   ): CommandRejectionReason | null => {
     const actor = players.get(player)
     if (actor === undefined) return 'resource-not-found'
     if (actor.world !== worldId || blockAt(at) !== expectedBlock) return 'invalid-command'
     return isBlockWithinReach(actor, at) ? null : 'out-of-range'
+  }
+
+  const brewingBottleFromItem = (item: string): BrewingBottle | undefined => {
+    if (item === 'water_bottle') return item
+    if (item === 'awkward_potion') return { potion: 'awkward' }
+    if (item === 'potion_of_swiftness') return { potion: 'speed' }
+    if (item === 'potion_of_poison') return { potion: 'poison' }
+    if (item === 'potion_of_regeneration') return { potion: 'regeneration' }
+    return undefined
   }
 
   const persistentState = (): MultiplayerServerState => ({
@@ -853,6 +912,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     })),
     wither: snapshotWitherRuntime(witherState),
     witherRevision,
+    brewingStands: [...brewingStands.values()].map(({ at, state }) => ({ at: { ...at }, state: copyBrewingStandState(state) })),
+    statusEffects: [...statusEffects].map(([player, state]) => ({ player, state: copyStatusEffectState(state) })),
   })
 
   const notifyStateChanged = (): void => options.onStateChanged?.(persistentState())
@@ -862,6 +923,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       inventories.set(player, { slots: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), durability: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), selectedSlot: 0 })
     }
     if (!vitals.has(player)) vitals.set(player, { ...DEFAULT_VITALS })
+    if (!statusEffects.has(player)) statusEffects.set(player, emptyStatusEffectState())
     const playerVitals = vitals.get(player) as MutableVitalsState
     const inventory = inventories.get(player) as MutableInventoryState
     const food: Record<string, number> = {}
@@ -1821,7 +1883,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     const maximum = options.maxMoveDistance ?? DEFAULT_MAX_MOVE_DISTANCE
     const previous = movementBudgets.get(player) ?? { updatedAtMs: nowMs, availableDistance: maximum }
     const elapsedSeconds = Math.max(0, nowMs - previous.updatedAtMs) / 1_000
-    const availableDistance = Math.min(maximum, previous.availableDistance + elapsedSeconds * PLAYER_MOVE_SPEED_BLOCKS_PER_SECOND)
+    const effects = statusEffects.get(player) ?? emptyStatusEffectState()
+    const speedMultiplier = tickStatusEffects(effects, DeltaTimeSecs(0)).movementSpeedMultiplier
+    const availableDistance = Math.min(maximum, previous.availableDistance + elapsedSeconds * PLAYER_MOVE_SPEED_BLOCKS_PER_SECOND * speedMultiplier)
     movementBudgets.set(player, { updatedAtMs: nowMs, availableDistance })
     if (distance > availableDistance + COLLISION_EPSILON) return false
     movementBudgets.set(player, { updatedAtMs: nowMs, availableDistance: availableDistance - distance })
@@ -1866,7 +1930,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     const client = clients.get(clientId)
     if (client === undefined) return { accepted: false, reason: 'unknown-client' }
     if ((frame.length > PLAYER_DAMAGE_MAX_WIRE_LENGTH && frame.includes('"_tag":"PlayerDamageCommand"'))
-      || (frame.length > CRAFTING_MAX_WIRE_LENGTH && frame.includes('"_tag":"CraftingCommand"'))) {
+      || (frame.length > CRAFTING_MAX_WIRE_LENGTH && frame.includes('"_tag":"CraftingCommand"'))
+      || (frame.length > BREWING_MAX_WIRE_LENGTH && frame.includes('"_tag":"BrewingCommand"'))) {
       return { accepted: false, reason: 'malformed-frame' }
     }
     const craftingMessage = decodeCraftingWireMessage(frame)
@@ -1921,6 +1986,92 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       broadcast({ _tag: 'PlayerInventoryDelta', world: presence.world, revision, player: client.playerId, state: inventorySnapshot(inventory) })
       sendCrafting(client, result)
       return { accepted: true, message: craftingMessage }
+    }
+    const brewingMessage = decodeBrewingWireMessage(frame)
+    if (brewingMessage?._tag === 'BrewingCommand') {
+      if (client.playerId === null) return { accepted: false, reason: 'join-required' }
+      const command = brewingMessage
+      const resultKey = brewingResultKey(client.playerId, command.commandId)
+      const fingerprint = brewingFingerprint(command)
+      const cached = brewingResults.get(resultKey)
+      if (cached !== undefined) {
+        if (cached.fingerprint !== fingerprint) return { accepted: false, reason: 'invalid-command' }
+        sendBrewing(client, cached.result)
+        return cached.result.accepted ? { accepted: true, message: brewingMessage } : { accepted: false, reason: 'invalid-command' }
+      }
+      const rejectBrewing = (reason: Extract<BrewingCommandResult, { accepted: false }>['reason'], receiveReason: Extract<ReceiveResult, { accepted: false }>['reason'] = 'invalid-command'): ReceiveResult => {
+        const result: BrewingCommandResult = { _tag: 'BrewingCommandResult', commandId: command.commandId, accepted: false, revision, reason }
+        cacheBrewingResult(resultKey, fingerprint, result)
+        sendBrewing(client, result)
+        return { accepted: false, reason: receiveReason }
+      }
+      if (command.player !== client.playerId) return rejectBrewing('unauthorized-player', 'identity-spoof')
+      if (command.world !== worldId) return rejectBrewing('wrong-world', 'wrong-world')
+      if (command.expectedRevision !== revision) return rejectBrewing('stale-revision')
+      const playerId = client.playerId
+      const inventory = inventories.get(playerId)
+      const presence = players.get(playerId)
+      const playerVitals = vitals.get(playerId)
+      if (inventory === undefined || presence === undefined || playerVitals === undefined || playerVitals.health <= 0) return rejectBrewing('invalid-command')
+      const at = { ...command.at }
+      const inaccessibleReason = facilityIsAccessible(playerId, at, 'brewing_stand')
+      if (inaccessibleReason !== null) return rejectBrewing('invalid-command')
+      const current = brewingStands.get(positionKey(at))?.state
+      if (current === undefined) return rejectBrewing('invalid-command')
+      if (command.action._tag === 'open') {
+        const result: BrewingCommandResult = { _tag: 'BrewingCommandResult', commandId: command.commandId, accepted: true, revision }
+        cacheBrewingResult(resultKey, fingerprint, result)
+        sendBrewing(client, { _tag: 'BrewingStandDelta', world: worldId, revision, at, state: copyBrewingStandState(current) })
+        sendBrewing(client, result)
+        return { accepted: true, message: brewingMessage }
+      }
+      let next = copyBrewingStandState(current)
+      let inventoryChanged = false
+      let effectsChanged = false
+      if (command.action._tag === 'insert') {
+        const source = inventory.slots[command.action.slot]
+        if (source === null || source === undefined || source.count < 1) return rejectBrewing('missing-ingredients')
+        const bottle = brewingBottleFromItem(source.item)
+        if (source.item === 'blaze_powder') {
+          const outcome = acceptBrewingFuel(next)
+          if (outcome[1]._tag !== 'Accepted') return rejectBrewing('invalid-command')
+          next = outcome[0]
+        } else if (bottle !== undefined) {
+          const outcome = acceptBrewingBottle(next, bottle)
+          if (outcome[1]._tag !== 'Accepted') return rejectBrewing('invalid-command')
+          next = outcome[0]
+        } else if (source.item === 'nether_wart' || source.item === 'sugar' || source.item === 'spider_eye' || source.item === 'ghast_tear') {
+          const outcome = acceptBrewingIngredient(next, source.item)
+          if (outcome[1]._tag !== 'Accepted') return rejectBrewing('invalid-command')
+          next = outcome[0]
+        } else return rejectBrewing('invalid-command')
+        inventory.slots[command.action.slot] = source.count === 1 ? null : { ...source, count: source.count - 1 }
+        inventoryChanged = true
+      } else if (command.action._tag === 'collect') {
+        const outcome = collectBrewingBottle(next)
+        if (outcome[1]._tag !== 'Collected') return rejectBrewing('invalid-command')
+        const nextSlots = inventory.slots.map(cloneStack)
+        if (addStackToInventory(nextSlots, outcome[1].returned) !== null) return rejectBrewing('no-room')
+        inventory.slots.splice(0, inventory.slots.length, ...nextSlots)
+        next = outcome[0]
+        inventoryChanged = true
+      } else {
+        const outcome = drinkBrewingPotion(next)
+        if (outcome[1]._tag !== 'Consumed') return rejectBrewing('invalid-command')
+        next = outcome[0]
+        statusEffects.set(playerId, applyStatusEffect(statusEffects.get(playerId) ?? emptyStatusEffectState(), outcome[1].effect))
+        effectsChanged = true
+      }
+      brewingStands.set(positionKey(at), { at, state: next })
+      revision += 1
+      const result: BrewingCommandResult = { _tag: 'BrewingCommandResult', commandId: command.commandId, accepted: true, revision }
+      cacheBrewingResult(resultKey, fingerprint, result)
+      notifyStateChanged()
+      broadcastBrewing({ _tag: 'BrewingStandDelta', world: worldId, revision, at, state: copyBrewingStandState(next) })
+      if (inventoryChanged) broadcast({ _tag: 'PlayerInventoryDelta', world: worldId, revision, player: playerId, state: inventorySnapshot(inventory) })
+      if (effectsChanged) broadcastBrewing({ _tag: 'PlayerStatusEffectsDelta', world: worldId, revision, player: playerId, state: copyStatusEffectState(statusEffects.get(playerId) as StatusEffectState) })
+      sendBrewing(client, result)
+      return { accepted: true, message: brewingMessage }
     }
     const playerDamageMessage = decodePlayerDamageWireMessage(frame)
     if (playerDamageMessage?._tag === 'PlayerDamageCommand') {
@@ -2147,6 +2298,16 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         facing: authoritativeFacing,
       })
       sendMessage(client, authoritativeSnapshot())
+      for (const { at, state } of brewingStands.values()) {
+        sendBrewing(client, { _tag: 'BrewingStandDelta', world: worldId, revision, at: { ...at }, state: copyBrewingStandState(state) })
+      }
+      sendBrewing(client, {
+        _tag: 'PlayerStatusEffectsDelta',
+        world: worldId,
+        revision,
+        player: message.player,
+        state: copyStatusEffectState(statusEffects.get(message.player) ?? emptyStatusEffectState()),
+      })
       sendSleep(client, { _tag: 'SleepSnapshot', snapshot: sleepSnapshot })
       const authoritativeJoin = { ...message, at: authoritativeAt }
       broadcast(authoritativeJoin, clientId)
@@ -2247,6 +2408,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             burnTicksRemaining: 0,
             cookTicks: 0,
           })
+        } else if (message.block === 'brewing_stand') {
+          brewingStands.set(positionKey(message.at), { at: { ...message.at }, state: emptyBrewingStandState() })
         }
         revision += 1
         notifyStateChanged()
@@ -2258,7 +2421,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           player: message.player,
           state: inventorySnapshot(inventory),
         })
-        if (containerKind !== undefined || message.block === 'furnace') broadcast(authoritativeSnapshot())
+        if (message.block === 'brewing_stand') {
+          broadcastBrewing({ _tag: 'BrewingStandDelta', world: worldId, revision, at: { ...message.at }, state: emptyBrewingStandState() })
+        }
+        if (containerKind !== undefined || message.block === 'furnace' || message.block === 'brewing_stand') broadcast(authoritativeSnapshot())
         return { accepted: true, message }
       }
       case 'BlockBreak': {
@@ -2272,6 +2438,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         disturbFallingBlocks([message.at])
         if (containerKindForBlock(brokenBlock) !== undefined) containers.delete(containerIdAt(message.at))
         else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
+        else if (brokenBlock === 'brewing_stand') brewingStands.delete(positionKey(message.at))
         revision += 1
         const inventory = inventories.get(message.player)
         const heldItem = inventory?.slots[inventory.selectedSlot]?.item
@@ -2293,7 +2460,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         notifyStateChanged()
         broadcast({ ...message, world: worldId })
         for (const drop of drops) broadcast({ _tag: 'EntitySpawnDelta', world: worldId, revision, entity: drop })
-        if (containerKindForBlock(brokenBlock) !== undefined || brokenBlock === 'furnace') broadcast(authoritativeSnapshot())
+        if (brokenBlock === 'brewing_stand') {
+          broadcastBrewing({ _tag: 'BrewingStandDelta', world: worldId, revision, at: { ...message.at }, state: emptyBrewingStandState() })
+        }
+        if (containerKindForBlock(brokenBlock) !== undefined || brokenBlock === 'furnace' || brokenBlock === 'brewing_stand') broadcast(authoritativeSnapshot())
         {
           const events = sleepAuthority.reconcile()
           if (events.length > 0) broadcastSleep({ _tag: 'SleepEvents', revision: sleepAuthority.snapshot().revision, events })
@@ -2408,6 +2578,66 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (timeChanged) postPersistenceDeltas.push({ _tag: 'WorldTimeWeatherDelta', world: worldId, revision, state: { ...timeWeather } })
         for (const furnace of changedFurnaces) {
           broadcast({ _tag: 'FurnaceDelta', world: worldId, revision, state: furnaceSnapshot(furnace) })
+        }
+      }
+    }
+
+    if (elapsedSecs > 0) {
+      const changedBrewingStands: Array<Readonly<{ at: BlockPos; state: BrewingStandState }>> = []
+      const changedEffects = new Set<PlayerId>()
+      const changedVitals = new Set<PlayerId>()
+
+      for (const [key, stand] of brewingStands) {
+        const next = tickBrewingStand(stand.state, DeltaTimeSecs(elapsedSecs))
+        if (JSON.stringify(next) === JSON.stringify(stand.state)) continue
+        brewingStands.set(key, { at: stand.at, state: next })
+        changedBrewingStands.push({ at: stand.at, state: next })
+      }
+
+      for (const [player, effects] of statusEffects) {
+        const advanced = tickStatusEffects(effects, DeltaTimeSecs(elapsedSecs))
+        if (JSON.stringify(advanced.state) !== JSON.stringify(effects)) {
+          statusEffects.set(player, advanced.state)
+          changedEffects.add(player)
+        }
+
+        const playerVitals = vitals.get(player)
+        if (playerVitals === undefined) continue
+        const nextHealth = Math.min(
+          PLAYER_MAXIMUM_HEALTH_POINTS,
+          Math.max(
+            POISON_MINIMUM_HEALTH_POINTS,
+            playerVitals.health - advanced.poisonPulses * POISON_DAMAGE_POINTS + advanced.regenerationPulses * REGENERATION_HEAL_POINTS,
+          ),
+        )
+        if (nextHealth === playerVitals.health) continue
+        playerVitals.health = nextHealth
+        const hungerActor = hungerActors.get(player)
+        if (hungerActor !== undefined) hungerActors.set(player, {
+          ...hungerActor,
+          state: { ...hungerActor.state, health: playerVitals.health },
+        })
+        changedVitals.add(player)
+      }
+
+      if (changedBrewingStands.length > 0 || changedEffects.size > 0 || changedVitals.size > 0) {
+        revision += 1
+        stateChanged = true
+        for (const stand of changedBrewingStands) {
+          broadcastBrewing({ _tag: 'BrewingStandDelta', world: worldId, revision, at: stand.at, state: copyBrewingStandState(stand.state) })
+        }
+        for (const player of changedEffects) {
+          broadcastBrewing({ _tag: 'PlayerStatusEffectsDelta', world: worldId, revision, player, state: copyStatusEffectState(statusEffects.get(player) as StatusEffectState) })
+        }
+        for (const player of changedVitals) {
+          const presence = players.get(player)
+          if (presence !== undefined) postPersistenceDeltas.push({
+            _tag: 'PlayerVitalsDelta',
+            world: presence.world,
+            revision,
+            player,
+            state: vitalsSnapshot(vitals.get(player) as MutableVitalsState),
+          })
         }
       }
     }
