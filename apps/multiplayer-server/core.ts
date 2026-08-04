@@ -2438,6 +2438,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           const block = isInBounds({ x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) })
             ? blockAt({ x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) })
             : 'bedrock'
+          const blockWasHit = block !== null && options.passableBlocks?.has(block) !== true
           const livingHit = [...entities.values()]
             .filter((candidate): candidate is Extract<AuthoritativeEntityState, { readonly _tag: 'living' }> => candidate._tag === 'living')
             .map((candidate) => ({
@@ -2460,9 +2461,19 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             .sort((left, right) => left.projection - right.projection)[0]
           const playerWasHit = playerHit !== undefined
             && (livingHit === undefined || playerHit.projection < livingHit.projection)
-          if (ageTicks >= ARROW_LIFESPAN_TICKS || (block !== null && options.passableBlocks?.has(block) !== true) || livingHit !== undefined || playerHit !== undefined) {
+          if (ageTicks >= ARROW_LIFESPAN_TICKS || blockWasHit || livingHit !== undefined || playerHit !== undefined) {
             entities.delete(entity.entityId)
             movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
+            if (blockWasHit && livingHit === undefined && playerHit === undefined) {
+              const drop: AuthoritativeEntityState = {
+                _tag: 'item-drop',
+                entityId: `${entity.entityId}:pickup:${String(revision + 1)}` as AuthoritativeEntityState['entityId'],
+                at,
+                stack: { item: 'arrow', count: 1 },
+              }
+              entities.set(drop.entityId, drop)
+              movedEntities.push({ _tag: 'EntitySpawnDelta', world: worldId, revision: 0, entity: drop })
+            }
             if (playerWasHit) {
               const playerVitals = vitals.get(playerHit.player)
               if (playerVitals !== undefined) {

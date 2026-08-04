@@ -250,6 +250,63 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  it('turns a block-hit arrow into an authoritative pickup', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 1 }, null], selectedSlot: 0 },
+      }],
+    }, undefined, 'normal', {
+      now: () => now,
+      generatedBlockAt: (position) => position.y === 63 || (position.x === 0 && position.y === 65 && position.z === -4) ? 'stone' : null,
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('embedded-arrow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('embedded-arrow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    const pickupSpawn = messages(fixture.sent).find((message) => message._tag === 'EntitySpawnDelta'
+      && message.entity._tag === 'item-drop' && message.entity.stack.item === 'arrow')
+    expect(pickupSpawn).toMatchObject({
+      _tag: 'EntitySpawnDelta', revision: 6,
+      entity: { _tag: 'item-drop', at: { x: 0, y: 65.5, z: -3.2 }, stack: { item: 'arrow', count: 1 } },
+    })
+    if (pickupSpawn?._tag !== 'EntitySpawnDelta' || pickupSpawn.entity._tag !== 'item-drop') {
+      throw new Error('missing embedded arrow pickup')
+    }
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'EntityPickupCommand', commandId: commandId('pickup-embedded-arrow'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 6, entityId: pickupSpawn.entity.entityId,
+    }).accepted).toBe(true)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'pickup-embedded-arrow', revision: 7 }),
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: pickupSpawn.entity.entityId, revision: 7 }),
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta', revision: 7,
+        state: expect.objectContaining({
+          slots: [{ item: 'bow', count: 1, durability: { current: 383, max: 384 } }, { item: 'arrow', count: 1 }, null],
+        }),
+      }),
+    ]))
+    expect(fixture.persisted.at(-1)).toMatchObject({ revision: 7, entities: [] })
+  })
+
   it('applies a bow arrow to the nearest opposing player and synchronizes their vitals', () => {
     let now = 0
     const state = initialState()
