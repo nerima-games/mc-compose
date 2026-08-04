@@ -36,6 +36,11 @@ import {
   type CraftingCommand,
 } from '../../apps/multiplayer-shared/crafting-network'
 import { decodeBrewingWireMessage } from '../../apps/multiplayer-shared/brewing-network'
+import {
+  decodeAnvilWireMessage,
+  encodeAnvilCommand,
+  type AnvilCommand,
+} from '../../apps/multiplayer-shared/anvil-network'
 import { decodeSleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
 
@@ -59,7 +64,8 @@ const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage
     && decodeWitherWireMessage(wire) === undefined
     && decodePlayerDamageWireMessage(wire) === undefined
     && decodeCraftingWireMessage(wire) === undefined
-    && decodeBrewingWireMessage(wire) === undefined).map((wire) => {
+    && decodeBrewingWireMessage(wire) === undefined
+    && decodeAnvilWireMessage(wire) === undefined).map((wire) => {
     const decoded = decodeFrame(wire)
     if (Either.isLeft(decoded)) throw decoded.left
     return decoded.right
@@ -153,6 +159,8 @@ const makeFixture = (
     server.receive('socket-a', encodePlayerDamageCommand(command))
   const receiveCrafting = (command: CraftingCommand): ReceiveResult =>
     server.receive('socket-a', encodeCraftingCommand(command))
+  const receiveAnvil = (command: AnvilCommand): ReceiveResult =>
+    server.receive('socket-a', encodeAnvilCommand(command))
   expect(receive({
     _tag: 'PlayerJoin',
     player: playerId('alice'),
@@ -161,7 +169,7 @@ const makeFixture = (
   }).accepted).toBe(true)
   persisted.length = 0
   timeline.length = 0
-  return { sent, persisted, timeline, receive, receiveDamage, receiveCrafting, server }
+  return { sent, persisted, timeline, receive, receiveDamage, receiveCrafting, receiveAnvil, server }
 }
 
 describe('multiplayer server authoritative state', () => {
@@ -1576,6 +1584,59 @@ describe('multiplayer server authoritative state', () => {
       _tag: 'CraftingCommandResult', commandId: 'craft-missing', accepted: false, revision: 4, reason: 'missing-ingredients',
     })
     expect(fixture.persisted).toEqual([])
+  })
+
+  it('authorizes anvil repair and naming exactly once', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [
+            { item: 'bow', count: 1, durability: { current: 10, max: 384 } },
+            { item: 'iron_ingot', count: 2 },
+            null,
+          ],
+          selectedSlot: 0,
+        },
+      }],
+    })
+    fixture.sent.length = 0
+    const command: AnvilCommand = {
+      _tag: 'AnvilCommand', commandId: 'anvil-1', player: 'alice', world: 'world-1',
+      expectedRevision: 4, slot: 0, name: 'Hunter',
+    }
+
+    expect(fixture.receiveAnvil(command).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta', revision: 5, player: 'alice',
+      state: expect.objectContaining({
+        slots: [
+          { item: 'bow', count: 1, durability: { current: 384, max: 384 } },
+          { item: 'iron_ingot', count: 1 },
+          null,
+        ],
+      }),
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', revision: 5, player: 'alice',
+      state: { health: 3, hunger: 2, experience: 0 },
+    }))
+    expect(fixture.sent.map(decodeAnvilWireMessage)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta', world: 'world-1', revision: 5, player: 'alice',
+      names: [{ slot: 0, name: 'Hunter' }],
+    })
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      anvilNames: [{ player: 'alice', names: [{ slot: 0, name: 'Hunter' }] }],
+    })
+
+    expect(fixture.receiveAnvil(command).accepted).toBe(true)
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.receiveAnvil({ ...command, commandId: 'anvil-spoof', player: 'bob', expectedRevision: 5 }))
+      .toEqual({ accepted: false, reason: 'identity-spoof' })
   })
 
   it('keeps NUL-boundary crafting cache keys distinct', () => {

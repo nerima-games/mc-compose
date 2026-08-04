@@ -174,7 +174,7 @@ import {
   type RenderEntity,
 } from '@nerima-games/mc-render'
 import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
-import { applyAnvilOperation, spendExperienceLevels } from './anvil-repair'
+import { applyAnvilOperation, spendExperienceLevels } from '../multiplayer-shared/anvil-repair'
 import { excludeReservedPlacementConsumptions } from './placement-consumption'
 import {
   advancePlayerSwimmingRuntime,
@@ -383,6 +383,10 @@ import {
   type BrewingCommand,
   type BrewingCommandResult,
 } from '../multiplayer-shared/brewing-network'
+import {
+  type AnvilCommand,
+  type AnvilCommandResult,
+} from '../multiplayer-shared/anvil-network'
 import {
   advanceEyeOfEnderRuntime,
   eyeOfEnderRenderDescriptors,
@@ -2996,6 +3000,7 @@ const bootGame = async (
   let nextPlayerDamageCommand = 0
   let nextCraftingCommand = 0
   let nextBrewingCommand = 0
+  let nextAnvilCommand = 0
   let nextVillagerTradeCommand = 0
   let pendingVitalsCommand: CommandId | null = null
   let pendingInventoryCommand: {
@@ -3034,6 +3039,9 @@ type MultiplayerInventorySelection = Readonly<{
     readonly acceptedRevision: number | null
   } | null = null
   let pendingBrewingCommand: {
+    readonly commandId: string
+  } | null = null
+  let pendingAnvilCommand: {
     readonly commandId: string
   } | null = null
   let activeBrewingStandAt: { readonly x: number; readonly y: number; readonly z: number } | undefined
@@ -3452,6 +3460,63 @@ type MultiplayerInventorySelection = Readonly<{
       if (message.player === String(multiplayer.query.player)) {
         Effect.runSync(restoreStatusEffects(gameplayState, message.state))
       }
+    }
+  }
+
+  const requestAnvil = (): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingAnvilCommand !== null) return false
+    nextAnvilCommand += 1
+    const commandId = `anvil-${String(nextAnvilCommand)}`
+    pendingAnvilCommand = { commandId }
+    const command: AnvilCommand = {
+      _tag: 'AnvilCommand',
+      commandId,
+      player: String(multiplayer.query.player),
+      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      expectedRevision: multiplayerRevision,
+      slot: selectedHotbarIndex,
+      name: anvilName.trim(),
+    }
+    Effect.runSync(multiplayer.transport.sendAnvil(command))
+    return true
+  }
+
+  const resyncAnvil = (): void => {
+    if (multiplayer === undefined) return
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'AuthoritativeResyncRequest',
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      lastKnownRevision: multiplayerRevision,
+    }))
+  }
+
+  const applyAnvilResult = (message: AnvilCommandResult): void => {
+    if (multiplayer === undefined || pendingAnvilCommand?.commandId !== message.commandId) return
+    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+    pendingAnvilCommand = null
+    if (message.accepted) return
+    anvilStatus = `Cannot use anvil: ${message.reason}`
+    resyncAnvil()
+    renderPlayerUi()
+  }
+
+  const drainAnvilInbound = (): void => {
+    if (multiplayer === undefined) return
+    const currentWorld = String(WorldId.make(Effect.runSync(playerApi.dimension)))
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.anvilInbound))) {
+      if (message._tag === 'AnvilCommandResult') {
+        applyAnvilResult(message)
+        continue
+      }
+      if (
+        message.world !== currentWorld
+        || message.revision < multiplayerRevision
+        || message.player !== String(multiplayer.query.player)
+      ) continue
+      multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+      for (const key of [...customNames.keys()]) if (/^\d+$/u.test(key)) customNames.delete(key)
+      for (const { slot, name } of message.names) customNames.set(String(slot), name)
+      renderPlayerUi()
     }
   }
 
@@ -5591,7 +5656,9 @@ type MultiplayerInventorySelection = Readonly<{
 
   const activateAnvilOutput = (): void => {
     if (multiplayer !== undefined) {
-      anvilStatus = 'Anvil operations are not yet available in multiplayer'
+      anvilStatus = requestAnvil()
+        ? 'Applying anvil operation...'
+        : 'Anvil operation is unavailable'
       renderPlayerUi()
       return
     }
@@ -8034,6 +8101,7 @@ type MultiplayerInventorySelection = Readonly<{
       if (multiplayer !== undefined) drainMultiplayerInbound()
       drainCraftingInbound()
       drainBrewingInbound()
+      drainAnvilInbound()
       drainPlayerDamageInbound()
       const outcome = Effect.runSyncExit(runFrame(deltaSecs))
       if (swimmingState.active && mountedVehicle === undefined) {
@@ -9930,6 +9998,7 @@ type MultiplayerInventorySelection = Readonly<{
         drainMultiplayerInbound()
         drainCraftingInbound()
         drainBrewingInbound()
+        drainAnvilInbound()
         drainPlayerDamageInbound()
       }, 100)
       surface.onCleanup(() => {

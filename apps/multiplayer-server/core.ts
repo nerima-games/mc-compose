@@ -128,6 +128,16 @@ import {
 } from '../multiplayer-shared/player-damage-network'
 import { CRAFTING_MAX_WIRE_LENGTH, decodeCraftingWireMessage, type CraftingCommand, type CraftingCommandResult } from '../multiplayer-shared/crafting-network'
 import { BREWING_MAX_WIRE_LENGTH, decodeBrewingWireMessage, type BrewingCommand, type BrewingCommandResult, type BrewingWireMessage } from '../multiplayer-shared/brewing-network'
+import {
+  ANVIL_MAX_WIRE_LENGTH,
+  decodeAnvilWireMessage,
+  isValidAnvilName,
+  type AnvilCommand,
+  type AnvilCommandResult,
+  type AnvilWireMessage,
+  type PlayerAnvilNamesDelta,
+} from '../multiplayer-shared/anvil-network'
+import { spendExperienceLevels } from '../multiplayer-shared/anvil-repair'
 
 export type ClientId = string
 export type SendFrame = (frame: WireText) => void
@@ -149,6 +159,8 @@ export const craftingResultKey = (player: PlayerId, commandId: string): string =
 const craftingFingerprint = (command: CraftingCommand): string => JSON.stringify(command)
 export const brewingResultKey = (player: PlayerId, commandId: string): string => JSON.stringify([player, commandId])
 const brewingFingerprint = (command: BrewingCommand): string => JSON.stringify(command)
+export const anvilResultKey = (player: PlayerId, commandId: string): string => JSON.stringify([player, commandId])
+const anvilFingerprint = (command: AnvilCommand): string => JSON.stringify(command)
 
 const arrowHitProjection = (
   from: Readonly<{ x: number; y: number; z: number }>,
@@ -211,10 +223,14 @@ export interface MultiplayerServerState {
   readonly witherRevision?: number
   readonly brewingStands?: ReadonlyArray<Readonly<{ at: BlockPos; state: BrewingStandState }>>
   readonly statusEffects?: ReadonlyArray<Readonly<{ player: PlayerId; state: StatusEffectState }>>
+  readonly anvilNames?: ReadonlyArray<Readonly<{
+    player: PlayerId
+    names: ReadonlyArray<Readonly<{ slot: number; name: string }>>
+  }>>
 }
 
 export type ReceiveResult =
-  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | PlayerDamageWireMessage | CraftingCommand | BrewingCommand }>
+  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | PlayerDamageWireMessage | CraftingCommand | BrewingCommand | AnvilCommand }>
   | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' | 'invalid-command' }>
 
 interface ConnectedClient {
@@ -723,6 +739,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       .filter(({ state }) => isValidStatusEffectState(state))
       .map(({ player, state }) => [player, copyStatusEffectState(state)]),
   )
+  const anvilNames = new Map<PlayerId, Map<number, string>>(
+    (options.initialState?.anvilNames ?? []).map(({ player, names }) => [player, new Map(
+      names
+        .filter(({ slot, name }) => Number.isSafeInteger(slot) && slot >= 0 && slot < DEFAULT_INVENTORY_SLOTS && name.length > 0 && isValidAnvilName(name))
+        .map(({ slot, name }) => [slot, name]),
+    )]),
+  )
   let villagerTrades: AuthoritativeSnapshot['villagerTrades'] = (options.initialState?.villagerTrades ?? []).map((state) => ({
     ...state,
     offers: state.offers.map((offer) => ({
@@ -756,6 +779,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   }>>()
   const craftingResults = new Map<string, Readonly<{ fingerprint: string; result: CraftingCommandResult }>>()
   const brewingResults = new Map<string, Readonly<{ fingerprint: string; result: BrewingCommandResult }>>()
+  const anvilResults = new Map<string, Readonly<{ fingerprint: string; result: AnvilCommandResult }>>()
   const cachePlayerDamageResult = (
     key: string,
     fingerprint: string,
@@ -777,6 +801,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (brewingResults.size <= commandResultLimit) return
     const oldestKey = brewingResults.keys().next().value
     if (oldestKey !== undefined) brewingResults.delete(oldestKey)
+  }
+  const cacheAnvilResult = (key: string, fingerprint: string, result: AnvilCommandResult): void => {
+    anvilResults.set(key, { fingerprint, result })
+    if (anvilResults.size <= commandResultLimit) return
+    const oldestKey = anvilResults.keys().next().value
+    if (oldestKey !== undefined) anvilResults.delete(oldestKey)
   }
   const lastWitherAttackMs = new Map<PlayerId, number>()
   const hungerActors = new Map<PlayerId, HungerActor>()
@@ -842,12 +872,27 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const sendBrewing = (client: ConnectedClient, message: BrewingWireMessage): void => {
     client.send(JSON.stringify(message) as WireText)
   }
+  const sendAnvil = (client: ConnectedClient, message: AnvilWireMessage): void => {
+    client.send(JSON.stringify(message) as WireText)
+  }
 
   const broadcastWither = (message: WitherWireMessage): void => {
     for (const client of clients.values()) if (client.playerId !== null) sendWither(client, message)
   }
   const broadcastBrewing = (message: BrewingWireMessage): void => {
     for (const client of clients.values()) if (client.playerId !== null) sendBrewing(client, message)
+  }
+  const anvilNamesDelta = (player: PlayerId): PlayerAnvilNamesDelta => {
+    const names = anvilNames.get(player)
+    return {
+      _tag: 'PlayerAnvilNamesDelta',
+      world: worldId,
+      revision,
+      player,
+      names: names === undefined
+        ? []
+        : [...names].sort(([left], [right]) => left - right).map(([slot, name]) => ({ slot, name })),
+    }
   }
 
   const witherSnapshot = (): WitherWireMessage => ({
@@ -1014,6 +1059,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     witherRevision,
     brewingStands: [...brewingStands.values()].map(({ at, state }) => ({ at: { ...at }, state: copyBrewingStandState(state) })),
     statusEffects: [...statusEffects].map(([player, state]) => ({ player, state: copyStatusEffectState(state) })),
+    anvilNames: [...anvilNames].map(([player, names]) => ({
+      player,
+      names: [...names].sort(([left], [right]) => left - right).map(([slot, name]) => ({ slot, name })),
+    })),
   })
 
   const notifyStateChanged = (): void => options.onStateChanged?.(persistentState())
@@ -1022,6 +1071,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (!inventories.has(player)) {
       inventories.set(player, { slots: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), durability: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), equipment: emptyEquipmentState(), selectedSlot: 0 })
     }
+    if (!anvilNames.has(player)) anvilNames.set(player, new Map())
     if (!vitals.has(player)) vitals.set(player, { ...DEFAULT_VITALS })
     if (!statusEffects.has(player)) statusEffects.set(player, emptyStatusEffectState())
     const playerVitals = vitals.get(player) as MutableVitalsState
@@ -2041,7 +2091,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (client === undefined) return { accepted: false, reason: 'unknown-client' }
     if ((frame.length > PLAYER_DAMAGE_MAX_WIRE_LENGTH && frame.includes('"_tag":"PlayerDamageCommand"'))
       || (frame.length > CRAFTING_MAX_WIRE_LENGTH && frame.includes('"_tag":"CraftingCommand"'))
-      || (frame.length > BREWING_MAX_WIRE_LENGTH && frame.includes('"_tag":"BrewingCommand"'))) {
+      || (frame.length > BREWING_MAX_WIRE_LENGTH && frame.includes('"_tag":"BrewingCommand"'))
+      || (frame.length > ANVIL_MAX_WIRE_LENGTH && frame.includes('"_tag":"AnvilCommand"'))) {
       return { accepted: false, reason: 'malformed-frame' }
     }
     const craftingMessage = decodeCraftingWireMessage(frame)
@@ -2096,6 +2147,70 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       broadcast({ _tag: 'PlayerInventoryDelta', world: presence.world, revision, player: client.playerId, state: inventorySnapshot(inventory) })
       sendCrafting(client, result)
       return { accepted: true, message: craftingMessage }
+    }
+    const anvilMessage = decodeAnvilWireMessage(frame)
+    if (anvilMessage?._tag === 'AnvilCommand') {
+      if (client.playerId === null) return { accepted: false, reason: 'join-required' }
+      const command = anvilMessage
+      const playerId = client.playerId
+      const resultKey = anvilResultKey(playerId, command.commandId)
+      const fingerprint = anvilFingerprint(command)
+      const cached = anvilResults.get(resultKey)
+      if (cached !== undefined) {
+        if (cached.fingerprint !== fingerprint) return { accepted: false, reason: 'invalid-command' }
+        sendAnvil(client, cached.result)
+        return cached.result.accepted
+          ? { accepted: true, message: anvilMessage }
+          : { accepted: false, reason: cached.result.reason === 'unauthorized-player' ? 'identity-spoof' : cached.result.reason === 'wrong-world' ? 'wrong-world' : 'invalid-command' }
+      }
+      const rejectAnvil = (
+        reason: Extract<AnvilCommandResult, { accepted: false }>['reason'],
+        receiveReason: Extract<ReceiveResult, { accepted: false }>['reason'] = 'invalid-command',
+      ): ReceiveResult => {
+        const result: AnvilCommandResult = { _tag: 'AnvilCommandResult', commandId: command.commandId, accepted: false, revision, reason }
+        cacheAnvilResult(resultKey, fingerprint, result)
+        sendAnvil(client, result)
+        return { accepted: false, reason: receiveReason }
+      }
+      if (command.player !== playerId) return rejectAnvil('unauthorized-player', 'identity-spoof')
+      if (command.world !== worldId) return rejectAnvil('wrong-world', 'wrong-world')
+      if (command.expectedRevision !== revision) return rejectAnvil('stale-revision')
+      const inventory = inventories.get(playerId)
+      const presence = players.get(playerId)
+      const playerVitals = vitals.get(playerId)
+      if (inventory === undefined || presence === undefined || playerVitals === undefined || playerVitals.health <= 0) return rejectAnvil('invalid-command')
+      const stack = inventory.slots[command.slot]
+      if (stack === null || stack === undefined) return rejectAnvil('no-item')
+      const names = anvilNames.get(playerId) ?? new Map<number, string>()
+      const currentName = names.get(command.slot) ?? ''
+      const currentDurability = inventory.durability[command.slot]
+      const canRepair = currentDurability !== null && currentDurability !== undefined && currentDurability.current < currentDurability.max
+      if (currentName === command.name && !canRepair) return rejectAnvil('no-change')
+      const remainingExperience = spendExperienceLevels(playerVitals.experience, 1)
+      if (remainingExperience === undefined) return rejectAnvil('insufficient-experience')
+      const ironSlot = inventory.slots.findIndex((candidate, slot) =>
+        slot !== command.slot && candidate?.item === 'iron_ingot' && candidate.count > 0,
+      )
+      if (ironSlot < 0) return rejectAnvil('missing-iron')
+      const iron = inventory.slots[ironSlot]
+      if (iron === null || iron === undefined) return rejectAnvil('missing-iron')
+      inventory.slots[ironSlot] = iron.count === 1 ? null : { ...iron, count: iron.count - 1 }
+      if (iron.count === 1) inventory.durability[ironSlot] = null
+      const repairedDurability = isItemType(stack.item) ? durabilityForItem(stack.item) : null
+      if (repairedDurability !== null) inventory.durability[command.slot] = repairedDurability
+      playerVitals.experience = remainingExperience
+      if (command.name.length === 0) names.delete(command.slot)
+      else names.set(command.slot, command.name)
+      anvilNames.set(playerId, names)
+      revision += 1
+      const result: AnvilCommandResult = { _tag: 'AnvilCommandResult', commandId: command.commandId, accepted: true, revision }
+      cacheAnvilResult(resultKey, fingerprint, result)
+      notifyStateChanged()
+      broadcast({ _tag: 'PlayerInventoryDelta', world: presence.world, revision, player: playerId, state: inventorySnapshot(inventory) })
+      broadcast({ _tag: 'PlayerVitalsDelta', world: presence.world, revision, player: playerId, state: vitalsSnapshot(playerVitals) })
+      sendAnvil(client, anvilNamesDelta(playerId))
+      sendAnvil(client, result)
+      return { accepted: true, message: anvilMessage }
     }
     const brewingMessage = decodeBrewingWireMessage(frame)
     if (brewingMessage?._tag === 'BrewingCommand') {
@@ -2408,6 +2523,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         facing: authoritativeFacing,
       })
       sendMessage(client, authoritativeSnapshot())
+      sendAnvil(client, anvilNamesDelta(message.player))
       for (const { at, state } of brewingStands.values()) {
         sendBrewing(client, { _tag: 'BrewingStandDelta', world: worldId, revision, at: { ...at }, state: copyBrewingStandState(state) })
       }

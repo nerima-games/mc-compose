@@ -4,7 +4,7 @@ import {
   itemStack,
   type PlayerStorage,
 } from '@nerima-games/mc-sim'
-import { applyAnvilOperation, spendExperienceLevels } from '../apps/web/anvil-repair'
+import { applyAnvilOperation, spendExperienceLevels } from '../apps/multiplayer-shared/anvil-repair'
 
 const storageWith = (
   entries: ReadonlyArray<readonly [number, Parameters<typeof itemStack>[0], number, PlayerStorage['inventoryDurability'][number]]>,
