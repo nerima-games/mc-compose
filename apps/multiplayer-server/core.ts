@@ -1526,18 +1526,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         return executeHungerCommand(message)
       }
       case 'WorldTimeWeatherCommand': {
-        timeWeather = message.action._tag === 'set-time'
-          ? { ...timeWeather, timeOfDay: message.action.timeOfDay }
-          : { ...timeWeather, weather: message.action.weather }
-        return {
-          accepted: true,
-          deltas: (nextRevision) => [{
-            _tag: 'WorldTimeWeatherDelta',
-            world: worldId,
-            revision: nextRevision,
-            state: { ...timeWeather },
-          }],
-        }
+        return { accepted: false, reason: 'invalid-command' }
       }
       case 'ContainerCommand': {
         const at = parseContainerId(message.containerId)

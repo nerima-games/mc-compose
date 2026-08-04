@@ -1467,7 +1467,7 @@ describe('multiplayer server authoritative state', () => {
     ])
   })
 
-  it('authoritatively updates time, containers, furnaces, and persistent state', () => {
+  it('rejects client world changes while updating containers, furnaces, and persistent state', () => {
     const fixture = makeFixture()
     fixture.sent.length = 0
 
@@ -1478,13 +1478,13 @@ describe('multiplayer server authoritative state', () => {
       world: worldId('world-1'),
       expectedRevision: 4,
       action: { _tag: 'set-weather', weather: 'rain' },
-    }).accepted).toBe(true)
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
     expect(fixture.receive({
       _tag: 'ContainerCommand',
       commandId: commandId('container-1'),
       player: playerId('alice'),
       world: worldId('world-1'),
-      expectedRevision: 5,
+      expectedRevision: 4,
       containerId: 'world-1:1,64,0',
       action: {
         _tag: 'move-item',
@@ -1498,7 +1498,7 @@ describe('multiplayer server authoritative state', () => {
       commandId: commandId('furnace-fuel-1'),
       player: playerId('alice'),
       world: worldId('world-1'),
-      expectedRevision: 6,
+      expectedRevision: 5,
       furnaceId: '["world-1",2,64,0]',
       action: {
         _tag: 'move-item',
@@ -1512,7 +1512,7 @@ describe('multiplayer server authoritative state', () => {
       commandId: commandId('furnace-output-1'),
       player: playerId('alice'),
       world: worldId('world-1'),
-      expectedRevision: 7,
+      expectedRevision: 6,
       furnaceId: '["world-1",2,64,0]',
       action: {
         _tag: 'take-output',
@@ -1524,18 +1524,30 @@ describe('multiplayer server authoritative state', () => {
 
     const output = messages(fixture.sent)
     expect(output).toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeCommandRejected',
+      commandId: 'weather-1',
+      reason: 'invalid-command',
+      revision: 4,
+      resyncRequired: false,
+    }))
+    expect(output).not.toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeCommandAccepted',
+      commandId: 'weather-1',
+    }))
+    expect(output).not.toContainEqual(expect.objectContaining({ _tag: 'WorldTimeWeatherDelta' }))
+    expect(output).toContainEqual(expect.objectContaining({
       _tag: 'ContainerDelta',
-      revision: 6,
+      revision: 5,
       state: { containerId: 'world-1:1,64,0', kind: 'chest', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] },
     }))
     expect(output).toContainEqual(expect.objectContaining({
       _tag: 'FurnaceDelta',
-      revision: 8,
+      revision: 7,
       state: expect.objectContaining({ fuel: { item: 'coal', count: 1 }, output: { item: 'iron-ingot', count: 1 } }),
     }))
     expect(fixture.persisted.at(-1)).toMatchObject({
-      revision: 8,
-      timeWeather: { timeOfDay: 6_000, weather: 'rain' },
+      revision: 7,
+      timeWeather: { timeOfDay: 6_000, weather: 'clear' },
       inventories: [{
         player: 'alice',
         state: { slots: [{ item: 'stone', count: 3 }, { item: 'coal', count: 2 }, { item: 'iron-ingot', count: 1 }] },
