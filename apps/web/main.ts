@@ -8958,7 +8958,9 @@ type MultiplayerInventorySelection = Readonly<{
             z: Math.floor(route.at.z),
           }
           const currentDimension = Effect.runSync(playerApi.dimension)
-          if (currentDimension !== 'overworld') {
+          if (currentDimension !== 'overworld' && multiplayer !== undefined) {
+            document.body.setAttribute('data-sleep-result', 'unavailable')
+          } else if (currentDimension !== 'overworld') {
             sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
             Effect.runSync(currentChunkStore.setBlock(bedPosition, blockIdOf('air')))
             applyWorldExplosion(

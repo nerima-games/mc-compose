@@ -25,8 +25,12 @@ const claimsFor = (players: Record<string, string>) => ({
 
 type GameplaySnapshot = {
   readonly mode: 'survival' | 'creative'
+  readonly dimension: 'overworld' | 'nether' | 'end'
   readonly pose: {
     readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
+  }
+  readonly vitals: {
+    readonly healthPoints: number
   }
   readonly renderedEntities: ReadonlyArray<{
     readonly id: string
@@ -34,6 +38,9 @@ type GameplaySnapshot = {
   }>
   readonly ignitionTarget: {
     readonly position: { readonly x: number; readonly y: number; readonly z: number }
+    readonly block: number | null
+  }
+  readonly bedExplosionProbe: {
     readonly block: number | null
   }
 }
@@ -50,6 +57,21 @@ const callQa = <A>(page: Page, command: string): Promise<A> =>
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
+
+const useTargetedBlock = async (page: Page): Promise<void> => {
+  const canvas = page.locator('#game-canvas')
+  await canvas.hover()
+  await page.evaluate(() => {
+    const gameCanvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
+    if (gameCanvas === null) throw new Error('missing game canvas')
+    Object.defineProperty(document, 'pointerLockElement', {
+      configurable: true,
+      get: () => gameCanvas,
+    })
+    document.dispatchEvent(new Event('pointerlockchange'))
+  })
+  await canvas.click({ button: 'right' })
+}
 
 const createCreativeWorld = async (page: Page, name: string): Promise<string> => {
   await page.goto('/')
@@ -163,12 +185,17 @@ const connectPage = async (page: Page, url: string, registrationToken?: string):
   await expect(canvas).toHaveAttribute('data-multiplayer-connection', 'connected')
 }
 
-const startServer = (stateFile: string, claimsFile: string): Promise<{ process: ChildProcess; url: string }> =>
+const startServer = (
+  stateFile: string,
+  claimsFile: string,
+  worldId = 'overworld',
+): Promise<{ process: ChildProcess; url: string }> =>
   new Promise((resolve, reject) => {
     const child = spawn(join(process.cwd(), 'node_modules/.bin/tsx'), [
       'apps/multiplayer-server/main.ts',
       '--host', '127.0.0.1',
       '--port', '0',
+      '--world', worldId,
       '--state-file', stateFile,
       '--legacy-player-claims-file', claimsFile,
     ], { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -238,6 +265,68 @@ test('joins a saved world from the title screen multiplayer form', async ({ page
   )
   await expect(page.locator('#multiplayer-status')).toContainText('Movement corrected')
   expect(new URL(page.url()).searchParams.get('player')).toBe('title-player-e2e')
+})
+
+test('does not explode or mutate a Nether bed in multiplayer', async ({ page }) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
+  const stateFile = join(stateDirectory, 'state.json')
+  const claimsFile = join(stateDirectory, 'claims.json')
+  const player = 'alice-e2e'
+  await writeFile(stateFile, `${JSON.stringify({
+    format: 1,
+    worldId: 'nether',
+    seed: 0,
+    state: {
+      revision: 0,
+      blocks: [],
+      inventories: [{
+        player,
+        state: { slots: [{ item: 'stone', count: 2 }], selectedSlot: 0 },
+      }],
+      playerPositions: [{
+        player,
+        at: { x: 8.5, y: 65, z: 10.5 },
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      }],
+    },
+  })}\n`, 'utf8')
+  await writeFile(claimsFile, `${JSON.stringify(claimsFor({
+    [player]: LEGACY_SECRETS[player],
+  }))}\n`, 'utf8')
+    const server = await startServer(stateFile, claimsFile, 'nether')
+
+  try {
+    const sessionUrl = await createCreativeWorld(page, 'Multiplayer Nether Bed E2E')
+    await callQa<GameplaySnapshot>(page, 'gameplay.seedCreativePlacementEncounter')
+    const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedBedExplosionEncounter')
+    expect(seeded.dimension).toBe('nether')
+    expect(seeded.bedExplosionProbe.block).not.toBeNull()
+    expect(seeded.bedExplosionProbe.block).not.toBe(0)
+    await page.keyboard.press('Escape')
+    await callQa(page, 'persistence.flush')
+    await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+    await connectPage(
+      page,
+      multiplayerUrl(sessionUrl, player, 'Alice', server.url),
+      LEGACY_SECRETS[player],
+    )
+    const before = await snapshot(page)
+    expect(before.dimension).toBe('nether')
+    expect(before.bedExplosionProbe.block).toBe(seeded.bedExplosionProbe.block)
+    const revisionBeforeUse = await canvasRevision(page)
+
+    await useTargetedBlock(page)
+
+    await expect(page.locator('body')).toHaveAttribute('data-sleep-result', 'unavailable')
+    const after = await snapshot(page)
+    expect(after.bedExplosionProbe.block).toBe(before.bedExplosionProbe.block)
+    expect(after.vitals.healthPoints).toBe(before.vitals.healthPoints)
+    expect(await canvasRevision(page)).toBe(revisionBeforeUse)
+    await expect(page.locator('body')).not.toHaveAttribute('data-bed-explosion-request')
+  } finally {
+    server.process.kill('SIGTERM')
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
 })
 
 test('synchronizes two Creative browser sessions through the authoritative server', async ({ browser }) => {
