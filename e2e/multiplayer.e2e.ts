@@ -26,6 +26,9 @@ const claimsFor = (players: Record<string, string>) => ({
 type GameplaySnapshot = {
   readonly mode: 'survival' | 'creative'
   readonly dimension: 'overworld' | 'nether' | 'end'
+  readonly inventory: {
+    readonly slots: ReadonlyArray<Readonly<{ readonly item: string; readonly count: number }> | null>
+  }
   readonly pose: {
     readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
   }
@@ -58,9 +61,15 @@ const callQa = <A>(page: Page, command: string): Promise<A> =>
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
 
-const useTargetedBlock = async (page: Page): Promise<void> => {
-  const canvas = page.locator('#game-canvas')
-  await canvas.hover()
+const itemCount = (current: GameplaySnapshot, item: string): number =>
+  current.inventory.slots.reduce(
+    (total, slot) => total + (slot?.item === item ? slot.count : 0),
+    0,
+  )
+
+const emptySlots = (): ReadonlyArray<null> => Array.from({ length: 36 }, () => null)
+
+const grantPointerLock = async (page: Page): Promise<void> => {
   await page.evaluate(() => {
     const gameCanvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
     if (gameCanvas === null) throw new Error('missing game canvas')
@@ -70,6 +79,12 @@ const useTargetedBlock = async (page: Page): Promise<void> => {
     })
     document.dispatchEvent(new Event('pointerlockchange'))
   })
+}
+
+const useTargetedBlock = async (page: Page): Promise<void> => {
+  const canvas = page.locator('#game-canvas')
+  await canvas.hover()
+  await grantPointerLock(page)
   await canvas.click({ button: 'right' })
 }
 
@@ -85,6 +100,24 @@ const createCreativeWorld = async (page: Page, name: string): Promise<string> =>
   await page.locator('[data-menu-action="confirm"]').click()
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
   expect((await snapshot(page)).mode).toBe('creative')
+  return page.url()
+}
+
+const createSurvivalWorld = async (page: Page, name: string): Promise<string> => {
+  await page.goto('/')
+  await page.locator('[data-menu-entry="new-world"]').click()
+  await page.locator('[data-mx-ui="menu-world-name"]').fill(name)
+  await expect(page.locator('[data-mx-ui="menu-game-mode"]')).toHaveAttribute(
+    'aria-label',
+    'Game mode: Survival',
+  )
+  await page.locator('[data-menu-action="confirm"]').click()
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await callQa(page, 'gameplay.seedCreativePlacementEncounter')
+  await page.keyboard.press('Escape')
+  await callQa(page, 'persistence.flush')
+  await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+  expect((await snapshot(page)).mode).toBe('survival')
   return page.url()
 }
 
@@ -230,14 +263,17 @@ const openPlayer = async (
   name: string,
   serverUrl = E2E_MULTIPLAYER_URL,
   registrationToken?: string,
+  createWorld: (page: Page, name: string) => Promise<string> = createCreativeWorld,
 ): Promise<{ readonly context: BrowserContext; readonly page: Page; readonly url: string }> => {
   const context = await browser.newContext()
   const page = await context.newPage()
-  const sessionUrl = await createCreativeWorld(page, worldName)
-  await callQa<GameplaySnapshot>(page, 'gameplay.seedCreativePlacementEncounter')
-  await page.keyboard.press('Escape')
-  await callQa(page, 'persistence.flush')
-  await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+  const sessionUrl = await createWorld(page, worldName)
+  if (createWorld !== createSurvivalWorld) {
+    await callQa<GameplaySnapshot>(page, 'gameplay.seedCreativePlacementEncounter')
+    await page.keyboard.press('Escape')
+    await callQa(page, 'persistence.flush')
+    await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+  }
   const url = multiplayerUrl(sessionUrl, player, name, serverUrl)
   await connectPage(page, url, registrationToken)
   return { context, page, url }
@@ -277,7 +313,9 @@ test('does not explode or mutate a Nether bed in multiplayer', async ({ page }) 
     worldId: 'nether',
     seed: 0,
     state: {
-      revision: 0,
+      // The local fixture advances before the multiplayer connection is established.
+      // Keep the server snapshot newer so the client accepts it during reconciliation.
+      revision: 4,
       blocks: [],
       inventories: [{
         player,
@@ -313,6 +351,7 @@ test('does not explode or mutate a Nether bed in multiplayer', async ({ page }) 
     const before = await snapshot(page)
     expect(before.dimension).toBe('nether')
     expect(before.bedExplosionProbe.block).toBe(seeded.bedExplosionProbe.block)
+    await expect.poll(() => canvasRevision(page)).toBe(4)
     const revisionBeforeUse = await canvasRevision(page)
 
     await useTargetedBlock(page)
@@ -324,6 +363,85 @@ test('does not explode or mutate a Nether bed in multiplayer', async ({ page }) 
     expect(await canvasRevision(page)).toBe(revisionBeforeUse)
     await expect(page.locator('body')).not.toHaveAttribute('data-bed-explosion-request')
   } finally {
+    server.process.kill('SIGTERM')
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test('fires a bow through the authoritative multiplayer server', async ({ browser }) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
+  const stateFile = join(stateDirectory, 'state.json')
+  const claimsFile = join(stateDirectory, 'claims.json')
+  const player = 'alice-e2e'
+  await writeFile(stateFile, `${JSON.stringify({
+    format: 1,
+    worldId: 'overworld',
+    seed: 0,
+    state: {
+      // The browser advances its local revision while creating the Survival world.
+      revision: 4,
+      blocks: [],
+      inventories: [{
+        player,
+        state: {
+          slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 2 }, ...emptySlots().slice(2)],
+          selectedSlot: 0,
+        },
+      }],
+      playerPositions: [{
+        player,
+        at: { x: 8.5, y: 65, z: 10.5 },
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      }],
+      vitals: [{ player, state: { health: 20, hunger: 20, experience: 0 } }],
+      timeWeather: { timeOfDay: 6_000, weather: 'clear' },
+      containers: [],
+      furnaces: [],
+      villagerTrades: [],
+      entities: [],
+    },
+  })}\n`, 'utf8')
+  await writeFile(claimsFile, `${JSON.stringify(claimsFor({
+    [player]: LEGACY_SECRETS[player],
+  }))}\n`, 'utf8')
+  const server = await startServer(stateFile, claimsFile)
+  let alice: Awaited<ReturnType<typeof openPlayer>> | undefined
+
+  try {
+    alice = await openPlayer(
+      browser,
+      'Authoritative Multiplayer Bow E2E',
+      player,
+      'Alice',
+      server.url,
+      LEGACY_SECRETS[player],
+      createSurvivalWorld,
+    )
+    const canvas = alice.page.locator('#game-canvas')
+    await expect.poll(() => canvasRevision(alice.page)).toBe(4)
+    await expect.poll(async () => itemCount(await snapshot(alice.page), 'bow')).toBe(1)
+    await expect.poll(async () => itemCount(await snapshot(alice.page), 'arrow')).toBe(2)
+    const before = await snapshot(alice.page)
+    expect(before.renderedEntities).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: 'arrow' })]),
+    )
+    const revisionBeforeDraw = await canvasRevision(alice.page)
+
+    await canvas.hover()
+    await grantPointerLock(alice.page)
+    await alice.page.mouse.down({ button: 'right' })
+    await alice.page.waitForTimeout(350)
+    expect(await canvasRevision(alice.page)).toBe(revisionBeforeDraw)
+    expect(itemCount(await snapshot(alice.page), 'arrow')).toBe(2)
+    await alice.page.mouse.up({ button: 'right' })
+
+    await expect.poll(() => canvasRevision(alice.page)).toBeGreaterThan(revisionBeforeDraw)
+    await expect.poll(async () => itemCount(await snapshot(alice.page), 'arrow')).toBe(1)
+    await expect.poll(async () => (await snapshot(alice.page)).renderedEntities).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: 'arrow' })]),
+    )
+  } finally {
+    await alice?.context.close()
     server.process.kill('SIGTERM')
     await rm(stateDirectory, { recursive: true, force: true })
   }

@@ -108,6 +108,7 @@ import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   addExperience as addVitalsExperience,
   containerIdAt,
+  durabilityForItem,
   emptyFurnaceState,
   emptyPlayerStorage,
   equipmentDefinitionFor,
@@ -3332,7 +3333,9 @@ type MultiplayerInventorySelection = Readonly<{
         const durability = state.durability?.[index]
         if (durability !== undefined) return durability
         const previous = storage.inventory.slots[index]
-        return previous?.item === stack?.item ? storage.inventoryDurability[index] : null
+        return previous?.item === stack?.item
+          ? storage.inventoryDurability[index]
+          : stack === undefined ? null : durabilityForItem(stack.item)
       }),
     }))
     selectedHotbarIndex = state.selectedSlot
