@@ -7817,6 +7817,7 @@ type MultiplayerInventorySelection = Readonly<{
       }
     }
 
+    if (multiplayer !== undefined) drainMultiplayerInbound()
     drainPlayerDamageInbound()
     const outcome = Effect.runSyncExit(runFrame(deltaSecs))
     if (swimmingState.active && mountedVehicle === undefined) {
@@ -7956,7 +7957,6 @@ type MultiplayerInventorySelection = Readonly<{
     if (villagerTradeResults.length > 0) renderTradeUi()
 
     if (multiplayer !== undefined) {
-      drainMultiplayerInbound()
       if (multiplayerHandshakeComplete && nowSecs - lastPlayerMoveSentAt >= 0.1) {
         const pose = Effect.runSync(playerApi.pose)
         const world = WorldId.make(Effect.runSync(playerApi.dimension))
