@@ -403,7 +403,7 @@ E2E の本数が増え続けるなら、それは compose にロジックが溜�
 
 ## DN-10: カメラ姿勢のミラーは名前の付いた 1 回の出来事にする
 
-**回帰テスト名**: `is input -> simulation -> camera-mirror -> chunk-sync -> render -> post-fx -> hud-sync`
+**回帰テスト名**: `is input -> simulation -> camera-mirror -> chunk-sync -> post-fx -> render -> hud-sync`
 **実装**: `test/stage-order.test.ts`(実装済み。順序の担保のみ)
 
 **根拠**: plan.md §3.8 / §5.1-2:

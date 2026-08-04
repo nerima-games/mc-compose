@@ -436,7 +436,7 @@ describe('the standard skeleton (plan.md §4.2)', () => {
     }),
   )
 
-  it.effect('is input -> simulation -> camera-mirror -> chunk-sync -> render -> post-fx -> hud-sync', () =>
+  it.effect('is input -> simulation -> camera-mirror -> chunk-sync -> post-fx -> render -> hud-sync', () =>
     Effect.sync(() => {
       const resolved = order(everyStage, STANDARD_STAGE_SKELETON)
       const at = (value: StageId): number => positionIn(resolved, value)
@@ -445,8 +445,8 @@ describe('the standard skeleton (plan.md §4.2)', () => {
       expect(at(STAGE_SIM_PHYSICS)).toBeGreaterThan(at(STAGE_INPUT))
       expect(at(STAGE_CAMERA_MIRROR)).toBeGreaterThan(at(STAGE_SIM_TIME_WEATHER))
       expect(at(STAGE_CHUNK_SYNC)).toBeGreaterThan(at(STAGE_CAMERA_MIRROR))
-      expect(at(STAGE_RENDER)).toBeGreaterThan(at(STAGE_CHUNK_SYNC))
-      expect(at(STAGE_POST_FX)).toBeGreaterThan(at(STAGE_RENDER))
+      expect(at(STAGE_POST_FX)).toBeGreaterThan(at(STAGE_CHUNK_SYNC))
+      expect(at(STAGE_RENDER)).toBeGreaterThan(at(STAGE_POST_FX))
       expect(at(STAGE_HUD_SYNC)).toBe(resolved.length - 1)
     }),
   )
@@ -579,8 +579,8 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
         'multiplayer:outbound',
         'render:camera-mirror',
         'render:chunk-sync',
-        'render:draw',
         'render:post-fx',
+        'render:draw',
         'ui:hud-sync',
         'ui:overlay-sync',
       ])

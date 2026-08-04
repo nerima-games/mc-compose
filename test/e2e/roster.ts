@@ -129,43 +129,43 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         id: 'gameplay:interactions',
         // Binds to mc-sim's registered `sim:physics` stage below.
         after: ['sim:physics'],
-        declaredAt: 'mx-gameplay/src/stages/registration.ts:2687',
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:2734',
         idAt: 'mx-gameplay/src/stages/stage-ids.ts:41',
       },
       {
         id: 'gameplay:fire',
         after: ['gameplay:interactions'],
-        declaredAt: 'mx-gameplay/src/stages/registration.ts:3481',
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3547',
         idAt: 'mx-gameplay/src/stages/stage-ids.ts:43',
       },
       {
         id: 'gameplay:survival-hunger',
         after: ['gameplay:fire'],
-        declaredAt: 'mx-gameplay/src/stages/registration.ts:3486',
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3552',
         idAt: 'mx-gameplay/src/stages/stage-ids.ts:45',
       },
       {
         id: 'gameplay:entities',
         after: ['gameplay:survival-hunger'],
-        declaredAt: 'mx-gameplay/src/stages/registration.ts:3491',
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3557',
         idAt: 'mx-gameplay/src/stages/stage-ids.ts:47',
       },
       {
         id: 'gameplay:ender-dragon',
         after: ['gameplay:entities'],
-        declaredAt: 'mx-gameplay/src/stages/registration.ts:3740',
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3806',
         idAt: 'mx-gameplay/src/stages/stage-ids.ts:49',
       },
       {
         id: 'gameplay:fluids',
         after: ['gameplay:ender-dragon'],
-        declaredAt: 'mx-gameplay/src/stages/registration.ts:3748',
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3814',
         idAt: 'mx-gameplay/src/stages/stage-ids.ts:51',
       },
       {
         id: 'gameplay:time-weather',
         after: ['gameplay:fluids'],
-        declaredAt: 'mx-gameplay/src/stages/registration.ts:3782',
+        declaredAt: 'mx-gameplay/src/stages/registration.ts:3848',
         idAt: 'mx-gameplay/src/stages/stage-ids.ts:53',
       },
     ],
@@ -213,31 +213,31 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // that lands in the frame is mc-compose's to decide — its skeleton
         // claims the NAME half of this id (`input`) for the first phase."
         after: [],
-        declaredAt: 'mc-render/src/stages/registration.ts:262',
+        declaredAt: 'mc-render/src/stages/registration.ts:265',
         idAt: 'mc-render/src/stages/stage-ids.ts:85',
       },
       {
         id: 'render:camera-mirror',
         after: ['sim:physics'],
-        declaredAt: 'mc-render/src/stages/registration.ts:321',
+        declaredAt: 'mc-render/src/stages/registration.ts:337',
         idAt: 'mc-render/src/stages/stage-ids.ts:92',
       },
       {
         id: 'render:chunk-sync',
         after: ['render:camera-mirror'],
-        declaredAt: 'mc-render/src/stages/registration.ts:346',
+        declaredAt: 'mc-render/src/stages/registration.ts:362',
         idAt: 'mc-render/src/stages/stage-ids.ts:94',
       },
       {
         id: 'render:draw',
-        after: ['render:chunk-sync'],
-        declaredAt: 'mc-render/src/stages/registration.ts:374',
+        after: ['render:post-fx'],
+        declaredAt: 'mc-render/src/stages/registration.ts:390',
         idAt: 'mc-render/src/stages/stage-ids.ts:96',
       },
       {
         id: 'render:post-fx',
-        after: ['render:draw'],
-        declaredAt: 'mc-render/src/stages/registration.ts:404',
+        after: ['render:chunk-sync'],
+        declaredAt: 'mc-render/src/stages/registration.ts:420',
         idAt: 'mc-render/src/stages/stage-ids.ts:105',
       },
     ],
@@ -260,7 +260,7 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // Every cross-repository `after` edge in the roster names it, and until
         // it existed all four dangled.
         after: [],
-        declaredAt: 'mc-sim/src/stages/registration.ts:209',
+        declaredAt: 'mc-sim/src/stages/registration.ts:226',
         idAt: 'mc-sim/src/stages/stage-ids.ts:86',
       },
     ],
@@ -379,8 +379,8 @@ export const PLAN_4_2_FRAME: ReadonlyArray<string> = [
   'multiplayer:outbound', //   network:outbound        — EXTENSION (not in §4.2)
   'render:camera-mirror', //   camera-mirror
   'render:chunk-sync', //      chunk-sync
-  'render:draw', //            render
   'render:post-fx', //         post-fx
+  'render:draw', //            render
   'ui:hud-sync', //            hud-sync                — mx-ui orders these two
   'ui:overlay-sync', //        hud-sync                  against each other
 ]

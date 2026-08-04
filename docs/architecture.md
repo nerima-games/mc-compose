@@ -169,8 +169,8 @@ simulation:time-weather      ← gameplay:time-weather
 network:outbound         ★   ← multiplayer:outbound
 camera-mirror                ← render:camera-mirror
 chunk-sync                   ← render:chunk-sync
-render                       ← render:draw
 post-fx                      ← render:post-fx
+render                       ← render:draw
 hud-sync                     ← ui:hud-sync, ui:overlay-sync       （名前空間一致）
 ```
 
@@ -197,7 +197,7 @@ compose がフェーズを並べ、モジュールは自分の `after` で**フ�
 ### 4.5 骨格に `network:inbound` / `network:outbound` を足した(§4.2 の拡張)
 
 **これは plan.md §4.2 の読み取りではなく、§4.2 への追加である。**
-§4.2 の骨格は input → simulation → camera-mirror → chunk-sync → render → post-fx → hud-sync で、
+§4.2 の骨格は input → simulation → camera-mirror → chunk-sync → post-fx → render → hud-sync で、
 **ネットワークについて一言も述べていない**。フェーズも、名前空間も、
 ネットワーク stage が名乗りそうな名前も無い。
 だから「どこに置くか」ではなく「置くかどうか」から議論が要る。

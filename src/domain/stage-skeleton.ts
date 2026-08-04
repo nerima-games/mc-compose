@@ -61,7 +61,7 @@ export const STAGE_PHASE_INPUT: StagePhase = stagePhase('input', 'input')
  * ---------------------------------------------------------------------------
  *
  * §4.2's backbone is input -> simulation -> camera-mirror -> chunk-sync ->
- * render -> post-fx -> hud-sync. IT SAYS NOTHING ABOUT NETWORKING — not a
+ * post-fx -> render -> hud-sync. IT SAYS NOTHING ABOUT NETWORKING — not a
  * phase, not a namespace, not a name a network stage would plausibly use. So
  * these two phases are not a reading of the plan; they are an addition to it,
  * and the header above says an addition to this array is the one edit to this
@@ -258,6 +258,14 @@ export const STAGE_PHASE_CAMERA_MIRROR: StagePhase = stagePhase('camera-mirror',
 export const STAGE_PHASE_CHUNK_SYNC: StagePhase = stagePhase('chunk-sync', 'chunk-sync', 'mesh-sync')
 
 /**
+ * Configure the post-processing chain. mc-render.
+ *
+ * mc-render prepares this state before `render:draw` consumes it. The actual
+ * GPU pass order remains mc-render's internal concern.
+ */
+export const STAGE_PHASE_POST_FX: StagePhase = stagePhase('post-fx', 'post-fx')
+
+/**
  * Draw. mc-render.
  *
  * `draw` as well as `render`, because mc-kernel's own worked example of the id
@@ -266,16 +274,6 @@ export const STAGE_PHASE_CHUNK_SYNC: StagePhase = stagePhase('chunk-sync', 'chun
  * the bug this table was rewritten to fix.
  */
 export const STAGE_PHASE_RENDER: StagePhase = stagePhase('render', 'render', 'draw')
-
-/**
- * Post-processing chain.
- *
- * plan.md §3.9 fixes the INTERNAL order of this phase:
- * RenderPass -> GTAO -> GodRays -> Bloom -> Bokeh(DoF) -> SMAA -> Output.
- * That order is mc-render's business, not this table's — this table only says
- * post-fx comes after render and before the HUD.
- */
-export const STAGE_PHASE_POST_FX: StagePhase = stagePhase('post-fx', 'post-fx')
 
 /**
  * Update the DOM HUD from settled state. mx-ui. Last: it reads, it does not decide.
@@ -297,8 +295,8 @@ export const STAGE_PHASE_HUD_SYNC: StagePhase = stagePhase('hud-sync', 'hud-sync
  *   -> network:outbound                                         [EXTENSION]
  *   -> camera-mirror
  *   -> chunk-sync
- *   -> render
  *   -> post-fx
+ *   -> render
  *   -> hud-sync
  *
  * The two marked phases are an EXTENSION of §4.2's backbone, not a reading of
@@ -325,8 +323,8 @@ export const STANDARD_STAGE_SKELETON: ReadonlyArray<StagePhase> = [
   STAGE_PHASE_NETWORK_OUTBOUND,
   STAGE_PHASE_CAMERA_MIRROR,
   STAGE_PHASE_CHUNK_SYNC,
-  STAGE_PHASE_RENDER,
   STAGE_PHASE_POST_FX,
+  STAGE_PHASE_RENDER,
   STAGE_PHASE_HUD_SYNC,
 ]
 
