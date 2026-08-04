@@ -395,8 +395,8 @@ const positionKey = ({ x, y, z }: BlockPos): string => `${String(x)},${String(y)
 const cloneStack = (stack: ItemStack | null): ItemStack | null => stack === null ? null : { ...stack }
 const cloneInventory = (state: InventoryState): MutableInventoryState => ({
   slots: state.slots.map(cloneStack),
-  durability: state.slots.map((stack, index) => {
-    const durability = state.durability?.[index]
+  durability: state.slots.map((stack) => {
+    const durability = stack?.durability
     if (stack?.item !== 'fishing_rod') return null
     return durability !== undefined && isValidDurabilityForItem('fishing_rod', durability)
       ? { ...durability }
@@ -405,10 +405,15 @@ const cloneInventory = (state: InventoryState): MutableInventoryState => ({
   selectedSlot: state.selectedSlot,
 })
 const inventorySnapshot = (state: MutableInventoryState): InventoryState => {
-  const durability = state.durability.map((value, index) => state.slots[index]?.item === 'fishing_rod' && value !== null ? { ...value } : null)
-  return durability.some((value) => value !== null)
-    ? { slots: state.slots.map(cloneStack), selectedSlot: state.selectedSlot, durability }
-    : { slots: state.slots.map(cloneStack), selectedSlot: state.selectedSlot }
+  return {
+    slots: state.slots.map((stack, index) => {
+      const durability = state.durability[index]
+      return stack?.item === 'fishing_rod' && durability !== null && durability !== undefined
+        ? { ...stack, durability: { ...durability } }
+        : cloneStack(stack)
+    }),
+    selectedSlot: state.selectedSlot,
+  }
 }
 const vitalsSnapshot = (state: MutableVitalsState): VitalsState => ({ ...state })
 const containerSnapshot = (state: MutableContainerState): ContainerState => ({
@@ -2199,7 +2204,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const brokenBlock = blockAt(message.at)
         if (brokenBlock === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })
-        disturbFallingBlocks([message.at])
+        disturbFallingBlocks([
+          { x: message.at.x, y: message.at.y + 1, z: message.at.z },
+        ])
         if (containerKindForBlock(brokenBlock) !== undefined) containers.delete(containerIdAt(message.at))
         else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
         revision += 1
@@ -2293,9 +2300,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (advanced._tag === 'Cancelled') {
           fishingSessions.delete(player)
           fishingDeltas.push({ _tag: 'PlayerFishingDelta', world: actor.world, player, state: { phase: 'idle', result: 'lost-water' } })
-        } else if (advanced._tag === 'Bite' || advanced._tag === 'Escaped') {
+        } else if (advanced._tag === 'Bite') {
           active.session = advanced.session
-          fishingDeltas.push({ _tag: 'PlayerFishingDelta', world: actor.world, player, state: { phase: advanced._tag === 'Bite' ? 'bite' : 'escaped', result: advanced._tag.toLowerCase() as 'bite' | 'escaped' } })
+          fishingDeltas.push({ _tag: 'PlayerFishingDelta', world: actor.world, player, state: { phase: 'bite', result: 'bite' } })
+        } else if (advanced._tag === 'Escaped') {
+          active.session = advanced.session
+          fishingDeltas.push({ _tag: 'PlayerFishingDelta', world: actor.world, player, state: { phase: 'escaped', result: 'escaped' } })
         } else if (advanced._tag === 'Waiting') active.session = advanced.session
       }
       if (fishingDeltas.length > 0) {
@@ -2450,13 +2460,15 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
                 movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: hit.entityId })
                 const kind = supportedMobKind(hit.entityType)
                 const experienceReward = kind === undefined ? 0 : mobXpReward({ _tag: 'Slain', lootingLevel: 0 }, mobExperienceReward(kind))
-                const ownerVitals = vitals.get(entity.owner)
-                const owner = players.get(entity.owner)
-                if (experienceReward > 0 && ownerVitals !== undefined) {
-                  ownerVitals.experience += experienceReward
-                  if (owner !== undefined) movedEntities.push({
-                    _tag: 'PlayerVitalsDelta', world: owner.world, revision: 0, player: entity.owner, state: vitalsSnapshot(ownerVitals),
-                  })
+                if (entity.owner !== null) {
+                  const ownerVitals = vitals.get(entity.owner)
+                  const owner = players.get(entity.owner)
+                  if (experienceReward > 0 && ownerVitals !== undefined) {
+                    ownerVitals.experience += experienceReward
+                    if (owner !== undefined) movedEntities.push({
+                      _tag: 'PlayerVitalsDelta', world: owner.world, revision: 0, player: entity.owner, state: vitalsSnapshot(ownerVitals),
+                    })
+                  }
                 }
                 const loot = kind === undefined ? [] : rollDropsOfKind(kind, { _tag: 'Slain', lootingLevel: 0 }, Array.from(
                   { length: dropRollsNeeded(kind) },

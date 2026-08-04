@@ -468,8 +468,7 @@ describe('multiplayer server authoritative state', () => {
         player: playerId('alice'),
         state: {
           selectedSlot: 0,
-          slots: [{ item: 'fishing_rod', count: 1 }, { item: 'stone', count: 64 }, { item: 'coal', count: 64 }],
-          durability: [{ current: 64, max: 64 }, null, null],
+          slots: [{ item: 'fishing_rod', count: 1, durability: { current: 64, max: 64 } }, { item: 'stone', count: 64 }, { item: 'coal', count: 64 }],
         },
       }],
     }, undefined, 'normal', {
@@ -509,7 +508,11 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({
         _tag: 'PlayerInventoryDelta',
         player: playerId('alice'),
-        state: expect.objectContaining({ durability: [{ current: 63, max: 64 }, null, null] }),
+        state: expect.objectContaining({
+          slots: expect.arrayContaining([
+            expect.objectContaining({ item: 'fishing_rod', count: 1, durability: { current: 63, max: 64 } }),
+          ]),
+        }),
       }),
       expect.objectContaining({
         _tag: 'PlayerFishingDelta', player: playerId('alice'), state: { phase: 'idle', result: 'caught' },
