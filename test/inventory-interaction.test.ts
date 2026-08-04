@@ -138,6 +138,24 @@ describe('inventory interaction', () => {
     expect(dirtyCount).toBe(1)
   })
 
+  it('confirms an authoritative craft without invoking the local inventory service', () => {
+    let dirtyCount = 0
+    const fixture = makeService({ preview: noMatch })
+    const interaction = createInventoryInteraction(fixture.service, {
+      consumeCraftingGrid: true,
+      onCrafted: () => { dirtyCount += 1 },
+    })
+    placeLog(interaction, 0)
+
+    const result = Effect.runSync(interaction.confirmCraftOnce())
+
+    expect(fixture.craftCalls).toHaveLength(0)
+    expect(fixture.previewCalls).toHaveLength(1)
+    expect(result.grid.cells).toEqual([undefined, undefined, undefined, undefined])
+    expect(result.preview).toEqual(noMatch)
+    expect(dirtyCount).toBe(1)
+  })
+
   it('crafts the same output twice while ingredients remain', () => {
     const crafted: InteractionCraftResult<Item> = {
       _tag: 'Crafted',
