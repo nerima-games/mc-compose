@@ -5,6 +5,7 @@ import {
   SleepAuthority,
   applySleepCommandResult,
   applySleepEvents,
+  decodeSleepWireMessage,
   initialSleepClientState,
   queueSleepCommand,
   sleepClientFromSnapshot,
@@ -46,6 +47,21 @@ const options = (sleepPercentage = 100) => ({
 })
 
 describe('authoritative sleep network adapter', () => {
+  it('decodes complete authoritative sleep messages', () => {
+    const message = { _tag: 'SleepSnapshot', snapshot: snapshot(actor(alice, 'a')) } as const
+    expect(decodeSleepWireMessage(JSON.stringify(message))).toEqual(message)
+  })
+
+  it('rejects malformed nested authoritative messages', () => {
+    const malformedSnapshot = { _tag: 'SleepSnapshot', snapshot: { ...snapshot(actor(alice, 'a')), actors: [{ ...actor(alice, 'a'), health: 'full' }] } }
+    const malformedEvents = { _tag: 'SleepEvents', revision: 1, events: [{ _tag: 'ActorSleepChanged', actor: 'alice', sleeping: { dimension: 'overworld', bed: { x: 0, y: 'high', z: 1 } } }] }
+    const malformedResult = { _tag: 'SleepCommandResult', result: { accepted: false, requestId: 'sleep-a', revision: 1, reason: 'unexpected' } }
+
+    expect(decodeSleepWireMessage(JSON.stringify(malformedSnapshot))).toBeUndefined()
+    expect(decodeSleepWireMessage(JSON.stringify(malformedEvents))).toBeUndefined()
+    expect(decodeSleepWireMessage(JSON.stringify(malformedResult))).toBeUndefined()
+  })
+
   it('does not apply local sleep until the server accepts it', () => {
     const pending = queueSleepCommand(initialSleepClientState(), command(alice, 'a', 'sleep-a', 0))
     expect(pending.sleepers.size).toBe(0)
