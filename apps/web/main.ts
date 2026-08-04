@@ -375,6 +375,10 @@ import {
   type PlayerDamageCommandResult,
 } from '../multiplayer-shared/player-damage-network'
 import {
+  type CraftingCommand,
+  type CraftingCommandResult,
+} from '../multiplayer-shared/crafting-network'
+import {
   advanceEyeOfEnderRuntime,
   eyeOfEnderRenderDescriptors,
   eyeOfEnderRuntimeSnapshot,
@@ -2985,6 +2989,7 @@ const bootGame = async (
   let nextFacilityCommand = 0
   let nextInventoryCommand = 0
   let nextPlayerDamageCommand = 0
+  let nextCraftingCommand = 0
   let nextVillagerTradeCommand = 0
   let pendingVitalsCommand: CommandId | null = null
   let pendingInventoryCommand: {
@@ -3017,6 +3022,11 @@ type MultiplayerInventorySelection = Readonly<{
   } | null = null
   let playerDamageResyncPending = false
   let lastPlayerVitalsRevision = -1
+  let lastCraftingInventoryRevision = -1
+  let pendingCrafting: {
+    readonly commandId: string
+    readonly acceptedRevision: number | null
+  } | null = null
   let pendingFacilityCommand: {
     readonly commandId: CommandId
     readonly facility: 'container' | 'furnace'
@@ -3296,6 +3306,75 @@ type MultiplayerInventorySelection = Readonly<{
     }
   }
 
+  const requestCrafting = (): void => {
+    if (
+      multiplayer === undefined
+      || !multiplayerHandshakeComplete
+      || pendingCrafting !== null
+    ) return
+    const grid = inventoryInteraction.state().grid
+    const dimensions = grid.width === 2 && grid.height === 2
+      ? { width: 2 as const, height: 2 as const }
+      : grid.width === 3 && grid.height === 3
+        ? { width: 3 as const, height: 3 as const }
+        : undefined
+    if (dimensions === undefined) return
+    nextCraftingCommand += 1
+    const commandId = `craft-${String(nextCraftingCommand)}`
+    pendingCrafting = { commandId, acceptedRevision: null }
+    const command: CraftingCommand = {
+      _tag: 'CraftingCommand',
+      commandId,
+      player: String(multiplayer.query.player),
+      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      expectedRevision: multiplayerRevision,
+      grid: {
+        ...dimensions,
+        cells: grid.cells.map((cell) => cell?.item ?? null),
+      },
+    }
+    Effect.runSync(multiplayer.transport.sendCrafting(command))
+  }
+
+  const settleCraftingAfterInventory = (revision: number): void => {
+    lastCraftingInventoryRevision = Math.max(lastCraftingInventoryRevision, revision)
+    const pending = pendingCrafting
+    if (
+      pending !== null
+      && pending.acceptedRevision !== null
+      && revision >= pending.acceptedRevision
+    ) {
+      pendingCrafting = null
+      Effect.runSync(inventoryInteraction.confirmCraftOnce())
+    }
+  }
+
+  const applyCraftingResult = (message: CraftingCommandResult): void => {
+    if (multiplayer === undefined || pendingCrafting?.commandId !== message.commandId) return
+    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+    if (!message.accepted) {
+      pendingCrafting = null
+      Effect.runSync(multiplayer.host.enqueueOutbound({
+        _tag: 'AuthoritativeResyncRequest',
+        world: WorldId.make(Effect.runSync(playerApi.dimension)),
+        lastKnownRevision: multiplayerRevision,
+      }))
+      return
+    }
+    pendingCrafting = { ...pendingCrafting, acceptedRevision: message.revision }
+    if (lastCraftingInventoryRevision >= message.revision) {
+      pendingCrafting = null
+      Effect.runSync(inventoryInteraction.confirmCraftOnce())
+    }
+  }
+
+  const drainCraftingInbound = (): void => {
+    if (multiplayer === undefined) return
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.craftingInbound))) {
+      if (message._tag === 'CraftingCommandResult') applyCraftingResult(message)
+    }
+  }
+
   document.addEventListener('mc-entity-command', (event) => {
     const detail = (event as CustomEvent<{ readonly entityId: string; readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'; readonly direction?: 'forward' | 'backward' }>).detail
     if (detail === undefined) return
@@ -3520,7 +3599,10 @@ type MultiplayerInventorySelection = Readonly<{
       case 'PlayerInventoryDelta':
         if (message.revision < multiplayerRevision) return
         multiplayerRevision = message.revision
-        if (message.player === multiplayer.query.player) applyNetworkInventory(message.state)
+        if (message.player === multiplayer.query.player) {
+          applyNetworkInventory(message.state)
+          settleCraftingAfterInventory(message.revision)
+        }
         if (
           message.player === multiplayer.query.player
           && pendingFacilityCommand !== null
@@ -5189,8 +5271,10 @@ type MultiplayerInventorySelection = Readonly<{
       return
     }
     if (target.kind === 'crafting-output') {
-      Effect.runSync(inventoryInteraction.craftOnce())
+      if (multiplayer === undefined) Effect.runSync(inventoryInteraction.craftOnce())
+      else requestCrafting()
     } else if (target.region === 'crafting-grid') {
+      if (pendingCrafting !== null) return
       Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
       Effect.runSync(inventoryInteraction.preview())
     } else if (target.region === 'hotbar') {
@@ -7820,6 +7904,7 @@ type MultiplayerInventorySelection = Readonly<{
       }
 
       if (multiplayer !== undefined) drainMultiplayerInbound()
+      drainCraftingInbound()
       drainPlayerDamageInbound()
       const outcome = Effect.runSyncExit(runFrame(deltaSecs))
       if (swimmingState.active && mountedVehicle === undefined) {
@@ -9702,9 +9787,10 @@ type MultiplayerInventorySelection = Readonly<{
     startRuntime: (surface) => Effect.sync(() => {
       const hiddenNetworkPump = window.setInterval(() => {
         if (document.visibilityState !== 'hidden' || multiplayerInboundStage === undefined) return
-        drainPlayerDamageInbound()
         Effect.runSync(multiplayerInboundStage.run(DeltaTimeSecs(0)))
         drainMultiplayerInbound()
+        drainCraftingInbound()
+        drainPlayerDamageInbound()
       }, 100)
       surface.onCleanup(() => {
         window.clearInterval(hiddenNetworkPump)

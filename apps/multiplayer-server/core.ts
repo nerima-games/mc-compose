@@ -20,9 +20,9 @@ import {
   type ContainerKind,
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
-import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem } from '@nerima-games/mc-kernel'
+import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, StackCount } from '@nerima-games/mc-kernel'
 import type { Dimension } from '@nerima-games/mc-worldgen'
-import { EYE_LEVEL_OFFSET, containerCapacity, durabilityForItem, forwardVector, isValidDurabilityForItem, planExplosion, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
+import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, forwardVector, isValidDurabilityForItem, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
@@ -105,6 +105,7 @@ import {
   type PlayerDamageCommandResult,
   type PlayerDamageWireMessage,
 } from '../multiplayer-shared/player-damage-network'
+import { CRAFTING_MAX_WIRE_LENGTH, decodeCraftingWireMessage, type CraftingCommand, type CraftingCommandResult } from '../multiplayer-shared/crafting-network'
 
 export type ClientId = string
 export type SendFrame = (frame: WireText) => void
@@ -121,6 +122,9 @@ const playerDamageFingerprint = (command: PlayerDamageCommand): string => JSON.s
   command.amount,
   command.minimumHealthPoints,
 ])
+
+export const craftingResultKey = (player: PlayerId, commandId: string): string => JSON.stringify([player, commandId])
+const craftingFingerprint = (command: CraftingCommand): string => JSON.stringify(command)
 
 const arrowHitProjection = (
   from: Readonly<{ x: number; y: number; z: number }>,
@@ -184,7 +188,7 @@ export interface MultiplayerServerState {
 }
 
 export type ReceiveResult =
-  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | PlayerDamageWireMessage }>
+  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | PlayerDamageWireMessage | CraftingCommand }>
   | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' | 'invalid-command' }>
 
 interface ConnectedClient {
@@ -613,6 +617,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     fingerprint: string
     result: PlayerDamageCommandResult
   }>>()
+  const craftingResults = new Map<string, Readonly<{ fingerprint: string; result: CraftingCommandResult }>>()
   const cachePlayerDamageResult = (
     key: string,
     fingerprint: string,
@@ -622,6 +627,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (playerDamageResults.size <= commandResultLimit) return
     const oldestKey = playerDamageResults.keys().next().value
     if (oldestKey !== undefined) playerDamageResults.delete(oldestKey)
+  }
+  const cacheCraftingResult = (key: string, fingerprint: string, result: CraftingCommandResult): void => {
+    craftingResults.set(key, { fingerprint, result })
+    if (craftingResults.size <= commandResultLimit) return
+    const oldestKey = craftingResults.keys().next().value
+    if (oldestKey !== undefined) craftingResults.delete(oldestKey)
   }
   const lastWitherAttackMs = new Map<PlayerId, number>()
   const hungerActors = new Map<PlayerId, HungerActor>()
@@ -679,6 +690,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   }
 
   const sendPlayerDamage = (client: ConnectedClient, message: PlayerDamageCommandResult): void => {
+    client.send(JSON.stringify(message) as WireText)
+  }
+  const sendCrafting = (client: ConnectedClient, message: CraftingCommandResult): void => {
     client.send(JSON.stringify(message) as WireText)
   }
 
@@ -1851,8 +1865,62 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const receive = (clientId: ClientId, frame: WireText): ReceiveResult => {
     const client = clients.get(clientId)
     if (client === undefined) return { accepted: false, reason: 'unknown-client' }
-    if (frame.length > PLAYER_DAMAGE_MAX_WIRE_LENGTH && frame.includes('"_tag":"PlayerDamageCommand"')) {
+    if ((frame.length > PLAYER_DAMAGE_MAX_WIRE_LENGTH && frame.includes('"_tag":"PlayerDamageCommand"'))
+      || (frame.length > CRAFTING_MAX_WIRE_LENGTH && frame.includes('"_tag":"CraftingCommand"'))) {
       return { accepted: false, reason: 'malformed-frame' }
+    }
+    const craftingMessage = decodeCraftingWireMessage(frame)
+    if (craftingMessage?._tag === 'CraftingCommand') {
+      if (client.playerId === null) return { accepted: false, reason: 'join-required' }
+      const command = craftingMessage
+      const resultKey = craftingResultKey(client.playerId, command.commandId)
+      const fingerprint = craftingFingerprint(command)
+      const cached = craftingResults.get(resultKey)
+      if (cached !== undefined) {
+        if (cached.fingerprint !== fingerprint) return { accepted: false, reason: 'invalid-command' }
+        sendCrafting(client, cached.result)
+        return cached.result.accepted ? { accepted: true, message: craftingMessage } : { accepted: false, reason: cached.result.reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command' }
+      }
+      const rejectCrafting = (reason: NonNullable<CraftingCommandResult['reason']>, receiveReason: Extract<ReceiveResult, { accepted: false }>['reason'] = 'invalid-command'): ReceiveResult => {
+        const result: CraftingCommandResult = { _tag: 'CraftingCommandResult', commandId: command.commandId, accepted: false, revision, reason }
+        cacheCraftingResult(resultKey, fingerprint, result)
+        sendCrafting(client, result)
+        return { accepted: false, reason: receiveReason }
+      }
+      if (command.player !== client.playerId) return rejectCrafting('unauthorized-player', 'identity-spoof')
+      if (command.world !== worldId) return rejectCrafting('wrong-world', 'wrong-world')
+      if (command.expectedRevision !== revision) return rejectCrafting('stale-revision')
+      const inventory = inventories.get(client.playerId)
+      const presence = players.get(client.playerId)
+      const playerVitals = vitals.get(client.playerId)
+      if (inventory === undefined || presence === undefined || playerVitals === undefined || playerVitals.health <= 0) return rejectCrafting('invalid-command')
+      const craftingSlots: Array<Parameters<typeof craftFromGrid>[0]['slots'][number]> = []
+      for (const slot of inventory.slots) {
+        if (slot === null) {
+          craftingSlots.push(undefined)
+          continue
+        }
+        if (!isItemType(slot.item)
+          || !Number.isSafeInteger(slot.count)
+          || slot.count <= 0
+          || slot.count > maxStackCountOfItem(slot.item)) return rejectCrafting('invalid-command')
+        craftingSlots.push({ item: slot.item, count: StackCount(slot.count) })
+      }
+      const outcome = craftFromGrid({
+        slots: craftingSlots,
+      }, STARTER_RECIPES, craftGrid(command.grid.width, command.grid.height, command.grid.cells.map((cell) => cell ?? undefined)))
+      if (outcome.result._tag !== 'Crafted') return rejectCrafting(outcome.result._tag === 'NoMatch' ? 'no-match' : outcome.result._tag === 'MissingIngredients' ? 'missing-ingredients' : 'no-room')
+      const oldSlots = [...inventory.slots]
+      const oldDurability = [...inventory.durability]
+      inventory.slots.splice(0, inventory.slots.length, ...outcome.inventory.slots.map((slot) => slot === undefined ? null : { item: slot.item, count: slot.count }))
+      inventory.durability.splice(0, inventory.durability.length, ...outcome.inventory.slots.map((slot, index) => slot !== undefined && oldSlots[index]?.item === slot.item ? oldDurability[index] ?? null : null))
+      revision += 1
+      const result: CraftingCommandResult = { _tag: 'CraftingCommandResult', commandId: command.commandId, accepted: true, revision }
+      cacheCraftingResult(resultKey, fingerprint, result)
+      notifyStateChanged()
+      broadcast({ _tag: 'PlayerInventoryDelta', world: presence.world, revision, player: client.playerId, state: inventorySnapshot(inventory) })
+      sendCrafting(client, result)
+      return { accepted: true, message: craftingMessage }
     }
     const playerDamageMessage = decodePlayerDamageWireMessage(frame)
     if (playerDamageMessage?._tag === 'PlayerDamageCommand') {

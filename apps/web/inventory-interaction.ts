@@ -111,6 +111,7 @@ export type InventoryInteractionController<Item, Recipe, Count extends number = 
   ) => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
   readonly preview: () => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
   readonly craftOnce: () => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
+  readonly confirmCraftOnce: () => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
   readonly reset: () => InventoryInteractionState<Item, Recipe, Count>
   readonly close: () => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
 }
@@ -410,6 +411,33 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
       )
     })
 
+  const confirmCraftOnce = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> =>
+    Effect.suspend(() => {
+      if (crafting) return Effect.succeed(state())
+      crafting = true
+      const grid = current.grid
+      current = {
+        inventoryCarried: current.inventoryCarried,
+        carried: undefined,
+        grid: options.consumeCraftingGrid === true
+          ? { ...grid, cells: grid.cells.map((cell) => cell === undefined || cell.count <= 1 ? undefined : { ...cell, count: (cell.count - 1) as Count }) }
+          : grid,
+        preview: undefined,
+        status: undefined,
+      }
+      options.onCrafted?.()
+      return Effect.ensuring(
+        Effect.matchCauseEffect(service.previewCraft(current.grid), {
+          onFailure: () => Effect.succeed(state()),
+          onSuccess: (match) => Effect.sync(() => {
+            current = { ...current, preview: match }
+            return state()
+          }),
+        }),
+        Effect.sync(() => { crafting = false }),
+      )
+    })
+
   const close = (): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => Effect.suspend(() => {
     if (crafting) return Effect.succeed(state())
     const inventoryCarried = current.inventoryCarried
@@ -438,6 +466,7 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     interactCraftingCellFromInventory,
     preview,
     craftOnce,
+    confirmCraftOnce,
     reset,
     close,
   }

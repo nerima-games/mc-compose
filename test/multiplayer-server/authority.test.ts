@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   makeMultiplayerServerCore,
+  craftingResultKey,
   type MultiplayerServerOptions,
   playerDamageResultKey,
   type MultiplayerServerState,
@@ -29,6 +30,11 @@ import {
   PLAYER_DAMAGE_MAX_WIRE_LENGTH,
   type PlayerDamageCommand,
 } from '../../apps/multiplayer-shared/player-damage-network'
+import {
+  decodeCraftingWireMessage,
+  encodeCraftingCommand,
+  type CraftingCommand,
+} from '../../apps/multiplayer-shared/crafting-network'
 import { decodeSleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
 
@@ -50,7 +56,8 @@ const frame = (message: NetworkMessage): WireText => {
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
   frames.filter((wire) => decodeSleepWireMessage(wire) === undefined
     && decodeWitherWireMessage(wire) === undefined
-    && decodePlayerDamageWireMessage(wire) === undefined).map((wire) => {
+    && decodePlayerDamageWireMessage(wire) === undefined
+    && decodeCraftingWireMessage(wire) === undefined).map((wire) => {
     const decoded = decodeFrame(wire)
     if (Either.isLeft(decoded)) throw decoded.left
     return decoded.right
@@ -142,6 +149,8 @@ const makeFixture = (
   const receive = (message: NetworkMessage): ReceiveResult => server.receive('socket-a', frame(message))
   const receiveDamage = (command: PlayerDamageCommand): ReceiveResult =>
     server.receive('socket-a', encodePlayerDamageCommand(command))
+  const receiveCrafting = (command: CraftingCommand): ReceiveResult =>
+    server.receive('socket-a', encodeCraftingCommand(command))
   expect(receive({
     _tag: 'PlayerJoin',
     player: playerId('alice'),
@@ -150,7 +159,7 @@ const makeFixture = (
   }).accepted).toBe(true)
   persisted.length = 0
   timeline.length = 0
-  return { sent, persisted, timeline, receive, receiveDamage, server }
+  return { sent, persisted, timeline, receive, receiveDamage, receiveCrafting, server }
 }
 
 describe('multiplayer server authoritative state', () => {
@@ -1450,6 +1459,50 @@ describe('multiplayer server authoritative state', () => {
   it('keeps NUL-boundary player damage cache keys distinct', () => {
     expect(playerDamageResultKey(playerId('alice'), commandId('part\u0000tail')))
       .not.toBe(playerDamageResultKey(playerId('alice\u0000part'), commandId('tail')))
+  })
+
+  it('crafts from server inventory and caches the accepted result', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'oak_log', count: 1 }, null], selectedSlot: 0 },
+      }],
+    })
+    fixture.sent.length = 0
+    const command: CraftingCommand = {
+      _tag: 'CraftingCommand', commandId: 'craft-1', player: 'alice', world: 'world-1', expectedRevision: 4,
+      grid: { width: 2, height: 2, cells: ['oak_log', null, null, null] },
+    }
+
+    expect(fixture.receiveCrafting(command).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta', revision: 5, player: 'alice',
+      state: expect.objectContaining({ slots: [{ item: 'oak_planks', count: 4 }, null] }),
+    }))
+    expect(fixture.sent.map(decodeCraftingWireMessage)).toContainEqual({
+      _tag: 'CraftingCommandResult', commandId: 'craft-1', accepted: true, revision: 5,
+    })
+    expect(fixture.receiveCrafting(command).accepted).toBe(true)
+    expect(fixture.persisted).toHaveLength(1)
+  })
+
+  it('rejects a crafting grid not backed by server inventory', () => {
+    const fixture = makeFixture()
+    fixture.sent.length = 0
+    expect(fixture.receiveCrafting({
+      _tag: 'CraftingCommand', commandId: 'craft-missing', player: 'alice', world: 'world-1', expectedRevision: 4,
+      grid: { width: 2, height: 2, cells: ['oak_log', null, null, null] },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(fixture.sent.map(decodeCraftingWireMessage)).toContainEqual({
+      _tag: 'CraftingCommandResult', commandId: 'craft-missing', accepted: false, revision: 4, reason: 'missing-ingredients',
+    })
+    expect(fixture.persisted).toEqual([])
+  })
+
+  it('keeps NUL-boundary crafting cache keys distinct', () => {
+    expect(craftingResultKey(playerId('alice'), commandId('part\u0000tail')))
+      .not.toBe(craftingResultKey(playerId('alice\u0000part'), commandId('tail')))
   })
 
   it('accepts fractional player damage produced by armor mitigation', () => {
