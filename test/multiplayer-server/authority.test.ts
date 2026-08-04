@@ -210,6 +210,64 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  it('applies a bow arrow to the nearest opposing player and synchronizes their vitals', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 2 }, null], selectedSlot: 0 },
+      }],
+      vitals: [
+        { player: playerId('alice'), state: { health: 20, hunger: 20, experience: 0 } },
+        { player: playerId('bob'), state: { health: 20, hunger: 20, experience: 0 } },
+      ],
+    }, undefined, 'normal', {
+      now: () => now,
+      generatedBlockAt: (position) => position.y === 63 ? 'stone' : null,
+    })
+    const bobSent: WireText[] = []
+    expect(fixture.server.connect('socket-b', (wire) => bobSent.push(wire))).toBe(true)
+    expect(fixture.server.receive('socket-b', frame({
+      _tag: 'PlayerJoin', player: playerId('bob'), name: playerName('Bob'), at: { x: 0, y: 64, z: -3.2 },
+    })).accepted).toBe(true)
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('player-bow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('player-bow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    const vitalsDelta = messages(fixture.sent).find((message) =>
+      message._tag === 'PlayerVitalsDelta' && message.player === playerId('bob'),
+    )
+    expect(vitalsDelta).toEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', player: 'bob', state: expect.objectContaining({ health: expect.any(Number) }),
+    }))
+    if (vitalsDelta?._tag !== 'PlayerVitalsDelta') throw new Error('missing opposing-player vitals delta')
+    expect(vitalsDelta.state.health).toBeLessThan(20)
+    expect(messages(fixture.sent)).not.toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', player: 'alice',
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityDespawnDelta', entityId: 'player-bow-release:arrow',
+    }))
+    expect(fixture.persisted.at(-1)?.vitals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ player: 'alice', state: expect.objectContaining({ health: 20 }) }),
+      expect.objectContaining({ player: 'bob', state: expect.objectContaining({ health: vitalsDelta.state.health }) }),
+    ]))
+  })
+
   it('ignites TNT and resolves its explosion on the server', () => {
     const state = initialState()
     const fixture = makeFixture({

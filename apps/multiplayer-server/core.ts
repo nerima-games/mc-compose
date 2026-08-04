@@ -122,11 +122,11 @@ const playerDamageFingerprint = (command: PlayerDamageCommand): string => JSON.s
   command.minimumHealthPoints,
 ])
 
-const arrowHitsLivingEntity = (
+const arrowHitProjection = (
   from: Readonly<{ x: number; y: number; z: number }>,
   to: Readonly<{ x: number; y: number; z: number }>,
   target: Readonly<{ x: number; y: number; z: number }>,
-): boolean => {
+): number | undefined => {
   const dx = to.x - from.x
   const dy = to.y - from.y
   const dz = to.z - from.z
@@ -136,6 +136,8 @@ const arrowHitsLivingEntity = (
     : Math.min(1, Math.max(0, ((target.x - from.x) * dx + (target.y - from.y) * dy + (target.z - from.z) * dz) / lengthSquared))
   const nearest = { x: from.x + dx * projection, y: from.y + dy * projection, z: from.z + dz * projection }
   return (target.x - nearest.x) ** 2 + (target.y - nearest.y) ** 2 + (target.z - nearest.z) ** 2 <= 0.81
+    ? projection
+    : undefined
 }
 
 export interface MultiplayerServerOptions {
@@ -2430,13 +2432,45 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           const block = isInBounds({ x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) })
             ? blockAt({ x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) })
             : 'bedrock'
-          const hit = [...entities.values()]
+          const livingHit = [...entities.values()]
             .filter((candidate): candidate is Extract<AuthoritativeEntityState, { readonly _tag: 'living' }> => candidate._tag === 'living')
-            .find((candidate) => arrowHitsLivingEntity(entity.at, at, { ...candidate.at, y: candidate.at.y + 0.9 }))
-          if (ageTicks >= ARROW_LIFESPAN_TICKS || (block !== null && options.passableBlocks?.has(block) !== true) || hit !== undefined) {
+            .map((candidate) => ({
+              candidate,
+              projection: arrowHitProjection(entity.at, at, { ...candidate.at, y: candidate.at.y + 0.9 }),
+            }))
+            .filter((candidate): candidate is { candidate: Extract<AuthoritativeEntityState, { readonly _tag: 'living' }>; projection: number } => candidate.projection !== undefined)
+            .sort((left, right) => left.projection - right.projection)[0]
+          const playerHit = [...players.entries()]
+            .filter(([player, presence]) =>
+              player !== entity.owner
+              && presence.world === worldId
+              && (vitals.get(player)?.health ?? 0) > 0,
+            )
+            .map(([player, presence]) => ({
+              player,
+              projection: arrowHitProjection(entity.at, at, { ...presence.at, y: presence.at.y + 0.9 }),
+            }))
+            .filter((candidate): candidate is { player: PlayerId; projection: number } => candidate.projection !== undefined)
+            .sort((left, right) => left.projection - right.projection)[0]
+          const playerWasHit = playerHit !== undefined
+            && (livingHit === undefined || playerHit.projection < livingHit.projection)
+          if (ageTicks >= ARROW_LIFESPAN_TICKS || (block !== null && options.passableBlocks?.has(block) !== true) || livingHit !== undefined || playerHit !== undefined) {
             entities.delete(entity.entityId)
             movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
-            if (hit !== undefined) {
+            if (playerWasHit) {
+              const playerVitals = vitals.get(playerHit.player)
+              if (playerVitals !== undefined) {
+                const wasAlive = playerVitals.health > 0
+                playerVitals.health = Math.max(0, playerVitals.health - entity.damage)
+                const hungerActor = hungerActors.get(playerHit.player)
+                if (hungerActor !== undefined) {
+                  hungerActors.set(playerHit.player, { ...hungerActor, state: { ...hungerActor.state, health: playerVitals.health } })
+                }
+                damagedPlayers.add(playerHit.player)
+                if (wasAlive && playerVitals.health <= 0) deadPlayers.add(playerHit.player)
+              }
+            } else if (livingHit !== undefined) {
+              const hit = livingHit.candidate
               const health = hit.health - entity.damage
               if (health > 0) {
                 const updated = { ...hit, health }
