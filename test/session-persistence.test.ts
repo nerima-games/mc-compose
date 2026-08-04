@@ -42,6 +42,7 @@ import {
   EMPTY_ENTITY_ROSTERS,
   EMPTY_VILLAGER_STATE,
   SESSION_FORMAT_NAME,
+  SESSION_FORMAT_VERSION,
   deleteSession,
   listSessions,
   loadSession,
@@ -684,6 +685,60 @@ describe('session persistence', () => {
         end: EMPTY_ENTITY_ROSTER,
       })
       expect(storage.envelope(key)?.version).toBe(16)
+    }).pipe(Effect.provide(storage.layer))
+  })
+
+  it.effect('normalizes malformed entity rosters during current session decode', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('current-entity-roster')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: SESSION_FORMAT_VERSION,
+      payload: {
+        sessionId: 'current-entity-roster',
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: {
+          ...sessionState(42),
+          entities: {
+            overworld: {
+              entities: [
+                {
+                  id: 'zombie-1',
+                  kind: 'zombie',
+                  feetPosition: { x: 1, y: 65, z: -2 },
+                  healthPoints: 20,
+                  behaviour: { target: 'local-player' },
+                },
+                { id: 'broken', kind: 'zombie' },
+              ],
+              nextSerial: 3.7,
+            },
+            nether: null,
+            end: { entities: [], nextSerial: -4 },
+          },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('current-entity-roster'))
+
+      expect(loaded.state.entities).toEqual({
+        overworld: {
+          entities: [{
+            id: 'zombie-1',
+            kind: 'zombie',
+            feetPosition: { x: 1, y: 65, z: -2 },
+            healthPoints: 20,
+            behaviour: { target: 'local-player' },
+          }],
+          nextSerial: 3,
+        },
+        nether: EMPTY_ENTITY_ROSTER,
+        end: { entities: [], nextSerial: 0 },
+      })
     }).pipe(Effect.provide(storage.layer))
   })
 

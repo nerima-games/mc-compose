@@ -372,6 +372,32 @@ const WeatherStateSchema: Schema.Schema<WeatherState> = Schema.Struct({
 
 const DimensionSchema: Schema.Schema<Dimension> = Schema.Literal('overworld', 'nether', 'end')
 
+const PersistedEntitySchema = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.String,
+  feetPosition: PositionSchema,
+  healthPoints: FiniteNumberSchema,
+  behaviour: Schema.Unknown,
+})
+
+const PersistedEntityRosterSchema = Schema.Struct({
+  entities: Schema.Array(PersistedEntitySchema),
+  nextSerial: Schema.Number,
+})
+
+const PersistedEntityRostersSchema = Schema.transform(
+  Schema.Unknown,
+  Schema.Struct({
+    overworld: PersistedEntityRosterSchema,
+    nether: PersistedEntityRosterSchema,
+    end: PersistedEntityRosterSchema,
+  }),
+  {
+    decode: normalizePersistedEntityRosters,
+    encode: (rosters) => rosters,
+  },
+)
+
 const PlayerStorageSchema = Schema.Unknown.pipe(
   Schema.filter(
     (value): value is PlayerStorage => validatePlayerStorageSnapshot(value)._tag === 'Valid',
@@ -532,7 +558,7 @@ const SessionStateSchema = Schema.Struct({
   furnaces: PersistedFurnacesSchema,
   portals: PersistedPortalsSchema,
   crops: CropSnapshotSchema,
-  entities: Schema.Unknown as unknown as Schema.Schema<PersistedEntityRosters>,
+  entities: PersistedEntityRostersSchema,
   villagers: PersistedVillagerStateSchema,
   brewing: BrewingStandStateSchema,
   statusEffects: StatusEffectStateSchema,
@@ -1012,15 +1038,7 @@ export const sessionChunkKey = (
 export const loadSession = (
   sessionId: string,
 ): Effect.Effect<Option.Option<SessionHead>, SessionPersistenceError, StoragePort> =>
-  loadFrom(SESSION_FORMAT, sessionHeadKey(sessionId)).pipe(
-    Effect.map(Option.map((head) => ({
-      ...head,
-      state: {
-        ...head.state,
-        entities: normalizePersistedEntityRosters(head.state.entities),
-      },
-    }))),
-  )
+  loadFrom(SESSION_FORMAT, sessionHeadKey(sessionId))
 
 const SESSION_KEY_PREFIX = 'mc-compose/session/'
 const SESSION_HEAD_KEY_PATTERN = /^mc-compose\/session\/([^/]+)\/head$/u
