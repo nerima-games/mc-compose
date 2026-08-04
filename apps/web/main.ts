@@ -5553,6 +5553,11 @@ type MultiplayerInventorySelection = Readonly<{
   }
 
   const activateAnvilOutput = (): void => {
+    if (multiplayer !== undefined) {
+      anvilStatus = 'Anvil operations are not yet available in multiplayer'
+      renderPlayerUi()
+      return
+    }
     const storage = Effect.runSync(world.inventory.storageSnapshot)
     const selected = storage.inventory.slots[selectedHotbarIndex]
     const vitals = Effect.runSync(world.vitals.snapshot)
@@ -5588,6 +5593,11 @@ type MultiplayerInventorySelection = Readonly<{
   }
 
   const activateEnchantingOffer = (slot: 0 | 1 | 2): void => {
+    if (multiplayer !== undefined) {
+      enchantingStatus = 'Enchanting is not yet available in multiplayer'
+      renderPlayerUi()
+      return
+    }
     const storage = Effect.runSync(world.inventory.storageSnapshot)
     const selected = storage.inventory.slots[selectedHotbarIndex]
     if (selected === undefined) return
