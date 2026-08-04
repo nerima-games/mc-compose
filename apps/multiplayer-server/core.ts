@@ -461,21 +461,35 @@ const furnaceSnapshot = (state: MutableFurnaceState): FurnaceState => ({
   output: cloneStack(state.output),
 })
 
+type SimItemStack = NonNullable<SimFurnaceState['input']>
+
+const toSimulationStack = (stack: ItemStack | null): SimItemStack | null | undefined => {
+  if (stack === null) return null
+  if (!isItemType(stack.item)) return undefined
+  return { item: stack.item, count: StackCount(stack.count) }
+}
+
+const fromSimulationStack = (stack: SimItemStack | null): ItemStack | null =>
+  stack === null ? null : { item: stack.item, count: stack.count }
+
 const furnaceSimulationState = (state: MutableFurnaceState): SimFurnaceState | null => {
-  if ([state.input, state.fuel, state.output].some((stack) => stack !== null && !isItemType(stack.item))) return null
+  const input = toSimulationStack(state.input)
+  const fuel = toSimulationStack(state.fuel)
+  const output = toSimulationStack(state.output)
+  if (input === undefined || fuel === undefined || output === undefined) return null
   return {
-    input: cloneStack(state.input) as SimFurnaceState['input'],
-    fuel: cloneStack(state.fuel) as SimFurnaceState['fuel'],
-    output: cloneStack(state.output) as SimFurnaceState['output'],
+    input,
+    fuel,
+    output,
     burnRemainingSecs: state.burnTicksRemaining / 20,
     cookElapsedSecs: state.cookTicks / 20,
   }
 }
 
 const applyFurnaceSimulationState = (target: MutableFurnaceState, state: SimFurnaceState): void => {
-  target.input = cloneStack(state.input as ItemStack | null)
-  target.fuel = cloneStack(state.fuel as ItemStack | null)
-  target.output = cloneStack(state.output as ItemStack | null)
+  target.input = fromSimulationStack(state.input)
+  target.fuel = fromSimulationStack(state.fuel)
+  target.output = fromSimulationStack(state.output)
   target.burnTicksRemaining = Math.round(state.burnRemainingSecs * 20)
   target.cookTicks = Math.round(state.cookElapsedSecs * 20)
 }
