@@ -80,6 +80,9 @@ type PlayerResumeAccepted = {
   readonly token: string
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
 const decodePlayerResumeAccepted = (frame: string): PlayerResumeAccepted | undefined => {
   let value: unknown
   try {
@@ -87,8 +90,8 @@ const decodePlayerResumeAccepted = (frame: string): PlayerResumeAccepted | undef
   } catch {
     return undefined
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const record = value as Record<string, unknown>
+  if (!isRecord(value)) return undefined
+  const record = value
   const keys = Object.keys(record)
   if (
     keys.length !== 3 ||
@@ -217,10 +220,8 @@ export const makeBrowserWebSocketTransport = (
           parsed = undefined
         }
         if (
-          typeof parsed === 'object' &&
-          parsed !== null &&
-          !Array.isArray(parsed) &&
-          (parsed as Record<string, unknown>)['_tag'] === 'PlayerResumeAccepted'
+          isRecord(parsed) &&
+          parsed['_tag'] === 'PlayerResumeAccepted'
         ) {
           if (!awaitingResume) return
           const accepted = decodePlayerResumeAccepted(event.data)
@@ -257,27 +258,27 @@ export const makeBrowserWebSocketTransport = (
         Queue.unsafeOffer(sleepInbound, sleepMessage)
         return
       }
-      const witherMessage = decodeWitherWireMessage(event.data as WireText)
+      const witherMessage = decodeWitherWireMessage(event.data)
       if (witherMessage !== undefined) {
         Queue.unsafeOffer(witherInbound, witherMessage)
         return
       }
-      const playerDamageMessage = decodePlayerDamageWireMessage(event.data as WireText)
+      const playerDamageMessage = decodePlayerDamageWireMessage(event.data)
       if (playerDamageMessage !== undefined) {
         Queue.unsafeOffer(playerDamageInbound, playerDamageMessage)
         return
       }
-      const craftingMessage = decodeCraftingWireMessage(event.data as WireText)
+      const craftingMessage = decodeCraftingWireMessage(event.data)
       if (craftingMessage !== undefined) {
         Queue.unsafeOffer(craftingInbound, craftingMessage)
         return
       }
-      const brewingMessage = decodeBrewingWireMessage(event.data as WireText)
+      const brewingMessage = decodeBrewingWireMessage(event.data)
       if (brewingMessage !== undefined) {
         Queue.unsafeOffer(brewingInbound, brewingMessage)
         return
       }
-      Queue.unsafeOffer(inbound, event.data as WireText)
+      Queue.unsafeOffer(inbound, event.data)
     }
 
     function handleClose(event: WebSocketCloseEvent): void {
@@ -345,7 +346,7 @@ export const makeBrowserWebSocketTransport = (
     })
 
     const sendSleep = (message: SleepWireMessage): Effect.Effect<void, TransportError> =>
-      send(JSON.stringify(message) as WireText)
+      send(JSON.stringify(message))
     const sendPlayerDamage = (command: PlayerDamageCommand): Effect.Effect<void, TransportError> =>
       send(encodePlayerDamageCommand(command))
     const sendCrafting = (command: CraftingCommand): Effect.Effect<void, TransportError> =>
