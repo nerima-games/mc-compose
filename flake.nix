@@ -49,6 +49,7 @@
             ];
 
             shellHook = ''
+              mkdir -p "$PWD/.corepack"
               corepack enable --install-directory "$PWD/.corepack" 2>/dev/null || true
               export PATH="$PWD/.corepack:$PATH"
             '';
