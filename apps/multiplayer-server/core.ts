@@ -298,6 +298,7 @@ const containerKindForBlock = (block: string): ContainerKind | undefined => {
     case 'chest':
     case 'shulker_box':
     case 'dispenser':
+    case 'dropper':
     case 'hopper':
       return block
     default:
@@ -719,6 +720,7 @@ export interface MultiplayerServerCore {
   readonly snapshot: () => WorldSnapshot
   readonly applyHopperTransfer: (at: BlockPos) => boolean
   readonly applyDispenserTrigger: (at: BlockPos) => boolean
+  readonly applyDropperTrigger: (at: BlockPos) => boolean
   readonly tick: (elapsedMs: number) => void
   readonly spawnEntity: (entity: AuthoritativeEntityState) => boolean
 }
@@ -1284,29 +1286,33 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return above === undefined ? false : moveFirstStack(above, hopper)
   }
 
-  const applyDispenserTrigger = (at: BlockPos): boolean => {
-    if (!isInBounds(at) || blockAt(at) !== 'dispenser') return false
-    const dispenser = containers.get(containerIdAt(at))
-    if (dispenser?.kind !== 'dispenser') return false
-    const slot = dispenser.slots.findIndex((stack) => stack !== null && stack !== undefined)
+  const applyItemDropperTrigger = (at: BlockPos, kind: 'dispenser' | 'dropper'): boolean => {
+    if (!isInBounds(at) || blockAt(at) !== kind) return false
+    const container = containers.get(containerIdAt(at))
+    if (container?.kind !== kind) return false
+    const slot = container.slots.findIndex((stack) => stack !== null && stack !== undefined)
     if (slot < 0) return false
 
-    const source = dispenser.slots[slot]
+    const source = container.slots[slot]
     if (source === null || source === undefined) return false
     const entity: AuthoritativeEntityState = {
       _tag: 'item-drop',
-      entityId: `dispenser:${positionKey(at)}:drop:${String(revision + 1)}:${String(slot)}` as AuthoritativeEntityState['entityId'],
+      entityId: `${kind}:${positionKey(at)}:drop:${String(revision + 1)}:${String(slot)}` as AuthoritativeEntityState['entityId'],
       at: { x: at.x + 0.5, y: at.y + 0.5, z: at.z - 0.25 },
       stack: { ...source, count: 1 },
     }
-    dispenser.slots[slot] = source.count === 1 ? null : { ...source, count: source.count - 1 }
+    container.slots[slot] = source.count === 1 ? null : { ...source, count: source.count - 1 }
     entities.set(entity.entityId, entity)
     revision += 1
     notifyStateChanged()
-    broadcast({ _tag: 'ContainerDelta', world: worldId, revision, state: containerSnapshot(dispenser) })
+    broadcast({ _tag: 'ContainerDelta', world: worldId, revision, state: containerSnapshot(container) })
     broadcast({ _tag: 'EntitySpawnDelta', world: worldId, revision, entity })
     return true
   }
+
+  const applyDispenserTrigger = (at: BlockPos): boolean => applyItemDropperTrigger(at, 'dispenser')
+
+  const applyDropperTrigger = (at: BlockPos): boolean => applyItemDropperTrigger(at, 'dropper')
 
   const ensurePlayerState = (player: PlayerId): void => {
     if (!inventories.has(player)) {
@@ -3980,5 +3986,5 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
-  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, tick, spawnEntity }
+  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, tick, spawnEntity }
 }

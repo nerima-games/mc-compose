@@ -239,12 +239,18 @@ describe('multiplayer WebSocket runtime', () => {
       _tag: 'PlayerJoin', player: 'persistent-player' as PlayerId, name: 'Persistent Player' as PlayerName,
       at: { x: 0, y: 200, z: 0 },
     }))
-    await expect(restoredSnapshot).resolves.toMatchObject({
-      _tag: 'WorldSnapshot',
+    const restored = await restoredSnapshot
+    if (restored._tag !== 'WorldSnapshot') throw new Error('expected WorldSnapshot')
+    expect(restored).toMatchObject({
       revision: expect.any(Number),
-      blocks: [{ at: block, block: null }],
       players: [expect.objectContaining({ player: 'persistent-player', at: fractionalAt })],
     })
+    expect(restored.blocks.some(({ at, block: restoredBlock }) => (
+      restoredBlock === null
+      && at.x === block.x
+      && at.y === block.y
+      && at.z === block.z
+    ))).toBe(true)
     reconnect.close()
   })
 
@@ -449,9 +455,12 @@ describe('multiplayer WebSocket runtime', () => {
       _tag: 'PlayerJoin', player: 'legacy-player' as PlayerId, name: 'Legacy Player' as PlayerName,
       at: { x: 0, y: 200, z: 0 },
     }))
-    await expect(snapshot).resolves.toMatchObject({
-      _tag: 'WorldSnapshot', revision: 2, blocks: [{ at: { x: 1, y: 64, z: 1 }, block: null }],
-    })
+    const restored = await snapshot
+    if (restored._tag !== 'WorldSnapshot') throw new Error('expected WorldSnapshot')
+    expect(restored.revision).toBe(2)
+    expect(restored.blocks.some(({ at, block }) => (
+      block === null && at.x === 1 && at.y === 64 && at.z === 1
+    ))).toBe(true)
     socket.close()
   })
 

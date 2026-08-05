@@ -43,6 +43,7 @@ const DEFAULT_BLOCKS = [
   'cobblestone',
   'dirt',
   'dispenser',
+  'dropper',
   'grass_block',
   'gravel',
   'iron_ore',

@@ -1,6 +1,6 @@
 {
   "name": "@nerima-games/mc-compose",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "type": "module",
   "description": "The composition repository for the nerima-games Minecraft-clone rebuild: Layer merge, the single total ordering of frame stages, session lifecycle, the QA/debug API and the modding entry point. It holds no game rules.",
   "homepage": "https://github.com/nerima-games/mc-compose#readme",
@@ -18,6 +18,15 @@
     "pnpm": ">=8.15.0"
   },
   "packageManager": "pnpm@9.15.0",
+  "pnpm": {
+    "overrides": {
+      "@nerima-games/mc-kernel": "0.2.18",
+      "@nerima-games/mc-render": "0.2.14",
+      "@nerima-games/mc-sim": "0.1.41",
+      "@nerima-games/mc-worldgen": "0.1.14",
+      "@nerima-games/mx-gameplay": "0.1.70"
+    }
+  },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",
     "access": "restricted"
@@ -58,14 +67,14 @@
   },
   "dependencies": {
     "@nerima-games/mc-audio": "0.2.6",
-    "@nerima-games/mc-kernel": "0.2.17",
+    "@nerima-games/mc-kernel": "0.2.18",
     "@nerima-games/mc-physics": "0.1.6",
     "@nerima-games/mc-render": "0.2.14",
     "@nerima-games/mc-save": "0.2.2",
-    "@nerima-games/mc-sim": "0.1.39",
+    "@nerima-games/mc-sim": "0.1.41",
     "@nerima-games/mc-worldgen": "0.1.14",
     "@nerima-games/mx-gameplay": "0.1.70",
-    "@nerima-games/mx-multiplayer": "0.2.0",
+    "@nerima-games/mx-multiplayer": "0.2.3",
     "@nerima-games/mx-redstone": "0.2.6",
     "@nerima-games/mx-ui": "0.3.7",
     "effect": "^3.22.0"

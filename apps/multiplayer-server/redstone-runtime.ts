@@ -27,6 +27,8 @@ const componentForBlock = (
       return { position, kind: 'hopper' }
     case 'dispenser':
       return { position, kind: 'dispenser' }
+    case 'dropper':
+      return { position, kind: 'dropper' }
     case 'redstone_torch':
       return { position, kind: 'torch' }
     case 'redstone_wire':
@@ -67,6 +69,8 @@ export const makeMultiplayerRedstoneRuntime = async (
       for (const event of Effect.runSync(runtime.drainTriggerEvents)) {
         if (event.kind === 'dispenser') {
           realmsByDimension.get(event.dimension)?.core.applyDispenserTrigger(event.position)
+        } else if (event.kind === 'dropper') {
+          realmsByDimension.get(event.dimension)?.core.applyDropperTrigger(event.position)
         }
       }
     },

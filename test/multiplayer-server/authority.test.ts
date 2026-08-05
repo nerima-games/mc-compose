@@ -2860,11 +2860,49 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  it('applies dropper triggers from redstone ticks through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'redstone_torch' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'dropper' },
+      ],
+      containers: [
+        { containerId: 'world-1:1,64,0', kind: 'dropper', slots: [{ item: 'apple', count: 2 }, ...Array.from({ length: 8 }, () => null)] },
+      ],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      containers: [{ containerId: 'world-1:1,64,0', kind: 'dropper', slots: [{ item: 'apple', count: 1 }, ...Array.from({ length: 8 }, () => null)] }],
+      entities: [expect.objectContaining({
+        _tag: 'item-drop',
+        at: { x: 1.5, y: 64.5, z: -0.25 },
+        stack: { item: 'apple', count: 1 },
+      })],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 5, state: expect.objectContaining({ containerId: 'world-1:1,64,0' }) }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        revision: 5,
+        entity: expect.objectContaining({ _tag: 'item-drop', at: { x: 1.5, y: 64.5, z: -0.25 }, stack: { item: 'apple', count: 1 } }),
+      }),
+    ]))
+  })
+
   it('creates each storage block with its typed capacity', () => {
     const storageCases: ReadonlyArray<readonly [ContainerKind, number]> = [
       ['chest', 27],
       ['shulker_box', 27],
       ['dispenser', 9],
+      ['dropper', 9],
       ['hopper', 5],
     ]
 

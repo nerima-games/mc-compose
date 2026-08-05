@@ -1,9 +1,2 @@
 packages:
   - '.'
-
-overrides:
-  '@nerima-games/mc-kernel': 0.2.17
-  '@nerima-games/mc-render': 0.2.14
-  '@nerima-games/mc-sim': 0.1.39
-  '@nerima-games/mc-worldgen': 0.1.14
-  '@nerima-games/mx-gameplay': 0.1.70

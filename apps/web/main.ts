@@ -652,6 +652,7 @@ const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'observer',
   'comparator',
   'dispenser',
+  'dropper',
   'hopper',
   'piston',
   'powered_rail',
@@ -2135,6 +2136,8 @@ const bootGame = async (
                       ? 'comparator'
                       : block === 83
                         ? 'dispenser'
+                        : block === 122
+                          ? 'dropper'
                         : block === 84
                           ? 'hopper'
                   : block === 16
@@ -2248,6 +2251,8 @@ const bootGame = async (
         return 'shulker_box'
       case 'dispenser':
         return 'dispenser'
+      case 'dropper':
+        return 'dropper'
       case 'hopper':
         return 'hopper'
       default:
@@ -2344,16 +2349,23 @@ const bootGame = async (
     if (aboveId !== undefined) moveOneContainerItem(aboveId, hopperId)
   }
 
-  const applyDispenserTrigger = (
+  const applyItemDropperTrigger = (
     dimension: Dimension,
     position: { readonly x: number; readonly y: number; readonly z: number },
+    kind: 'dispenser' | 'dropper',
   ): void => {
     if (multiplayer !== undefined) return
+
+    const context = dimensionContexts.get(dimension)
+    if (context === undefined) return
+    const reading = Effect.runSync(context.chunkStore.getBlock(position))
+    if (reading._tag !== 'Block' || blockTypeOfId(reading.block) !== kind) return
 
     const containerId = containerIdForStorageBlock(dimension, position)
     if (containerId === undefined) return
 
     const container = Effect.runSync(world.inventory.containerSnapshot(containerId))
+    if (container?.kind !== kind) return
     const slot = container?.slots.findIndex((stack) => stack !== null) ?? -1
     if (slot < 0) return
 
@@ -2402,6 +2414,16 @@ const bootGame = async (
     if (updated?.slots[slot] === null) deleteItemMetadata(metadataKey)
     markSessionDirty()
   }
+
+  const applyDispenserTrigger = (
+    dimension: Dimension,
+    position: { readonly x: number; readonly y: number; readonly z: number },
+  ): void => applyItemDropperTrigger(dimension, position, 'dispenser')
+
+  const applyDropperTrigger = (
+    dimension: Dimension,
+    position: { readonly x: number; readonly y: number; readonly z: number },
+  ): void => applyItemDropperTrigger(dimension, position, 'dropper')
 
   const applyPoweredPistonTransition = (transition: PoweredPistonTransition): void => {
     const context = dimensionContexts.get(transition.dimension as Dimension)
@@ -8410,6 +8432,7 @@ type MultiplayerInventorySelection = Readonly<{
           pending.blockId === blockIdOf('chest') ||
           pending.blockId === blockIdOf('shulker_box') ||
           pending.blockId === blockIdOf('dispenser') ||
+          pending.blockId === blockIdOf('dropper') ||
           pending.blockId === blockIdOf('hopper')
         ) {
           const id = containerIdAt(pending.dimension, pending.position)
@@ -9804,6 +9827,8 @@ type MultiplayerInventorySelection = Readonly<{
         )
         if (event.kind === 'dispenser') {
           applyDispenserTrigger(event.dimension as Dimension, event.position)
+        } else if (event.kind === 'dropper') {
+          applyDropperTrigger(event.dimension as Dimension, event.position)
         }
         markSessionDirty()
       }
