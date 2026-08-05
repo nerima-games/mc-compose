@@ -341,18 +341,26 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
     await expect(craftingCell).toHaveAttribute('aria-label', /oak_log, 1/)
     await expect(craftingOutput).toHaveAttribute('aria-label', /oak_planks, 4/)
+    const revisionBeforeFirstCraft = await revision(alice.page)
     await craftingOutput.click()
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
-    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots[1]).toEqual({
-      item: 'oak_log', count: 1,
-    })
+    await expect.poll(() => revision(alice.page)).toBeGreaterThan(revisionBeforeFirstCraft)
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
+      expect.arrayContaining([
+        { item: 'oak_log', count: 1 },
+        { item: 'oak_planks', count: 4 },
+      ]),
+    )
 
     await aliceLogs.dragTo(craftingCell)
     await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
     await expect(craftingCell).toHaveAttribute('aria-label', /oak_log, 1/)
+    const revisionBeforeSecondCraft = await revision(alice.page)
     await craftingOutput.click()
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
+    await expect.poll(() => revision(alice.page)).toBeGreaterThan(revisionBeforeSecondCraft)
     await expect.poll(async () => (await snapshot(alice.page)).inventory.slots[1]).toBeNull()
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
+      expect.arrayContaining([{ item: 'oak_planks', count: 8 }]),
+    )
     await alice.page.keyboard.press('KeyE')
     await expect(aliceInventory).toBeHidden()
     await expect.poll(async () => (await snapshot(bob.page)).vitals.healthPoints).toBe(18)
