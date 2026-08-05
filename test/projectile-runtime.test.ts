@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
-import type { ProjectileWorld } from '@nerima-games/mc-physics'
+import type { ProjectileWorld } from '@nerima-games/mc-sim'
 import {
   advanceProjectileRuntime,
   initialProjectileRuntimeState,

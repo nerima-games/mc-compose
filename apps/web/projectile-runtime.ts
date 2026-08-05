@@ -4,7 +4,7 @@ import {
   type Arrow,
   type ProjectileHit,
   type ProjectileWorld,
-} from '@nerima-games/mc-physics'
+} from '@nerima-games/mc-sim'
 
 export type RuntimeProjectile = Readonly<{
   id: string
