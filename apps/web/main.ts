@@ -3202,6 +3202,14 @@ type MultiplayerInventorySelection = Readonly<{
   ): void => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete) return
     if (command._tag === 'EntityAttackCommand' || command._tag === 'EntityPickupCommand' || command._tag === 'VehicleCommand') {
+      const pickupIsPendingOrQueued = command._tag === 'EntityPickupCommand'
+        && (
+          (pendingEntityCommand?.command._tag === 'EntityPickupCommand'
+            && pendingEntityCommand.command.entityId === command.entityId)
+          || queuedEntityCommands.some((queued) =>
+            queued._tag === 'EntityPickupCommand' && queued.entityId === command.entityId)
+        )
+      if (pickupIsPendingOrQueued) return
       if (pendingEntityCommand !== null) {
         queuedEntityCommands = [...queuedEntityCommands, command]
         return
@@ -8197,22 +8205,33 @@ type MultiplayerInventorySelection = Readonly<{
           .filter((entity) => isDroppedItemBehaviour(entity.behaviour))
           .map((entity) => [String(entity.id), entity]),
       )
-      const expiredDroppedItemIds = droppedItemLifetime.advance(
-        currentChunkContext.dimension,
-        deltaSecs,
-        [...droppedEntitiesById.keys()],
-      )
-      for (const entityId of expiredDroppedItemIds) {
-        const entity = droppedEntitiesById.get(entityId)
-        if (entity === undefined) continue
-        Effect.runSync(world.entities.despawn(entity.id))
-        droppedItemMetadata.delete(droppedItemMetadataKey(currentChunkContext.dimension, entityId))
+      if (multiplayer === undefined) {
+        const expiredDroppedItemIds = droppedItemLifetime.advance(
+          currentChunkContext.dimension,
+          deltaSecs,
+          [...droppedEntitiesById.keys()],
+        )
+        for (const entityId of expiredDroppedItemIds) {
+          const entity = droppedEntitiesById.get(entityId)
+          if (entity === undefined) continue
+          Effect.runSync(world.entities.despawn(entity.id))
+          droppedItemMetadata.delete(droppedItemMetadataKey(currentChunkContext.dimension, entityId))
+        }
+        if (expiredDroppedItemIds.length > 0) markSessionDirty()
       }
-      if (expiredDroppedItemIds.length > 0) markSessionDirty()
 
       const playerPosition = Effect.runSync(playerApi.pose).feetPosition
       const playerDimension = Effect.runSync(playerApi.dimension)
-      for (const entity of Effect.runSync(world.entities.entities)) {
+      if (multiplayer !== undefined) {
+        for (const entity of multiplayerEntities.values()) {
+          if (entity._tag !== 'item-drop') continue
+          const dx = entity.at.x - playerPosition.x
+          const dy = entity.at.y - playerPosition.y
+          const dz = entity.at.z - playerPosition.z
+          if (dx * dx + dy * dy + dz * dz > 1.5 * 1.5) continue
+          sendEntityCommand({ _tag: 'EntityPickupCommand', entityId: entity.entityId })
+        }
+      } else for (const entity of Effect.runSync(world.entities.entities)) {
         if (deadAfterFrame) break
         if (!isDroppedItemBehaviour(entity.behaviour)) continue
         const metadataKey = droppedItemMetadataKey(playerDimension, String(entity.id))

@@ -242,6 +242,26 @@ test.afterAll(async () => {
   }
 })
 
+test('automatically picks up nearby item drops through the authoritative multiplayer snapshot', async ({ browser }) => {
+  const alice = await connectPlayer(browser, serverUrl, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
+  let bob: PlayerSession | undefined
+
+  try {
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
+      expect.arrayContaining([{ item: 'rotten_flesh', count: 2 }]),
+    )
+    await expect.poll(() => authoritativeEntity(alice.page, 'survival-rotten-flesh')).toBeUndefined()
+
+    bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
+    await expect.poll(() => authoritativeEntity(bob.page, 'survival-rotten-flesh')).toBeUndefined()
+    await expect.poll(async () => (await snapshot(bob!.page)).inventory.slots).not.toEqual(
+      expect.arrayContaining([{ item: 'rotten_flesh', count: 2 }]),
+    )
+  } finally {
+    await Promise.all([alice.context.close(), bob?.context.close()])
+  }
+})
+
 test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state authoritative', async ({ browser }) => {
   const alice = await connectPlayer(browser, serverUrl, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
   const bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
@@ -262,9 +282,11 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'selecting')
     await aliceMainSlot.click({ button: 'right' })
     await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'pending')
-    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots.slice(0, 10)).toEqual([
+    await expect.poll(async () => {
+      const slots = (await snapshot(alice.page)).inventory.slots
+      return [slots[0], ...slots.slice(2, 10)]
+    }).toEqual([
       { item: 'potato', count: 1 },
-      null,
       null,
       null,
       null,
@@ -286,20 +308,6 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await entityCommand(alice.page, { entityId: 'survival-target', action: 'attack' })
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toBeUndefined()
 
-    await expect.poll(async () => (await snapshot(bob.page)).renderedEntities.find(
-      (entity) => entity.kind === 'dropped_item',
-    )).not.toBeUndefined()
-    await expect.poll(async () => (await snapshot(alice.page)).renderedEntities.find(
-      (entity) => entity.kind === 'dropped_item',
-    )).not.toBeUndefined()
-    const dropEntity = (await snapshot(alice.page)).renderedEntities.find(
-      (entity) => entity.kind === 'dropped_item',
-    )
-    expect(dropEntity).toBeDefined()
-    await entityCommand(alice.page, {
-      entityId: dropEntity?.id.replace('authoritative:', '') ?? '',
-      action: 'pickup',
-    })
     await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
       expect.arrayContaining([{ item: 'rotten_flesh', count: 2 }]),
     )
