@@ -775,6 +775,11 @@ const isRedstoneStatefulBlock = (block: string | null): block is RedstoneStatefu
   block === 'redstone_lamp' ||
   block === 'redstone_lamp_lit'
 
+export interface ContainerSlotSnapshot {
+  readonly count: number
+  readonly maxStack: number
+}
+
 export interface MultiplayerServerCore {
   readonly connect: (clientId: ClientId, send: SendFrame) => boolean
   readonly receive: (clientId: ClientId, frame: WireText) => ReceiveResult
@@ -793,6 +798,7 @@ export interface MultiplayerServerCore {
   readonly isPoweredRailPowered: (at: BlockPos) => boolean
   readonly applyPoweredRailState: (at: BlockPos, powered: boolean) => boolean
   readonly isLeverActive: (at: BlockPos) => boolean
+  readonly readContainerSlots: (at: BlockPos) => ReadonlyArray<ContainerSlotSnapshot> | undefined
   readonly readPistonCell: (at: BlockPos) => PistonCellRead
   readonly applyPistonPlan: (plan: PistonMovementPlan) => boolean
   readonly tick: (elapsedMs: number) => void
@@ -1413,13 +1419,21 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
   const notifyStateChanged = (): void => options.onStateChanged?.(persistentState())
 
+  const containerAt = (position: BlockPos): MutableContainerState | undefined => {
+    if (!isInBounds(position)) return undefined
+    const expectedKind = containerKindForBlock(blockAt(position) ?? '')
+    const container = containers.get(containerIdAt(position))
+    return expectedKind === undefined || container?.kind !== expectedKind ? undefined : container
+  }
+
+  const readContainerSlots = (at: BlockPos): ReadonlyArray<ContainerSlotSnapshot> | undefined => {
+    const container = containerAt(at)
+    return container?.slots.map((stack) => stack === null || stack === undefined
+      ? { count: 0, maxStack: 64 }
+      : { count: stack.count, maxStack: isItemType(stack.item) ? maxStackCountOfItem(stack.item) : 64 })
+  }
+
   const applyHopperTransfer = (at: BlockPos): boolean => {
-    const containerAt = (position: BlockPos): MutableContainerState | undefined => {
-      if (!isInBounds(position)) return undefined
-      const expectedKind = containerKindForBlock(blockAt(position) ?? '')
-      const container = containers.get(containerIdAt(position))
-      return expectedKind === undefined || container?.kind !== expectedKind ? undefined : container
-    }
     const moveFirstStack = (source: MutableContainerState, destination: MutableContainerState): boolean => {
       for (let sourceIndex = 0; sourceIndex < source.slots.length; sourceIndex += 1) {
         if (source.slots[sourceIndex] === null || source.slots[sourceIndex] === undefined) continue
@@ -4492,5 +4506,5 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
-  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, applyRedstoneBlockState, isPoweredRailPowered, applyPoweredRailState, isLeverActive, readPistonCell, applyPistonPlan, tick, spawnEntity }
+  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, applyRedstoneBlockState, isPoweredRailPowered, applyPoweredRailState, isLeverActive, readContainerSlots, readPistonCell, applyPistonPlan, tick, spawnEntity }
 }

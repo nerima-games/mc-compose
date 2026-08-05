@@ -48,6 +48,22 @@ const componentForBlock = (
       return { position, kind: 'powered-rail', powered: core.isPoweredRailPowered(position) }
     case 'lever':
       return { position, kind: 'lever', active: core.isLeverActive(position) }
+    case 'comparator': {
+      const inputFrom = { x: position.x, y: position.y, z: position.z + 1 }
+      const containerSlots = core.readContainerSlots(inputFrom)
+      return {
+        position,
+        kind: 'comparator',
+        inputFrom,
+        outputTo: { x: position.x, y: position.y, z: position.z - 1 },
+        sideInputs: [
+          { x: position.x - 1, y: position.y, z: position.z },
+          { x: position.x + 1, y: position.y, z: position.z },
+        ],
+        mode: 'compare',
+        ...(containerSlots === undefined ? {} : { containerSlots }),
+      }
+    }
     case 'redstone_lamp':
     case 'redstone_lamp_lit':
       return { position, kind: 'lamp' }

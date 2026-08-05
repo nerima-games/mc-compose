@@ -3099,6 +3099,31 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  it('powers a redstone lamp from a server-owned comparator container reading', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 1 }, block: 'chest' },
+        { at: { x: 0, y: 64, z: 0 }, block: 'comparator' },
+        { at: { x: 0, y: 64, z: -1 }, block: 'redstone_lamp' },
+      ],
+      containers: [
+        { containerId: 'world-1:0,64,1', kind: 'chest', slots: [{ item: 'apple', count: 32 }, ...Array.from({ length: 26 }, () => null)] },
+      ],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      blocks: expect.arrayContaining([{ at: { x: 0, y: 64, z: -1 }, block: 'redstone_lamp_lit' }]),
+    })
+  })
+
   it('toggles levers authoritatively and publishes the state in snapshots', () => {
     const fixture = makeFixture({
       ...initialState(),
