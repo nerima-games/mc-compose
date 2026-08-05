@@ -2926,6 +2926,71 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  it('toggles levers authoritatively and publishes the state in snapshots', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [{ at: { x: 1, y: 64, z: 0 }, block: 'lever' }],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'ToggleLeverCommand', commandId: commandId('toggle-lever'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, lever: { x: 1, y: 64, z: 0 },
+    })).toMatchObject({ accepted: true })
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      levers: [{ at: { x: 1, y: 64, z: 0 }, active: true }],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        revision: 5,
+        levers: [{ at: { x: 1, y: 64, z: 0 }, active: true }],
+      }),
+    ]))
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'ToggleLeverCommand', commandId: commandId('toggle-lever-stale'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, lever: { x: 1, y: 64, z: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeCommandRejected', commandId: 'toggle-lever-stale', reason: 'stale-revision', revision: 5,
+    }))
+
+    expect(fixture.receive({
+      _tag: 'ToggleLeverCommand', commandId: commandId('toggle-missing-lever'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 5, lever: { x: 2, y: 64, z: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+  })
+
+  it('powers a redstone lamp from server-owned lever state', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'lever' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'redstone_lamp' },
+      ],
+      levers: [{ at: { x: 0, y: 64, z: 0 }, active: true }],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      blocks: expect.arrayContaining([{ at: { x: 1, y: 64, z: 0 }, block: 'redstone_lamp_lit' }]),
+      levers: [{ at: { x: 0, y: 64, z: 0 }, active: true }],
+    })
+  })
+
   it('persists and broadcasts powered door state through server authority', async () => {
     const fixture = makeFixture({
       ...initialState(),

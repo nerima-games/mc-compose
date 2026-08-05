@@ -46,6 +46,8 @@ const componentForBlock = (
       return { position, kind: 'wire' }
     case 'powered_rail':
       return { position, kind: 'powered-rail', powered: core.isPoweredRailPowered(position) }
+    case 'lever':
+      return { position, kind: 'lever', active: core.isLeverActive(position) }
     case 'redstone_lamp':
     case 'redstone_lamp_lit':
       return { position, kind: 'lamp' }

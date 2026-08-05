@@ -232,6 +232,7 @@ export interface MultiplayerServerState {
   readonly revision: number
   readonly blocks: ReadonlyArray<Readonly<{ at: BlockPos; block: string | null }>>
   readonly poweredRails?: ReadonlyArray<Readonly<{ at: BlockPos; powered: boolean }>>
+  readonly levers?: ReadonlyArray<Readonly<{ at: BlockPos; active: boolean }>>
   readonly inventories: AuthoritativeSnapshot['inventories']
   readonly vitals: AuthoritativeSnapshot['vitals']
   readonly timeWeather: AuthoritativeSnapshot['timeWeather']
@@ -442,6 +443,7 @@ type CommandDecision =
       deltas: (revision: number) => ReadonlyArray<AuthoritativeDelta>
       messages?: (revision: number) => ReadonlyArray<NetworkMessage>
       worldSnapshotRequired?: boolean
+      snapshotBroadcastRequired?: boolean
     }>
 
 const DEFAULT_BOUNDS = {
@@ -576,8 +578,9 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'VillagerTradeCommand' ||
   message._tag === 'EntityAttackCommand' ||
   message._tag === 'EntityPickupCommand' ||
-  message._tag === 'BowUseCommand' ||
+    message._tag === 'BowUseCommand' ||
     message._tag === 'EndPortalUseCommand' ||
+    message._tag === 'ToggleLeverCommand' ||
     message._tag === 'IgniteTntCommand' ||
     message._tag === 'EnderPearlCommand' ||
     message._tag === 'BucketUseCommand' ||
@@ -742,6 +745,7 @@ export interface MultiplayerServerCore {
   ) => boolean
   readonly isPoweredRailPowered: (at: BlockPos) => boolean
   readonly applyPoweredRailState: (at: BlockPos, powered: boolean) => boolean
+  readonly isLeverActive: (at: BlockPos) => boolean
   readonly readPistonCell: (at: BlockPos) => PistonCellRead
   readonly applyPistonPlan: (plan: PistonMovementPlan) => boolean
   readonly tick: (elapsedMs: number) => void
@@ -797,6 +801,16 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     [...poweredRails.values()]
       .filter(({ at }) => blocks.get(positionKey(at))?.block === 'powered_rail')
       .map(({ at, powered }) => ({ at: { ...at }, powered }))
+  const levers = new Map<string, Readonly<{ at: BlockPos; active: boolean }>>(
+    (options.initialState?.levers ?? []).map(({ at, active }) => [positionKey(at), {
+      at: { ...at },
+      active,
+    }]),
+  )
+  const leverSnapshot = (): ReadonlyArray<Readonly<{ at: BlockPos; active: boolean }>> =>
+    [...levers.values()]
+      .filter(({ at }) => blocks.get(positionKey(at))?.block === 'lever')
+      .map(({ at, active }) => ({ at: { ...at }, active }))
   const entities = new Map<string, AuthoritativeEntityState>(
     (options.initialState?.entities ?? []).map((entity) => [entity.entityId, entity]),
   )
@@ -1124,6 +1138,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     players: [...players.values()].map((player) => ({ ...player })),
     blocks: [...blocks.values()].map((mutation) => ({ world: worldId, ...mutation })),
     poweredRails: poweredRailSnapshot(),
+    levers: leverSnapshot(),
   })
 
   const authoritativeSnapshot = (): AuthoritativeSnapshot => ({
@@ -1266,6 +1281,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     revision,
     blocks: [...blocks.values()].map((mutation) => ({ ...mutation, at: { ...mutation.at } })),
     poweredRails: poweredRailSnapshot(),
+    levers: leverSnapshot(),
     inventories: [...inventories].map(([player, state]) => ({ player, state: inventorySnapshot(state) })),
     vitals: [...vitals].map(([player, state]) => ({ player, state: vitalsSnapshot(state) })),
     timeWeather: { ...timeWeather },
@@ -1373,6 +1389,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
   const isPoweredRailPowered = (at: BlockPos): boolean =>
     blockAt(at) === 'powered_rail' && (poweredRails.get(positionKey(at))?.powered ?? false)
+
+  const isLeverActive = (at: BlockPos): boolean =>
+    blockAt(at) === 'lever' && (levers.get(positionKey(at))?.active ?? false)
 
   const applyPoweredRailState = (at: BlockPos, powered: boolean): boolean => {
     if (!isInBounds(at) || blockAt(at) !== 'powered_rail') return false
@@ -1569,6 +1588,17 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (inventory === undefined) return { accepted: false, reason: 'resource-not-found' }
 
     switch (message._tag) {
+      case 'ToggleLeverCommand': {
+        const actor = players.get(message.player)
+        if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+        if (!isInBounds(message.lever) || !isBlockWithinReach(actor, message.lever)) {
+          return { accepted: false, reason: 'out-of-range' }
+        }
+        if (blockAt(message.lever) !== 'lever') return { accepted: false, reason: 'invalid-command' }
+        const key = positionKey(message.lever)
+        levers.set(key, { at: { ...message.lever }, active: !isLeverActive(message.lever) })
+        return { accepted: true, deltas: () => [], snapshotBroadcastRequired: true }
+      }
       case 'EndPortalUseCommand': {
         const actor = players.get(message.player)
         if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
@@ -2377,7 +2407,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     const nextRevision = revision + 1
     const deltas = decision.deltas(nextRevision)
     const outboundMessages = decision.messages?.(nextRevision) ?? []
-    if (deltas.length > 0 || outboundMessages.length > 0) revision += 1
+    if (deltas.length > 0 || outboundMessages.length > 0 || decision.snapshotBroadcastRequired === true) revision += 1
     const result: AuthoritativeCommandResult = {
       _tag: 'AuthoritativeCommandAccepted',
       commandId: message.commandId,
@@ -2398,6 +2428,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     }
     for (const outboundMessage of outboundMessages) broadcast(outboundMessage)
     if (decision.worldSnapshotRequired === true) broadcast(authoritativeSnapshot())
+    if (decision.snapshotBroadcastRequired === true) broadcast(snapshot())
     return { accepted: true, message }
   }
 
@@ -3258,6 +3289,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (brokenBlock === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })
         poweredRails.delete(positionKey(message.at))
+        levers.delete(positionKey(message.at))
         disturbFallingBlocks([message.at])
         if (containerKindForBlock(brokenBlock) !== undefined) containers.delete(containerIdAt(message.at))
         else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
@@ -4089,5 +4121,5 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
-  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, applyRedstoneBlockState, isPoweredRailPowered, applyPoweredRailState, readPistonCell, applyPistonPlan, tick, spawnEntity }
+  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, applyRedstoneBlockState, isPoweredRailPowered, applyPoweredRailState, isLeverActive, readPistonCell, applyPistonPlan, tick, spawnEntity }
 }

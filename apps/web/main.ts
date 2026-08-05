@@ -3094,6 +3094,8 @@ type MultiplayerInventorySelection = Readonly<{
   let nextSleepRequest = 1
   let nextEndPortalCommand = 1
   let pendingEndPortalCommand: CommandId | null = null
+  let nextLeverCommand = 1
+  let pendingLeverCommand: CommandId | null = null
   let appliedNightSkipRevision: number | null = null
   let multiplayerRejection = ''
   let multiplayerHandshakeComplete = false
@@ -3186,6 +3188,22 @@ type MultiplayerInventorySelection = Readonly<{
       world: WorldId.make(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
       portal,
+    }))
+    return true
+  }
+
+  const sendToggleLeverCommand = (lever: { readonly x: number; readonly y: number; readonly z: number }): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingLeverCommand !== null) return false
+    nextLeverCommand += 1
+    const commandId = CommandId.make(`lever-${String(nextLeverCommand)}`)
+    pendingLeverCommand = commandId
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'ToggleLeverCommand',
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+      lever,
     }))
     return true
   }
@@ -3815,7 +3833,19 @@ type MultiplayerInventorySelection = Readonly<{
             const key = leverKeyOf({ dimension, position: rail.at })
             if (rail.powered) poweredRails.add(key)
           }
+          for (const [key, lever] of leverStates) {
+            if (lever.dimension === dimension) leverStates.delete(key)
+          }
+          for (const lever of message.levers) {
+            leverStates.set(leverKeyOf({ dimension, position: lever.at }), {
+              dimension,
+              position: { ...lever.at },
+              active: lever.active,
+            })
+          }
+          if (dimension === currentChunkContext.dimension) redstoneDirty = true
         }
+        pendingLeverCommand = null
         break
       case 'AuthoritativeSnapshot': {
         if (message.revision < multiplayerRevision) {
@@ -4014,6 +4044,7 @@ type MultiplayerInventorySelection = Readonly<{
         multiplayerRevision = Math.max(multiplayerRevision, message.revision)
         multiplayerRejection = message.reason
         if (message.commandId === pendingEndPortalCommand) pendingEndPortalCommand = null
+        if (message.commandId === pendingLeverCommand) pendingLeverCommand = null
         if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
         if (message.commandId === pendingInventoryCommand?.commandId) {
           if (message.resyncRequired) pendingInventoryRetry = pendingInventoryCommand.action
@@ -4080,7 +4111,15 @@ type MultiplayerInventorySelection = Readonly<{
         multiplayerRevision += 1
         break
       case 'BlockBreak':
-        applyNetworkBlock(message.world ?? WorldId.make(currentChunkContext.dimension), message.at, null)
+        {
+          const world = message.world ?? WorldId.make(currentChunkContext.dimension)
+          applyNetworkBlock(world, message.at, null)
+          const dimension = dimensionFromWorld(world)
+          if (dimension !== undefined) {
+            leverStates.delete(leverKeyOf({ dimension, position: message.at }))
+            if (dimension === currentChunkContext.dimension) redstoneDirty = true
+          }
+        }
         multiplayerRevision += 1
         break
       case 'BlockMutationRejected':
@@ -9402,18 +9441,21 @@ type MultiplayerInventorySelection = Readonly<{
         const usedMultiplayerEndPortal = portalTarget !== undefined
           && blockTypeOfId(portalTarget.block) === 'end_portal'
           && sendEndPortalUseCommand(portalTarget.position)
+        const usedMultiplayerLever = portalTarget !== undefined
+          && blockTypeOfId(portalTarget.block) === 'lever'
+        if (usedMultiplayerLever) sendToggleLeverCommand(portalTarget.position)
         const shouldAttemptEndFeature = multiplayer === undefined && (currentChunkContext.dimension === 'end'
           || endPortalComplete
           || specialSelected?.item === 'eye_of_ender')
         const usedEndFeature = usedSpecialItem
           || usedMultiplayerEndPortal
           || (shouldAttemptEndFeature && Effect.runSync(useEndFeature()))
-        const brewingTarget = usedEndFeature ? undefined : Effect.runSync(targetedBlock())
+        const brewingTarget = usedEndFeature || usedMultiplayerLever ? undefined : Effect.runSync(targetedBlock())
         const opensBrewing = brewingTarget !== undefined && blockTypeOfId(brewingTarget.block) === 'brewing_stand'
-        const route = usedEndFeature || opensBrewing
+        const route = usedEndFeature || usedMultiplayerLever || opensBrewing
           ? undefined
           : Effect.runSync(targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH))
-        if (usedEndFeature) {
+        if (usedEndFeature || usedMultiplayerLever) {
           renderPlayerUi()
         } else if (opensBrewing) {
           setBrewingOpen(true)

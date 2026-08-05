@@ -49,6 +49,7 @@ const DEFAULT_BLOCKS = [
   'gravel',
   'iron_ore',
   'hopper',
+  'lever',
   'oak_leaves',
   'oak_log',
   'oak_planks',

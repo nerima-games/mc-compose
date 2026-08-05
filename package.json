@@ -74,7 +74,7 @@
     "@nerima-games/mc-sim": "0.1.41",
     "@nerima-games/mc-worldgen": "0.1.14",
     "@nerima-games/mx-gameplay": "0.1.70",
-    "@nerima-games/mx-multiplayer": "0.2.4",
+    "@nerima-games/mx-multiplayer": "0.2.5",
     "@nerima-games/mx-redstone": "0.2.6",
     "@nerima-games/mx-ui": "0.3.7",
     "effect": "^3.22.0"
