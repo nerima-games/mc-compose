@@ -31,6 +31,7 @@ import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabili
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
+  advanceWeather,
   bowCharge,
   bowDamage,
   arrowHitProjection,
@@ -40,7 +41,10 @@ import {
   CREEPER_KIND,
   CREEPER_XP_REWARD,
   DORMANT_FUSE,
+  DEFAULT_ROLL_SEED,
   INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
+  INITIAL_WEATHER,
+  LOWEST_WEATHER_ROLLS,
   ENDER_PEARL_DAMAGE,
   ENDER_PEARL_MAX_DISTANCE,
   CHICKEN_KIND,
@@ -87,6 +91,8 @@ import {
   furnaceAdvanceChanged,
   FALLING_BLOCK_MOVES_PER_TICK,
   miningLootContextForItem,
+  nextRoll,
+  normaliseSeed,
   planFurnaceAdvance,
   planFallingBlockMoves,
   PRIMED_TNT_FUSE_SECS,
@@ -99,6 +105,7 @@ import {
   stepCreeperFuse,
   stepEcosystemMob,
   TNT_EXPLOSION_POWER,
+  weatherExpires,
   type CreeperFuse,
   type BucketItemType,
   type EcosystemMobState,
@@ -225,6 +232,11 @@ export interface EyeOfEnderRecoveryState {
   readonly remainingSecs: number
 }
 
+export interface WeatherClockState {
+  readonly remainingSecs: number
+  readonly seed: number
+}
+
 export interface MultiplayerServerState {
   readonly revision: number
   readonly blocks: ReadonlyArray<Readonly<{ at: BlockPos; block: string | null }>>
@@ -233,6 +245,7 @@ export interface MultiplayerServerState {
   readonly inventories: AuthoritativeSnapshot['inventories']
   readonly vitals: AuthoritativeSnapshot['vitals']
   readonly timeWeather: AuthoritativeSnapshot['timeWeather']
+  readonly weatherClock?: WeatherClockState
   readonly containers: AuthoritativeSnapshot['containers']
   readonly furnaces: AuthoritativeSnapshot['furnaces']
   readonly villagerTrades: AuthoritativeSnapshot['villagerTrades']
@@ -312,6 +325,17 @@ const emptyContainerSlots = (kind: ContainerKind): Array<ItemStack | null> =>
 
 const unknownRecord = (value: unknown): UnknownRecord | undefined =>
   typeof value === 'object' && value !== null ? value as UnknownRecord : undefined
+
+export const isWeatherClockState = (value: unknown): value is WeatherClockState => {
+  const record = unknownRecord(value)
+  return record !== undefined
+    && typeof record['remainingSecs'] === 'number'
+    && Number.isFinite(record['remainingSecs'])
+    && record['remainingSecs'] > 0
+    && typeof record['seed'] === 'number'
+    && Number.isSafeInteger(record['seed'])
+    && normaliseSeed(record['seed']) === record['seed']
+}
 
 const supportedMobKind = (entityType: string) => {
   if (entityType === ZOMBIE_KIND) return ZOMBIE_KIND
@@ -475,6 +499,10 @@ const MOVEMENT_COLLISION_SAMPLE_DISTANCE = 0.25
 const DEFAULT_INVENTORY_SLOTS = 36
 const DEFAULT_VITALS: VitalsState = { health: 20, hunger: 20, experience: 0 }
 const DEFAULT_TIME_WEATHER: TimeWeatherState = { timeOfDay: 6_000, weather: 'clear' }
+const DEFAULT_WEATHER_CLOCK: WeatherClockState = {
+  remainingSecs: INITIAL_WEATHER.remainingSecs,
+  seed: DEFAULT_ROLL_SEED,
+}
 const MINECRAFT_DAY_TICKS = 24_000
 const MINECRAFT_TICK_MS = 50
 const ITEM_DROP_LIFESPAN_TICKS = 6_000
@@ -846,6 +874,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     (options.initialState?.vitals ?? []).map(({ player, state }) => [player, { ...state }]),
   )
   let timeWeather: TimeWeatherState = { ...(options.initialState?.timeWeather ?? DEFAULT_TIME_WEATHER) }
+  let weatherClock: WeatherClockState = isWeatherClockState(options.initialState?.weatherClock)
+    ? { ...options.initialState.weatherClock }
+    : { ...DEFAULT_WEATHER_CLOCK }
   const containers = new Map<string, MutableContainerState>(
     (options.initialState?.containers ?? []).map((state) => [state.containerId, {
       containerId: state.containerId,
@@ -1344,6 +1375,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     inventories: [...inventories].map(([player, state]) => ({ player, state: inventorySnapshot(state) })),
     vitals: [...vitals].map(([player, state]) => ({ player, state: vitalsSnapshot(state) })),
     timeWeather: { ...timeWeather },
+    weatherClock: { ...weatherClock },
     containers: [...containers.values()].map(containerSnapshot),
     furnaces: [...furnaces.values()].map(furnaceSnapshot),
     villagerTrades,
@@ -3701,9 +3733,26 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       }
     }
     if (timeChanged) {
+      const elapsedGameSecs = (elapsedTicks * MINECRAFT_TICK_MS) / 1_000
+      const weatherState = { weather: timeWeather.weather, remainingSecs: weatherClock.remainingSecs }
+      const transitionDraw = weatherExpires(weatherState, elapsedGameSecs)
+        ? nextRoll(weatherClock.seed)
+        : undefined
+      const durationDraw = transitionDraw === undefined ? undefined : nextRoll(transitionDraw.seed)
+      const nextWeather = advanceWeather(
+        weatherState,
+        elapsedGameSecs,
+        transitionDraw === undefined || durationDraw === undefined
+          ? LOWEST_WEATHER_ROLLS
+          : { transition: transitionDraw.roll, duration: durationDraw.roll },
+      )
       timeWeather = {
-        ...timeWeather,
         timeOfDay: (timeWeather.timeOfDay + elapsedTicks) % MINECRAFT_DAY_TICKS,
+        weather: nextWeather.weather,
+      }
+      weatherClock = {
+        remainingSecs: nextWeather.remainingSecs,
+        seed: durationDraw?.seed ?? weatherClock.seed,
       }
     }
     if (elapsedSecs > 0) {

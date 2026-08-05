@@ -33,7 +33,12 @@ import {
 import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
 
-import { makeMultiplayerServerCore, type MultiplayerServerCore, type MultiplayerServerState } from './core'
+import {
+  isWeatherClockState,
+  makeMultiplayerServerCore,
+  type MultiplayerServerCore,
+  type MultiplayerServerState,
+} from './core'
 import { loadLegacyPlayerClaims } from './legacy-player-claims'
 import { createReconnectAuth } from './reconnect-auth'
 import { makeMultiplayerRedstoneRuntime } from './redstone-runtime'
@@ -248,6 +253,9 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
       })
   if (eyeOfEnderRecoveriesValue !== undefined && eyeOfEnderRecoveries.length !== eyeOfEnderRecoveriesValue.length) return undefined
 
+  const weatherClock = state['weatherClock']
+  if (weatherClock !== undefined && !isWeatherClockState(weatherClock)) return undefined
+
   const decoded = Schema.decodeUnknownEither(AuthoritativeSnapshot)({
     _tag: 'AuthoritativeSnapshot',
     world: worldId,
@@ -279,6 +287,7 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     inventories: snapshot.inventories,
     vitals: snapshot.vitals,
     timeWeather: snapshot.timeWeather,
+    ...(weatherClock === undefined ? {} : { weatherClock }),
     containers: snapshot.containers,
     furnaces: snapshot.furnaces,
     villagerTrades: snapshot.villagerTrades,

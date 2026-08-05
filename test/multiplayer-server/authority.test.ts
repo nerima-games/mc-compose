@@ -2182,6 +2182,40 @@ describe('multiplayer server authoritative state', () => {
     }))
   })
 
+  it('advances weather deterministically and resumes the persisted weather clock', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      weatherClock: { remainingSecs: 0.05, seed: 1 },
+    })
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(50)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'WorldTimeWeatherDelta',
+      state: { timeOfDay: 6_001, weather: 'thunder' },
+    }))
+    const persisted = fixture.persisted.at(-1)
+    expect(persisted).toMatchObject({
+      timeWeather: { timeOfDay: 6_001, weather: 'thunder' },
+      weatherClock: { seed: 282_475_249 },
+    })
+    if (persisted?.weatherClock === undefined) throw new Error('weather clock must be persisted')
+
+    const resumed = makeFixture(persisted)
+    resumed.persisted.length = 0
+    resumed.server.tick(50)
+
+    expect(resumed.persisted.at(-1)).toMatchObject({
+      timeWeather: { timeOfDay: 6_002, weather: 'thunder' },
+      weatherClock: {
+        remainingSecs: persisted.weatherClock.remainingSecs - 0.05,
+        seed: persisted.weatherClock.seed,
+      },
+    })
+  })
+
   it('ages item drops authoritatively and despawns them after five minutes', () => {
     const fixture = makeFixture(initialState())
     fixture.sent.length = 0
