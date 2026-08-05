@@ -30,7 +30,7 @@ import {
 import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
 
-import { makeMultiplayerServerCore, type MultiplayerServerState } from './core'
+import { makeMultiplayerServerCore, type MultiplayerServerCore, type MultiplayerServerState } from './core'
 import { loadLegacyPlayerClaims } from './legacy-player-claims'
 import { createReconnectAuth } from './reconnect-auth'
 import { isAllowedWebSocketOrigin, resolveTransportSecurity } from './transport-security'
@@ -411,17 +411,71 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     : createLatestStatePersistence((state: MultiplayerServerState) =>
         writeServerState(options.stateFile as string, options.worldId, options.seed, state),
       )
+  const endStateFile = options.stateFile === undefined ? undefined : `${options.stateFile}.end`
+  const endInitialState = endStateFile === undefined
+    ? undefined
+    : await loadServerState(endStateFile, 'end', options.seed)
+  const endPersistence = endStateFile === undefined
+    ? undefined
+    : createLatestStatePersistence((state: MultiplayerServerState) =>
+        writeServerState(endStateFile, 'end', options.seed, state),
+      )
   const generatedBlockAt = makeGeneratedBlockAt(options.seed)
-  const core = makeMultiplayerServerCore({
+  const overworldSpawnAt = findSpawnAt(generatedBlockAt)
+  const endSpawnAt: BlockPos = { x: 0, y: 64, z: 0 }
+  const overworldPortalAt: BlockPos = { x: overworldSpawnAt.x + 1, y: overworldSpawnAt.y, z: overworldSpawnAt.z }
+  const endStaticBlocks = [
+    ...Array.from({ length: 49 }, (_, index) => ({
+      at: { x: (index % 7) - 3, y: 63, z: Math.floor(index / 7) - 3 },
+      block: 'end_stone',
+    })),
+    { at: { x: 1, y: 64, z: 0 }, block: 'end_portal' },
+  ]
+  const activeRealms = new Map<string, MultiplayerServerCore>()
+  let overworldCore: MultiplayerServerCore
+  let endCore: MultiplayerServerCore
+  const transferPlayer = (
+    clientId: string,
+    source: MultiplayerServerCore,
+    destination: MultiplayerServerCore,
+    destinationAt: BlockPos,
+    command: Parameters<NonNullable<import('./core').MultiplayerServerOptions['onEndPortalUse']>>[1],
+  ): void => {
+    const transfer = source.detachPlayer(clientId)
+    if (transfer === undefined) return
+    if (!destination.acceptRealmTransfer(clientId, transfer, {
+      commandId: command.commandId,
+      fromWorld: command.world,
+      at: destinationAt,
+      facing: transfer.facing,
+    })) return
+    activeRealms.set(clientId, destination)
+  }
+  overworldCore = makeMultiplayerServerCore({
     worldId: options.worldId,
     dimension: dimensionForWorld(options.worldId),
     seed: options.seed,
     allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
     generatedBlockAt,
-    spawnAt: findSpawnAt(generatedBlockAt),
+    spawnAt: overworldSpawnAt,
+    staticBlocks: [{ at: overworldPortalAt, block: 'end_portal' }],
     ...(initialState === undefined ? {} : { initialState }),
     ...(persistence === undefined ? {} : { onStateChanged: persistence.request }),
-    passableBlocks: new Set(['water']),
+    passableBlocks: new Set(['water', 'end_portal']),
+    onEndPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, endCore, endSpawnAt, command),
+  })
+  endCore = makeMultiplayerServerCore({
+    worldId: 'end',
+    dimension: 'end',
+    seed: options.seed,
+    allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
+    generatedBlockAt: () => null,
+    spawnAt: endSpawnAt,
+    staticBlocks: endStaticBlocks,
+    ...(endInitialState === undefined ? {} : { initialState: endInitialState }),
+    ...(endPersistence === undefined ? {} : { onStateChanged: endPersistence.request }),
+    passableBlocks: new Set(['water', 'end_portal']),
+    onEndPortalUse: (clientId, command) => transferPlayer(clientId, endCore, overworldCore, overworldSpawnAt, command),
   })
   const requestHandler: RequestListener = (request, response) => {
     if (request.method === 'GET' && request.url === '/health') {
@@ -469,7 +523,9 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       if (activePlayer !== undefined && activePlayers.get(activePlayer) === clientId) {
         activePlayers.delete(activePlayer)
       }
-      core.disconnect(clientId)
+      activeRealms.delete(clientId)
+      overworldCore.disconnect(clientId)
+      endCore.disconnect(clientId)
     }
     const rejectHandshake = (): void => {
       if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'reconnect authentication failed')
@@ -506,16 +562,19 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
         rejectHandshake()
       }
     }
-    core.connect(clientId, (frame) => {
+    const send = (frame: WireText): void => {
       if (socket.readyState === WebSocket.OPEN) socket.send(frame)
-    })
+    }
+    overworldCore.connect(clientId, send)
+    endCore.connect(clientId, send)
     socket.on('message', (data, isBinary) => {
       if (isBinary) return
       const frame = data.toString() as WireText
       _messageQueue = _messageQueue.then(async () => {
         if (disconnected) return
         if (activePlayer !== undefined) {
-          core.receive(clientId, frame)
+          const realm = activeRealms.get(clientId)
+          if (realm !== undefined) realm.receive(clientId, frame)
           return
         }
         if (authenticatedPlayer === undefined) {
@@ -537,7 +596,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
           rejectHandshake()
           return
         }
-        const result = core.receive(clientId, frame)
+        const result = overworldCore.receive(clientId, frame)
         if (!result.accepted) {
           reservedPlayers.delete(authenticatedPlayer)
           rejectHandshake()
@@ -545,6 +604,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
         }
         activePlayer = authenticatedPlayer
         activePlayers.set(activePlayer, clientId)
+        activeRealms.set(clientId, overworldCore)
         reservedPlayers.delete(activePlayer)
       }).catch(() => rejectHandshake())
     })
@@ -558,7 +618,8 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     const now = performance.now()
     const elapsedMs = Math.max(0, now - lastTickAt)
     lastTickAt = now
-    core.tick(elapsedMs)
+    overworldCore.tick(elapsedMs)
+    endCore.tick(elapsedMs)
   }, 50)
   let closing: Promise<void> | undefined
   const signalHandlers = new Map<NodeJS.Signals, () => void>()
@@ -571,7 +632,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       sockets.close()
       server.close((error) => error === undefined ? resolve() : reject(error))
     }).then(async () => {
-      await persistence?.drain()
+      await Promise.all([persistence?.drain(), endPersistence?.drain()])
     })
     return closing
   }

@@ -13,7 +13,7 @@ import type { Dimension } from '@nerima-games/mc-worldgen'
 import { Either } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { makeMultiplayerServerCore, type ReceiveResult } from '../../apps/multiplayer-server/core'
+import { makeMultiplayerServerCore, type MultiplayerServerOptions, type ReceiveResult } from '../../apps/multiplayer-server/core'
 import { decodeAnvilWireMessage } from '../../apps/multiplayer-shared/anvil-network'
 import { decodeBrewingWireMessage } from '../../apps/multiplayer-shared/brewing-network'
 import { decodeEnchantingWireMessage } from '../../apps/multiplayer-shared/enchanting-network'
@@ -75,6 +75,7 @@ const makeFixture = (
   spawnAt?: { x: number; y: number; z: number },
   initialWeather: 'clear' | 'rain' | 'thunder' = 'clear',
   dimension: Dimension = 'overworld',
+  options: Pick<MultiplayerServerOptions, 'staticBlocks' | 'onEndPortalUse'> = {},
 ) => {
   const sent = new Map<string, Array<WireText>>()
   let nowMs = 0
@@ -86,6 +87,7 @@ const makeFixture = (
     bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
     generatedBlockAt,
     ...(spawnAt === undefined ? {} : { spawnAt }),
+    ...options,
     now: () => nowMs,
     initialState: {
       revision: 0,
@@ -769,5 +771,74 @@ describe('authoritative multiplayer server core', () => {
         }),
       }),
     ]))
+  })
+
+  it('accepts End portal travel only for a server-owned portal block', () => {
+    const usedPortals: Array<Extract<NetworkMessage, { readonly _tag: 'EndPortalUseCommand' }>> = []
+    const fixture = makeFixture(undefined, undefined, undefined, undefined, undefined, {
+      staticBlocks: [{ at: { x: 1, y: 64, z: 0 }, block: 'end_portal' }],
+      onEndPortalUse: (_clientId, command) => usedPortals.push(command),
+    })
+    fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+
+    const valid = {
+      _tag: 'EndPortalUseCommand',
+      commandId: 'end-valid' as CommandId,
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: fixture.server.snapshot().revision,
+      portal: { x: 1, y: 64, z: 0 },
+    } as const satisfies NetworkMessage
+    expect(fixture.receive('socket-a', valid)).toEqual(expect.objectContaining({ accepted: true }))
+    expect(usedPortals).toEqual([valid])
+
+    expect(fixture.receive('socket-a', {
+      ...valid,
+      commandId: 'end-forged' as CommandId,
+      portal: { x: 2, y: 64, z: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(usedPortals).toEqual([valid])
+  })
+
+  it('moves player authority between realms and sends an arrival snapshot', () => {
+    const source = makeFixture()
+    source.connect('socket-a')
+    source.receive('socket-a', join('alice'))
+
+    const destinationFrames: Array<WireText> = []
+    const destination = makeMultiplayerServerCore({
+      worldId: 'end',
+      dimension: 'end',
+      seed: 42,
+      allowedBlocks: new Set(['end_stone', 'end_portal']),
+      bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
+      staticBlocks: [{ at: { x: 0, y: 64, z: 0 }, block: 'end_portal' }],
+    })
+    expect(destination.connect('socket-a', (wire) => destinationFrames.push(wire))).toBe(true)
+
+    const transfer = source.server.detachPlayer('socket-a')
+    expect(transfer).toBeDefined()
+    expect(source.server.snapshot().players).toEqual([])
+    expect(destination.acceptRealmTransfer('socket-a', transfer!, {
+      commandId: 'end-transfer' as CommandId,
+      fromWorld: worldId('world-1'),
+      at: { x: 0, y: 65, z: 0 },
+      facing: { yawRadians: 1, pitchRadians: 0 },
+    })).toBe(true)
+
+    expect(messages(destinationFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'RealmTransferSnapshot',
+      commandId: 'end-transfer',
+      player: playerId('alice'),
+      fromWorld: worldId('world-1'),
+      destinationWorld: worldId('end'),
+      at: { x: 0, y: 65, z: 0 },
+      authoritativeSnapshot: expect.objectContaining({
+        inventories: [expect.objectContaining({ player: playerId('alice') })],
+        vitals: [expect.objectContaining({ player: playerId('alice') })],
+      }),
+      worldSnapshot: expect.objectContaining({ world: worldId('end') }),
+    }))
   })
 })

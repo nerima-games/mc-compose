@@ -10,6 +10,7 @@ import {
   type BlockMutationRejected,
   type BlockPos,
   type CommandRejectionReason,
+  type EndPortalUseCommand,
   type NetworkMessage,
   type Orientation,
   type PlayerId,
@@ -208,6 +209,7 @@ export interface MultiplayerServerOptions {
     maxZ: number
   }>
   readonly generatedBlockAt?: (position: BlockPos) => string | null
+  readonly staticBlocks?: ReadonlyArray<Readonly<{ at: BlockPos; block: string | null }>>
   readonly spawnAt?: BlockPos
   readonly initialState?: MultiplayerServerState
   readonly onStateChanged?: (state: MultiplayerServerState) => void
@@ -216,6 +218,7 @@ export interface MultiplayerServerOptions {
   readonly sleepPercentage?: number
   readonly now?: () => number
   readonly difficulty?: 'peaceful' | 'easy' | 'normal' | 'hard'
+  readonly onEndPortalUse?: (clientId: ClientId, command: EndPortalUseCommand) => void
 }
 
 export interface MultiplayerServerState {
@@ -559,6 +562,7 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'EntityAttackCommand' ||
   message._tag === 'EntityPickupCommand' ||
   message._tag === 'BowUseCommand' ||
+    message._tag === 'EndPortalUseCommand' ||
     message._tag === 'IgniteTntCommand' ||
     message._tag === 'EnderPearlCommand' ||
     message._tag === 'BucketUseCommand' ||
@@ -698,9 +702,27 @@ export interface MultiplayerServerCore {
   readonly connect: (clientId: ClientId, send: SendFrame) => boolean
   readonly receive: (clientId: ClientId, frame: WireText) => ReceiveResult
   readonly disconnect: (clientId: ClientId) => void
+  readonly detachPlayer: (clientId: ClientId) => RealmTransferPlayer | undefined
+  readonly acceptRealmTransfer: (clientId: ClientId, transfer: RealmTransferPlayer, arrival: RealmTransferArrival) => boolean
   readonly snapshot: () => WorldSnapshot
   readonly tick: (elapsedMs: number) => void
   readonly spawnEntity: (entity: AuthoritativeEntityState) => boolean
+}
+
+export interface RealmTransferPlayer {
+  readonly player: PlayerId
+  readonly name: PlayerSnapshot['name']
+  readonly facing: Orientation
+  readonly inventory: InventoryState
+  readonly vitals: VitalsState
+  readonly statusEffects: StatusEffectState
+}
+
+export interface RealmTransferArrival {
+  readonly commandId: EndPortalUseCommand['commandId']
+  readonly fromWorld: WorldId
+  readonly at: BlockPos
+  readonly facing: Orientation
 }
 
 export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): MultiplayerServerCore => {
@@ -718,7 +740,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const playerClients = new Map<PlayerId, ClientId>()
   const movementBudgets = new Map<PlayerId, MovementBudget>()
   const blocks = new Map<string, Readonly<{ at: BlockPos; block: string | null }>>(
-    (options.initialState?.blocks ?? []).map((mutation) => [positionKey(mutation.at), mutation]),
+    [...(options.initialState?.blocks ?? []), ...(options.staticBlocks ?? [])]
+      .map((mutation) => [positionKey(mutation.at), mutation]),
   )
   const entities = new Map<string, AuthoritativeEntityState>(
     (options.initialState?.entities ?? []).map((entity) => [entity.entityId, entity]),
@@ -1336,6 +1359,17 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (inventory === undefined) return { accepted: false, reason: 'resource-not-found' }
 
     switch (message._tag) {
+      case 'EndPortalUseCommand': {
+        const actor = players.get(message.player)
+        if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+        if (!isInBounds(message.portal) || !isBlockWithinReach(actor, message.portal)) {
+          return { accepted: false, reason: 'out-of-range' }
+        }
+        if (blockAt(message.portal) !== 'end_portal' || options.onEndPortalUse === undefined) {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+        return { accepted: true, deltas: () => [] }
+      }
       case 'BowUseCommand': {
         const actor = players.get(message.player)
         if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
@@ -2112,7 +2146,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return { accepted: false, reason: reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command' }
   }
 
-  const handleCommand = (client: ConnectedClient, message: AuthoritativeCommand): ReceiveResult => {
+  const handleCommand = (clientId: ClientId, client: ConnectedClient, message: AuthoritativeCommand): ReceiveResult => {
     const cached = commandResults.get(commandResultKey(message))
     if (cached !== undefined) {
       if (cached.fingerprint !== commandFingerprint(message)) {
@@ -2143,6 +2177,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     cacheCommandResult(message, result)
     notifyStateChanged()
     sendMessage(client, result)
+    if (message._tag === 'EndPortalUseCommand') {
+      options.onEndPortalUse?.(clientId, message)
+      return { accepted: true, message }
+    }
     for (const delta of deltas) broadcast(delta)
     if (message._tag === 'PlayerInventoryCommand' || message._tag === 'EntityPickupCommand') {
       sendAnvil(client, anvilNamesDelta(message.player))
@@ -2823,7 +2861,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
     if (client.playerId === null) return { accepted: false, reason: 'join-required' }
 
-    if (isAuthoritativeCommand(message)) return handleCommand(client, message)
+    if (isAuthoritativeCommand(message)) return handleCommand(clientId, client, message)
 
     if ('player' in message && message.player !== client.playerId) {
       if (message._tag === 'BlockPlace' || message._tag === 'BlockBreak') {
@@ -2979,6 +3017,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         return { accepted: true, message }
       case 'WorldInfo':
       case 'WorldSnapshot':
+      case 'RealmTransferSnapshot':
       case 'BlockMutationRejected':
       case 'AuthoritativeSnapshot':
       case 'PlayerInventoryDelta':
@@ -3008,6 +3047,89 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       if (events.length > 0) broadcastSleep({ _tag: 'SleepEvents', revision: sleepAuthority.snapshot().revision, events })
     }
     clients.delete(clientId)
+  }
+
+  const detachPlayer = (clientId: ClientId): RealmTransferPlayer | undefined => {
+    const client = clients.get(clientId)
+    if (client === undefined || client.playerId === null) return undefined
+    const playerId = client.playerId
+    const player = players.get(playerId)
+    const inventory = inventories.get(playerId)
+    const playerVitals = vitals.get(playerId)
+    if (player === undefined || inventory === undefined || playerVitals === undefined) return undefined
+    const transfer: RealmTransferPlayer = {
+      player: player.player,
+      name: player.name,
+      facing: { ...player.facing },
+      inventory: inventorySnapshot(inventory),
+      vitals: vitalsSnapshot(playerVitals),
+      statusEffects: copyStatusEffectState(statusEffects.get(playerId) ?? emptyStatusEffectState()),
+    }
+    removePlayer(clientId, client)
+    bowDrawStartedAt.delete(playerId)
+    const sleepEvents = sleepAuthority.disconnect(playerId)
+    if (sleepEvents.length > 0) broadcastSleep({ _tag: 'SleepEvents', revision: sleepAuthority.snapshot().revision, events: sleepEvents })
+    inventories.delete(playerId)
+    vitals.delete(playerId)
+    statusEffects.delete(playerId)
+    hungerActors.delete(playerId)
+    playerPositions.delete(playerId)
+    notifyStateChanged()
+    return transfer
+  }
+
+  const acceptRealmTransfer = (clientId: ClientId, transfer: RealmTransferPlayer, arrival: RealmTransferArrival): boolean => {
+    const client = clients.get(clientId)
+    if (client === undefined || client.playerId !== null || playerClients.has(transfer.player)) return false
+    const player: MutablePlayer = {
+      player: transfer.player,
+      name: transfer.name,
+      world: worldId,
+      at: { ...arrival.at },
+      facing: { ...arrival.facing },
+    }
+    client.playerId = transfer.player
+    players.set(transfer.player, player)
+    playerClients.set(transfer.player, clientId)
+    playerPositions.set(transfer.player, { at: { ...arrival.at }, facing: { ...arrival.facing } })
+    inventories.set(transfer.player, cloneInventory(transfer.inventory))
+    vitals.set(transfer.player, { ...transfer.vitals })
+    statusEffects.set(transfer.player, copyStatusEffectState(transfer.statusEffects))
+    ensurePlayerState(transfer.player)
+    sleepAuthority.addActor({
+      player: transfer.player,
+      session: String(transfer.player),
+      position: { ...arrival.at },
+      gameMode: 'survival',
+      inventory: [],
+      health: 20,
+      spawn: { ...arrival.at },
+      lastActionTick: 0,
+    })
+    notifyStateChanged()
+    sendMessage(client, {
+      _tag: 'RealmTransferSnapshot',
+      commandId: arrival.commandId,
+      player: transfer.player,
+      fromWorld: arrival.fromWorld,
+      destinationWorld: worldId,
+      at: { ...arrival.at },
+      facing: { ...arrival.facing },
+      worldSnapshot: snapshot(),
+      authoritativeSnapshot: authoritativeSnapshot(),
+    })
+    sendAnvil(client, anvilNamesDelta(transfer.player))
+    sendEnchanting(client, enchantmentsDelta(transfer.player))
+    sendBrewing(client, {
+      _tag: 'PlayerStatusEffectsDelta',
+      world: worldId,
+      revision,
+      player: transfer.player,
+      state: copyStatusEffectState(statusEffects.get(transfer.player) ?? emptyStatusEffectState()),
+    })
+    sendSleep(client, { _tag: 'SleepSnapshot', snapshot: sleepAuthority.snapshot() })
+    sendWither(client, witherSnapshot())
+    return true
   }
 
   const tick = (elapsedMs: number): void => {
@@ -3632,5 +3754,5 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
-  return { connect, receive, disconnect, snapshot, tick, spawnEntity }
+  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, tick, spawnEntity }
 }

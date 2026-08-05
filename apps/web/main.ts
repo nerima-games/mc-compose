@@ -3064,6 +3064,8 @@ type MultiplayerInventorySelection = Readonly<{
   } | null = null
   let networkSleepState: SleepClientState = initialSleepClientState()
   let nextSleepRequest = 1
+  let nextEndPortalCommand = 1
+  let pendingEndPortalCommand: CommandId | null = null
   let appliedNightSkipRevision: number | null = null
   let multiplayerRejection = ''
   let multiplayerHandshakeComplete = false
@@ -3136,6 +3138,22 @@ type MultiplayerInventorySelection = Readonly<{
       expectedRevision: multiplayerRevision,
       action,
     }))
+  }
+
+  const sendEndPortalUseCommand = (portal: { readonly x: number; readonly y: number; readonly z: number }): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingEndPortalCommand !== null) return false
+    nextEndPortalCommand += 1
+    const commandId = CommandId.make(`end-portal-${String(nextEndPortalCommand)}`)
+    pendingEndPortalCommand = commandId
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'EndPortalUseCommand',
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+      portal,
+    }))
+    return true
   }
 
   const sendInventoryCommand = (
@@ -3805,6 +3823,27 @@ type MultiplayerInventorySelection = Readonly<{
         pendingVillagerTradeCommand = null
         break
       }
+      case 'RealmTransferSnapshot': {
+        if (message.player !== multiplayer.query.player) break
+        const dimension = dimensionFromWorld(message.destinationWorld)
+        if (dimension === undefined) break
+        // Each realm maintains its own revision sequence.
+        multiplayerRevision = -1
+        applyNetworkMessage(message.worldSnapshot)
+        applyNetworkMessage(message.authoritativeSnapshot)
+        Effect.runSync(playerApi.restore({
+          feetPosition: message.at,
+          yawRadians: message.facing.yawRadians,
+          pitchRadians: message.facing.pitchRadians,
+        }, dimension))
+        alignActiveDimension(dimension)
+        resetSimState(true)
+        lastPlayerMoveSent = { world: message.destinationWorld, at: message.at, facing: message.facing }
+        lastPlayerMoveSentAt = performance.now() / 1_000
+        pendingEndPortalCommand = null
+        multiplayerStatus.textContent = `Connected to multiplayer server (${dimension})`
+        break
+      }
       case 'EntitySpawnDelta':
       case 'EntityUpdateDelta':
         if (message.revision < multiplayerRevision) return
@@ -3929,6 +3968,7 @@ type MultiplayerInventorySelection = Readonly<{
       case 'AuthoritativeCommandRejected':
         multiplayerRevision = Math.max(multiplayerRevision, message.revision)
         multiplayerRejection = message.reason
+        if (message.commandId === pendingEndPortalCommand) pendingEndPortalCommand = null
         if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
         if (message.commandId === pendingInventoryCommand?.commandId) {
           if (message.resyncRequired) pendingInventoryRetry = pendingInventoryCommand.action
@@ -8347,7 +8387,7 @@ type MultiplayerInventorySelection = Readonly<{
 
       // Portal travel has already updated the player. Make its destination world
       // concrete before dimension alignment streams or renders that world.
-      Effect.runSync(applyPortalTravels())
+      if (multiplayer === undefined) Effect.runSync(applyPortalTravels())
 
       for (const pending of pendingBlockBreakConfirmations.splice(0)) {
         const context = dimensionContexts.get(pending.dimension)
@@ -9300,10 +9340,17 @@ type MultiplayerInventorySelection = Readonly<{
           }
           usedSpecialItem = true
         }
-        const shouldAttemptEndFeature = currentChunkContext.dimension === 'end'
+        const portalTarget = !usedSpecialItem && multiplayer !== undefined && multiplayerHandshakeComplete
+          ? Effect.runSync(targetedBlock())
+          : undefined
+        const usedMultiplayerEndPortal = portalTarget !== undefined
+          && blockTypeOfId(portalTarget.block) === 'end_portal'
+          && sendEndPortalUseCommand(portalTarget.position)
+        const shouldAttemptEndFeature = multiplayer === undefined && (currentChunkContext.dimension === 'end'
           || endPortalComplete
-          || specialSelected?.item === 'eye_of_ender'
+          || specialSelected?.item === 'eye_of_ender')
         const usedEndFeature = usedSpecialItem
+          || usedMultiplayerEndPortal
           || (shouldAttemptEndFeature && Effect.runSync(useEndFeature()))
         const brewingTarget = usedEndFeature ? undefined : Effect.runSync(targetedBlock())
         const opensBrewing = brewingTarget !== undefined && blockTypeOfId(brewingTarget.block) === 'brewing_stand'
