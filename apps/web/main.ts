@@ -251,6 +251,7 @@ import {
   BLAZE_KIND,
   ENDERMAN_KIND,
   drainBlockUseResults,
+  drainBowKnockbacks,
   drainItemUseResults,
   drainMeleeAttackResults,
   drainMobDrops,
@@ -9876,10 +9877,8 @@ type MultiplayerInventorySelection = Readonly<{
           }
         }
       }
-      const pearlOutcomes = Effect.runSync(Ref.getAndSet(gameplayState.enderPearlOutcomes, []))
-
       if (multiplayer === undefined) {
-        for (const outcome of pearlOutcomes) {
+        for (const outcome of Effect.runSync(Ref.getAndSet(gameplayState.enderPearlOutcomes, []))) {
           const pose = Effect.runSync(playerApi.pose)
           Effect.runSync(playerApi.moveTo({
             x: pose.feetPosition.x + outcome.displacement.x,
@@ -9888,6 +9887,34 @@ type MultiplayerInventorySelection = Readonly<{
           }))
           if (outcome.damage !== undefined) applyPlayerDamage(outcome.damage)
           markSessionDirty()
+        }
+        for (const knockback of Effect.runSync(drainBowKnockbacks(gameplayState))) {
+          let applied = false
+          Effect.runSync(world.entities.sweep((entity) => {
+            if (entity.id !== knockback.id || entity.healthPoints <= 0) {
+              return { transition: UNCHANGED, emit: undefined }
+            }
+            applied = true
+            return {
+              transition: changed({
+                feetPosition: knockback.direction._tag === 'Away'
+                  ? {
+                    x: entity.feetPosition.x + knockback.direction.x * 0.35,
+                    y: entity.feetPosition.y,
+                    z: entity.feetPosition.z + knockback.direction.z * 0.35,
+                  }
+                  : {
+                    x: entity.feetPosition.x,
+                    y: entity.feetPosition.y + 0.35,
+                    z: entity.feetPosition.z,
+                  },
+                healthPoints: entity.healthPoints,
+                behaviour: entity.behaviour,
+              }),
+              emit: undefined,
+            }
+          }))
+          if (applied) markSessionDirty()
         }
       }
       const confirmedPlacementItems: GameplayItemType[] = []
