@@ -1763,15 +1763,27 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const arrowSlot = inventory.slots.findIndex((stack) => stack?.item === 'arrow')
         const arrowStack = arrowSlot < 0 ? undefined : inventory.slots[arrowSlot]
         if (arrowStack?.item !== 'arrow') return { accepted: false, reason: 'insufficient-items' }
-        const bowDurability = inventory.durability[inventory.selectedSlot]
+        const selectedSlot = inventory.selectedSlot
+        const selectedMetadata = inventorySlotMetadata(message.player, selectedSlot)
+        const bowDurability = inventory.durability[selectedSlot]
         if (!isValidDurabilityForItem('bow', bowDurability)) return { accepted: false, reason: 'invalid-command' }
         inventory.slots[arrowSlot] = arrowStack.count === 1 ? null : { ...arrowStack, count: arrowStack.count - 1 }
-        if (bowDurability.current === 1) {
-          inventory.slots[inventory.selectedSlot] = null
-          inventory.durability[inventory.selectedSlot] = null
-        } else inventory.durability[inventory.selectedSlot] = { ...bowDurability, current: bowDurability.current - 1 }
+        const nextBowDurability = bowDurability.current === 1
+          ? null
+          : { ...bowDurability, current: bowDurability.current - 1 }
+        if (nextBowDurability === null) inventory.slots[selectedSlot] = null
+        inventory.durability[selectedSlot] = nextBowDurability
+        if (selectedMetadata.enchantment !== null) {
+          setInventorySlotMetadata(message.player, selectedSlot, {
+            ...selectedMetadata,
+            enchantment: nextBowDurability === null
+              ? null
+              : { ...selectedMetadata.enchantment, durability: { ...nextBowDurability } },
+          })
+        }
         const horizontal = Math.cos(actor.facing.pitchRadians)
         const speed = 8 + 24 * charge
+        const powerLevel = selectedMetadata.enchantment?.enchantments.find((enchantment) => enchantment.id === 'power')?.level
         const arrow: AuthoritativeEntityState = {
           _tag: 'arrow',
           entityId: `${message.commandId}:arrow` as AuthoritativeEntityState['entityId'],
@@ -1781,7 +1793,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             y: -Math.sin(actor.facing.pitchRadians) * speed,
             z: -Math.cos(actor.facing.yawRadians) * horizontal * speed,
           },
-          damage: bowDamage(charge),
+          damage: bowDamage(charge, powerLevel === undefined ? {} : { powerLevel }),
           owner: message.player,
           ageTicks: 0,
         }

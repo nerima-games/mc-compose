@@ -193,6 +193,18 @@ describe('multiplayer server authoritative state', () => {
         player: playerId('alice'),
         state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 2 }, null], selectedSlot: 0 },
       }],
+      enchantments: [{
+        player: playerId('alice'),
+        seed: 42,
+        items: [{
+          slot: 0,
+          item: {
+            item: 'bow',
+            durability: { current: 384, max: 384 },
+            enchantments: [{ id: 'power', level: 1 }],
+          },
+        }],
+      }],
       entities: [{
         _tag: 'living', entityId: entityId('bow-target'), entityType: 'zombie',
         at: { x: 0, y: 64, z: -3.2 }, health: 20, maxHealth: 20,
@@ -224,9 +236,22 @@ describe('multiplayer server authoritative state', () => {
       }),
       expect.objectContaining({
         _tag: 'EntitySpawnDelta',
-        entity: expect.objectContaining({ _tag: 'arrow', owner: 'alice', damage: expect.any(Number) }),
+        entity: expect.objectContaining({ _tag: 'arrow', owner: 'alice', damage: 14 }),
       }),
     ]))
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      enchantments: [{
+        player: 'alice',
+        items: [{
+          slot: 0,
+          item: {
+            item: 'bow',
+            durability: { current: 383, max: 384 },
+            enchantments: [{ id: 'power', level: 1 }],
+          },
+        }],
+      }],
+    })
     fixture.sent.length = 0
 
     fixture.server.tick(100)
@@ -235,7 +260,7 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'bow-release:arrow' }),
       expect.objectContaining({
         _tag: 'EntityUpdateDelta',
-        entity: expect.objectContaining({ entityId: 'bow-target', health: expect.any(Number) }),
+        entity: expect.objectContaining({ entityId: 'bow-target', health: 6 }),
       }),
     ]))
     expect(fixture.persisted.at(-1)?.entities).toEqual(expect.arrayContaining([
