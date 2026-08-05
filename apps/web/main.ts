@@ -5874,16 +5874,31 @@ type MultiplayerInventorySelection = Readonly<{
         else rejectInventoryAction(action, 'Equipment cannot move to crafting slots')
         return
       }
-      if (action.source.kind === 'slot' && action.target.kind === 'slot') {
-        const sourceSlot = inventorySlotOf(action.source)
-        const targetSlot = inventorySlotOf(action.target)
-        if (sourceSlot === undefined || targetSlot === undefined) {
-          rejectInventoryAction(action, 'Crafting slots cannot move inventory items')
-        } else {
-          moveInventoryItem(action, sourceSlot, targetSlot)
+        if (action.source.kind === 'slot' && action.target.kind === 'slot') {
+          const sourceSlot = inventorySlotOf(action.source)
+          const targetSlot = inventorySlotOf(action.target)
+          if (sourceSlot !== undefined && action.target.region === 'crafting-grid') {
+            if (multiplayer !== undefined) {
+              rejectInventoryAction(action, 'Crafting drag is unavailable in multiplayer')
+            } else if (pendingCrafting !== null) {
+              rejectInventoryAction(action, 'Crafting update is pending')
+            } else if (inventoryInteraction.state().inventoryCarried !== undefined) {
+              rejectInventoryAction(action, 'Place the carried stack first')
+            } else {
+              Effect.runSync(inventoryInteraction.clickInventoryItem(sourceSlot, 'left'))
+              Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(action.target.index))
+              Effect.runSync(inventoryInteraction.preview())
+              completeInventoryAction()
+            }
+            return
+          }
+          if (sourceSlot === undefined || targetSlot === undefined) {
+            rejectInventoryAction(action, 'Crafting slots cannot move inventory items')
+          } else {
+            moveInventoryItem(action, sourceSlot, targetSlot)
+          }
+          return
         }
-        return
-      }
       rejectInventoryAction(action, 'Drag between these slots is not supported')
       return
     }
