@@ -467,6 +467,80 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  it('applies lethal player arrow damage through authoritative death drops', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [
+        {
+          player: playerId('alice'),
+          state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 1 }, null], selectedSlot: 0 },
+        },
+        {
+          player: playerId('bob'),
+          state: { slots: [{ item: 'apple', count: 1 }, null, null], selectedSlot: 0 },
+        },
+      ],
+      vitals: [
+        { player: playerId('alice'), state: { health: 20, hunger: 20, experience: 0 } },
+        { player: playerId('bob'), state: { health: 1, hunger: 20, experience: 7 } },
+      ],
+    }, undefined, 'normal', {
+      now: () => now,
+      generatedBlockAt: (position) => position.y === 63 ? 'stone' : null,
+    })
+    expect(fixture.server.connect('socket-b', () => undefined)).toBe(true)
+    expect(fixture.server.receive('socket-b', frame({
+      _tag: 'PlayerJoin', player: playerId('bob'), name: playerName('Bob'), at: { x: 0, y: 64, z: -3.2 },
+    })).accepted).toBe(true)
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('lethal-player-bow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('lethal-player-bow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerVitalsDelta', player: 'bob', state: expect.objectContaining({ health: 0, experience: 0 }),
+      }),
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta', player: 'bob', state: expect.objectContaining({ slots: [null, null, null] }),
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({
+          _tag: 'item-drop',
+          entityId: 'player:bob:death:6:0',
+          at: { x: 0, y: 64, z: -3.2 },
+          stack: { item: 'apple', count: 1 },
+        }),
+      }),
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'lethal-player-bow-release:arrow' }),
+    ]))
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      vitals: expect.arrayContaining([
+        expect.objectContaining({ player: 'bob', state: expect.objectContaining({ health: 0, experience: 0 }) }),
+      ]),
+      inventories: expect.arrayContaining([
+        expect.objectContaining({ player: 'bob', state: expect.objectContaining({ slots: [null, null, null] }) }),
+      ]),
+      entities: expect.arrayContaining([
+        expect.objectContaining({ entityId: 'player:bob:death:6:0', stack: { item: 'apple', count: 1 } }),
+      ]),
+    })
+  })
+
   it('ignites TNT and resolves its explosion on the server', () => {
     const state = initialState()
     const fixture = makeFixture({
