@@ -231,6 +231,7 @@ export interface MultiplayerServerOptions {
 export interface MultiplayerServerState {
   readonly revision: number
   readonly blocks: ReadonlyArray<Readonly<{ at: BlockPos; block: string | null }>>
+  readonly poweredRails?: ReadonlyArray<Readonly<{ at: BlockPos; powered: boolean }>>
   readonly inventories: AuthoritativeSnapshot['inventories']
   readonly vitals: AuthoritativeSnapshot['vitals']
   readonly timeWeather: AuthoritativeSnapshot['timeWeather']
@@ -739,6 +740,8 @@ export interface MultiplayerServerCore {
     expectedBlocks: ReadonlySet<RedstoneStatefulBlock>,
     nextBlock: RedstoneStatefulBlock,
   ) => boolean
+  readonly isPoweredRailPowered: (at: BlockPos) => boolean
+  readonly applyPoweredRailState: (at: BlockPos, powered: boolean) => boolean
   readonly readPistonCell: (at: BlockPos) => PistonCellRead
   readonly applyPistonPlan: (plan: PistonMovementPlan) => boolean
   readonly tick: (elapsedMs: number) => void
@@ -784,6 +787,16 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     [...(options.initialState?.blocks ?? []), ...(options.staticBlocks ?? [])]
       .map((mutation) => [positionKey(mutation.at), mutation]),
   )
+  const poweredRails = new Map<string, Readonly<{ at: BlockPos; powered: boolean }>>(
+    (options.initialState?.poweredRails ?? []).map(({ at, powered }) => [positionKey(at), {
+      at: { ...at },
+      powered,
+    }]),
+  )
+  const poweredRailSnapshot = (): ReadonlyArray<Readonly<{ at: BlockPos; powered: boolean }>> =>
+    [...poweredRails.values()]
+      .filter(({ at }) => blocks.get(positionKey(at))?.block === 'powered_rail')
+      .map(({ at, powered }) => ({ at: { ...at }, powered }))
   const entities = new Map<string, AuthoritativeEntityState>(
     (options.initialState?.entities ?? []).map((entity) => [entity.entityId, entity]),
   )
@@ -1110,6 +1123,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     revision,
     players: [...players.values()].map((player) => ({ ...player })),
     blocks: [...blocks.values()].map((mutation) => ({ world: worldId, ...mutation })),
+    poweredRails: poweredRailSnapshot(),
   })
 
   const authoritativeSnapshot = (): AuthoritativeSnapshot => ({
@@ -1251,6 +1265,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const persistentState = (): MultiplayerServerState => ({
     revision,
     blocks: [...blocks.values()].map((mutation) => ({ ...mutation, at: { ...mutation.at } })),
+    poweredRails: poweredRailSnapshot(),
     inventories: [...inventories].map(([player, state]) => ({ player, state: inventorySnapshot(state) })),
     vitals: [...vitals].map(([player, state]) => ({ player, state: vitalsSnapshot(state) })),
     timeWeather: { ...timeWeather },
@@ -1350,6 +1365,20 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (!isRedstoneStatefulBlock(currentBlock) || !expectedBlocks.has(currentBlock) || currentBlock === nextBlock) return false
 
     blocks.set(positionKey(at), { at: { ...at }, block: nextBlock })
+    revision += 1
+    notifyStateChanged()
+    broadcast(snapshot())
+    return true
+  }
+
+  const isPoweredRailPowered = (at: BlockPos): boolean =>
+    blockAt(at) === 'powered_rail' && (poweredRails.get(positionKey(at))?.powered ?? false)
+
+  const applyPoweredRailState = (at: BlockPos, powered: boolean): boolean => {
+    if (!isInBounds(at) || blockAt(at) !== 'powered_rail') return false
+    const key = positionKey(at)
+    if ((poweredRails.get(key)?.powered ?? false) === powered) return false
+    poweredRails.set(key, { at: { ...at }, powered })
     revision += 1
     notifyStateChanged()
     broadcast(snapshot())
@@ -3228,6 +3257,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const brokenBlock = blockAt(message.at)
         if (brokenBlock === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })
+        poweredRails.delete(positionKey(message.at))
         disturbFallingBlocks([message.at])
         if (containerKindForBlock(brokenBlock) !== undefined) containers.delete(containerIdAt(message.at))
         else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
@@ -4059,5 +4089,5 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
-  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, applyRedstoneBlockState, readPistonCell, applyPistonPlan, tick, spawnEntity }
+  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, applyRedstoneBlockState, isPoweredRailPowered, applyPoweredRailState, readPistonCell, applyPistonPlan, tick, spawnEntity }
 }

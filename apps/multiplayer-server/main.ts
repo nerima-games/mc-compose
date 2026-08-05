@@ -208,6 +208,16 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
   })
   if (blocks.length !== blocksValue.length) return undefined
 
+  const poweredRailsValue = state['poweredRails']
+  if (poweredRailsValue !== undefined && !Array.isArray(poweredRailsValue)) return undefined
+  const poweredRails = poweredRailsValue === undefined
+    ? []
+    : poweredRailsValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !isBlockPos(entry['at']) || typeof entry['powered'] !== 'boolean') return []
+        return [{ at: entry['at'], powered: entry['powered'] }]
+      })
+  if (poweredRailsValue !== undefined && poweredRails.length !== poweredRailsValue.length) return undefined
+
   const playerPositionsValue = state['playerPositions']
   if (playerPositionsValue !== undefined && !Array.isArray(playerPositionsValue)) return undefined
   const playerPositions = playerPositionsValue === undefined
@@ -246,6 +256,7 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
   return {
     revision: snapshot.revision,
     blocks,
+    poweredRails,
     inventories: snapshot.inventories,
     vitals: snapshot.vitals,
     timeWeather: snapshot.timeWeather,

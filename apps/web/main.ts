@@ -3805,6 +3805,17 @@ type MultiplayerInventorySelection = Readonly<{
           if (player.player !== multiplayer.query.player) multiplayer.players.set(player.player, player)
         }
         for (const block of message.blocks) applyNetworkBlock(block.world, block.at, block.block)
+        const dimension = dimensionFromWorld(message.world)
+        if (dimension !== undefined) {
+          const dimensionKeyPrefix = `${JSON.stringify(dimension)},`
+          for (const key of poweredRails) {
+            if (key.startsWith(dimensionKeyPrefix)) poweredRails.delete(key)
+          }
+          for (const rail of message.poweredRails) {
+            const key = leverKeyOf({ dimension, position: rail.at })
+            if (rail.powered) poweredRails.add(key)
+          }
+        }
         break
       case 'AuthoritativeSnapshot': {
         if (message.revision < multiplayerRevision) {
@@ -7995,13 +8006,15 @@ type MultiplayerInventorySelection = Readonly<{
       const raw = previousSecs === undefined ? FIRST_FRAME_SECS : nowSecs - previousSecs
       previousSecs = nowSecs
       const deltaSecs = clampDelta(raw)
-      for (const [key, expiresAt] of observerPulses) {
-        if (expiresAt <= simulationElapsedSecs) {
-          observerPulses.delete(key)
-          redstoneDirty = true
+      if (multiplayer === undefined) {
+        for (const [key, expiresAt] of observerPulses) {
+          if (expiresAt <= simulationElapsedSecs) {
+            observerPulses.delete(key)
+            redstoneDirty = true
+          }
         }
+        if (redstoneDirty) syncRedstoneSnapshot(currentChunkContext)
       }
-      if (redstoneDirty) syncRedstoneSnapshot(currentChunkContext)
 
       // -----------------------------------------------------------------------
       // The player, moved and stopped by the world
@@ -9811,45 +9824,47 @@ type MultiplayerInventorySelection = Readonly<{
         }
       }
 
-      for (const transition of Effect.runSync(redstoneRuntime.drainLampTransitions)) {
-        const context = dimensionContexts.get(transition.dimension as Dimension)
-        if (context === undefined) continue
-        Effect.runSync(context.chunkStore.setBlock(transition.position, transition.lit ? 80 : 79))
-        markSessionDirty()
-      }
-      for (const transition of Effect.runSync(redstoneRuntime.drainPistonTransitions)) {
-        applyPoweredPistonTransition(transition)
-      }
-      for (const event of Effect.runSync(redstoneRuntime.drainTriggerEvents)) {
-        canvas.setAttribute(
-          'data-redstone-trigger',
-          `${event.kind}:${event.dimension}:${event.position.x},${event.position.y},${event.position.z}`,
-        )
-        if (event.kind === 'dispenser') {
-          applyDispenserTrigger(event.dimension as Dimension, event.position)
-        } else if (event.kind === 'dropper') {
-          applyDropperTrigger(event.dimension as Dimension, event.position)
+      if (multiplayer === undefined) {
+        for (const transition of Effect.runSync(redstoneRuntime.drainLampTransitions)) {
+          const context = dimensionContexts.get(transition.dimension as Dimension)
+          if (context === undefined) continue
+          Effect.runSync(context.chunkStore.setBlock(transition.position, transition.lit ? 80 : 79))
+          markSessionDirty()
         }
-        markSessionDirty()
-      }
-      for (const event of Effect.runSync(redstoneRuntime.drainHopperTransferEvents)) {
-        applyHopperTransfer(event.dimension as Dimension, event.position)
-      }
-      for (const transition of Effect.runSync(redstoneRuntime.drainPoweredComponentTransitions)) {
-        const context = dimensionContexts.get(transition.dimension as Dimension)
-        if (context === undefined) continue
-        const key = leverKeyOf({
-          dimension: transition.dimension as Dimension,
-          position: transition.position,
-        })
-        if (transition.kind === 'door') {
-          Effect.runSync(context.chunkStore.setBlock(transition.position, transition.powered ? 107 : 106))
-        } else if (transition.kind === 'powered-rail') {
-          if (transition.powered) poweredRails.add(key)
-          else poweredRails.delete(key)
-          canvas.setAttribute('data-powered-rail', `${key}:${String(transition.powered)}`)
+        for (const transition of Effect.runSync(redstoneRuntime.drainPistonTransitions)) {
+          applyPoweredPistonTransition(transition)
         }
-        markSessionDirty()
+        for (const event of Effect.runSync(redstoneRuntime.drainTriggerEvents)) {
+          canvas.setAttribute(
+            'data-redstone-trigger',
+            `${event.kind}:${event.dimension}:${event.position.x},${event.position.y},${event.position.z}`,
+          )
+          if (event.kind === 'dispenser') {
+            applyDispenserTrigger(event.dimension as Dimension, event.position)
+          } else if (event.kind === 'dropper') {
+            applyDropperTrigger(event.dimension as Dimension, event.position)
+          }
+          markSessionDirty()
+        }
+        for (const event of Effect.runSync(redstoneRuntime.drainHopperTransferEvents)) {
+          applyHopperTransfer(event.dimension as Dimension, event.position)
+        }
+        for (const transition of Effect.runSync(redstoneRuntime.drainPoweredComponentTransitions)) {
+          const context = dimensionContexts.get(transition.dimension as Dimension)
+          if (context === undefined) continue
+          const key = leverKeyOf({
+            dimension: transition.dimension as Dimension,
+            position: transition.position,
+          })
+          if (transition.kind === 'door') {
+            Effect.runSync(context.chunkStore.setBlock(transition.position, transition.powered ? 107 : 106))
+          } else if (transition.kind === 'powered-rail') {
+            if (transition.powered) poweredRails.add(key)
+            else poweredRails.delete(key)
+            canvas.setAttribute('data-powered-rail', `${key}:${String(transition.powered)}`)
+          }
+          markSessionDirty()
+        }
       }
 
       // Portal stages can replace both dimension and pose. Stream and present

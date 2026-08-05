@@ -44,6 +44,8 @@ const componentForBlock = (
       return { position, kind: 'torch' }
     case 'redstone_wire':
       return { position, kind: 'wire' }
+    case 'powered_rail':
+      return { position, kind: 'powered-rail', powered: core.isPoweredRailPowered(position) }
     case 'redstone_lamp':
     case 'redstone_lamp_lit':
       return { position, kind: 'lamp' }
@@ -108,12 +110,12 @@ export const makeMultiplayerRedstoneRuntime = async (
         )
       }
       for (const event of Effect.runSync(runtime.drainPoweredComponentTransitions)) {
-        if (event.kind !== 'door') continue
-        realmsByDimension.get(event.dimension)?.core.applyRedstoneBlockState(
-          event.position,
-          doorBlocks,
-          event.powered ? 'door_open' : 'door',
-        )
+        const core = realmsByDimension.get(event.dimension)?.core
+        if (event.kind === 'door') {
+          core?.applyRedstoneBlockState(event.position, doorBlocks, event.powered ? 'door_open' : 'door')
+        } else if (event.kind === 'powered-rail') {
+          core?.applyPoweredRailState(event.position, event.powered)
+        }
       }
       for (const event of Effect.runSync(runtime.drainPistonTransitions)) {
         const realm = realmsByDimension.get(event.dimension)

@@ -2955,6 +2955,45 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  it('persists and broadcasts powered rail state through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'redstone_torch' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'powered_rail' },
+      ],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      poweredRails: [{ at: { x: 1, y: 64, z: 0 }, powered: true }],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        revision: 5,
+        poweredRails: [{ at: { x: 1, y: 64, z: 0 }, powered: true }],
+      }),
+    ]))
+
+    runtime.tick(100)
+    expect(fixture.persisted).toHaveLength(1)
+
+    expect(fixture.server.applyPoweredRailState({ x: 1, y: 64, z: 0 }, false)).toBe(true)
+    expect(fixture.persisted).toHaveLength(2)
+    expect(fixture.persisted[1]).toMatchObject({
+      revision: 6,
+      poweredRails: [{ at: { x: 1, y: 64, z: 0 }, powered: false }],
+    })
+  })
+
   it('persists and broadcasts a powered sticky piston move through server authority', async () => {
     const fixture = makeFixture({
       ...initialState(),
