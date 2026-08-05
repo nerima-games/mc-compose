@@ -33,19 +33,24 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { makeMultiplayerServerCore, type MultiplayerServerCore, type MultiplayerServerState } from './core'
 import { loadLegacyPlayerClaims } from './legacy-player-claims'
 import { createReconnectAuth } from './reconnect-auth'
+import { makeMultiplayerRedstoneHopperRuntime } from './redstone-hopper-runtime'
 import { isAllowedWebSocketOrigin, resolveTransportSecurity } from './transport-security'
 
 const DEFAULT_BLOCKS = [
   'bedrock',
+  'chest',
   'coal_ore',
   'cobblestone',
   'dirt',
   'grass_block',
   'gravel',
   'iron_ore',
+  'hopper',
   'oak_leaves',
   'oak_log',
   'oak_planks',
+  'redstone_torch',
+  'redstone_wire',
   'sand',
   'stone',
 ] as const
@@ -477,6 +482,10 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     passableBlocks: new Set(['water', 'end_portal']),
     onEndPortalUse: (clientId, command) => transferPlayer(clientId, endCore, overworldCore, overworldSpawnAt, command),
   })
+  const redstoneHopperRuntime = await makeMultiplayerRedstoneHopperRuntime([
+    { dimension: dimensionForWorld(options.worldId), core: overworldCore },
+    { dimension: 'end', core: endCore },
+  ])
   const requestHandler: RequestListener = (request, response) => {
     if (request.method === 'GET' && request.url === '/health') {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
@@ -618,6 +627,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     const now = performance.now()
     const elapsedMs = Math.max(0, now - lastTickAt)
     lastTickAt = now
+    redstoneHopperRuntime.tick(elapsedMs)
     overworldCore.tick(elapsedMs)
     endCore.tick(elapsedMs)
   }, 50)

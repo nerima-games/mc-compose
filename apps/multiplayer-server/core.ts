@@ -717,6 +717,7 @@ export interface MultiplayerServerCore {
   readonly detachPlayer: (clientId: ClientId) => RealmTransferPlayer | undefined
   readonly acceptRealmTransfer: (clientId: ClientId, transfer: RealmTransferPlayer, arrival: RealmTransferArrival) => boolean
   readonly snapshot: () => WorldSnapshot
+  readonly applyHopperTransfer: (at: BlockPos) => boolean
   readonly tick: (elapsedMs: number) => void
   readonly spawnEntity: (entity: AuthoritativeEntityState) => boolean
 }
@@ -1251,6 +1252,36 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   })
 
   const notifyStateChanged = (): void => options.onStateChanged?.(persistentState())
+
+  const applyHopperTransfer = (at: BlockPos): boolean => {
+    const containerAt = (position: BlockPos): MutableContainerState | undefined => {
+      if (!isInBounds(position)) return undefined
+      const expectedKind = containerKindForBlock(blockAt(position) ?? '')
+      const container = containers.get(containerIdAt(position))
+      return expectedKind === undefined || container?.kind !== expectedKind ? undefined : container
+    }
+    const moveFirstStack = (source: MutableContainerState, destination: MutableContainerState): boolean => {
+      for (let sourceIndex = 0; sourceIndex < source.slots.length; sourceIndex += 1) {
+        if (source.slots[sourceIndex] === null || source.slots[sourceIndex] === undefined) continue
+        for (let destinationIndex = 0; destinationIndex < destination.slots.length; destinationIndex += 1) {
+          if (moveStack(source.slots, sourceIndex, destination.slots, destinationIndex, 1) !== null) continue
+          revision += 1
+          notifyStateChanged()
+          broadcast({ _tag: 'ContainerDelta', world: worldId, revision, state: containerSnapshot(source) })
+          broadcast({ _tag: 'ContainerDelta', world: worldId, revision, state: containerSnapshot(destination) })
+          return true
+        }
+      }
+      return false
+    }
+
+    const hopper = containerAt(at)
+    if (hopper?.kind !== 'hopper') return false
+    const below = containerAt({ x: at.x, y: at.y - 1, z: at.z })
+    if (below !== undefined && hopper.slots.some((stack) => stack !== null && stack !== undefined)) return moveFirstStack(hopper, below)
+    const above = containerAt({ x: at.x, y: at.y + 1, z: at.z })
+    return above === undefined ? false : moveFirstStack(above, hopper)
+  }
 
   const ensurePlayerState = (player: PlayerId): void => {
     if (!inventories.has(player)) {
@@ -3924,5 +3955,5 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
-  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, tick, spawnEntity }
+  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, tick, spawnEntity }
 }

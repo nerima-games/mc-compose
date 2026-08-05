@@ -21,6 +21,7 @@ import {
   type MultiplayerServerState,
   type ReceiveResult,
 } from '../../apps/multiplayer-server/core'
+import { makeMultiplayerRedstoneHopperRuntime } from '../../apps/multiplayer-server/redstone-hopper-runtime'
 import {
   decodePlayerDamageWireMessage,
   encodePlayerDamageCommand,
@@ -2769,6 +2770,56 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'EntitySpawnDelta', revision: 9, entity: expect.objectContaining({ _tag: 'item-drop', stack: { item: 'furnace', count: 1 } }) }),
       expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 8, containers: [] }),
       expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 9, containers: [], furnaces: [] }),
+    ]))
+  })
+
+  it('applies hopper transfers from redstone ticks through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 1, y: 65, z: 0 }, block: 'chest' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'hopper' },
+        { at: { x: 1, y: 63, z: 0 }, block: 'chest' },
+      ],
+      containers: [
+        { containerId: 'world-1:1,65,0', kind: 'chest', slots: [{ item: 'apple', count: 2 }] },
+        { containerId: 'world-1:1,64,0', kind: 'hopper', slots: Array.from({ length: 5 }, () => null) },
+        { containerId: 'world-1:1,63,0', kind: 'chest', slots: Array.from({ length: 27 }, () => null) },
+      ],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneHopperRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(400)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      containers: expect.arrayContaining([
+        { containerId: 'world-1:1,65,0', kind: 'chest', slots: [{ item: 'apple', count: 1 }] },
+        { containerId: 'world-1:1,64,0', kind: 'hopper', slots: [{ item: 'apple', count: 1 }, null, null, null, null] },
+      ]),
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 5, state: expect.objectContaining({ containerId: 'world-1:1,65,0' }) }),
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 5, state: expect.objectContaining({ containerId: 'world-1:1,64,0' }) }),
+    ]))
+
+    fixture.sent.length = 0
+    runtime.tick(400)
+
+    expect(fixture.persisted).toHaveLength(2)
+    expect(fixture.persisted[1]).toMatchObject({
+      revision: 6,
+      containers: expect.arrayContaining([
+        { containerId: 'world-1:1,64,0', kind: 'hopper', slots: [null, null, null, null, null] },
+        { containerId: 'world-1:1,63,0', kind: 'chest', slots: [{ item: 'apple', count: 1 }, ...Array.from({ length: 26 }, () => null)] },
+      ]),
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 6, state: expect.objectContaining({ containerId: 'world-1:1,64,0' }) }),
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 6, state: expect.objectContaining({ containerId: 'world-1:1,63,0' }) }),
     ]))
   })
 
