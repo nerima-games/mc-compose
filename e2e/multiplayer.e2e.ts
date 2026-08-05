@@ -4,7 +4,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { NetworkMessage } from '@nerima-games/mx-multiplayer'
 import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test'
+import { Either } from 'effect'
+import { tsImport } from 'tsx/esm/api'
 import { WebSocket } from 'ws'
 
 import { E2E_MULTIPLAYER_URL } from '../playwright.config'
@@ -139,15 +142,43 @@ const canvasRevision = async (page: Page): Promise<number> =>
 
 type WireMessage = { readonly _tag: string; readonly [key: string]: unknown }
 
-const encode = (message: WireMessage): string => JSON.stringify({ protocolVersion: 1, message })
+const { encodeFrame } = await tsImport(
+  '@nerima-games/mx-multiplayer',
+  import.meta.url,
+) as typeof import('@nerima-games/mx-multiplayer')
+
+const encode = (message: NetworkMessage): string => {
+  const result = encodeFrame(message)
+  if (Either.isLeft(result)) throw result.left
+  return result.right
+}
 
 const receiveMessage = (socket: WebSocket): Promise<WireMessage> =>
   new Promise((resolve, reject) => {
-    socket.once('error', reject)
-    socket.once('message', (data) => {
-      const frame = JSON.parse(data.toString()) as WireMessage & { readonly message?: WireMessage }
-      resolve(frame.message ?? frame)
-    })
+    const cleanup = (): void => {
+      socket.off('error', onError)
+      socket.off('close', onClose)
+      socket.off('message', onMessage)
+    }
+    const fail = (error: Error): void => {
+      cleanup()
+      reject(error)
+    }
+    const onError = (error: Error): void => fail(error)
+    const onClose = (code: number, reason: Buffer): void =>
+      fail(new Error(`socket closed before receiving a message (${String(code)}): ${reason.toString()}`))
+    const onMessage = (data: Buffer): void => {
+      try {
+        const frame = JSON.parse(data.toString()) as WireMessage & { readonly message?: WireMessage }
+        cleanup()
+        resolve(frame.message ?? frame)
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)))
+      }
+    }
+    socket.once('error', onError)
+    socket.once('close', onClose)
+    socket.once('message', onMessage)
   })
 
 const receiveMessageWithTag = async (socket: WebSocket, tag: string): Promise<WireMessage> => {
@@ -179,7 +210,7 @@ const expectOutOfBoundsPlacementRejection = async (
       player: 'invalid-mutation-e2e',
       name: 'Invalid Mutation Probe',
       at: { x: 0, y: 64, z: 0 },
-    }))
+    } as NetworkMessage))
     expect(await receiveMessage(socket)).toMatchObject({ _tag: 'WorldSnapshot', revision })
 
     socket.send(encode({
@@ -187,7 +218,7 @@ const expectOutOfBoundsPlacementRejection = async (
       player: 'invalid-mutation-e2e',
       at: { x: 30_000_001, y: 64, z: 0 },
       block: 'stone',
-    }))
+    } as NetworkMessage))
     expect(await receiveMessageWithTag(socket, 'BlockMutationRejected')).toMatchObject({
       _tag: 'BlockMutationRejected',
       operation: 'place',

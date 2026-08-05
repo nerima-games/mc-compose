@@ -4,7 +4,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { NetworkMessage } from '@nerima-games/mx-multiplayer'
 import { expect, test } from '@playwright/test'
+import { Either } from 'effect'
+import { tsImport } from 'tsx/esm/api'
 import { WebSocket } from 'ws'
 
 type WireMessage = {
@@ -29,8 +32,16 @@ type WireMessage = {
   readonly [key: string]: unknown
 }
 
-const encodeProtocol = (message: WireMessage): string =>
-  JSON.stringify({ protocolVersion: 6, message })
+const { encodeFrame } = await tsImport(
+  '@nerima-games/mx-multiplayer',
+  import.meta.url,
+) as typeof import('@nerima-games/mx-multiplayer')
+
+const encodeProtocol = (message: NetworkMessage): string => {
+  const result = encodeFrame(message)
+  if (Either.isLeft(result)) throw result.left
+  return result.right
+}
 
 const encodeWither = (message: WireMessage): string => JSON.stringify(message)
 const LEGACY_SECRETS = {
@@ -128,9 +139,16 @@ const connect = async (
     player,
     name: player,
     at: { x: 0, y: 88, z: 0 },
-  }))
+  } as NetworkMessage))
   try {
-    await inbox.next('WorldSnapshot')
+    await Promise.race([
+      inbox.next('WorldSnapshot'),
+      new Promise<never>((_resolve, reject) => {
+        socket.once('close', (code, reason) => reject(new Error(
+          `join rejected with close code ${String(code)}: ${reason.toString()}`,
+        )))
+      }),
+    ])
   } catch (error) {
     throw new Error(`join did not produce a world snapshot: ${JSON.stringify(inbox.messages())}`, { cause: error })
   }
@@ -229,13 +247,13 @@ test('serializes competing Wither damage and restores the canonical state on rej
           world: 'overworld',
           expectedRevision: 4,
           action: { _tag: 'select-slot', slot: 1 },
-        }))
+        } as NetworkMessage))
         await alice.inbox.next('AuthoritativeCommandAccepted', (message) =>
           message.commandId === 'select-wither-skulls')
       }
       alice.socket.send(encodeProtocol({
         _tag: 'BlockPlace', player: 'wither-alice', world: 'overworld', ...placement,
-      }))
+      } as NetworkMessage))
       await alice.inbox.next('BlockPlace', (_message) => alice.inbox.messages('BlockPlace').length > index)
     }
     alice.socket.send(encodeWither({
@@ -272,7 +290,7 @@ test('serializes competing Wither damage and restores the canonical state on rej
       client.socket.send(encodeProtocol({
         _tag: 'PlayerMove', player: client === alice ? 'wither-alice' : 'wither-bob',
         at: { x: 8, y: 88, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 },
-      }))
+      } as NetworkMessage))
     }
 
     const consumedStructure = await alice.inbox.next('WorldSnapshot', (message) => message.revision === 9)
@@ -303,7 +321,7 @@ test('serializes competing Wither damage and restores the canonical state on rej
       client.socket.send(encodeProtocol({
         _tag: 'PlayerMove', player,
         at: { x: 0, y: 88, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 },
-      }))
+      } as NetworkMessage))
       await client.inbox.next('PlayerMove', (message) => message.player === player
         && (message.at as { x: number; y: number; z: number }).x === 0
         && (message.at as { x: number; y: number; z: number }).y === 88
@@ -358,7 +376,7 @@ test('serializes competing Wither damage and restores the canonical state on rej
       client.socket.send(encodeProtocol({
         _tag: 'PlayerMove', player, at: attackPosition,
         facing: { yawRadians: 0, pitchRadians: 0 },
-      }))
+      } as NetworkMessage))
       await client.inbox.next('PlayerMove', (message) => message.player === player
         && (message.at as { x: number; y: number; z: number }).x === attackPosition.x
         && (message.at as { x: number; y: number; z: number }).y === attackPosition.y
