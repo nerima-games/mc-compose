@@ -718,6 +718,7 @@ export interface MultiplayerServerCore {
   readonly acceptRealmTransfer: (clientId: ClientId, transfer: RealmTransferPlayer, arrival: RealmTransferArrival) => boolean
   readonly snapshot: () => WorldSnapshot
   readonly applyHopperTransfer: (at: BlockPos) => boolean
+  readonly applyDispenserTrigger: (at: BlockPos) => boolean
   readonly tick: (elapsedMs: number) => void
   readonly spawnEntity: (entity: AuthoritativeEntityState) => boolean
 }
@@ -1281,6 +1282,30 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (below !== undefined && hopper.slots.some((stack) => stack !== null && stack !== undefined)) return moveFirstStack(hopper, below)
     const above = containerAt({ x: at.x, y: at.y + 1, z: at.z })
     return above === undefined ? false : moveFirstStack(above, hopper)
+  }
+
+  const applyDispenserTrigger = (at: BlockPos): boolean => {
+    if (!isInBounds(at) || blockAt(at) !== 'dispenser') return false
+    const dispenser = containers.get(containerIdAt(at))
+    if (dispenser?.kind !== 'dispenser') return false
+    const slot = dispenser.slots.findIndex((stack) => stack !== null && stack !== undefined)
+    if (slot < 0) return false
+
+    const source = dispenser.slots[slot]
+    if (source === null || source === undefined) return false
+    const entity: AuthoritativeEntityState = {
+      _tag: 'item-drop',
+      entityId: `dispenser:${positionKey(at)}:drop:${String(revision + 1)}:${String(slot)}` as AuthoritativeEntityState['entityId'],
+      at: { x: at.x + 0.5, y: at.y + 0.5, z: at.z - 0.25 },
+      stack: { ...source, count: 1 },
+    }
+    dispenser.slots[slot] = source.count === 1 ? null : { ...source, count: source.count - 1 }
+    entities.set(entity.entityId, entity)
+    revision += 1
+    notifyStateChanged()
+    broadcast({ _tag: 'ContainerDelta', world: worldId, revision, state: containerSnapshot(dispenser) })
+    broadcast({ _tag: 'EntitySpawnDelta', world: worldId, revision, entity })
+    return true
   }
 
   const ensurePlayerState = (player: PlayerId): void => {
@@ -3955,5 +3980,5 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
-  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, tick, spawnEntity }
+  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, tick, spawnEntity }
 }

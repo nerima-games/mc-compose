@@ -14,7 +14,7 @@ export interface MultiplayerRedstoneRealm {
   readonly core: MultiplayerServerCore
 }
 
-export interface MultiplayerRedstoneHopperRuntime {
+export interface MultiplayerRedstoneRuntime {
   readonly tick: (elapsedMs: number) => void
 }
 
@@ -25,6 +25,8 @@ const componentForBlock = (
   switch (block) {
     case 'hopper':
       return { position, kind: 'hopper' }
+    case 'dispenser':
+      return { position, kind: 'dispenser' }
     case 'redstone_torch':
       return { position, kind: 'torch' }
     case 'redstone_wire':
@@ -34,10 +36,10 @@ const componentForBlock = (
   }
 }
 
-/** Bridges mx-redstone timing events into the server-owned container authority. */
-export const makeMultiplayerRedstoneHopperRuntime = async (
+/** Bridges mx-redstone events into server-owned gameplay authority. */
+export const makeMultiplayerRedstoneRuntime = async (
   realms: ReadonlyArray<MultiplayerRedstoneRealm>,
-): Promise<MultiplayerRedstoneHopperRuntime> => {
+): Promise<MultiplayerRedstoneRuntime> => {
   const scope = Effect.runSync(Scope.make())
   const context = await Effect.runPromise(
     Effect.provideService(Layer.build(RedstoneWorldRuntimeLayer), Scope.Scope, scope),
@@ -61,6 +63,11 @@ export const makeMultiplayerRedstoneHopperRuntime = async (
       }
       for (const event of Effect.runSync(runtime.drainHopperTransferEvents)) {
         realmsByDimension.get(event.dimension)?.core.applyHopperTransfer(event.position)
+      }
+      for (const event of Effect.runSync(runtime.drainTriggerEvents)) {
+        if (event.kind === 'dispenser') {
+          realmsByDimension.get(event.dimension)?.core.applyDispenserTrigger(event.position)
+        }
       }
     },
   }
