@@ -5714,9 +5714,15 @@ type MultiplayerInventorySelection = Readonly<{
       if (multiplayer === undefined) Effect.runSync(inventoryInteraction.craftOnce())
       else requestCrafting()
     } else if (target.region === 'crafting-grid') {
-      if (pendingCrafting !== null) return
-      Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
-      Effect.runSync(inventoryInteraction.preview())
+      const action = actionTarget === null ? null : { kind: 'click' as const, target: actionTarget }
+      if (multiplayer !== undefined && multiplayerInventorySelection !== null && action !== null) {
+        const selection = multiplayerInventorySelection
+        draftCraftingFromInventory(action, selection.source, target.index)
+      } else {
+        if (pendingCrafting !== null) return
+        Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
+        Effect.runSync(inventoryInteraction.preview())
+      }
     } else if (target.region === 'hotbar') {
       Effect.runSync(inventoryInteraction.clickInventoryItem(target.index, button))
     } else if (target.region === 'main') {
@@ -5866,6 +5872,30 @@ type MultiplayerInventorySelection = Readonly<{
     return true
   }
 
+  const draftCraftingFromInventory = (
+    action: InventoryAction,
+    source: number,
+    cell: number,
+  ): void => {
+    if (pendingCrafting !== null) {
+      rejectInventoryAction(action, 'Crafting update is pending')
+      return
+    }
+    if (inventoryInteraction.state().inventoryCarried !== undefined) {
+      rejectInventoryAction(action, 'Place the carried stack first')
+      return
+    }
+    if (Effect.runSync(world.inventory.snapshot).slots[source] === undefined) {
+      rejectInventoryAction(action, 'Source slot is empty')
+      return
+    }
+    multiplayerInventorySelection = null
+    Effect.runSync(inventoryInteraction.clickInventoryItem(source, 'left'))
+    Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(cell))
+    Effect.runSync(inventoryInteraction.preview())
+    completeInventoryAction()
+  }
+
   const dispatchInventoryAction = (action: InventoryAction): void => {
     if (action.kind === 'drag') {
       if (action.source.kind === 'slot' && action.target.kind === 'equipment-slot') {
@@ -5884,18 +5914,7 @@ type MultiplayerInventorySelection = Readonly<{
           const sourceSlot = inventorySlotOf(action.source)
           const targetSlot = inventorySlotOf(action.target)
           if (sourceSlot !== undefined && action.target.region === 'crafting-grid') {
-            if (multiplayer !== undefined) {
-              rejectInventoryAction(action, 'Crafting drag is unavailable in multiplayer')
-            } else if (pendingCrafting !== null) {
-              rejectInventoryAction(action, 'Crafting update is pending')
-            } else if (inventoryInteraction.state().inventoryCarried !== undefined) {
-              rejectInventoryAction(action, 'Place the carried stack first')
-            } else {
-              Effect.runSync(inventoryInteraction.clickInventoryItem(sourceSlot, 'left'))
-              Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(action.target.index))
-              Effect.runSync(inventoryInteraction.preview())
-              completeInventoryAction()
-            }
+            draftCraftingFromInventory(action, sourceSlot, action.target.index)
             return
           }
           if (sourceSlot === undefined || targetSlot === undefined) {
