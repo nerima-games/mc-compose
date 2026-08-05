@@ -9,8 +9,10 @@ import {
   type AuthoritativeSnapshot,
   type BlockMutationRejected,
   type BlockPos,
+  type CommandId,
   type CommandRejectionReason,
   type EndPortalUseCommand,
+  type NetherPortalUseCommand,
   type NetworkMessage,
   type Orientation,
   type PlayerId,
@@ -226,6 +228,7 @@ export interface MultiplayerServerOptions {
   readonly now?: () => number
   readonly difficulty?: 'peaceful' | 'easy' | 'normal' | 'hard'
   readonly onEndPortalUse?: (clientId: ClientId, command: EndPortalUseCommand) => void
+  readonly onNetherPortalUse?: (clientId: ClientId, command: NetherPortalUseCommand) => void
 }
 
 export interface MultiplayerServerState {
@@ -580,6 +583,7 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'EntityPickupCommand' ||
     message._tag === 'BowUseCommand' ||
     message._tag === 'EndPortalUseCommand' ||
+    message._tag === 'NetherPortalUseCommand' ||
     message._tag === 'ToggleLeverCommand' ||
     message._tag === 'IgniteTntCommand' ||
     message._tag === 'EnderPearlCommand' ||
@@ -767,7 +771,7 @@ export interface RealmTransferPlayer {
 }
 
 export interface RealmTransferArrival {
-  readonly commandId: EndPortalUseCommand['commandId']
+  readonly commandId: CommandId
   readonly fromWorld: WorldId
   readonly at: BlockPos
   readonly facing: Orientation
@@ -1610,6 +1614,17 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
         return { accepted: true, deltas: () => [] }
       }
+      case 'NetherPortalUseCommand': {
+        const actor = players.get(message.player)
+        if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+        if (!isInBounds(message.portal) || !isBlockWithinReach(actor, message.portal)) {
+          return { accepted: false, reason: 'out-of-range' }
+        }
+        if (blockAt(message.portal) !== 'nether_portal' || options.onNetherPortalUse === undefined) {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+        return { accepted: true, deltas: () => [] }
+      }
       case 'BowUseCommand': {
         const actor = players.get(message.player)
         if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
@@ -2419,6 +2434,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     sendMessage(client, result)
     if (message._tag === 'EndPortalUseCommand') {
       options.onEndPortalUse?.(clientId, message)
+      return { accepted: true, message }
+    }
+    if (message._tag === 'NetherPortalUseCommand') {
+      options.onNetherPortalUse?.(clientId, message)
       return { accepted: true, message }
     }
     for (const delta of deltas) broadcast(delta)

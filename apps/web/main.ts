@@ -3092,8 +3092,8 @@ type MultiplayerInventorySelection = Readonly<{
   } | null = null
   let networkSleepState: SleepClientState = initialSleepClientState()
   let nextSleepRequest = 1
-  let nextEndPortalCommand = 1
-  let pendingEndPortalCommand: CommandId | null = null
+  let nextPortalCommand = 1
+  let pendingPortalCommand: CommandId | null = null
   let nextLeverCommand = 1
   let pendingLeverCommand: CommandId | null = null
   let appliedNightSkipRevision: number | null = null
@@ -3176,13 +3176,16 @@ type MultiplayerInventorySelection = Readonly<{
     }))
   }
 
-  const sendEndPortalUseCommand = (portal: { readonly x: number; readonly y: number; readonly z: number }): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingEndPortalCommand !== null) return false
-    nextEndPortalCommand += 1
-    const commandId = CommandId.make(`end-portal-${String(nextEndPortalCommand)}`)
-    pendingEndPortalCommand = commandId
+  const sendPortalUseCommand = (
+    portal: { readonly x: number; readonly y: number; readonly z: number },
+    tag: 'EndPortalUseCommand' | 'NetherPortalUseCommand',
+  ): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingPortalCommand !== null) return false
+    nextPortalCommand += 1
+    const commandId = CommandId.make(`${tag === 'EndPortalUseCommand' ? 'end' : 'nether'}-portal-${String(nextPortalCommand)}`)
+    pendingPortalCommand = commandId
     Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'EndPortalUseCommand',
+      _tag: tag,
       commandId,
       player: multiplayer.query.player,
       world: WorldId.make(Effect.runSync(playerApi.dimension)),
@@ -3915,7 +3918,7 @@ type MultiplayerInventorySelection = Readonly<{
         resetSimState(true)
         lastPlayerMoveSent = { world: message.destinationWorld, at: message.at, facing: message.facing }
         lastPlayerMoveSentAt = performance.now() / 1_000
-        pendingEndPortalCommand = null
+        pendingPortalCommand = null
         multiplayerStatus.textContent = `Connected to multiplayer server (${dimension})`
         break
       }
@@ -4043,7 +4046,7 @@ type MultiplayerInventorySelection = Readonly<{
       case 'AuthoritativeCommandRejected':
         multiplayerRevision = Math.max(multiplayerRevision, message.revision)
         multiplayerRejection = message.reason
-        if (message.commandId === pendingEndPortalCommand) pendingEndPortalCommand = null
+        if (message.commandId === pendingPortalCommand) pendingPortalCommand = null
         if (message.commandId === pendingLeverCommand) pendingLeverCommand = null
         if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
         if (message.commandId === pendingInventoryCommand?.commandId) {
@@ -9438,9 +9441,13 @@ type MultiplayerInventorySelection = Readonly<{
         const portalTarget = !usedSpecialItem && multiplayer !== undefined && multiplayerHandshakeComplete
           ? Effect.runSync(targetedBlock())
           : undefined
-        const usedMultiplayerEndPortal = portalTarget !== undefined
-          && blockTypeOfId(portalTarget.block) === 'end_portal'
-          && sendEndPortalUseCommand(portalTarget.position)
+        const portalBlock = portalTarget === undefined ? undefined : blockTypeOfId(portalTarget.block)
+        const usedMultiplayerPortal = portalTarget !== undefined
+          && (portalBlock === 'end_portal' || portalBlock === 'nether_portal')
+          && sendPortalUseCommand(
+            portalTarget.position,
+            portalBlock === 'end_portal' ? 'EndPortalUseCommand' : 'NetherPortalUseCommand',
+          )
         const usedMultiplayerLever = portalTarget !== undefined
           && blockTypeOfId(portalTarget.block) === 'lever'
         if (usedMultiplayerLever) sendToggleLeverCommand(portalTarget.position)
@@ -9448,7 +9455,7 @@ type MultiplayerInventorySelection = Readonly<{
           || endPortalComplete
           || specialSelected?.item === 'eye_of_ender')
         const usedEndFeature = usedSpecialItem
-          || usedMultiplayerEndPortal
+          || usedMultiplayerPortal
           || (shouldAttemptEndFeature && Effect.runSync(useEndFeature()))
         const brewingTarget = usedEndFeature || usedMultiplayerLever ? undefined : Effect.runSync(targetedBlock())
         const opensBrewing = brewingTarget !== undefined && blockTypeOfId(brewingTarget.block) === 'brewing_stand'

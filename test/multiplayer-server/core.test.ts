@@ -94,7 +94,7 @@ const makeFixture = (
   spawnAt?: { x: number; y: number; z: number },
   initialWeather: 'clear' | 'rain' | 'thunder' = 'clear',
   dimension: Dimension = 'overworld',
-  options: Pick<MultiplayerServerOptions, 'staticBlocks' | 'onEndPortalUse'> & Readonly<{
+  options: Pick<MultiplayerServerOptions, 'staticBlocks' | 'onEndPortalUse' | 'onNetherPortalUse'> & Readonly<{
     metadata?: Pick<MultiplayerServerState, 'anvilNames' | 'enchantments'>
   }> = {},
 ) => {
@@ -822,6 +822,34 @@ describe('authoritative multiplayer server core', () => {
     expect(fixture.receive('socket-a', {
       ...valid,
       commandId: 'end-forged' as CommandId,
+      portal: { x: 2, y: 64, z: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(usedPortals).toEqual([valid])
+  })
+
+  it('accepts Nether portal travel only for a server-owned portal block', () => {
+    const usedPortals: Array<Extract<NetworkMessage, { readonly _tag: 'NetherPortalUseCommand' }>> = []
+    const fixture = makeFixture(undefined, undefined, undefined, undefined, undefined, {
+      staticBlocks: [{ at: { x: 1, y: 64, z: 0 }, block: 'nether_portal' }],
+      onNetherPortalUse: (_clientId, command) => usedPortals.push(command),
+    })
+    fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+
+    const valid = {
+      _tag: 'NetherPortalUseCommand',
+      commandId: 'nether-valid' as CommandId,
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: fixture.server.snapshot().revision,
+      portal: { x: 1, y: 64, z: 0 },
+    } as const satisfies NetworkMessage
+    expect(fixture.receive('socket-a', valid)).toEqual(expect.objectContaining({ accepted: true }))
+    expect(usedPortals).toEqual([valid])
+
+    expect(fixture.receive('socket-a', {
+      ...valid,
+      commandId: 'nether-forged' as CommandId,
       portal: { x: 2, y: 64, z: 0 },
     })).toEqual({ accepted: false, reason: 'invalid-command' })
     expect(usedPortals).toEqual([valid])

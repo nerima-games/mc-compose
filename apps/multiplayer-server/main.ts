@@ -23,9 +23,11 @@ import {
   PlayerId as PlayerIdSchema,
   decodeFrame,
   type BlockPos,
+  type CommandId,
   type Orientation,
   type PlayerId,
   type WireText,
+  type WorldId,
 } from '@nerima-games/mx-multiplayer'
 import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
@@ -442,10 +444,22 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     : createLatestStatePersistence((state: MultiplayerServerState) =>
         writeServerState(endStateFile, 'end', options.seed, state),
       )
+  const netherStateFile = options.stateFile === undefined ? undefined : `${options.stateFile}.nether`
+  const netherInitialState = netherStateFile === undefined
+    ? undefined
+    : await loadServerState(netherStateFile, 'nether', options.seed)
+  const netherPersistence = netherStateFile === undefined
+    ? undefined
+    : createLatestStatePersistence((state: MultiplayerServerState) =>
+        writeServerState(netherStateFile, 'nether', options.seed, state),
+      )
   const generatedBlockAt = makeGeneratedBlockAt(options.seed)
   const overworldSpawnAt = findSpawnAt(generatedBlockAt)
+  const netherSpawnAt = findSpawnAt(generatedBlockAt)
   const endSpawnAt: BlockPos = { x: 0, y: 64, z: 0 }
-  const overworldPortalAt: BlockPos = { x: overworldSpawnAt.x + 1, y: overworldSpawnAt.y, z: overworldSpawnAt.z }
+  const overworldEndPortalAt: BlockPos = { x: overworldSpawnAt.x + 1, y: overworldSpawnAt.y, z: overworldSpawnAt.z }
+  const overworldNetherPortalAt: BlockPos = { x: overworldSpawnAt.x - 1, y: overworldSpawnAt.y, z: overworldSpawnAt.z }
+  const netherPortalAt: BlockPos = { x: netherSpawnAt.x + 1, y: netherSpawnAt.y, z: netherSpawnAt.z }
   const endStaticBlocks = [
     ...Array.from({ length: 49 }, (_, index) => ({
       at: { x: (index % 7) - 3, y: 63, z: Math.floor(index / 7) - 3 },
@@ -455,13 +469,14 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   ]
   const activeRealms = new Map<string, MultiplayerServerCore>()
   let overworldCore: MultiplayerServerCore
+  let netherCore: MultiplayerServerCore
   let endCore: MultiplayerServerCore
   const transferPlayer = (
     clientId: string,
     source: MultiplayerServerCore,
     destination: MultiplayerServerCore,
     destinationAt: BlockPos,
-    command: Parameters<NonNullable<import('./core').MultiplayerServerOptions['onEndPortalUse']>>[1],
+    command: Readonly<{ commandId: CommandId; world: WorldId }>,
   ): void => {
     const transfer = source.detachPlayer(clientId)
     if (transfer === undefined) return
@@ -480,11 +495,28 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
     generatedBlockAt,
     spawnAt: overworldSpawnAt,
-    staticBlocks: [{ at: overworldPortalAt, block: 'end_portal' }],
+    staticBlocks: [
+      { at: overworldEndPortalAt, block: 'end_portal' },
+      { at: overworldNetherPortalAt, block: 'nether_portal' },
+    ],
     ...(initialState === undefined ? {} : { initialState }),
     ...(persistence === undefined ? {} : { onStateChanged: persistence.request }),
-    passableBlocks: new Set(['water', 'end_portal']),
+    passableBlocks: new Set(['water', 'end_portal', 'nether_portal']),
     onEndPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, endCore, endSpawnAt, command),
+    onNetherPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, netherCore, netherSpawnAt, command),
+  })
+  netherCore = makeMultiplayerServerCore({
+    worldId: 'nether',
+    dimension: 'nether',
+    seed: options.seed,
+    allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
+    generatedBlockAt,
+    spawnAt: netherSpawnAt,
+    staticBlocks: [{ at: netherPortalAt, block: 'nether_portal' }],
+    ...(netherInitialState === undefined ? {} : { initialState: netherInitialState }),
+    ...(netherPersistence === undefined ? {} : { onStateChanged: netherPersistence.request }),
+    passableBlocks: new Set(['water', 'nether_portal']),
+    onNetherPortalUse: (clientId, command) => transferPlayer(clientId, netherCore, overworldCore, overworldSpawnAt, command),
   })
   endCore = makeMultiplayerServerCore({
     worldId: 'end',
@@ -501,6 +533,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   })
   const redstoneRuntime = await makeMultiplayerRedstoneRuntime([
     { dimension: dimensionForWorld(options.worldId), core: overworldCore },
+    { dimension: 'nether', core: netherCore },
     { dimension: 'end', core: endCore },
   ])
   const requestHandler: RequestListener = (request, response) => {
@@ -551,6 +584,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       }
       activeRealms.delete(clientId)
       overworldCore.disconnect(clientId)
+      netherCore.disconnect(clientId)
       endCore.disconnect(clientId)
     }
     const rejectHandshake = (): void => {
@@ -592,6 +626,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       if (socket.readyState === WebSocket.OPEN) socket.send(frame)
     }
     overworldCore.connect(clientId, send)
+    netherCore.connect(clientId, send)
     endCore.connect(clientId, send)
     socket.on('message', (data, isBinary) => {
       if (isBinary) return
@@ -646,6 +681,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     lastTickAt = now
     redstoneRuntime.tick(elapsedMs)
     overworldCore.tick(elapsedMs)
+    netherCore.tick(elapsedMs)
     endCore.tick(elapsedMs)
   }, 50)
   let closing: Promise<void> | undefined
@@ -659,7 +695,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       sockets.close()
       server.close((error) => error === undefined ? resolve() : reject(error))
     }).then(async () => {
-      await Promise.all([persistence?.drain(), endPersistence?.drain()])
+      await Promise.all([persistence?.drain(), netherPersistence?.drain(), endPersistence?.drain()])
     })
     return closing
   }
