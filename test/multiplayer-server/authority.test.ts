@@ -291,7 +291,7 @@ describe('multiplayer server authoritative state', () => {
       }],
     }, undefined, 'normal', {
       now: () => now,
-      generatedBlockAt: (position) => position.y === 63 || (position.x === 0 && position.y === 65 && position.z === -4) ? 'stone' : null,
+      generatedBlockAt: (position) => position.y === 63 || (position.x === 0 && position.y === 65 && position.z === -3) ? 'stone' : null,
     })
     fixture.sent.length = 0
 
@@ -312,7 +312,7 @@ describe('multiplayer server authoritative state', () => {
       && message.entity._tag === 'item-drop' && message.entity.stack.item === 'arrow')
     expect(pickupSpawn).toMatchObject({
       _tag: 'EntitySpawnDelta', revision: 6,
-      entity: { _tag: 'item-drop', at: { x: 0, y: 65.5, z: -3.2 }, stack: { item: 'arrow', count: 1 } },
+      entity: { _tag: 'item-drop', at: { x: 0, y: 65.5, z: -2 }, stack: { item: 'arrow', count: 1 } },
     })
     if (pickupSpawn?._tag !== 'EntitySpawnDelta' || pickupSpawn.entity._tag !== 'item-drop') {
       throw new Error('missing embedded arrow pickup')
@@ -335,6 +335,53 @@ describe('multiplayer server authoritative state', () => {
       }),
     ]))
     expect(fixture.persisted.at(-1)).toMatchObject({ revision: 7, entities: [] })
+  })
+
+  it('stops an arrow at a wall before it can damage a player behind it', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 1 }, null], selectedSlot: 0 },
+      }],
+      vitals: [
+        { player: playerId('alice'), state: { health: 20, hunger: 20, experience: 0 } },
+        { player: playerId('bob'), state: { health: 20, hunger: 20, experience: 0 } },
+      ],
+    }, undefined, 'normal', {
+      now: () => now,
+      generatedBlockAt: (position) => position.y === 63 || (position.x === 0 && position.y === 65 && position.z === -1) ? 'stone' : null,
+    })
+    expect(fixture.server.connect('socket-b', () => undefined)).toBe(true)
+    expect(fixture.server.receive('socket-b', frame({
+      _tag: 'PlayerJoin', player: playerId('bob'), name: playerName('Bob'), at: { x: 0, y: 64, z: -3.2 },
+    })).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('wall-bow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('wall-bow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    expect(messages(fixture.sent)).not.toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', player: playerId('bob'),
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntitySpawnDelta',
+      entity: expect.objectContaining({
+        _tag: 'item-drop', at: { x: 0, y: 65.5, z: 0 }, stack: { item: 'arrow', count: 1 },
+      }),
+    }))
   })
 
   it('applies a bow arrow to the nearest opposing player and synchronizes their vitals', () => {
