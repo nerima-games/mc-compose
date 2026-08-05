@@ -1,16 +1,23 @@
 import {
   makeRuntimeRedstoneStages,
+  pistonPositionAt,
+  planPistonTransition,
   RedstoneWorldRuntime,
   RedstoneWorldRuntimeLayer,
   type RedstoneComponentSnapshot,
   type RedstonePosition,
 } from '@nerima-games/mx-redstone'
+import { blockIdOf, capabilityOfBlockId, isBlockType } from '@nerima-games/mc-kernel'
 import { Context, Effect, Layer, Scope } from 'effect'
 
 import type { MultiplayerServerCore } from './core'
 
 const lampBlocks = new Set(['redstone_lamp', 'redstone_lamp_lit'] as const)
 const doorBlocks = new Set(['door', 'door_open'] as const)
+const pistonCapabilities = {
+  pistonImmovable: (block: string): boolean =>
+    isBlockType(block) && capabilityOfBlockId(blockIdOf(block), 'pistonImmovable'),
+}
 
 export interface MultiplayerRedstoneRealm {
   readonly dimension: string
@@ -22,6 +29,7 @@ export interface MultiplayerRedstoneRuntime {
 }
 
 const componentForBlock = (
+  core: MultiplayerServerCore,
   block: string | null,
   position: RedstonePosition,
 ): RedstoneComponentSnapshot | undefined => {
@@ -42,6 +50,16 @@ const componentForBlock = (
     case 'door':
     case 'door_open':
       return { position, kind: 'door' }
+    case 'piston': {
+      const head = core.readPistonCell(pistonPositionAt(position, 'north', 1))
+      return {
+        position,
+        kind: 'piston',
+        pistonFacing: 'north',
+        pistonKind: 'sticky',
+        pistonState: head.kind === 'block' && head.block === 'piston_head' ? 'extended' : 'retracted',
+      }
+    }
     default:
       return undefined
   }
@@ -63,7 +81,7 @@ export const makeMultiplayerRedstoneRuntime = async (
     tick: (elapsedMs) => {
       for (const realm of realms) {
         const components = realm.core.snapshot().blocks.flatMap(({ at, block }) => {
-          const component = componentForBlock(block, at)
+          const component = componentForBlock(realm.core, block, at)
           return component === undefined ? [] : [component]
         })
         Effect.runSync(runtime.syncSnapshot({ dimension: realm.dimension, components }))
@@ -96,6 +114,12 @@ export const makeMultiplayerRedstoneRuntime = async (
           doorBlocks,
           event.powered ? 'door_open' : 'door',
         )
+      }
+      for (const event of Effect.runSync(runtime.drainPistonTransitions)) {
+        const realm = realmsByDimension.get(event.dimension)
+        if (realm === undefined) continue
+        const outcome = planPistonTransition(event, { read: realm.core.readPistonCell }, pistonCapabilities)
+        if (outcome.kind === 'move') realm.core.applyPistonPlan(outcome.plan)
       }
     },
   }

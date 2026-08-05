@@ -22,6 +22,7 @@ import {
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, StackCount } from '@nerima-games/mc-kernel'
+import { pistonPositionAt, validatePistonPlan, type PistonCellRead, type PistonMovementPlan } from '@nerima-games/mx-redstone'
 import { END_PORTAL_BLOCK, type Dimension } from '@nerima-games/mc-worldgen'
 import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
@@ -738,6 +739,8 @@ export interface MultiplayerServerCore {
     expectedBlocks: ReadonlySet<RedstoneStatefulBlock>,
     nextBlock: RedstoneStatefulBlock,
   ) => boolean
+  readonly readPistonCell: (at: BlockPos) => PistonCellRead
+  readonly applyPistonPlan: (plan: PistonMovementPlan) => boolean
   readonly tick: (elapsedMs: number) => void
   readonly spawnEntity: (entity: AuthoritativeEntityState) => boolean
 }
@@ -1141,6 +1144,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return override === undefined ? (options.generatedBlockAt?.(at) ?? null) : override.block
   }
 
+  const readPistonCell = (at: BlockPos): PistonCellRead => {
+    if (!isInBounds(at)) return { kind: 'out-of-world' }
+    const block = blockAt(at)
+    return block === null ? { kind: 'empty' } : { kind: 'block', block }
+  }
+
   const fishingEnvironmentAt = (water: BlockPos) => {
     let hasSkyAccess = true
     for (let y = water.y + 1; y <= bounds.maxY; y += 1) {
@@ -1341,6 +1350,37 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (!isRedstoneStatefulBlock(currentBlock) || !expectedBlocks.has(currentBlock) || currentBlock === nextBlock) return false
 
     blocks.set(positionKey(at), { at: { ...at }, block: nextBlock })
+    revision += 1
+    notifyStateChanged()
+    broadcast(snapshot())
+    return true
+  }
+
+  /** Commits a validated piston plan as one authoritative world revision. */
+  const applyPistonPlan = (plan: PistonMovementPlan): boolean => {
+    if (validatePistonPlan(plan) !== undefined || !isInBounds(plan.piston) || blockAt(plan.piston) !== 'piston') return false
+
+    const head = pistonPositionAt(plan.piston, plan.facing, 1)
+    if (!isInBounds(head) || (plan.fromState === 'extended' && blockAt(head) !== 'piston_head')) return false
+    if (plan.moves.some((move) => !isInBounds(move.from) || !isInBounds(move.to) || blockAt(move.from) !== move.block)) return false
+
+    if (plan.toState === 'extended') {
+      const finalTarget = plan.moves[0]?.to ?? head
+      if (blockAt(finalTarget) !== null) return false
+    }
+
+    for (const move of plan.moves) {
+      blocks.set(positionKey(move.to), { at: { ...move.to }, block: move.block })
+    }
+    for (const move of plan.moves) {
+      blocks.set(positionKey(move.from), { at: { ...move.from }, block: null })
+    }
+    if (plan.toState === 'extended') {
+      blocks.set(positionKey(head), { at: { ...head }, block: 'piston_head' })
+    } else if (plan.moves.length === 0) {
+      blocks.set(positionKey(head), { at: { ...head }, block: null })
+    }
+
     revision += 1
     notifyStateChanged()
     broadcast(snapshot())
@@ -4019,5 +4059,5 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
-  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, applyRedstoneBlockState, tick, spawnEntity }
+  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, applyRedstoneBlockState, readPistonCell, applyPistonPlan, tick, spawnEntity }
 }

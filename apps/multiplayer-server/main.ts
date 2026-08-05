@@ -52,6 +52,7 @@ const DEFAULT_BLOCKS = [
   'oak_leaves',
   'oak_log',
   'oak_planks',
+  'piston',
   'redstone_lamp',
   'redstone_torch',
   'redstone_wire',
