@@ -32,6 +32,7 @@ import {
   BLAZE_XP_REWARD,
   bowCharge,
   bowDamage,
+  arrowHitProjection,
   castFishing,
   advanceFishing,
   canFireBow,
@@ -189,24 +190,6 @@ export const anvilResultKey = (player: PlayerId, commandId: string): string => J
 const anvilFingerprint = (command: AnvilCommand): string => JSON.stringify(command)
 export const enchantingResultKey = (player: PlayerId, commandId: string): string => JSON.stringify([player, commandId])
 const enchantingFingerprint = (command: EnchantingCommand): string => JSON.stringify(command)
-
-const arrowHitProjection = (
-  from: Readonly<{ x: number; y: number; z: number }>,
-  to: Readonly<{ x: number; y: number; z: number }>,
-  target: Readonly<{ x: number; y: number; z: number }>,
-): number | undefined => {
-  const dx = to.x - from.x
-  const dy = to.y - from.y
-  const dz = to.z - from.z
-  const lengthSquared = dx ** 2 + dy ** 2 + dz ** 2
-  const projection = lengthSquared === 0
-    ? 0
-    : Math.min(1, Math.max(0, ((target.x - from.x) * dx + (target.y - from.y) * dy + (target.z - from.z) * dz) / lengthSquared))
-  const nearest = { x: from.x + dx * projection, y: from.y + dy * projection, z: from.z + dz * projection }
-  return (target.x - nearest.x) ** 2 + (target.y - nearest.y) ** 2 + (target.z - nearest.z) ** 2 <= 0.81
-    ? projection
-    : undefined
-}
 
 export interface MultiplayerServerOptions {
   readonly worldId: string
