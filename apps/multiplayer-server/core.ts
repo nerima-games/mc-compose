@@ -22,7 +22,7 @@ import {
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, StackCount } from '@nerima-games/mc-kernel'
-import type { Dimension } from '@nerima-games/mc-worldgen'
+import { END_PORTAL_BLOCK, type Dimension } from '@nerima-games/mc-worldgen'
 import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
@@ -102,8 +102,13 @@ import {
   type BrewingStandState,
   type StatusEffectState,
   applyEnchantmentOffer,
+  advanceEnderDragonEncounter,
   decodeEnchantedItem,
   enchantmentOffers,
+  decodeEnderDragonEncounterSnapshot,
+  damageEnderDragonByPlayer,
+  initialEnderDragonEncounter,
+  type EnderDragonEncounterSnapshot,
   type EnchantedItem,
 } from '@nerima-games/mx-gameplay'
 import { Either, Option } from 'effect'
@@ -124,6 +129,7 @@ import {
   type WitherRuntimeState,
 } from '../multiplayer-shared/wither-runtime'
 import { decodeWitherWireMessage, type WitherWireMessage } from '../multiplayer-shared/wither-network'
+import { decodeEnderDragonWireMessage, type EnderDragonWireMessage } from '../multiplayer-shared/ender-dragon-network'
 import {
   decodePlayerDamageWireMessage,
   PLAYER_DAMAGE_MAX_WIRE_LENGTH,
@@ -238,6 +244,8 @@ export interface MultiplayerServerState {
   }>>
   readonly wither?: WitherRuntimeSnapshot
   readonly witherRevision?: number
+  readonly enderDragon?: EnderDragonEncounterSnapshot
+  readonly enderDragonRevision?: number
   readonly brewingStands?: ReadonlyArray<Readonly<{ at: BlockPos; state: BrewingStandState }>>
   readonly statusEffects?: ReadonlyArray<Readonly<{ player: PlayerId; state: StatusEffectState }>>
   readonly anvilNames?: ReadonlyArray<Readonly<{
@@ -252,7 +260,7 @@ export interface MultiplayerServerState {
 }
 
 export type ReceiveResult =
-  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | PlayerDamageWireMessage | CraftingCommand | BrewingCommand | AnvilCommand | EnchantingCommand }>
+  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | EnderDragonWireMessage | PlayerDamageWireMessage | CraftingCommand | BrewingCommand | AnvilCommand | EnchantingCommand }>
   | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' | 'invalid-command' }>
 
 interface ConnectedClient {
@@ -464,6 +472,10 @@ const WITHER_INTERACTION_RANGE = 5
 const WITHER_ATTACK_DAMAGE = 4
 const WITHER_ATTACK_COOLDOWN_MS = 500
 const WITHER_TARGET_RANGE = 64
+const ENDER_DRAGON_INTERACTION_RANGE = 8
+const ENDER_DRAGON_ATTACK_DAMAGE = 4
+const ENDER_DRAGON_ATTACK_COOLDOWN_MS = 500
+const END_EXIT_PORTAL_BLOCK = blockTypeOfId(END_PORTAL_BLOCK.PORTAL) ?? 'end_portal'
 const positionKey = ({ x, y, z }: BlockPos): string => `${String(x)},${String(y)},${String(z)}`
 
 const cloneStack = (stack: ItemStack | null): ItemStack | null => stack === null ? null : { ...stack }
@@ -833,6 +845,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   let witherRevision = options.initialState?.witherRevision ?? 0
   let witherState: WitherRuntimeState = restoreWitherRuntime(options.initialState?.wither)
   const witherCommandResults = new Map<string, Extract<WitherWireMessage, { readonly _tag: 'WitherCommandResult' }>>()
+  let enderDragonRevision = options.initialState?.enderDragonRevision ?? 0
+  let enderDragonState = decodeEnderDragonEncounterSnapshot(options.initialState?.enderDragon) ?? initialEnderDragonEncounter()
+  const enderDragonCommandResults = new Map<string, Extract<EnderDragonWireMessage, { readonly _tag: 'EnderDragonCommandResult' }>>()
   const playerDamageResults = new Map<string, Readonly<{
     fingerprint: string
     result: PlayerDamageCommandResult
@@ -876,6 +891,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (oldestKey !== undefined) enchantingResults.delete(oldestKey)
   }
   const lastWitherAttackMs = new Map<PlayerId, number>()
+  const lastEnderDragonAttackMs = new Map<PlayerId, number>()
   const hungerActors = new Map<PlayerId, HungerActor>()
   let hungerTickRemainderMs = 0
   const sleepAuthority = new SleepAuthority({
@@ -930,6 +946,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     client.send(JSON.stringify(message) as WireText)
   }
 
+  const sendEnderDragon = (client: ConnectedClient, message: EnderDragonWireMessage): void => {
+    client.send(JSON.stringify(message) as WireText)
+  }
+
   const sendPlayerDamage = (client: ConnectedClient, message: PlayerDamageCommandResult): void => {
     client.send(JSON.stringify(message) as WireText)
   }
@@ -948,6 +968,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
 
   const broadcastWither = (message: WitherWireMessage): void => {
     for (const client of clients.values()) if (client.playerId !== null) sendWither(client, message)
+  }
+  const broadcastEnderDragon = (message: EnderDragonWireMessage): void => {
+    for (const client of clients.values()) if (client.playerId !== null) sendEnderDragon(client, message)
   }
   const broadcastBrewing = (message: BrewingWireMessage): void => {
     for (const client of clients.values()) if (client.playerId !== null) sendBrewing(client, message)
@@ -1048,6 +1071,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     _tag: 'WitherSnapshot',
     revision: witherRevision,
     snapshot: snapshotWitherRuntime(witherState),
+  })
+
+  const enderDragonSnapshot = (): EnderDragonWireMessage => ({
+    _tag: 'EnderDragonSnapshot',
+    revision: enderDragonRevision,
+    snapshot: enderDragonState,
   })
 
   const snapshot = (): WorldSnapshot => ({
@@ -1206,6 +1235,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     })),
     wither: snapshotWitherRuntime(witherState),
     witherRevision,
+    enderDragon: enderDragonState,
+    enderDragonRevision,
     brewingStands: [...brewingStands.values()].map(({ at, state }) => ({ at: { ...at }, state: copyBrewingStandState(state) })),
     statusEffects: [...statusEffects].map(([player, state]) => ({ player, state: copyStatusEffectState(state) })),
     anvilNames: [...anvilNames].map(([player, names]) => ({
@@ -2780,6 +2811,78 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       broadcastWither(witherSnapshot())
       return { accepted: true, message: witherMessage }
     }
+    const enderDragonMessage = decodeEnderDragonWireMessage(frame)
+    if (enderDragonMessage?._tag === 'EnderDragonCommand') {
+      if (client.playerId === null) return { accepted: false, reason: 'join-required' }
+      const command = enderDragonMessage.command
+      if (command.actor !== client.playerId) return { accepted: false, reason: 'identity-spoof' }
+      if (dimension !== 'end') return { accepted: false, reason: 'wrong-world' }
+      const resultKey = `${String(command.actor)}\u0000${command.requestId}`
+      const cachedResult = enderDragonCommandResults.get(resultKey)
+      if (cachedResult !== undefined) {
+        sendEnderDragon(client, cachedResult)
+        return cachedResult.accepted
+          ? { accepted: true, message: enderDragonMessage }
+          : { accepted: false, reason: 'invalid-command' }
+      }
+      const rejectEnderDragon = (reason: 'stale-revision' | 'invalid-command'): ReceiveResult => {
+        const result = { _tag: 'EnderDragonCommandResult', requestId: command.requestId, accepted: false, revision: enderDragonRevision, reason } as const
+        enderDragonCommandResults.set(resultKey, result)
+        sendEnderDragon(client, result)
+        return { accepted: false, reason: 'invalid-command' }
+      }
+      if (command.expectedRevision !== enderDragonRevision) return rejectEnderDragon('stale-revision')
+      const actor = players.get(command.actor as PlayerId)
+      const actorVitals = vitals.get(command.actor as PlayerId)
+      const lastAttackMs = lastEnderDragonAttackMs.get(command.actor as PlayerId)
+      const angle = enderDragonState.phaseTimerSecs * (enderDragonState.phase === 'charging' ? 1.4 : 0.35)
+      const radius = enderDragonState.phase === 'perching' ? 4 : enderDragonState.phase === 'charging' ? 8 : 20
+      const dragonAt = { x: Math.cos(angle) * radius, y: 72 + Math.sin(angle * 0.5) * 8, z: Math.sin(angle) * radius }
+      if (actor === undefined || actorVitals === undefined || actor.world !== worldId || actorVitals.health <= 0
+        || enderDragonState.phase === 'dead' || (lastAttackMs !== undefined && (options.now?.() ?? Date.now()) - lastAttackMs < ENDER_DRAGON_ATTACK_COOLDOWN_MS)
+        || Math.hypot(actor.at.x - dragonAt.x, actor.at.y - dragonAt.y, actor.at.z - dragonAt.z) > ENDER_DRAGON_INTERACTION_RANGE) {
+        return rejectEnderDragon('invalid-command')
+      }
+      lastEnderDragonAttackMs.set(command.actor as PlayerId, options.now?.() ?? Date.now())
+      const damage = damageEnderDragonByPlayer(enderDragonState, ENDER_DRAGON_ATTACK_DAMAGE)
+      if (damage._tag === 'Rejected') return rejectEnderDragon('invalid-command')
+      enderDragonState = damage.state
+      for (const event of damage.events) {
+        if (event._tag === 'ExperienceRewarded') {
+          actorVitals.experience += event.amount
+          revision += 1
+          broadcast({ _tag: 'PlayerVitalsDelta', world: actor.world, revision, player: command.actor as PlayerId, state: vitalsSnapshot(actorVitals) })
+        }
+        if (event._tag === 'DragonEggRewarded') {
+          const drop: AuthoritativeEntityState = {
+            _tag: 'item-drop',
+            entityId: `ender-dragon:egg:${String(enderDragonRevision + 1)}` as AuthoritativeEntityState['entityId'],
+            at: { x: 0, y: 65, z: 0 },
+            stack: { item: event.item, count: event.count },
+          }
+          entities.set(drop.entityId, drop)
+          revision += 1
+          broadcast({ _tag: 'EntitySpawnDelta', world: worldId, revision, entity: drop })
+        }
+        if (event._tag === 'ExitPortalMaterializationRequested') {
+          for (let x = -1; x <= 1; x += 1) {
+            for (let z = -1; z <= 1; z += 1) {
+              const at = { x, y: 64, z }
+              blocks.set(positionKey(at), { at, block: END_EXIT_PORTAL_BLOCK })
+            }
+          }
+          revision += 1
+          broadcast(snapshot())
+        }
+      }
+      enderDragonRevision += 1
+      notifyStateChanged()
+      const acceptedResult = { _tag: 'EnderDragonCommandResult', requestId: command.requestId, accepted: true, revision: enderDragonRevision } as const
+      enderDragonCommandResults.set(resultKey, acceptedResult)
+      sendEnderDragon(client, acceptedResult)
+      broadcastEnderDragon(enderDragonSnapshot())
+      return { accepted: true, message: enderDragonMessage }
+    }
     const sleepMessage = decodeSleepWireMessage(frame)
     if (sleepMessage?._tag === 'SleepCommand') {
       if (client.playerId === null) return { accepted: false, reason: 'join-required' }
@@ -2866,6 +2969,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       const authoritativeJoin = { ...message, at: authoritativeAt }
       broadcast(authoritativeJoin, clientId)
       sendWither(client, witherSnapshot())
+      sendEnderDragon(client, enderDragonSnapshot())
       return { accepted: true, message: authoritativeJoin }
     }
 
@@ -3153,6 +3257,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     })
     sendSleep(client, { _tag: 'SleepSnapshot', snapshot: sleepAuthority.snapshot() })
     sendWither(client, witherSnapshot())
+    sendEnderDragon(client, enderDragonSnapshot())
     return true
   }
 
@@ -3761,6 +3866,47 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         witherRevision += 1
         stateChanged = true
         broadcastWither(witherSnapshot())
+      }
+    }
+
+    if (dimension === 'end') {
+      const [advancedDragon, dragonEvents] = advanceEnderDragonEncounter(enderDragonState, elapsedMs / 1_000)
+      if (JSON.stringify(advancedDragon) !== JSON.stringify(enderDragonState)) {
+        enderDragonState = advancedDragon
+        enderDragonRevision += 1
+        stateChanged = true
+        broadcastEnderDragon(enderDragonSnapshot())
+      }
+      for (const event of dragonEvents) {
+        if (event._tag !== 'PlayerDamaged') continue
+        const angle = advancedDragon.phaseTimerSecs * (advancedDragon.phase === 'charging' ? 1.4 : 0.35)
+        const radius = advancedDragon.phase === 'perching' ? 4 : advancedDragon.phase === 'charging' ? 8 : 20
+        const dragonAt = { x: Math.cos(angle) * radius, y: 72 + Math.sin(angle * 0.5) * 8, z: Math.sin(angle) * radius }
+        const damagedPlayers = [...players].flatMap(([player, presence]) => {
+          if (presence.world !== worldId || Math.hypot(
+            presence.at.x - dragonAt.x,
+            presence.at.y - dragonAt.y,
+            presence.at.z - dragonAt.z,
+          ) > 6) return []
+          const playerVitals = vitals.get(player)
+          if (playerVitals === undefined || playerVitals.health <= 0) return []
+          const wasAlive = playerVitals.health > 0
+          playerVitals.health = Math.max(0, playerVitals.health - event.amount)
+          const hungerActor = hungerActors.get(player)
+          if (hungerActor !== undefined) hungerActors.set(player, {
+            ...hungerActor,
+            state: { ...hungerActor.state, health: playerVitals.health },
+          })
+          return [{ player, died: wasAlive && playerVitals.health <= 0 }] as const
+        })
+        if (damagedPlayers.length === 0) continue
+        revision += 1
+        stateChanged = true
+        postPersistenceDeltas.push(...applyPlayerDeaths(damagedPlayers.filter((entry) => entry.died).map((entry) => entry.player), revision))
+        for (const { player } of damagedPlayers) {
+          const presence = players.get(player)
+          if (presence !== undefined) postPersistenceDeltas.push({ _tag: 'PlayerVitalsDelta', world: presence.world, revision, player, state: vitalsSnapshot(vitals.get(player) as MutableVitalsState) })
+        }
       }
     }
 

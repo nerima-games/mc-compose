@@ -1685,8 +1685,14 @@ const bootGame = async (
   let witherRuntimeState = restoreWitherRuntime(
     Option.isSome(loadedSession) ? loadedSession.value.state.wither : undefined,
   )
+  let authoritativeEnderDragonSnapshot = Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
+  let enderDragonRevision = 0
+  let nextEnderDragonCommand = 0
+  const endDragonSnapshot = () => multiplayer === undefined
+    ? Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
+    : authoritativeEnderDragonSnapshot
   const endDragonPosition = (): SessionPosition => {
-    const dragon = Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
+    const dragon = endDragonSnapshot()
     const angle = dragon.phaseTimerSecs * (dragon.phase === 'charging' ? 1.4 : 0.35)
     const radius = dragon.phase === 'perching' ? 4 : dragon.phase === 'charging' ? 8 : 20
     return {
@@ -1947,7 +1953,7 @@ const bootGame = async (
       end: {
         frames: [...endPortalFrames.values()],
         portalComplete: endPortalComplete,
-        dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
+        dragon: endDragonSnapshot(),
         exitPortalMaterialized,
         dragonEggRewarded,
       },
@@ -3095,6 +3101,12 @@ type MultiplayerInventorySelection = Readonly<{
     for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.witherInbound))) {
       if (message._tag === 'WitherSnapshot') {
         witherRuntimeState = restoreWitherRuntime(message.snapshot)
+      }
+    }
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.enderDragonInbound))) {
+      if (message._tag === 'EnderDragonSnapshot' && message.revision >= enderDragonRevision) {
+        enderDragonRevision = message.revision
+        authoritativeEnderDragonSnapshot = message.snapshot
       }
     }
     for (const message of Effect.runSync(multiplayer.host.drainInbound)) {
@@ -6298,7 +6310,7 @@ type MultiplayerInventorySelection = Readonly<{
         feetPosition: villager.feetPosition,
       } satisfies RenderEntity)),
     ...(currentChunkContext.dimension === 'end'
-      && Effect.runSync(gameplayState.enderDragonEncounter.snapshot).phase !== 'dead'
+      && endDragonSnapshot().phase !== 'dead'
       ? [{
           id: 'ender-dragon',
           kind: 'ender_dragon',
@@ -6421,7 +6433,7 @@ type MultiplayerInventorySelection = Readonly<{
       end: {
         frames: [...endPortalFrames.values()],
         portalComplete: endPortalComplete,
-        dragon: Effect.runSync(gameplayState.enderDragonEncounter.snapshot),
+        dragon: endDragonSnapshot(),
         exitPortalMaterialized,
         dragonEggRewarded,
       },
@@ -8983,9 +8995,19 @@ type MultiplayerInventorySelection = Readonly<{
         const alignment = distance === 0 ? 1 : (dx * forward.x + dy * forward.y + dz * forward.z) / distance
         if (distance <= DEFAULT_BLOCK_REACH + 3 && alignment >= 0.8) {
           const damage = inventoryMeleeDamage(selectedHotbarIndex)
-          Effect.runSync(gameplayState.enderDragonEncounter.damageByPlayer(Math.max(1, damage)))
+          if (multiplayer === undefined) {
+            Effect.runSync(gameplayState.enderDragonEncounter.damageByPlayer(Math.max(1, damage)))
+          } else {
+            nextEnderDragonCommand += 1
+            Effect.runFork(multiplayer.transport.sendEnderDragon({
+              _tag: 'DamageEnderDragon',
+              actor: String(multiplayer.query.player),
+              requestId: `ender-dragon:${nextEnderDragonCommand}`,
+              expectedRevision: enderDragonRevision,
+            }))
+          }
           primaryAttackGestureConsumed = true
-          markSessionDirty()
+          if (multiplayer === undefined) markSessionDirty()
         }
       }
 
@@ -10026,7 +10048,9 @@ type MultiplayerInventorySelection = Readonly<{
       }
       if (mobExperience.length > 0 || (multiplayer === undefined && playerHeals.length > 0)) markSessionDirty()
 
-      const dragonEvents = Effect.runSync(gameplayState.enderDragonEncounter.drainEvents)
+      const dragonEvents = multiplayer === undefined
+        ? Effect.runSync(gameplayState.enderDragonEncounter.drainEvents)
+        : []
       for (const event of dragonEvents) {
         switch (event._tag) {
           case 'PlayerDamaged': {
@@ -10073,7 +10097,7 @@ type MultiplayerInventorySelection = Readonly<{
         }
       }
       if (dragonEvents.length > 0) markSessionDirty()
-      const dragonSnapshot = Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
+      const dragonSnapshot = endDragonSnapshot()
       canvas.setAttribute('data-end-dragon-phase', dragonSnapshot.phase)
       canvas.setAttribute('data-end-dragon-health', String(dragonSnapshot.health))
       endAudio.update({

@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest'
 import { makeMultiplayerServerCore, type MultiplayerServerOptions, type MultiplayerServerState, type ReceiveResult } from '../../apps/multiplayer-server/core'
 import { decodeAnvilWireMessage } from '../../apps/multiplayer-shared/anvil-network'
 import { decodeBrewingWireMessage } from '../../apps/multiplayer-shared/brewing-network'
+import { decodeEnderDragonWireMessage, type EnderDragonWireMessage } from '../../apps/multiplayer-shared/ender-dragon-network'
 import { decodeEnchantingWireMessage } from '../../apps/multiplayer-shared/enchanting-network'
 import { decodeSleepWireMessage, type SleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage, type WitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
@@ -31,7 +32,7 @@ const frame = (message: NetworkMessage): WireText => {
 }
 
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
-  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined && decodeWitherWireMessage(wire) === undefined && decodeBrewingWireMessage(wire) === undefined && decodeAnvilWireMessage(wire) === undefined && decodeEnchantingWireMessage(wire) === undefined).map((wire) => {
+  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined && decodeWitherWireMessage(wire) === undefined && decodeEnderDragonWireMessage(wire) === undefined && decodeBrewingWireMessage(wire) === undefined && decodeAnvilWireMessage(wire) === undefined && decodeEnchantingWireMessage(wire) === undefined).map((wire) => {
     const result = decodeFrame(wire)
     if (Either.isLeft(result)) throw result.left
     return result.right
@@ -46,6 +47,12 @@ const sleepMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<SleepWire
 const witherMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<WitherWireMessage> =>
   frames.flatMap((wire) => {
     const message = decodeWitherWireMessage(wire)
+    return message === undefined ? [] : [message]
+  })
+
+const enderDragonMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<EnderDragonWireMessage> =>
+  frames.flatMap((wire) => {
+    const message = decodeEnderDragonWireMessage(wire)
     return message === undefined ? [] : [message]
   })
 
@@ -131,8 +138,11 @@ const makeFixture = (
     server.receive(clientId, JSON.stringify(message) as WireText)
   const receiveWither = (clientId: string, message: WitherWireMessage): ReceiveResult =>
     server.receive(clientId, JSON.stringify(message) as WireText)
+  const receiveEnderDragon = (clientId: string, message: EnderDragonWireMessage): ReceiveResult =>
+    server.receive(clientId, JSON.stringify(message) as WireText)
   const advanceTime = (elapsedMs: number): void => { nowMs += elapsedMs }
-  return { server, sent, connect, receive, receiveSleep, receiveWither, advanceTime }
+  const tick = (elapsedMs: number): void => server.tick(elapsedMs)
+  return { server, sent, connect, receive, receiveSleep, receiveWither, receiveEnderDragon, advanceTime, tick }
 }
 
 describe('authoritative multiplayer server core', () => {
@@ -877,5 +887,58 @@ describe('authoritative multiplayer server core', () => {
       seed: 73,
       items: [{ slot: 0, item: enchantedStone }],
     })
+  })
+
+  it('authoritatively resolves Ender Dragon attacks and completion rewards', () => {
+    const fixture = makeFixture(() => null, 6_000, { x: 20, y: 76, z: 0 }, 'clear', 'end')
+    const frames = fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+    frames.length = 0
+
+    for (let hit = 0; hit < 50; hit += 1) {
+      if (hit > 0) fixture.advanceTime(500)
+      expect(fixture.receiveEnderDragon('socket-a', {
+        _tag: 'EnderDragonCommand',
+        command: { _tag: 'DamageEnderDragon', actor: 'alice', requestId: `hit-${String(hit)}`, expectedRevision: hit },
+      })).toEqual(expect.objectContaining({ accepted: true }))
+    }
+
+    expect(enderDragonMessages(frames)).toContainEqual(expect.objectContaining({
+      _tag: 'EnderDragonSnapshot', revision: 50,
+      snapshot: expect.objectContaining({ phase: 'dead', health: 0, rewardEmitted: true }),
+    }))
+    expect(messages(frames)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerVitalsDelta',
+        player: playerId('alice'),
+        state: expect.objectContaining({ experience: 12_000 }),
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({ _tag: 'item-drop', stack: { item: 'dragon_egg', count: 1 } }),
+      }),
+    ]))
+    expect(fixture.server.snapshot().blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ at: { x: 0, y: 64, z: 0 }, block: 'end_portal' }),
+    ]))
+  })
+
+  it('authoritatively applies Ender Dragon charge damage in the End dimension', () => {
+    const fixture = makeFixture(() => null, 6_000, { x: 8, y: 72, z: 0 }, 'clear', 'end')
+    const frames = fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+    frames.length = 0
+
+    fixture.tick(14_000)
+
+    expect(enderDragonMessages(frames)).toContainEqual(expect.objectContaining({
+      _tag: 'EnderDragonSnapshot',
+      snapshot: expect.objectContaining({ phase: 'charging' }),
+    }))
+    expect(messages(frames)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta',
+      player: playerId('alice'),
+      state: expect.objectContaining({ health: 10 }),
+    }))
   })
 })
