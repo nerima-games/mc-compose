@@ -8520,13 +8520,11 @@ type MultiplayerInventorySelection = Readonly<{
       }
 
       const playerDamages = Effect.runSync(drainPlayerDamages(gameplayState))
-      if (multiplayer === undefined) {
-        for (const event of playerDamages) {
-          applyPlayerDamage(
-            event.damage,
-            event._tag === 'StatusEffect' ? event.minimumHealthPoints : 0,
-          )
-        }
+      for (const event of playerDamages) {
+        applyPlayerDamage(
+          event.damage,
+          event._tag === 'StatusEffect' ? event.minimumHealthPoints : 0,
+        )
       }
       const playerHeals = Effect.runSync(drainPlayerHeals(gameplayState))
       if (multiplayer === undefined) {

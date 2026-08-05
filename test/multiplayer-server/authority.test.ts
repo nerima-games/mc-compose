@@ -48,6 +48,7 @@ import {
 } from '../../apps/multiplayer-shared/enchanting-network'
 import { decodeSleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
+import { decodeEnderDragonWireMessage } from '../../apps/multiplayer-shared/ender-dragon-network'
 
 const playerId = (value: string): PlayerId => value as PlayerId
 const playerName = (value: string): PlayerName => value as PlayerName
@@ -67,6 +68,7 @@ const frame = (message: NetworkMessage): WireText => {
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
   frames.filter((wire) => decodeSleepWireMessage(wire) === undefined
     && decodeWitherWireMessage(wire) === undefined
+    && decodeEnderDragonWireMessage(wire) === undefined
     && decodePlayerDamageWireMessage(wire) === undefined
     && decodeCraftingWireMessage(wire) === undefined
     && decodeBrewingWireMessage(wire) === undefined

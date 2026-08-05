@@ -7,6 +7,15 @@ import { join } from 'node:path'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const PLAYER_AT = { x: 8.5, y: 65, z: 10.5 } as const
+const ENVIRONMENT_PLAYER_AT = { x: 24.95, y: 65, z: 8.5 } as const
+const ENVIRONMENT_BLOCKS = [
+  { at: { x: 23, y: 64, z: 8 }, block: 'stone' },
+  { at: { x: 24, y: 64, z: 8 }, block: 'stone' },
+  { at: { x: 25, y: 64, z: 8 }, block: 'stone' },
+  { at: { x: 26, y: 64, z: 8 }, block: 'stone' },
+  { at: { x: 24, y: 65, z: 8 }, block: 'lava' },
+  { at: { x: 25, y: 65, z: 8 }, block: 'lava' },
+] as const
 const BOOT_TIMEOUT_MS = 15_000
 const LEGACY_SECRETS = {
   'survival-alice': 'survival-alice-registration-secret',
@@ -239,6 +248,40 @@ test.afterAll(async () => {
   serverProcess?.kill('SIGTERM')
   if (stateDirectory !== undefined) {
     await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test('routes environmental survival damage through multiplayer authority', async ({ browser }) => {
+  const environmentStateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-environmental-authority-e2e-'))
+  const environmentStateFile = join(environmentStateDirectory, 'state.json')
+  const environmentClaimsFile = join(environmentStateDirectory, 'claims.json')
+  let environmentServer: ChildProcess | undefined
+  let alice: PlayerSession | undefined
+
+  try {
+    await writeFile(environmentStateFile, `${JSON.stringify({
+      format: 1,
+      worldId: 'overworld',
+      seed: 0,
+      state: {
+        ...initialState,
+        blocks: ENVIRONMENT_BLOCKS,
+        playerPositions: initialState.playerPositions.map((position) => ({
+          ...position,
+          at: ENVIRONMENT_PLAYER_AT,
+        })),
+      },
+    })}\n`, 'utf8')
+    await writeFile(environmentClaimsFile, `${JSON.stringify(claimsFor(LEGACY_SECRETS))}\n`, 'utf8')
+    const started = await startServer(environmentStateFile, environmentClaimsFile)
+    environmentServer = started.process
+    alice = await connectPlayer(browser, started.url, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
+
+    await expect.poll(async () => (await snapshot(alice!.page)).vitals.healthPoints).toBe(9)
+  } finally {
+    await alice?.context.close()
+    environmentServer?.kill('SIGTERM')
+    await rm(environmentStateDirectory, { recursive: true, force: true })
   }
 })
 
