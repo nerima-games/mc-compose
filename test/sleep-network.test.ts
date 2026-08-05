@@ -8,6 +8,8 @@ import {
   decodeSleepWireMessage,
   initialSleepClientState,
   queueSleepCommand,
+  SLEEP_MAX_IDENTIFIER_LENGTH,
+  SLEEP_MAX_WIRE_LENGTH,
   sleepClientFromSnapshot,
   type SleepCommand,
 } from '../apps/multiplayer-shared/sleep-network'
@@ -60,6 +62,23 @@ describe('authoritative sleep network adapter', () => {
     expect(decodeSleepWireMessage(JSON.stringify(malformedSnapshot))).toBeUndefined()
     expect(decodeSleepWireMessage(JSON.stringify(malformedEvents))).toBeUndefined()
     expect(decodeSleepWireMessage(JSON.stringify(malformedResult))).toBeUndefined()
+  })
+
+  it('rejects oversized sleep wires and command identifiers', () => {
+    const base = {
+      _tag: 'SleepCommand',
+      command: {
+        _tag: 'EnterSleep', actor: 'alice', session: 'session-a', requestId: 'sleep-size',
+        expectedRevision: 0, clientTick: 5, bed,
+      },
+    }
+    for (const key of ['actor', 'session', 'requestId'] as const) {
+      const wire = JSON.stringify({ ...base, command: { ...base.command, [key]: 'x'.repeat(SLEEP_MAX_IDENTIFIER_LENGTH + 1) } })
+      expect(decodeSleepWireMessage(wire)).toBeUndefined()
+    }
+    const oversized = `${JSON.stringify(base)}${' '.repeat(SLEEP_MAX_WIRE_LENGTH)}`
+    expect(oversized.length).toBeGreaterThan(SLEEP_MAX_WIRE_LENGTH)
+    expect(decodeSleepWireMessage(oversized)).toBeUndefined()
   })
 
   it('does not apply local sleep until the server accepts it', () => {

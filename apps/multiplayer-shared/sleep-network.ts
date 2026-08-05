@@ -21,8 +21,17 @@ export type SleepWireMessage =
   | { readonly _tag: 'SleepSnapshot'; readonly snapshot: SurvivalSnapshot }
   | { readonly _tag: 'SleepEvents'; readonly revision: number; readonly events: ReadonlyArray<SurvivalEvent> }
 
+export const SLEEP_MAX_WIRE_LENGTH = 1_048_576
+export const SLEEP_MAX_IDENTIFIER_LENGTH = 128
+
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === 'object' && value !== null
+
+const isIdentifier = (value: unknown): value is string =>
+  typeof value === 'string'
+  && value.length > 0
+  && value.length <= SLEEP_MAX_IDENTIFIER_LENGTH
+  && !/\p{Cc}/u.test(value)
 
 const isFiniteInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value)
@@ -41,8 +50,8 @@ const isSleepState = (value: unknown): value is SurvivalSleepState =>
 
 const isActorState = (value: unknown): value is SurvivalActorState =>
   isRecord(value)
-  && typeof value['player'] === 'string'
-  && typeof value['session'] === 'string'
+  && isIdentifier(value['player'])
+  && isIdentifier(value['session'])
   && isPosition(value['position'])
   && (value['gameMode'] === 'survival' || value['gameMode'] === 'creative' || value['gameMode'] === 'spectator')
   && Array.isArray(value['inventory'])
@@ -56,16 +65,16 @@ const isActorState = (value: unknown): value is SurvivalActorState =>
 const isSurvivalEvent = (value: unknown): value is SurvivalEvent => {
   if (!isRecord(value)) return false
   if (value['_tag'] === 'InventoryChanged') {
-    return typeof value['actor'] === 'string' && isFiniteInteger(value['slot']) && (value['stack'] === null || isItemStack(value['stack']))
+    return isIdentifier(value['actor']) && isFiniteInteger(value['slot']) && (value['stack'] === null || isItemStack(value['stack']))
   }
   if (value['_tag'] === 'BlockChanged') return isPosition(value['at']) && (value['block'] === null || typeof value['block'] === 'string')
   if (value['_tag'] === 'ActorDamaged') {
-    return typeof value['actor'] === 'string' && typeof value['source'] === 'string' && typeof value['health'] === 'number' && Number.isFinite(value['health'])
+    return isIdentifier(value['actor']) && typeof value['source'] === 'string' && typeof value['health'] === 'number' && Number.isFinite(value['health'])
   }
-  if (value['_tag'] === 'ActorDied') return typeof value['actor'] === 'string' && typeof value['killer'] === 'string'
+  if (value['_tag'] === 'ActorDied') return isIdentifier(value['actor']) && typeof value['killer'] === 'string'
   if (value['_tag'] === 'ItemDropped') return typeof value['item'] === 'string' && isFiniteInteger(value['count']) && value['count'] > 0 && isPosition(value['at'])
-  if (value['_tag'] === 'ActorRespawned') return typeof value['actor'] === 'string' && isPosition(value['at']) && typeof value['health'] === 'number' && Number.isFinite(value['health'])
-  if (value['_tag'] === 'ActorSleepChanged') return typeof value['actor'] === 'string' && (value['sleeping'] === null || isSleepState(value['sleeping']))
+  if (value['_tag'] === 'ActorRespawned') return isIdentifier(value['actor']) && isPosition(value['at']) && typeof value['health'] === 'number' && Number.isFinite(value['health'])
+  if (value['_tag'] === 'ActorSleepChanged') return isIdentifier(value['actor']) && (value['sleeping'] === null || isSleepState(value['sleeping']))
   if (value['_tag'] === 'SleepProgress') {
     return isFiniteInteger(value['sleeping']) && isFiniteInteger(value['required']) && isFiniteInteger(value['connected']) && typeof value['ready'] === 'boolean'
   }
@@ -96,7 +105,7 @@ const isRejectionReason = (value: unknown): value is Extract<SurvivalCommandResu
 
 const isCommandResult = (value: unknown): value is SurvivalCommandResult =>
   isRecord(value)
-  && typeof value['requestId'] === 'string'
+  && isIdentifier(value['requestId'])
   && isFiniteInteger(value['revision'])
   && ((value['accepted'] === true && Array.isArray(value['events']) && value['events'].every(isSurvivalEvent))
     || (value['accepted'] === false && isRejectionReason(value['reason'])))
@@ -114,15 +123,16 @@ const isSnapshot = (value: unknown): value is SurvivalSnapshot =>
 
 const isSleepCommand = (value: unknown): value is SleepCommand => {
   if (!isRecord(value) || (value['_tag'] !== 'EnterSleep' && value['_tag'] !== 'LeaveSleep')) return false
-  const validBase = typeof value['actor'] === 'string'
-    && typeof value['session'] === 'string'
-    && typeof value['requestId'] === 'string'
+  const validBase = isIdentifier(value['actor'])
+    && isIdentifier(value['session'])
+    && isIdentifier(value['requestId'])
     && isFiniteInteger(value['expectedRevision'])
     && isFiniteInteger(value['clientTick'])
   return validBase && (value['_tag'] === 'LeaveSleep' || isPosition(value['bed']))
 }
 
 export const decodeSleepWireMessage = (frame: string): SleepWireMessage | undefined => {
+  if (frame.length > SLEEP_MAX_WIRE_LENGTH) return undefined
   try {
     const value: unknown = JSON.parse(frame)
     if (!isRecord(value)) return undefined
