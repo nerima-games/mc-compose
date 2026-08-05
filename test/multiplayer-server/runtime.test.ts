@@ -327,7 +327,7 @@ describe('multiplayer WebSocket runtime', () => {
     })).rejects.toThrow(/Failed to read multiplayer state/)
   })
 
-  it('registers legacy players from every persisted authority collection and then rotates normally', async () => {
+  it('lets legacy players reclaim a lost browser token and then rotates normally', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'mc-compose-server-'))
     const stateFile = join(directory, 'state.json')
     const claimsFile = join(directory, 'claims.json')
@@ -372,9 +372,16 @@ describe('multiplayer WebSocket runtime', () => {
       socket.close()
       await closed
 
+      const reclaimedSocket = await connect(runtime)
+      const reclaimed = await authenticate(reclaimedSocket, player, undefined, secret)
+      expect(reclaimed.token).not.toBe(registered.token)
+      const reclaimedClosed = waitForClose(reclaimedSocket)
+      reclaimedSocket.close()
+      await reclaimedClosed
+
       const reconnect = await connect(runtime)
-      const rotated = await authenticate(reconnect, player, registered.token)
-      expect(rotated.token).not.toBe(registered.token)
+      const rotated = await authenticate(reconnect, player, reclaimed.token)
+      expect(rotated.token).not.toBe(reclaimed.token)
       const reconnectClosed = waitForClose(reconnect)
       reconnect.close()
       await reconnectClosed

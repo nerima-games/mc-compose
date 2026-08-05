@@ -78,6 +78,7 @@ export interface MultiplayerRuntimeOptions {
   readonly tlsKey?: string
   readonly allowedOrigins?: string
   readonly legacyPlayerClaimsFile?: string
+  readonly maxMoveDistance?: number
 }
 
 export interface MultiplayerRuntime {
@@ -499,6 +500,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     ],
     ...(initialState === undefined ? {} : { initialState }),
     ...(persistence === undefined ? {} : { onStateChanged: persistence.request }),
+    ...(options.maxMoveDistance === undefined ? {} : { maxMoveDistance: options.maxMoveDistance }),
     passableBlocks: new Set(['water', 'end_portal', 'nether_portal']),
     onEndPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, endCore, endSpawnAt, command),
     onNetherPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, netherCore, netherSpawnAt, command),
@@ -513,6 +515,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     staticBlocks: [{ at: netherPortalAt, block: 'nether_portal' }],
     ...(netherInitialState === undefined ? {} : { initialState: netherInitialState }),
     ...(netherPersistence === undefined ? {} : { onStateChanged: netherPersistence.request }),
+    ...(options.maxMoveDistance === undefined ? {} : { maxMoveDistance: options.maxMoveDistance }),
     passableBlocks: new Set(['water', 'nether_portal']),
     onNetherPortalUse: (clientId, command) => transferPlayer(clientId, netherCore, overworldCore, overworldSpawnAt, command),
   })
@@ -526,6 +529,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     staticBlocks: endStaticBlocks,
     ...(endInitialState === undefined ? {} : { initialState: endInitialState }),
     ...(endPersistence === undefined ? {} : { onStateChanged: endPersistence.request }),
+    ...(options.maxMoveDistance === undefined ? {} : { maxMoveDistance: options.maxMoveDistance }),
     passableBlocks: new Set(['water', 'end_portal']),
     onEndPortalUse: (clientId, command) => transferPlayer(clientId, endCore, overworldCore, overworldSpawnAt, command),
   })
@@ -597,14 +601,16 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       reservedPlayers.add(player)
       try {
         let token: string | undefined
+        const verifiedLegacyRegistration = resume.token === undefined
+          && resume.registrationToken !== undefined
+          && legacyPlayerClaims?.has(player) === true
+          && legacyPlayerClaims.verify(player, resume.registrationToken)
         if (reconnectAuth.has(player)) {
-          token = resume.token === undefined ? undefined : await reconnectAuth.rotate(player, resume.token)
+          token = resume.token === undefined
+            ? (verifiedLegacyRegistration ? await reconnectAuth.reissue(player) : undefined)
+            : await reconnectAuth.rotate(player, resume.token)
         } else if (legacyPlayers.has(player)) {
-          token = resume.registrationToken !== undefined
-            && legacyPlayerClaims?.has(player) === true
-            && legacyPlayerClaims.verify(player, resume.registrationToken)
-            ? await reconnectAuth.issue(player)
-            : undefined
+          token = verifiedLegacyRegistration ? await reconnectAuth.issue(player) : undefined
         } else {
           token = await reconnectAuth.issue(player)
         }

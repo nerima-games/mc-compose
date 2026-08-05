@@ -1686,6 +1686,8 @@ const bootGame = async (
   let witherRuntimeState = restoreWitherRuntime(
     Option.isSome(loadedSession) ? loadedSession.value.state.wither : undefined,
   )
+  let witherRevision = 0
+  let nextWitherCommand = 0
   let authoritativeEnderDragonSnapshot = Effect.runSync(gameplayState.enderDragonEncounter.snapshot)
   let enderDragonRevision = 0
   let nextEnderDragonCommand = 0
@@ -3023,6 +3025,12 @@ const bootGame = async (
   const multiplayerInboundStage = multiplayer?.host.stages.find(
     (stage) => stage.id === 'multiplayer:inbound',
   )
+  // The server deduplicates commands across reconnects, so a fresh page must not reuse its counters.
+  const multiplayerCommandSessionId = crypto.randomUUID()
+  const commandIdFor = (scope: string, sequence: number): CommandId =>
+    CommandId.make(`${scope}-${multiplayerCommandSessionId}-${String(sequence)}`)
+  const requestIdFor = (scope: string, sequence: number): string =>
+    `${scope}-${multiplayerCommandSessionId}-${String(sequence)}`
   let multiplayerRevision = 0
   const multiplayerEntities = new Map<string, AuthoritativeEntityState>()
   let nextVitalsCommand = 0
@@ -3124,6 +3132,7 @@ type MultiplayerInventorySelection = Readonly<{
     }
     for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.witherInbound))) {
       if (message._tag === 'WitherSnapshot') {
+        witherRevision = message.revision
         witherRuntimeState = restoreWitherRuntime(message.snapshot)
       }
     }
@@ -3164,7 +3173,7 @@ type MultiplayerInventorySelection = Readonly<{
   const sendVitalsCommand = (action: Extract<NetworkMessage, { readonly _tag: 'PlayerVitalsCommand' }>['action']): void => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingVitalsCommand !== null) return
     nextVitalsCommand += 1
-    const commandId = CommandId.make(`vitals-${String(nextVitalsCommand)}`)
+    const commandId = commandIdFor('vitals', nextVitalsCommand)
     pendingVitalsCommand = commandId
     Effect.runSync(multiplayer.host.enqueueOutbound({
       _tag: 'PlayerVitalsCommand',
@@ -3182,7 +3191,7 @@ type MultiplayerInventorySelection = Readonly<{
   ): boolean => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingPortalCommand !== null) return false
     nextPortalCommand += 1
-    const commandId = CommandId.make(`${tag === 'EndPortalUseCommand' ? 'end' : 'nether'}-portal-${String(nextPortalCommand)}`)
+    const commandId = commandIdFor(`${tag === 'EndPortalUseCommand' ? 'end' : 'nether'}-portal`, nextPortalCommand)
     pendingPortalCommand = commandId
     Effect.runSync(multiplayer.host.enqueueOutbound({
       _tag: tag,
@@ -3201,7 +3210,7 @@ type MultiplayerInventorySelection = Readonly<{
   ): boolean => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingPortalCommand !== null) return false
     nextPortalCommand += 1
-    const commandId = CommandId.make(`end-eye-${String(nextPortalCommand)}`)
+    const commandId = commandIdFor('end-eye', nextPortalCommand)
     pendingPortalCommand = commandId
     const header = {
       commandId,
@@ -3220,7 +3229,7 @@ type MultiplayerInventorySelection = Readonly<{
   const sendToggleLeverCommand = (lever: { readonly x: number; readonly y: number; readonly z: number }): boolean => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingLeverCommand !== null) return false
     nextLeverCommand += 1
-    const commandId = CommandId.make(`lever-${String(nextLeverCommand)}`)
+    const commandId = commandIdFor('lever', nextLeverCommand)
     pendingLeverCommand = commandId
     Effect.runSync(multiplayer.host.enqueueOutbound({
       _tag: 'ToggleLeverCommand',
@@ -3238,7 +3247,7 @@ type MultiplayerInventorySelection = Readonly<{
   ): boolean => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingInventoryCommand !== null) return false
     nextInventoryCommand += 1
-    const commandId = CommandId.make(`inventory-${String(nextInventoryCommand)}`)
+    const commandId = commandIdFor('inventory', nextInventoryCommand)
     pendingInventoryCommand = { commandId, action, acceptedRevision: null }
     Effect.runSync(multiplayer.host.enqueueOutbound({
       _tag: 'PlayerInventoryCommand',
@@ -3263,7 +3272,7 @@ type MultiplayerInventorySelection = Readonly<{
   const sendVillagerTradeCommand = (villagerId: string, offerId: string): boolean => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingVillagerTradeCommand !== null) return false
     nextVillagerTradeCommand += 1
-    const commandId = CommandId.make(`villager-trade-${String(nextVillagerTradeCommand)}`)
+    const commandId = commandIdFor('villager-trade', nextVillagerTradeCommand)
     pendingVillagerTradeCommand = commandId
     Effect.runSync(multiplayer.host.enqueueOutbound({
       _tag: 'VillagerTradeCommand',
@@ -3310,7 +3319,7 @@ type MultiplayerInventorySelection = Readonly<{
         return
       }
       nextEntityCommand += 1
-      const commandId = CommandId.make(`entity-${String(nextEntityCommand)}`)
+      const commandId = commandIdFor('entity', nextEntityCommand)
       pendingEntityCommand = { commandId, command }
       Effect.runSync(multiplayer.host.enqueueOutbound({
         ...command,
@@ -3324,7 +3333,7 @@ type MultiplayerInventorySelection = Readonly<{
     nextEntityCommand += 1
     Effect.runSync(multiplayer.host.enqueueOutbound({
       ...command,
-      commandId: CommandId.make(`entity-${String(nextEntityCommand)}`),
+      commandId: commandIdFor('entity', nextEntityCommand),
       player: multiplayer.query.player,
       world: WorldId.make(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
@@ -3350,7 +3359,7 @@ type MultiplayerInventorySelection = Readonly<{
   ): boolean => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingFacilityCommand !== null) return false
     nextFacilityCommand += 1
-    const commandId = CommandId.make(`facility-${String(nextFacilityCommand)}`)
+    const commandId = commandIdFor('facility', nextFacilityCommand)
     pendingFacilityCommand = {
       commandId,
       facility: command._tag === 'ContainerCommand' ? 'container' : 'furnace',
@@ -3381,7 +3390,7 @@ type MultiplayerInventorySelection = Readonly<{
     if (next === undefined) return
     queuedPlayerDamages = queuedPlayerDamages.slice(1)
     nextPlayerDamageCommand += 1
-    const commandId = `damage-${String(nextPlayerDamageCommand)}`
+    const commandId = requestIdFor('damage', nextPlayerDamageCommand)
     pendingPlayerDamage = { commandId, acceptedRevision: null }
     const command = {
       _tag: 'PlayerDamageCommand' as const,
@@ -3449,7 +3458,7 @@ type MultiplayerInventorySelection = Readonly<{
         : undefined
     if (dimensions === undefined) return
     nextCraftingCommand += 1
-    const commandId = `craft-${String(nextCraftingCommand)}`
+    const commandId = requestIdFor('craft', nextCraftingCommand)
     pendingCrafting = { commandId, acceptedRevision: null }
     const command: CraftingCommand = {
       _tag: 'CraftingCommand',
@@ -3512,7 +3521,7 @@ type MultiplayerInventorySelection = Readonly<{
       || activeBrewingStandAt === undefined
     ) return false
     nextBrewingCommand += 1
-    const commandId = `brewing-${String(nextBrewingCommand)}`
+    const commandId = requestIdFor('brewing', nextBrewingCommand)
     pendingBrewingCommand = { commandId }
     const command: BrewingCommand = {
       _tag: 'BrewingCommand',
@@ -3577,7 +3586,7 @@ type MultiplayerInventorySelection = Readonly<{
   const requestAnvil = (): boolean => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingAnvilCommand !== null) return false
     nextAnvilCommand += 1
-    const commandId = `anvil-${String(nextAnvilCommand)}`
+    const commandId = requestIdFor('anvil', nextAnvilCommand)
     pendingAnvilCommand = { commandId }
     const command: AnvilCommand = {
       _tag: 'AnvilCommand',
@@ -3595,7 +3604,7 @@ type MultiplayerInventorySelection = Readonly<{
   const requestEnchanting = (offer: 0 | 1 | 2): boolean => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingEnchantingCommand !== null) return false
     nextEnchantingCommand += 1
-    const commandId = `enchanting-${String(nextEnchantingCommand)}`
+    const commandId = requestIdFor('enchanting', nextEnchantingCommand)
     pendingEnchantingCommand = { commandId }
     const command: EnchantingCommand = {
       _tag: 'EnchantingCommand',
@@ -8711,7 +8720,7 @@ type MultiplayerInventorySelection = Readonly<{
       deadAfterFrame = playerIsDead()
 
       // Landing damage resolves before block contact in the same frame.
-      if (!deadAfterFrame && !dimensionChanged) {
+      if (!deadAfterFrame && !dimensionChanged && multiplayer === undefined) {
         const environmentalDamage = resolveEnvironmentalContactDamage(
           environmentalContactDamageState,
           environmentalContactsForPose(postFramePose),
@@ -9076,22 +9085,35 @@ type MultiplayerInventorySelection = Readonly<{
           .filter(({ distance, alignment }) => distance <= DEFAULT_BLOCK_REACH && alignment >= 0.8)
           .sort((left, right) => left.distance - right.distance)[0]
         if (target !== undefined) {
-          const result = damageRuntimeWither(
-            witherRuntimeState,
-            target.wither.id,
-            Math.max(1, inventoryMeleeDamage(selectedHotbarIndex)),
-            'melee',
-          )
-          witherRuntimeState = result.state
-          if (result.death !== undefined) {
-            Effect.runSync(spawnDroppedItems(world.entities, [{
-              item: result.death.drop.item,
-              count: result.death.drop.count,
-              at: result.death.drop.position,
-            }]))
+          if (multiplayer === undefined) {
+            const result = damageRuntimeWither(
+              witherRuntimeState,
+              target.wither.id,
+              Math.max(1, inventoryMeleeDamage(selectedHotbarIndex)),
+              'melee',
+            )
+            witherRuntimeState = result.state
+            if (result.death !== undefined) {
+              Effect.runSync(spawnDroppedItems(world.entities, [{
+                item: result.death.drop.item,
+                count: result.death.drop.count,
+                at: result.death.drop.position,
+              }]))
+            }
+            markSessionDirty()
+          } else {
+            nextWitherCommand += 1
+            Effect.runFork(multiplayer.transport.sendWither({
+              _tag: 'DamageWither',
+              actor: String(multiplayer.query.player),
+              requestId: requestIdFor('wither', nextWitherCommand),
+              expectedRevision: witherRevision,
+              id: target.wither.id,
+              amount: Math.max(1, inventoryMeleeDamage(selectedHotbarIndex)),
+              kind: 'melee',
+            }))
           }
           primaryAttackGestureConsumed = true
-          markSessionDirty()
         }
       }
 

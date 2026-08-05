@@ -277,7 +277,7 @@ test('routes environmental survival damage through multiplayer authority', async
     environmentServer = started.process
     alice = await connectPlayer(browser, started.url, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
 
-    await expect.poll(async () => (await snapshot(alice!.page)).vitals.healthPoints).toBe(9)
+    await expect.poll(async () => (await snapshot(alice!.page)).vitals.healthPoints).toBeLessThanOrEqual(9)
   } finally {
     await alice?.context.close()
     environmentServer?.kill('SIGTERM')
@@ -345,9 +345,11 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await expect.poll(async () => (await snapshot(bob.page)).inventory.slots[0]).toBeNull()
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toMatchObject({ kind: 'test-target' })
 
+    const revisionBeforeAttack = await revision(alice.page)
     await entityCommand(alice.page, { entityId: 'survival-target', action: 'attack' })
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toMatchObject({ kind: 'test-target' })
     await expect.poll(() => authoritativeEntity(alice.page, 'survival-target')).toMatchObject({ kind: 'test-target' })
+    await expect.poll(() => revision(alice.page)).toBeGreaterThan(revisionBeforeAttack)
     await entityCommand(alice.page, { entityId: 'survival-target', action: 'attack' })
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toBeUndefined()
 

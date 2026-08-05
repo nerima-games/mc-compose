@@ -15,7 +15,11 @@ import { decodeBrewingWireMessage, encodeBrewingCommand, type BrewingCommand, ty
 import { decodeAnvilWireMessage, encodeAnvilCommand, type AnvilCommand, type AnvilWireMessage } from '../multiplayer-shared/anvil-network'
 import { decodeEnchantingWireMessage, encodeEnchantingCommand, type EnchantingCommand, type EnchantingWireMessage } from '../multiplayer-shared/enchanting-network'
 import { decodeSleepWireMessage, type SleepWireMessage } from '../multiplayer-shared/sleep-network'
-import { decodeWitherWireMessage, type WitherWireMessage } from '../multiplayer-shared/wither-network'
+import {
+  decodeWitherWireMessage,
+  type WitherCommand,
+  type WitherWireMessage,
+} from '../multiplayer-shared/wither-network'
 import {
   decodeEnderDragonWireMessage,
   encodeEnderDragonCommand,
@@ -66,6 +70,7 @@ export interface BrowserWebSocketTransport extends TransportService {
   readonly anvilInbound: Queue.Dequeue<AnvilWireMessage>
   readonly enchantingInbound: Queue.Dequeue<EnchantingWireMessage>
   readonly sendSleep: (message: SleepWireMessage) => Effect.Effect<void, TransportError>
+  readonly sendWither: (command: WitherCommand) => Effect.Effect<void, TransportError>
   readonly sendEnderDragon: (command: EnderDragonCommand) => Effect.Effect<void, TransportError>
   readonly sendPlayerDamage: (command: PlayerDamageCommand) => Effect.Effect<void, TransportError>
   readonly sendCrafting: (command: CraftingCommand) => Effect.Effect<void, TransportError>
@@ -385,6 +390,8 @@ export const makeBrowserWebSocketTransport = (
 
     const sendSleep = (message: SleepWireMessage): Effect.Effect<void, TransportError> =>
       send(JSON.stringify(message))
+    const sendWither = (command: WitherCommand): Effect.Effect<void, TransportError> =>
+      send(JSON.stringify({ _tag: 'WitherCommand', command }))
     const sendEnderDragon = (command: EnderDragonCommand): Effect.Effect<void, TransportError> =>
       send(encodeEnderDragonCommand(command))
     const sendPlayerDamage = (command: PlayerDamageCommand): Effect.Effect<void, TransportError> =>
@@ -409,6 +416,7 @@ export const makeBrowserWebSocketTransport = (
       anvilInbound,
       enchantingInbound,
       sendSleep,
+      sendWither,
       sendEnderDragon,
       sendPlayerDamage,
       sendCrafting,

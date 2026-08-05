@@ -627,6 +627,7 @@ describe('authoritative multiplayer server core', () => {
         })
       }
     }
+    expect(witherMessages(aliceFrames).at(-1)).toMatchObject({ _tag: 'WitherSnapshot', revision: 1 })
     aliceFrames.length = 0
     bobFrames.length = 0
     for (let hit = 0; hit < 74; hit += 1) {
@@ -634,7 +635,7 @@ describe('authoritative multiplayer server core', () => {
       expect(fixture.receiveWither('socket-a', {
         _tag: 'WitherCommand',
         command: {
-          _tag: 'DamageWither', actor: 'alice', requestId: `setup-${String(hit)}`, expectedRevision: hit + 2,
+          _tag: 'DamageWither', actor: 'alice', requestId: `setup-${String(hit)}`, expectedRevision: hit + 1,
           id: 'wither-1', amount: 300, kind: 'melee',
         },
       })).toEqual(expect.objectContaining({ accepted: true }))
@@ -645,7 +646,7 @@ describe('authoritative multiplayer server core', () => {
     const lethal = (actor: string, requestId: string): WitherWireMessage => ({
       _tag: 'WitherCommand',
       command: {
-        _tag: 'DamageWither', actor, requestId, expectedRevision: 76,
+        _tag: 'DamageWither', actor, requestId, expectedRevision: 75,
         id: 'wither-1', amount: 300, kind: 'melee',
       },
     })
@@ -653,14 +654,14 @@ describe('authoritative multiplayer server core', () => {
     expect(fixture.receiveWither('socket-a', lethal('alice', 'hit-a'))).toEqual(expect.objectContaining({ accepted: true }))
     expect(fixture.receiveWither('socket-b', lethal('bob', 'hit-b'))).toEqual(expect.objectContaining({ accepted: false }))
     expect(witherMessages(aliceFrames)).toContainEqual(expect.objectContaining({
-      _tag: 'WitherCommandResult', requestId: 'hit-a', accepted: true, revision: 77,
+      _tag: 'WitherCommandResult', requestId: 'hit-a', accepted: true, revision: 76,
     }))
     expect(witherMessages(bobFrames)).toContainEqual(expect.objectContaining({
-      _tag: 'WitherCommandResult', requestId: 'hit-b', accepted: false, revision: 77, reason: 'stale-revision',
+      _tag: 'WitherCommandResult', requestId: 'hit-b', accepted: false, revision: 76, reason: 'stale-revision',
     }))
     for (const frames of [aliceFrames, bobFrames]) {
       expect(witherMessages(frames)).toContainEqual(expect.objectContaining({
-        _tag: 'WitherSnapshot', revision: 77,
+        _tag: 'WitherSnapshot', revision: 76,
         snapshot: expect.objectContaining({ withers: [] }),
       }))
       expect(messages(frames).filter((message) => message._tag === 'EntitySpawnDelta')).toEqual([
@@ -674,7 +675,7 @@ describe('authoritative multiplayer server core', () => {
     const rejoinedFrames = fixture.connect('socket-b2')
     fixture.receive('socket-b2', join('bob'))
     expect(witherMessages(rejoinedFrames)).toContainEqual(expect.objectContaining({
-      _tag: 'WitherSnapshot', revision: 77,
+      _tag: 'WitherSnapshot', revision: 76,
       snapshot: expect.objectContaining({ withers: [] }),
     }))
     expect(messages(rejoinedFrames)).toContainEqual(expect.objectContaining({
@@ -723,7 +724,7 @@ describe('authoritative multiplayer server core', () => {
     valid.receiveWither('socket-a', {
       _tag: 'WitherCommand',
       command: {
-        _tag: 'DamageWither', actor: 'alice', requestId: 'forged', expectedRevision: 2,
+        _tag: 'DamageWither', actor: 'alice', requestId: 'forged', expectedRevision: 1,
         id: 'wither-1', amount: 300, kind: 'melee',
       },
     })

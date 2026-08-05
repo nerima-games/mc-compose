@@ -23,7 +23,7 @@ import {
   type ContainerKind,
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
-import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, StackCount } from '@nerima-games/mc-kernel'
+import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, propertyOfBlockId, StackCount } from '@nerima-games/mc-kernel'
 import { pistonPositionAt, validatePistonPlan, type PistonCellRead, type PistonMovementPlan } from '@nerima-games/mx-redstone'
 import { END_PORTAL_BLOCK, END_PORTAL_FRAME_OFFSETS, endPortalCenterForStronghold, nearestStrongholdSite, type Dimension } from '@nerima-games/mc-worldgen'
 import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
@@ -38,6 +38,7 @@ import {
   CREEPER_KIND,
   CREEPER_XP_REWARD,
   DORMANT_FUSE,
+  INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
   ENDER_PEARL_DAMAGE,
   ENDER_PEARL_MAX_DISTANCE,
   CHICKEN_KIND,
@@ -91,6 +92,7 @@ import {
   mobXpReward,
   initialEcosystemMobState,
   repairEcosystemMobState,
+  resolveEnvironmentalContactDamage,
   resolveSafeEndermanTeleport,
   stepCreeperFuse,
   stepEcosystemMob,
@@ -99,6 +101,8 @@ import {
   type BucketItemType,
   type EcosystemMobState,
   type EndermanTeleportCell,
+  type EnvironmentalContact,
+  type EnvironmentalContactDamageState,
   type Explosion,
   type FishingSession,
   type BrewingBottle,
@@ -901,6 +905,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   }
   let revision = options.initialState?.revision ?? 0
   let timeTickRemainderMs = 0
+  let simulationElapsedSecs = 0
+  const environmentalContactDamageStates = new Map<PlayerId, EnvironmentalContactDamageState>()
   let witherRevision = options.initialState?.witherRevision ?? 0
   let witherState: WitherRuntimeState = restoreWitherRuntime(options.initialState?.wither)
   const witherCommandResults = new Map<string, Extract<WitherWireMessage, { readonly _tag: 'WitherCommandResult' }>>()
@@ -1179,6 +1185,41 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const blockAt = (at: BlockPos): string | null => {
     const override = blocks.get(positionKey(at))
     return override === undefined ? (options.generatedBlockAt?.(at) ?? null) : override.block
+  }
+
+  const environmentalContactsAt = (at: PlayerSnapshot['at']): ReadonlyArray<EnvironmentalContact> => {
+    const minX = at.x - PLAYER_HALF_WIDTH
+    const maxX = at.x + PLAYER_HALF_WIDTH
+    const minY = at.y
+    const maxY = at.y + PLAYER_HEIGHT
+    const minZ = at.z - PLAYER_HALF_WIDTH
+    const maxZ = at.z + PLAYER_HALF_WIDTH
+    const contacts = new Map<'lava' | 'cactus', EnvironmentalContact>()
+    const overlaps = (minimum: number, maximum: number, cell: number): boolean =>
+      minimum < cell + 1 - COLLISION_EPSILON && maximum > cell + COLLISION_EPSILON
+    const gap = (minimum: number, maximum: number, cell: number): number => {
+      if (maximum < cell) return cell - maximum
+      if (minimum > cell + 1) return minimum - (cell + 1)
+      return 0
+    }
+
+    for (let x = Math.floor(minX); x < Math.ceil(maxX); x += 1) {
+      for (let y = Math.floor(minY); y < Math.ceil(maxY); y += 1) {
+        for (let z = Math.floor(minZ); z < Math.ceil(maxZ); z += 1) {
+          const block = blockAt({ x, y, z })
+          if (block !== 'lava' && block !== 'cactus') continue
+          const contactDamage = propertyOfBlockId(blockIdOf(block), 'contactDamage')
+          if (contactDamage === undefined) continue
+          const touches = block === 'lava'
+            ? overlaps(minX, maxX, x) && overlaps(minY, maxY, y) && overlaps(minZ, maxZ, z)
+            : overlaps(minY, maxY, y)
+              && ((gap(minX, maxX, x) <= COLLISION_EPSILON && overlaps(minZ, maxZ, z))
+                || (gap(minZ, maxZ, z) <= COLLISION_EPSILON && overlaps(minX, maxX, x)))
+          if (touches) contacts.set(block, { block, contactDamage })
+        }
+      }
+    }
+    return [...contacts.values()]
   }
 
   const readPistonCell = (at: BlockPos): PistonCellRead => {
@@ -3703,6 +3744,54 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       }
     }
 
+    if (elapsedSecs > 0) {
+      simulationElapsedSecs += elapsedSecs
+      const damagedPlayers = new Set<PlayerId>()
+      const deadPlayers = new Set<PlayerId>()
+
+      for (const [player, presence] of players) {
+        const playerVitals = vitals.get(player)
+        if (playerVitals === undefined || playerVitals.health <= 0) {
+          environmentalContactDamageStates.delete(player)
+          continue
+        }
+        const resolution = resolveEnvironmentalContactDamage(
+          environmentalContactDamageStates.get(player) ?? INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
+          environmentalContactsAt(presence.at),
+          simulationElapsedSecs,
+        )
+        environmentalContactDamageStates.set(player, resolution.state)
+        const damage = resolution.damages.reduce((total, entry) => total + entry.amount, 0)
+        if (damage <= 0) continue
+
+        const wasAlive = playerVitals.health > 0
+        playerVitals.health = Math.max(0, playerVitals.health - damage)
+        const hungerActor = hungerActors.get(player)
+        if (hungerActor !== undefined) hungerActors.set(player, {
+          ...hungerActor,
+          state: { ...hungerActor.state, health: playerVitals.health },
+        })
+        damagedPlayers.add(player)
+        if (wasAlive && playerVitals.health <= 0) deadPlayers.add(player)
+      }
+
+      if (damagedPlayers.size > 0) {
+        revision += 1
+        stateChanged = true
+        postPersistenceDeltas.push(...applyPlayerDeaths([...deadPlayers], revision))
+        for (const player of damagedPlayers) {
+          const presence = players.get(player)
+          if (presence !== undefined) postPersistenceDeltas.push({
+            _tag: 'PlayerVitalsDelta',
+            world: presence.world,
+            revision,
+            player,
+            state: vitalsSnapshot(vitals.get(player) as MutableVitalsState),
+          })
+        }
+      }
+    }
+
     if (elapsedTicks > 0) {
       if (applyPendingFallingBlocks()) {
         revision += 1
@@ -4170,12 +4259,11 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
       }
       const nextSnapshot = snapshotWitherRuntime(advanced)
-      if (JSON.stringify(nextSnapshot) !== JSON.stringify(previousSnapshot)) {
-        witherState = advanced
-        witherRevision += 1
-        stateChanged = true
-        broadcastWither(witherSnapshot())
-      }
+    if (JSON.stringify(nextSnapshot) !== JSON.stringify(previousSnapshot)) {
+      witherState = advanced
+      stateChanged = true
+      broadcastWither(witherSnapshot())
+    }
     }
 
     if (dimension === 'end') {

@@ -439,7 +439,17 @@ describe('browser websocket transport', () => {
       amount: 1,
     }
     await Effect.runPromise(throwing.sendPlayerDamage(command))
-    expect(throwingSocket.sent).toEqual([JSON.stringify(command)])
+    const witherCommand = {
+      _tag: 'DamageWither' as const,
+      actor: 'alice',
+      requestId: 'wither-send',
+      expectedRevision: 3,
+      id: 'wither-1',
+      amount: 4,
+      kind: 'melee' as const,
+    }
+    await Effect.runPromise(throwing.sendWither(witherCommand))
+    expect(throwingSocket.sent).toEqual([JSON.stringify(command), JSON.stringify({ _tag: 'WitherCommand', command: witherCommand })])
     throwingSocket.sendFailure = new Error('write rejected')
     const sendResult = await Effect.runPromise(Effect.either(throwing.send('frame' as WireText)))
     expect(Either.isLeft(sendResult)).toBe(true)
