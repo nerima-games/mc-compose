@@ -711,6 +711,18 @@ const addStackToInventory = (slots: Array<ItemStack | null>, stack: ItemStack): 
   return { ...stack, count: remaining }
 }
 
+export type RedstoneStatefulBlock =
+  | 'door'
+  | 'door_open'
+  | 'redstone_lamp'
+  | 'redstone_lamp_lit'
+
+const isRedstoneStatefulBlock = (block: string | null): block is RedstoneStatefulBlock =>
+  block === 'door' ||
+  block === 'door_open' ||
+  block === 'redstone_lamp' ||
+  block === 'redstone_lamp_lit'
+
 export interface MultiplayerServerCore {
   readonly connect: (clientId: ClientId, send: SendFrame) => boolean
   readonly receive: (clientId: ClientId, frame: WireText) => ReceiveResult
@@ -721,6 +733,11 @@ export interface MultiplayerServerCore {
   readonly applyHopperTransfer: (at: BlockPos) => boolean
   readonly applyDispenserTrigger: (at: BlockPos) => boolean
   readonly applyDropperTrigger: (at: BlockPos) => boolean
+  readonly applyRedstoneBlockState: (
+    at: BlockPos,
+    expectedBlocks: ReadonlySet<RedstoneStatefulBlock>,
+    nextBlock: RedstoneStatefulBlock,
+  ) => boolean
   readonly tick: (elapsedMs: number) => void
   readonly spawnEntity: (entity: AuthoritativeEntityState) => boolean
 }
@@ -1313,6 +1330,22 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const applyDispenserTrigger = (at: BlockPos): boolean => applyItemDropperTrigger(at, 'dispenser')
 
   const applyDropperTrigger = (at: BlockPos): boolean => applyItemDropperTrigger(at, 'dropper')
+
+  const applyRedstoneBlockState = (
+    at: BlockPos,
+    expectedBlocks: ReadonlySet<RedstoneStatefulBlock>,
+    nextBlock: RedstoneStatefulBlock,
+  ): boolean => {
+    if (!isInBounds(at)) return false
+    const currentBlock = blockAt(at)
+    if (!isRedstoneStatefulBlock(currentBlock) || !expectedBlocks.has(currentBlock) || currentBlock === nextBlock) return false
+
+    blocks.set(positionKey(at), { at: { ...at }, block: nextBlock })
+    revision += 1
+    notifyStateChanged()
+    broadcast(snapshot())
+    return true
+  }
 
   const ensurePlayerState = (player: PlayerId): void => {
     if (!inventories.has(player)) {
@@ -3986,5 +4019,5 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return true
   }
 
-  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, tick, spawnEntity }
+  return { connect, receive, disconnect, detachPlayer, acceptRealmTransfer, snapshot, applyHopperTransfer, applyDispenserTrigger, applyDropperTrigger, applyRedstoneBlockState, tick, spawnEntity }
 }

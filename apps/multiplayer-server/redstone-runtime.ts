@@ -9,6 +9,9 @@ import { Context, Effect, Layer, Scope } from 'effect'
 
 import type { MultiplayerServerCore } from './core'
 
+const lampBlocks = new Set(['redstone_lamp', 'redstone_lamp_lit'] as const)
+const doorBlocks = new Set(['door', 'door_open'] as const)
+
 export interface MultiplayerRedstoneRealm {
   readonly dimension: string
   readonly core: MultiplayerServerCore
@@ -33,6 +36,12 @@ const componentForBlock = (
       return { position, kind: 'torch' }
     case 'redstone_wire':
       return { position, kind: 'wire' }
+    case 'redstone_lamp':
+    case 'redstone_lamp_lit':
+      return { position, kind: 'lamp' }
+    case 'door':
+    case 'door_open':
+      return { position, kind: 'door' }
     default:
       return undefined
   }
@@ -72,6 +81,21 @@ export const makeMultiplayerRedstoneRuntime = async (
         } else if (event.kind === 'dropper') {
           realmsByDimension.get(event.dimension)?.core.applyDropperTrigger(event.position)
         }
+      }
+      for (const event of Effect.runSync(runtime.drainLampTransitions)) {
+        realmsByDimension.get(event.dimension)?.core.applyRedstoneBlockState(
+          event.position,
+          lampBlocks,
+          event.lit ? 'redstone_lamp_lit' : 'redstone_lamp',
+        )
+      }
+      for (const event of Effect.runSync(runtime.drainPoweredComponentTransitions)) {
+        if (event.kind !== 'door') continue
+        realmsByDimension.get(event.dimension)?.core.applyRedstoneBlockState(
+          event.position,
+          doorBlocks,
+          event.powered ? 'door_open' : 'door',
+        )
       }
     },
   }
