@@ -716,6 +716,11 @@ export interface RealmTransferPlayer {
   readonly inventory: InventoryState
   readonly vitals: VitalsState
   readonly statusEffects: StatusEffectState
+  readonly anvilNames: ReadonlyArray<Readonly<{ readonly slot: number; readonly name: string }>>
+  readonly enchantments: Readonly<{
+    readonly seed: number
+    readonly items: ReadonlyArray<Readonly<{ readonly slot: number; readonly item: EnchantedItem }>>
+  }>
 }
 
 export interface RealmTransferArrival {
@@ -948,24 +953,34 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     for (const client of clients.values()) if (client.playerId !== null) sendBrewing(client, message)
   }
   const anvilNamesDelta = (player: PlayerId): PlayerAnvilNamesDelta => {
-    const names = anvilNames.get(player)
     return {
       _tag: 'PlayerAnvilNamesDelta',
       world: worldId,
       revision,
       player,
-      names: names === undefined
-        ? []
-        : [...names].sort(([left], [right]) => left - right).map(([slot, name]) => ({ slot, name })),
+      names: transferAnvilNames(player),
     }
   }
   const enchantmentsDelta = (player: PlayerId): PlayerEnchantmentsDelta => {
-    const state = enchantments.get(player)
+    const state = transferEnchantments(player)
     return {
       _tag: 'PlayerEnchantmentsDelta',
       world: worldId,
       revision,
       player,
+      seed: state.seed,
+      items: state.items,
+    }
+  }
+  const transferAnvilNames = (player: PlayerId): RealmTransferPlayer['anvilNames'] => {
+    const names = anvilNames.get(player)
+    return names === undefined
+      ? []
+      : [...names].sort(([left], [right]) => left - right).map(([slot, name]) => ({ slot, name }))
+  }
+  const transferEnchantments = (player: PlayerId): RealmTransferPlayer['enchantments'] => {
+    const state = enchantments.get(player)
+    return {
       seed: state?.seed ?? (options.seed >>> 0),
       items: state === undefined
         ? []
@@ -3064,6 +3079,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       inventory: inventorySnapshot(inventory),
       vitals: vitalsSnapshot(playerVitals),
       statusEffects: copyStatusEffectState(statusEffects.get(playerId) ?? emptyStatusEffectState()),
+      anvilNames: transferAnvilNames(playerId),
+      enchantments: transferEnchantments(playerId),
     }
     removePlayer(clientId, client)
     bowDrawStartedAt.delete(playerId)
@@ -3072,6 +3089,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     inventories.delete(playerId)
     vitals.delete(playerId)
     statusEffects.delete(playerId)
+    anvilNames.delete(playerId)
+    enchantments.delete(playerId)
     hungerActors.delete(playerId)
     playerPositions.delete(playerId)
     notifyStateChanged()
@@ -3095,6 +3114,11 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     inventories.set(transfer.player, cloneInventory(transfer.inventory))
     vitals.set(transfer.player, { ...transfer.vitals })
     statusEffects.set(transfer.player, copyStatusEffectState(transfer.statusEffects))
+    anvilNames.set(transfer.player, new Map(transfer.anvilNames.map(({ slot, name }) => [slot, name])))
+    enchantments.set(transfer.player, {
+      seed: transfer.enchantments.seed,
+      items: new Map(transfer.enchantments.items.map(({ slot, item }) => [slot, item])),
+    })
     ensurePlayerState(transfer.player)
     sleepAuthority.addActor({
       player: transfer.player,

@@ -13,7 +13,7 @@ import type { Dimension } from '@nerima-games/mc-worldgen'
 import { Either } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { makeMultiplayerServerCore, type MultiplayerServerOptions, type ReceiveResult } from '../../apps/multiplayer-server/core'
+import { makeMultiplayerServerCore, type MultiplayerServerOptions, type MultiplayerServerState, type ReceiveResult } from '../../apps/multiplayer-server/core'
 import { decodeAnvilWireMessage } from '../../apps/multiplayer-shared/anvil-network'
 import { decodeBrewingWireMessage } from '../../apps/multiplayer-shared/brewing-network'
 import { decodeEnchantingWireMessage } from '../../apps/multiplayer-shared/enchanting-network'
@@ -49,6 +49,18 @@ const witherMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<WitherWi
     return message === undefined ? [] : [message]
   })
 
+const anvilMessages = (frames: ReadonlyArray<WireText>) =>
+  frames.flatMap((wire) => {
+    const message = decodeAnvilWireMessage(wire)
+    return message === undefined ? [] : [message]
+  })
+
+const enchantingMessages = (frames: ReadonlyArray<WireText>) =>
+  frames.flatMap((wire) => {
+    const message = decodeEnchantingWireMessage(wire)
+    return message === undefined ? [] : [message]
+  })
+
 const join = (player: string, name = player): Extract<NetworkMessage, { readonly _tag: 'PlayerJoin' }> => ({
   _tag: 'PlayerJoin',
   player: playerId(player),
@@ -75,8 +87,11 @@ const makeFixture = (
   spawnAt?: { x: number; y: number; z: number },
   initialWeather: 'clear' | 'rain' | 'thunder' = 'clear',
   dimension: Dimension = 'overworld',
-  options: Pick<MultiplayerServerOptions, 'staticBlocks' | 'onEndPortalUse'> = {},
+  options: Pick<MultiplayerServerOptions, 'staticBlocks' | 'onEndPortalUse'> & Readonly<{
+    metadata?: Pick<MultiplayerServerState, 'anvilNames' | 'enchantments'>
+  }> = {},
 ) => {
+  const { metadata, ...serverOptions } = options
   const sent = new Map<string, Array<WireText>>()
   let nowMs = 0
   const server = makeMultiplayerServerCore({
@@ -87,7 +102,7 @@ const makeFixture = (
     bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
     generatedBlockAt,
     ...(spawnAt === undefined ? {} : { spawnAt }),
-    ...options,
+    ...serverOptions,
     now: () => nowMs,
     initialState: {
       revision: 0,
@@ -101,6 +116,7 @@ const makeFixture = (
       containers: [],
       furnaces: [],
       villagerTrades: [],
+      ...metadata,
     },
   })
   const connect = (clientId: string): Array<WireText> => {
@@ -802,7 +818,13 @@ describe('authoritative multiplayer server core', () => {
   })
 
   it('moves player authority between realms and sends an arrival snapshot', () => {
-    const source = makeFixture()
+    const enchantedStone = { item: 'stone' as const, durability: null, enchantments: [] }
+    const source = makeFixture(() => null, 6_000, undefined, 'clear', 'overworld', {
+      metadata: {
+        anvilNames: [{ player: playerId('alice'), names: [{ slot: 0, name: 'Endbringer' }] }],
+        enchantments: [{ player: playerId('alice'), seed: 73, items: [{ slot: 0, item: enchantedStone }] }],
+      },
+    })
     source.connect('socket-a')
     source.receive('socket-a', join('alice'))
 
@@ -840,5 +862,20 @@ describe('authoritative multiplayer server core', () => {
       }),
       worldSnapshot: expect.objectContaining({ world: worldId('end') }),
     }))
+    expect(anvilMessages(destinationFrames)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta',
+      world: worldId('end'),
+      revision: 0,
+      player: playerId('alice'),
+      names: [{ slot: 0, name: 'Endbringer' }],
+    })
+    expect(enchantingMessages(destinationFrames)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta',
+      world: worldId('end'),
+      revision: 0,
+      player: playerId('alice'),
+      seed: 73,
+      items: [{ slot: 0, item: enchantedStone }],
+    })
   })
 })
