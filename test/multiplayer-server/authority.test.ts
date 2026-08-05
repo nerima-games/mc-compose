@@ -3195,4 +3195,42 @@ describe('multiplayer server authoritative state', () => {
     })).toEqual({ accepted: false, reason: 'invalid-mutation' })
     expect(fixture.persisted.at(-1)).toMatchObject({ revision: 9 })
   })
+
+  it('consumes Eyes of Ender only through an authoritative command', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'eye_of_ender', count: 2 }], selectedSlot: 0 },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'ThrowEyeOfEnderCommand',
+      commandId: commandId('throw-eye'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: 5,
+      state: expect.objectContaining({ slots: [{ item: 'eye_of_ender', count: 1 }] }),
+    }))
+
+    const withoutEye = makeFixture(initialState())
+    withoutEye.sent.length = 0
+    expect(withoutEye.receive({
+      _tag: 'ThrowEyeOfEnderCommand',
+      commandId: commandId('throw-no-eye'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(messages(withoutEye.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeCommandRejected',
+      reason: 'insufficient-items',
+    }))
+  })
 })

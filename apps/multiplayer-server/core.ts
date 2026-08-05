@@ -25,7 +25,7 @@ import {
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, StackCount } from '@nerima-games/mc-kernel'
 import { pistonPositionAt, validatePistonPlan, type PistonCellRead, type PistonMovementPlan } from '@nerima-games/mx-redstone'
-import { END_PORTAL_BLOCK, type Dimension } from '@nerima-games/mc-worldgen'
+import { END_PORTAL_BLOCK, END_PORTAL_FRAME_OFFSETS, endPortalCenterForStronghold, nearestStrongholdSite, type Dimension } from '@nerima-games/mc-worldgen'
 import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
@@ -484,6 +484,8 @@ const ENDER_DRAGON_INTERACTION_RANGE = 8
 const ENDER_DRAGON_ATTACK_DAMAGE = 4
 const ENDER_DRAGON_ATTACK_COOLDOWN_MS = 500
 const END_EXIT_PORTAL_BLOCK = blockTypeOfId(END_PORTAL_BLOCK.PORTAL) ?? 'end_portal'
+const END_PORTAL_FRAME_EMPTY_BLOCK = blockTypeOfId(END_PORTAL_BLOCK.FRAME_EMPTY) ?? 'end_portal_frame'
+const END_PORTAL_FRAME_FILLED_BLOCK = blockTypeOfId(END_PORTAL_BLOCK.FRAME_FILLED) ?? 'end_portal_frame_filled'
 const positionKey = ({ x, y, z }: BlockPos): string => `${String(x)},${String(y)},${String(z)}`
 
 const cloneStack = (stack: ItemStack | null): ItemStack | null => stack === null ? null : { ...stack }
@@ -582,6 +584,8 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
   message._tag === 'EntityAttackCommand' ||
   message._tag === 'EntityPickupCommand' ||
     message._tag === 'BowUseCommand' ||
+    message._tag === 'ThrowEyeOfEnderCommand' ||
+    message._tag === 'InsertEyeIntoEndPortalFrameCommand' ||
     message._tag === 'EndPortalUseCommand' ||
     message._tag === 'NetherPortalUseCommand' ||
     message._tag === 'ToggleLeverCommand' ||
@@ -1602,6 +1606,95 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const key = positionKey(message.lever)
         levers.set(key, { at: { ...message.lever }, active: !isLeverActive(message.lever) })
         return { accepted: true, deltas: () => [], snapshotBroadcastRequired: true }
+      }
+      case 'ThrowEyeOfEnderCommand': {
+        const actor = players.get(message.player)
+        if (actor === undefined || dimension !== 'overworld') {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+        const inventory = inventories.get(message.player)
+        if (inventory === undefined) return { accepted: false, reason: 'invalid-command' }
+        const selected = inventory.slots[inventory.selectedSlot]
+        if (selected?.item !== 'eye_of_ender') {
+          return { accepted: false, reason: 'insufficient-items' }
+        }
+
+        inventory.slots[inventory.selectedSlot] = selected.count === 1
+          ? null
+          : { ...selected, count: selected.count - 1 }
+        if (selected.count === 1) inventory.durability[inventory.selectedSlot] = null
+        return {
+          accepted: true,
+          deltas: (nextRevision) => [{
+            _tag: 'PlayerInventoryDelta',
+            world: actor.world,
+            revision: nextRevision,
+            player: message.player,
+            state: inventorySnapshot(inventory),
+          }],
+        }
+      }
+      case 'InsertEyeIntoEndPortalFrameCommand': {
+        const actor = players.get(message.player)
+        if (
+          actor === undefined ||
+          dimension !== 'overworld' ||
+          !isInBounds(message.frame) ||
+          !isBlockWithinReach(actor, message.frame)
+        ) {
+          return { accepted: false, reason: 'out-of-range' }
+        }
+        const site = nearestStrongholdSite(options.seed, message.frame.x, message.frame.z)
+        if (Option.isNone(site)) return { accepted: false, reason: 'invalid-command' }
+        const center = endPortalCenterForStronghold(site.value)
+        const isPortalFrame = END_PORTAL_FRAME_OFFSETS.some(
+          ({ dx, dz }) =>
+            message.frame.x === center.x + dx &&
+            message.frame.y === center.y &&
+            message.frame.z === center.z + dz,
+        )
+        if (!isPortalFrame || blockAt(message.frame) !== END_PORTAL_FRAME_EMPTY_BLOCK) {
+          return { accepted: false, reason: 'invalid-command' }
+        }
+
+        const inventory = inventories.get(message.player)
+        if (inventory === undefined) return { accepted: false, reason: 'invalid-command' }
+        const selected = inventory.slots[inventory.selectedSlot]
+        if (selected?.item !== 'eye_of_ender') {
+          return { accepted: false, reason: 'insufficient-items' }
+        }
+        inventory.slots[inventory.selectedSlot] = selected.count === 1
+          ? null
+          : { ...selected, count: selected.count - 1 }
+        if (selected.count === 1) inventory.durability[inventory.selectedSlot] = null
+        blocks.set(positionKey(message.frame), {
+          at: { ...message.frame },
+          block: END_PORTAL_FRAME_FILLED_BLOCK,
+        })
+
+        const completed = END_PORTAL_FRAME_OFFSETS.every(({ dx, dz }) =>
+          blockAt({ x: center.x + dx, y: center.y, z: center.z + dz }) ===
+          END_PORTAL_FRAME_FILLED_BLOCK,
+        )
+        if (completed) {
+          for (let x = -1; x <= 1; x += 1) {
+            for (let z = -1; z <= 1; z += 1) {
+              const at = { x: center.x + x, y: center.y, z: center.z + z }
+              blocks.set(positionKey(at), { at, block: END_EXIT_PORTAL_BLOCK })
+            }
+          }
+        }
+        return {
+          accepted: true,
+          deltas: (nextRevision) => [{
+            _tag: 'PlayerInventoryDelta',
+            world: actor.world,
+            revision: nextRevision,
+            player: message.player,
+            state: inventorySnapshot(inventory),
+          }],
+          snapshotBroadcastRequired: true,
+        }
       }
       case 'EndPortalUseCommand': {
         const actor = players.get(message.player)

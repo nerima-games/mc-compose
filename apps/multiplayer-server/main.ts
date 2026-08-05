@@ -457,7 +457,6 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   const overworldSpawnAt = findSpawnAt(generatedBlockAt)
   const netherSpawnAt = findSpawnAt(generatedBlockAt)
   const endSpawnAt: BlockPos = { x: 0, y: 64, z: 0 }
-  const overworldEndPortalAt: BlockPos = { x: overworldSpawnAt.x + 1, y: overworldSpawnAt.y, z: overworldSpawnAt.z }
   const overworldNetherPortalAt: BlockPos = { x: overworldSpawnAt.x - 1, y: overworldSpawnAt.y, z: overworldSpawnAt.z }
   const netherPortalAt: BlockPos = { x: netherSpawnAt.x + 1, y: netherSpawnAt.y, z: netherSpawnAt.z }
   const endStaticBlocks = [
@@ -496,7 +495,6 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     generatedBlockAt,
     spawnAt: overworldSpawnAt,
     staticBlocks: [
-      { at: overworldEndPortalAt, block: 'end_portal' },
       { at: overworldNetherPortalAt, block: 'nether_portal' },
     ],
     ...(initialState === undefined ? {} : { initialState }),

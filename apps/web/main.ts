@@ -3195,6 +3195,28 @@ type MultiplayerInventorySelection = Readonly<{
     return true
   }
 
+  const sendEndProgressCommand = (
+    command: { readonly _tag: 'ThrowEyeOfEnderCommand' }
+      | { readonly _tag: 'InsertEyeIntoEndPortalFrameCommand'; readonly frame: { readonly x: number; readonly y: number; readonly z: number } },
+  ): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingPortalCommand !== null) return false
+    nextPortalCommand += 1
+    const commandId = CommandId.make(`end-eye-${String(nextPortalCommand)}`)
+    pendingPortalCommand = commandId
+    const header = {
+      commandId,
+      player: multiplayer.query.player,
+      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      expectedRevision: multiplayerRevision,
+    }
+    Effect.runSync(multiplayer.host.enqueueOutbound(
+      command._tag === 'ThrowEyeOfEnderCommand'
+        ? { _tag: command._tag, ...header }
+        : { _tag: command._tag, ...header, frame: command.frame },
+    ))
+    return true
+  }
+
   const sendToggleLeverCommand = (lever: { readonly x: number; readonly y: number; readonly z: number }): boolean => {
     if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingLeverCommand !== null) return false
     nextLeverCommand += 1
@@ -4020,6 +4042,7 @@ type MultiplayerInventorySelection = Readonly<{
       case 'AuthoritativeCommandAccepted':
         multiplayerRevision = Math.max(multiplayerRevision, message.revision)
         if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
+        if (message.commandId === pendingPortalCommand) pendingPortalCommand = null
         if (message.commandId === pendingInventoryCommand?.commandId) {
           pendingInventoryCommand.acceptedRevision = message.revision
         }
@@ -4778,10 +4801,30 @@ type MultiplayerInventorySelection = Readonly<{
 
   const useEndFeature = (): Effect.Effect<boolean> => Effect.gen(function* () {
     if (multiplayer !== undefined) {
-      multiplayerRejection = 'End travel is unavailable in this multiplayer world.'
-      multiplayerStatus.textContent = multiplayerRejection
-      multiplayerStatus.hidden = false
-      return true
+      const dimension = yield* playerApi.dimension
+      const pose = yield* playerApi.pose
+      const inventory = yield* world.inventory.snapshot
+      const selected = inventory.slots[selectedHotbarIndex]
+      if (dimension !== 'overworld' || selected?.item !== 'eye_of_ender') return false
+      const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
+      if (Option.isNone(site)) return false
+      const center = endPortalCenterForStronghold(site.value)
+      const target = yield* targetedBlock()
+      const offset = target === undefined ? undefined : END_PORTAL_FRAME_OFFSETS.find((candidate) =>
+        center.x + candidate.dx === target.position.x
+        && center.y === target.position.y
+        && center.z + candidate.dz === target.position.z)
+      if (target?.block === END_PORTAL_BLOCK.FRAME_EMPTY && offset !== undefined) {
+        return sendEndProgressCommand({
+          _tag: 'InsertEyeIntoEndPortalFrameCommand',
+          frame: target.position,
+        })
+      }
+      const dx = site.value.x - pose.feetPosition.x
+      const dz = site.value.z - pose.feetPosition.z
+      canvas.setAttribute('data-stronghold-direction', String(Math.atan2(dx, -dz)))
+      canvas.setAttribute('data-stronghold-distance', String(Math.round(Math.hypot(dx, dz))))
+      return sendEndProgressCommand({ _tag: 'ThrowEyeOfEnderCommand' })
     }
     const dimension = yield* playerApi.dimension
     const pose = yield* playerApi.pose
@@ -9451,9 +9494,9 @@ type MultiplayerInventorySelection = Readonly<{
         const usedMultiplayerLever = portalTarget !== undefined
           && blockTypeOfId(portalTarget.block) === 'lever'
         if (usedMultiplayerLever) sendToggleLeverCommand(portalTarget.position)
-        const shouldAttemptEndFeature = multiplayer === undefined && (currentChunkContext.dimension === 'end'
+        const shouldAttemptEndFeature = currentChunkContext.dimension === 'end'
           || endPortalComplete
-          || specialSelected?.item === 'eye_of_ender')
+          || specialSelected?.item === 'eye_of_ender'
         const usedEndFeature = usedSpecialItem
           || usedMultiplayerPortal
           || (shouldAttemptEndFeature && Effect.runSync(useEndFeature()))
