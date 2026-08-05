@@ -24,10 +24,9 @@ import {
 } from '@nerima-games/mx-multiplayer'
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, propertyOfBlockId, StackCount } from '@nerima-games/mc-kernel'
-import { voxelRaycast } from '@nerima-games/mc-physics'
 import { pistonPositionAt, validatePistonPlan, type PistonCellRead, type PistonMovementPlan } from '@nerima-games/mx-redstone'
 import { END_PORTAL_BLOCK, END_PORTAL_FRAME_OFFSETS, endPortalCenterForStronghold, nearestStrongholdSite, type Dimension } from '@nerima-games/mc-worldgen'
-import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
+import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, raycastArrowBlock, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
@@ -4057,16 +4056,15 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             y: at.y - entity.at.y,
             z: at.z - entity.at.z,
           }
-          const travelDistance = Math.hypot(travel.x, travel.y, travel.z)
-          const blockRay = voxelRaycast(entity.at, travel, travelDistance, (x, y, z) => {
+          const blockImpact = raycastArrowBlock(entity.at, at, (x, y, z) => {
             const position: BlockPos = { x, y, z }
             if (!isInBounds(position)) return true
             const block = blockAt(position)
             return block !== null && options.passableBlocks?.has(block) !== true
           })
-          const blockImpact = Option.isSome(blockRay) ? blockRay.value : undefined
-          const blockProjection = blockImpact === undefined ? undefined : blockImpact.distance / travelDistance
-          const blockWasHit = blockImpact !== undefined
+          const travelDistance = Math.hypot(travel.x, travel.y, travel.z)
+          const blockProjection = Option.isNone(blockImpact) ? undefined : blockImpact.value.distance / travelDistance
+          const blockWasHit = Option.isSome(blockImpact)
           const livingHit = [...entities.values()]
             .filter((candidate): candidate is Extract<AuthoritativeEntityState, { readonly _tag: 'living' }> => candidate._tag === 'living')
             .map((candidate) => ({
@@ -4095,11 +4093,11 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           if (ageTicks >= ARROW_LIFESPAN_TICKS || blockWasHit || livingWasHit || playerWasHit) {
             entities.delete(entity.entityId)
             movedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
-            if (blockImpact !== undefined && !livingWasHit && !playerWasHit) {
+            if (Option.isSome(blockImpact) && !livingWasHit && !playerWasHit) {
               const drop: AuthoritativeEntityState = {
                 _tag: 'item-drop',
                 entityId: `${entity.entityId}:pickup:${String(revision + 1)}` as AuthoritativeEntityState['entityId'],
-                at: blockImpact.point,
+                at: blockImpact.value.point,
                 stack: { item: 'arrow', count: 1 },
               }
               entities.set(drop.entityId, drop)
