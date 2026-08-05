@@ -777,6 +777,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       return [[player, { seed, items: new Map(decodedItems) }] as const]
     }),
   )
+  const droppedItemMetadata = new Map<AuthoritativeEntityState['entityId'], Readonly<{ name: string | null; enchantment: EnchantedItem | null }>>()
   let villagerTrades: AuthoritativeSnapshot['villagerTrades'] = (options.initialState?.villagerTrades ?? []).map((state) => ({
     ...state,
     offers: state.offers.map((offer) => ({
@@ -947,6 +948,62 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         ? []
         : [...state.items].sort(([left], [right]) => left - right).map(([slot, item]) => ({ slot, item })),
     }
+  }
+  const inventorySlotMetadata = (player: PlayerId, slot: number): Readonly<{ name: string | null; enchantment: EnchantedItem | null }> => ({
+    name: anvilNames.get(player)?.get(slot) ?? null,
+    enchantment: enchantments.get(player)?.items.get(slot) ?? null,
+  })
+  const hasInventorySlotMetadata = (player: PlayerId, slot: number): boolean => {
+    const metadata = inventorySlotMetadata(player, slot)
+    return metadata.name !== null || metadata.enchantment !== null
+  }
+  const sameInventorySlotMetadata = (
+    left: Readonly<{ name: string | null; enchantment: EnchantedItem | null }>,
+    right: Readonly<{ name: string | null; enchantment: EnchantedItem | null }>,
+  ): boolean => JSON.stringify(left) === JSON.stringify(right)
+  const setInventorySlotMetadata = (
+    player: PlayerId,
+    slot: number,
+    metadata: Readonly<{ name: string | null; enchantment: EnchantedItem | null }>,
+  ): void => {
+    let names = anvilNames.get(player)
+    if (names === undefined) {
+      names = new Map()
+      anvilNames.set(player, names)
+    }
+    let playerEnchantments = enchantments.get(player)
+    if (playerEnchantments === undefined) {
+      playerEnchantments = { seed: options.seed >>> 0, items: new Map() }
+      enchantments.set(player, playerEnchantments)
+    }
+    if (metadata.name === null) names.delete(slot)
+    else names.set(slot, metadata.name)
+    if (metadata.enchantment === null) playerEnchantments.items.delete(slot)
+    else playerEnchantments.items.set(slot, metadata.enchantment)
+  }
+  const validateInventorySlotMetadataMove = (
+    player: PlayerId,
+    source: number,
+    destination: number,
+    count: number,
+    sourceStack: ItemStack,
+    destinationStack: ItemStack | null | undefined,
+  ): CommandRejectionReason | null => {
+    const sourceMetadata = inventorySlotMetadata(player, source)
+    const destinationMetadata = inventorySlotMetadata(player, destination)
+    if (count < sourceStack.count && hasInventorySlotMetadata(player, source)) return 'invalid-command'
+    if (destinationStack !== null && destinationStack !== undefined && !sameInventorySlotMetadata(sourceMetadata, destinationMetadata)) return 'invalid-command'
+    return null
+  }
+  const transferInventorySlotMetadata = (player: PlayerId, source: number, destination: number): void => {
+    const sourceMetadata = inventorySlotMetadata(player, source)
+    setInventorySlotMetadata(player, source, { name: null, enchantment: null })
+    setInventorySlotMetadata(player, destination, sourceMetadata)
+  }
+  const swapInventorySlotMetadata = (player: PlayerId, source: number, destination: number): void => {
+    const sourceMetadata = inventorySlotMetadata(player, source)
+    setInventorySlotMetadata(player, source, inventorySlotMetadata(player, destination))
+    setInventorySlotMetadata(player, destination, sourceMetadata)
   }
 
   const witherSnapshot = (): WitherWireMessage => ({
@@ -1189,6 +1246,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           stack: { ...stack },
         }
         entities.set(entity.entityId, entity)
+        if (hasInventorySlotMetadata(player, slot)) {
+          droppedItemMetadata.set(entity.entityId, inventorySlotMetadata(player, slot))
+          setInventorySlotMetadata(player, slot, { name: null, enchantment: null })
+        }
         deltas.push({ _tag: 'EntitySpawnDelta', world: presence.world, revision: nextRevision, entity })
       }
       inventory.slots.fill(null)
@@ -1617,19 +1678,45 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       case 'EntityPickupCommand': {
         const entity = entities.get(message.entityId)
         if (entity === undefined) return { accepted: false, reason: 'resource-not-found' }
-        if (entity._tag !== 'item-drop' || !isItemType(entity.stack.item)) {
+        if (entity._tag !== 'item-drop') {
           return { accepted: false, reason: 'invalid-command' }
         }
+        const droppedItem = entity.stack.item
+        if (!isItemType(droppedItem)) return { accepted: false, reason: 'invalid-command' }
         const actor = players.get(message.player)
         if (actor === undefined || (actor.at.x - entity.at.x) ** 2 + (actor.at.y - entity.at.y) ** 2 + (actor.at.z - entity.at.z) ** 2 > 25) {
           return { accepted: false, reason: 'out-of-range' }
         }
 
-        const maxStackCount = maxStackCountOfItem(entity.stack.item)
+        const dropMetadata = droppedItemMetadata.get(entity.entityId)
+        if (dropMetadata !== undefined) {
+          const matchingSlot = inventory.slots.findIndex((current, slot) => current !== null
+            && current !== undefined
+            && current.item === droppedItem
+            && current.count + entity.stack.count <= maxStackCountOfItem(droppedItem)
+            && sameInventorySlotMetadata(inventorySlotMetadata(message.player, slot), dropMetadata))
+          const emptySlot = inventory.slots.findIndex((current) => current === null
+            && entity.stack.count <= maxStackCountOfItem(droppedItem))
+          const slot = matchingSlot >= 0 ? matchingSlot : emptySlot
+          if (slot < 0) return { accepted: false, reason: 'invalid-command' }
+          const current = inventory.slots[slot]
+          inventory.slots[slot] = current === null || current === undefined
+            ? { item: droppedItem, count: entity.stack.count, ...(entity.stack.durability === undefined ? {} : { durability: { ...entity.stack.durability } }) }
+            : { ...current, count: current.count + entity.stack.count }
+          setInventorySlotMetadata(message.player, slot, dropMetadata)
+          entities.delete(entity.entityId)
+          droppedItemMetadata.delete(entity.entityId)
+          return { accepted: true, deltas: (nextRevision) => [
+            { _tag: 'EntityDespawnDelta', world: worldId, revision: nextRevision, entityId: entity.entityId },
+            { _tag: 'PlayerInventoryDelta', world: worldId, revision: nextRevision, player: message.player, state: inventorySnapshot(inventory) },
+          ] }
+        }
+
+        const maxStackCount = maxStackCountOfItem(droppedItem)
         let remaining = entity.stack.count
         for (let slot = 0; slot < inventory.slots.length && remaining > 0; slot += 1) {
           const current = inventory.slots[slot]
-          if (current === null || current === undefined || current.item !== entity.stack.item || current.count >= maxStackCount) continue
+          if (current === null || current === undefined || current.item !== droppedItem || current.count >= maxStackCount) continue
           const moved = Math.min(maxStackCount - current.count, remaining)
           inventory.slots[slot] = { ...current, count: current.count + moved }
           remaining -= moved
@@ -1637,7 +1724,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         for (let slot = 0; slot < inventory.slots.length && remaining > 0; slot += 1) {
           if (inventory.slots[slot] !== null && inventory.slots[slot] !== undefined) continue
           const moved = Math.min(maxStackCount, remaining)
-          inventory.slots[slot] = { ...entity.stack, count: moved }
+          inventory.slots[slot] = { item: droppedItem, count: moved, ...(entity.stack.durability === undefined ? {} : { durability: { ...entity.stack.durability } }) }
           remaining -= moved
         }
         if (remaining === entity.stack.count) return { accepted: false, reason: 'invalid-command' }
@@ -1652,6 +1739,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             }
         if (remaining === 0) {
           entities.delete(entity.entityId)
+          droppedItemMetadata.delete(entity.entityId)
         } else if (entityDelta._tag === 'EntityUpdateDelta') {
           entities.set(entity.entityId, entityDelta.entity)
         }
@@ -1766,6 +1854,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             return { accepted: false, reason: 'insufficient-items' }
           }
           if (actor === undefined) return { accepted: false, reason: 'resource-not-found' }
+          if (message.action.count < source.count && hasInventorySlotMetadata(message.player, message.action.source)) {
+            return { accepted: false, reason: 'invalid-command' }
+          }
           const durability = inventory.durability[message.action.source] ?? source.durability ?? null
           inventory.slots[message.action.source] = source.count === message.action.count
             ? null
@@ -1780,6 +1871,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
               : { ...source, count: message.action.count, durability: { ...durability } },
           }
           entities.set(entity.entityId, entity)
+          if (source.count === message.action.count && hasInventorySlotMetadata(message.player, message.action.source)) {
+            droppedItemMetadata.set(entity.entityId, inventorySlotMetadata(message.player, message.action.source))
+            setInventorySlotMetadata(message.player, message.action.source, { name: null, enchantment: null })
+          }
           return {
             accepted: true,
             deltas: (nextRevision) => [
@@ -1800,13 +1895,26 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             message.action.destination,
           )
           if (reason !== null) return { accepted: false, reason }
+          swapInventorySlotMetadata(message.player, message.action.source, message.action.destination)
         } else if (message.action._tag === 'equip-item') {
+          if (hasInventorySlotMetadata(message.player, message.action.source)) return { accepted: false, reason: 'invalid-command' }
           const reason = equipInventoryItem(inventory, message.action.source, message.action.equipmentSlot)
           if (reason !== null) return { accepted: false, reason }
         } else if (message.action._tag === 'unequip-item') {
           const reason = unequipInventoryItem(inventory, message.action.equipmentSlot, message.action.destination)
           if (reason !== null) return { accepted: false, reason }
         } else {
+          const source = inventory.slots[message.action.source]
+          if (source === null || source === undefined) return { accepted: false, reason: 'insufficient-items' }
+          const metadataReason = validateInventorySlotMetadataMove(
+            message.player,
+            message.action.source,
+            message.action.destination,
+            message.action.count,
+            source,
+            inventory.slots[message.action.destination],
+          )
+          if (metadataReason !== null) return { accepted: false, reason: metadataReason }
           const reason = moveInventoryStack(
             inventory,
             message.action.source,
@@ -1814,6 +1922,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             message.action.count,
           )
           if (reason !== null) return { accepted: false, reason }
+          if (message.action.count === source.count) {
+            transferInventorySlotMetadata(message.player, message.action.source, message.action.destination)
+          }
         }
         return {
           accepted: true,
@@ -1841,6 +1952,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (inaccessibleReason !== null) return { accepted: false, reason: inaccessibleReason }
         if (message.action._tag === 'move-item') {
           const playerIsSource = message.action.source._tag === 'player-slot'
+          const playerSlot = playerIsSource ? message.action.source.slot : message.action.destination.slot
+          if (hasInventorySlotMetadata(message.player, playerSlot)) return { accepted: false, reason: 'invalid-command' }
           const sourceSlots = playerIsSource ? inventory.slots : container.slots
           const destinationSlots = playerIsSource ? container.slots : inventory.slots
           const reason = moveStack(
@@ -1878,6 +1991,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const source = message.action.source
         const destination = message.action.destination
         if (source._tag === 'player-slot') {
+          if (hasInventorySlotMetadata(message.player, source.slot)) return { accepted: false, reason: 'invalid-command' }
           if (destination._tag !== 'furnace-slot') return { accepted: false, reason: 'invalid-command' }
           const furnaceSlot = destination.slot
           const temporaryFurnaceSlot = [furnace[furnaceSlot]]
@@ -1886,6 +2000,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           furnace[furnaceSlot] = temporaryFurnaceSlot[0] ?? null
         } else {
           if (destination._tag !== 'player-slot') return { accepted: false, reason: 'invalid-command' }
+          if (hasInventorySlotMetadata(message.player, destination.slot)) return { accepted: false, reason: 'invalid-command' }
           const furnaceSlot = source.slot
           const temporaryFurnaceSlot = [furnace[furnaceSlot]]
           const reason = moveStack(temporaryFurnaceSlot, 0, inventory.slots, destination.slot, message.action.count)
@@ -2029,6 +2144,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     notifyStateChanged()
     sendMessage(client, result)
     for (const delta of deltas) broadcast(delta)
+    if (message._tag === 'PlayerInventoryCommand' || message._tag === 'EntityPickupCommand') {
+      sendAnvil(client, anvilNamesDelta(message.player))
+      sendEnchanting(client, enchantmentsDelta(message.player))
+    }
     for (const outboundMessage of outboundMessages) broadcast(outboundMessage)
     if (decision.worldSnapshotRequired === true) broadcast(authoritativeSnapshot())
     return { accepted: true, message }
@@ -3037,6 +3156,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const ageTicks = (entity.ageTicks ?? 0) + elapsedTicks
         if (ageTicks >= ITEM_DROP_LIFESPAN_TICKS) {
           entities.delete(entity.entityId)
+          droppedItemMetadata.delete(entity.entityId)
           agedEntities.push({ _tag: 'EntityDespawnDelta', world: worldId, revision: 0, entityId: entity.entityId })
           continue
         }

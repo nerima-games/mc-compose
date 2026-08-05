@@ -1706,6 +1706,70 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted).toHaveLength(1)
   })
 
+  it('preserves named enchanted items through inventory moves and world drops', () => {
+    const state = initialState()
+    const enchantedBoots = {
+      item: 'iron_boots' as const,
+      durability: { current: 195, max: 195 },
+      enchantments: [{ id: 'protection' as const, level: 2 }],
+    }
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'iron_boots', count: 1, durability: { current: 195, max: 195 } }, null],
+          selectedSlot: 0,
+        },
+      }],
+      anvilNames: [{ player: playerId('alice'), names: [{ slot: 0, name: 'Traveler' }] }],
+      enchantments: [{ player: playerId('alice'), seed: 42, items: [{ slot: 0, item: enchantedBoots }] }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand', commandId: commandId('move-metadata'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+      action: { _tag: 'move-item', source: 0, destination: 1, count: 1 },
+    }).accepted).toBe(true)
+    expect(fixture.sent.map(decodeAnvilWireMessage)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta', world: 'world-1', revision: 5, player: 'alice',
+      names: [{ slot: 1, name: 'Traveler' }],
+    })
+    expect(fixture.sent.map(decodeEnchantingWireMessage)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta', world: 'world-1', revision: 5, player: 'alice', seed: 42,
+      items: [{ slot: 1, item: enchantedBoots }],
+    })
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand', commandId: commandId('drop-metadata'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 5,
+      action: { _tag: 'drop-item', source: 1, destination: 'world', count: 1 },
+    }).accepted).toBe(true)
+    const drop = messages(fixture.sent).find((message) => message._tag === 'EntitySpawnDelta')
+    if (drop?._tag !== 'EntitySpawnDelta') throw new Error('missing metadata item drop')
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'EntityPickupCommand', commandId: commandId('pickup-metadata'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 6, entityId: drop.entity.entityId,
+    }).accepted).toBe(true)
+    expect(fixture.sent.map(decodeAnvilWireMessage)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta', world: 'world-1', revision: 7, player: 'alice',
+      names: [{ slot: 0, name: 'Traveler' }],
+    })
+    expect(fixture.sent.map(decodeEnchantingWireMessage)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta', world: 'world-1', revision: 7, player: 'alice', seed: 42,
+      items: [{ slot: 0, item: enchantedBoots }],
+    })
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      revision: 7,
+      anvilNames: [{ player: 'alice', names: [{ slot: 0, name: 'Traveler' }] }],
+      enchantments: [{ player: 'alice', seed: 42, items: [{ slot: 0, item: enchantedBoots }] }],
+    })
+  })
+
   it('keeps NUL-boundary crafting cache keys distinct', () => {
     expect(craftingResultKey(playerId('alice'), commandId('part\u0000tail')))
       .not.toBe(craftingResultKey(playerId('alice\u0000part'), commandId('tail')))
