@@ -14,6 +14,7 @@ import {
   startMultiplayerServer,
   type MultiplayerRuntime,
 } from '../../apps/multiplayer-server/main'
+import { WITHER_MAX_WIRE_LENGTH } from '../../apps/multiplayer-shared/wither-network'
 
 const runtimes: Array<MultiplayerRuntime> = []
 
@@ -38,6 +39,22 @@ const nextMessage = (socket: WebSocket): Promise<NetworkMessage> => new Promise(
     socket.off('message', handleMessage)
     socket.off('error', handleError)
     resolve(decoded.right)
+  }
+  socket.once('error', handleError)
+  socket.on('message', handleMessage)
+})
+
+const nextMessageWithTag = <Tag extends NetworkMessage['_tag']>(socket: WebSocket, tag: Tag): Promise<Extract<NetworkMessage, { readonly _tag: Tag }>> => new Promise((resolve, reject) => {
+  const handleError = (error: Error): void => {
+    socket.off('message', handleMessage)
+    reject(error)
+  }
+  const handleMessage = (data: WebSocket.RawData): void => {
+    const decoded = decodeFrame(data.toString() as never)
+    if (Either.isLeft(decoded) || decoded.right._tag !== tag) return
+    socket.off('message', handleMessage)
+    socket.off('error', handleError)
+    resolve(decoded.right as Extract<NetworkMessage, { readonly _tag: Tag }>)
   }
   socket.once('error', handleError)
   socket.on('message', handleMessage)
@@ -124,6 +141,23 @@ describe('multiplayer WebSocket runtime', () => {
     })).rejects.toThrow(/tls-cert/)
   })
 
+  it('rejects text frames above the protocol limit before command processing', async () => {
+    const runtime = await startMultiplayerServer({
+      host: '127.0.0.1',
+      port: 0,
+      worldId: 'runtime-world',
+      seed: 73,
+      installSignalHandlers: false,
+    })
+    runtimes.push(runtime)
+
+    const socket = await connect(runtime)
+    const closeCode = waitForClose(socket)
+    socket.send('x'.repeat(WITHER_MAX_WIRE_LENGTH + 1))
+
+    await expect(closeCode).resolves.toBe(1009)
+  })
+
   it('serves health and returns an authoritative snapshot after join', async () => {
     const runtime = await startMultiplayerServer({
       host: '127.0.0.1',
@@ -194,7 +228,7 @@ describe('multiplayer WebSocket runtime', () => {
     const block = { x: spawnAt.x, y: spawnAt.y - 1, z: spawnAt.z }
     expect(generatedBlockAt(block)).not.toBeNull()
 
-    const correction = nextMessage(socket)
+    const correction = nextMessageWithTag(socket, 'PlayerMove')
     socket.send(encode({
       _tag: 'PlayerMove', player: 'persistent-player' as PlayerId,
       at: { x: 100, y: playerAt.y, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 },
@@ -216,14 +250,14 @@ describe('multiplayer WebSocket runtime', () => {
     })
 
     const fractionalAt = { x: spawnAt.x + 0.25, y: spawnAt.y, z: spawnAt.z + 0.5 }
-    const acceptedMove = nextMessage(sameProcess)
+    const acceptedMove = nextMessageWithTag(sameProcess, 'PlayerMove')
     sameProcess.send(encode({
       _tag: 'PlayerMove', player: 'persistent-player' as PlayerId,
       at: fractionalAt, facing: { yawRadians: 0.5, pitchRadians: -0.25 },
     }))
     await expect(acceptedMove).resolves.toMatchObject({ _tag: 'PlayerMove', at: fractionalAt })
 
-    const acceptedBreak = nextMessage(sameProcess)
+    const acceptedBreak = nextMessageWithTag(sameProcess, 'BlockBreak')
     sameProcess.send(encode({ _tag: 'BlockBreak', player: 'persistent-player' as PlayerId, world: worldId as never, at: block }))
     await expect(acceptedBreak).resolves.toMatchObject({ _tag: 'BlockBreak', at: block })
     await first.close()

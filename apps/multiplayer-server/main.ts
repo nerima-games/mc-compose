@@ -33,6 +33,7 @@ import {
 import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
 
+import { WITHER_MAX_WIRE_LENGTH } from '../multiplayer-shared/wither-network'
 import {
   isWeatherClockState,
   makeMultiplayerServerCore,
@@ -578,7 +579,8 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
         key: await readFile(transportSecurity.tlsKey as string),
       }, requestHandler)
     : createServer(requestHandler)
-  const sockets = new WebSocketServer({ noServer: true })
+  // The largest protocol frame is the Wither payload; reject larger frames before decoding or queuing commands.
+  const sockets = new WebSocketServer({ noServer: true, maxPayload: WITHER_MAX_WIRE_LENGTH })
   const activePlayers = new Map<string, string>()
   const reservedPlayers = new Set<string>()
 
