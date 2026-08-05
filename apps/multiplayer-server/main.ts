@@ -20,6 +20,7 @@ import {
 } from '@nerima-games/mc-worldgen'
 import {
   AuthoritativeSnapshot,
+  EntityId as EntityIdSchema,
   PlayerId as PlayerIdSchema,
   decodeFrame,
   type BlockPos,
@@ -233,6 +234,20 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
       })
   if (playerPositionsValue !== undefined && playerPositions.length !== playerPositionsValue.length) return undefined
 
+  const eyeOfEnderRecoveriesValue = state['eyeOfEnderRecoveries']
+  if (eyeOfEnderRecoveriesValue !== undefined && !Array.isArray(eyeOfEnderRecoveriesValue)) return undefined
+  const eyeOfEnderRecoveries = eyeOfEnderRecoveriesValue === undefined
+    ? []
+    : eyeOfEnderRecoveriesValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !isPlayerPosition(entry['at']) || typeof entry['remainingSecs'] !== 'number'
+          || !Number.isFinite(entry['remainingSecs']) || entry['remainingSecs'] <= 0) return []
+        const entityId = Schema.decodeUnknownEither(EntityIdSchema)(entry['entityId'])
+        return Either.isLeft(entityId)
+          ? []
+          : [{ entityId: entityId.right, at: entry['at'], remainingSecs: entry['remainingSecs'] }]
+      })
+  if (eyeOfEnderRecoveriesValue !== undefined && eyeOfEnderRecoveries.length !== eyeOfEnderRecoveriesValue.length) return undefined
+
   const decoded = Schema.decodeUnknownEither(AuthoritativeSnapshot)({
     _tag: 'AuthoritativeSnapshot',
     world: worldId,
@@ -268,6 +283,7 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     furnaces: snapshot.furnaces,
     villagerTrades: snapshot.villagerTrades,
     entities: snapshot.entities ?? [],
+    eyeOfEnderRecoveries,
     playerPositions,
     ...(state['wither'] === undefined ? {} : { wither: state['wither'] as NonNullable<MultiplayerServerState['wither']> }),
     ...(Number.isInteger(state['witherRevision']) ? { witherRevision: state['witherRevision'] as number } : {}),

@@ -219,6 +219,12 @@ export interface MultiplayerServerOptions {
   readonly onNetherPortalUse?: (clientId: ClientId, command: NetherPortalUseCommand) => void
 }
 
+export interface EyeOfEnderRecoveryState {
+  readonly entityId: AuthoritativeEntityState['entityId']
+  readonly at: Readonly<{ x: number; y: number; z: number }>
+  readonly remainingSecs: number
+}
+
 export interface MultiplayerServerState {
   readonly revision: number
   readonly blocks: ReadonlyArray<Readonly<{ at: BlockPos; block: string | null }>>
@@ -231,6 +237,7 @@ export interface MultiplayerServerState {
   readonly furnaces: AuthoritativeSnapshot['furnaces']
   readonly villagerTrades: AuthoritativeSnapshot['villagerTrades']
   readonly entities?: ReadonlyArray<AuthoritativeEntityState>
+  readonly eyeOfEnderRecoveries?: ReadonlyArray<EyeOfEnderRecoveryState>
   readonly playerPositions?: ReadonlyArray<Readonly<{
     player: PlayerId
     at: BlockPos
@@ -823,11 +830,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const entities = new Map<string, AuthoritativeEntityState>(
     (options.initialState?.entities ?? []).map((entity) => [entity.entityId, entity]),
   )
-  const eyeOfEnderRecoveries = new Map<string, Readonly<{
-    entityId: AuthoritativeEntityState['entityId']
-    at: Readonly<{ x: number; y: number; z: number }>
-    remainingSecs: number
-  }>>()
+  const eyeOfEnderRecoveries = new Map<string, EyeOfEnderRecoveryState>(
+    (options.initialState?.eyeOfEnderRecoveries ?? []).map((recovery) => [
+      recovery.entityId,
+      { entityId: recovery.entityId, at: { ...recovery.at }, remainingSecs: recovery.remainingSecs },
+    ]),
+  )
   const fallingPending = new Map<string, BlockPos>()
   const bowDrawStartedAt = new Map<PlayerId, number>()
   const fishingSessions = new Map<PlayerId, { session: FishingSession; slot: number; water: BlockPos }>()
@@ -1340,6 +1348,11 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     furnaces: [...furnaces.values()].map(furnaceSnapshot),
     villagerTrades,
     entities: [...entities.values()],
+    eyeOfEnderRecoveries: [...eyeOfEnderRecoveries.values()].map((recovery) => ({
+      entityId: recovery.entityId,
+      at: { ...recovery.at },
+      remainingSecs: recovery.remainingSecs,
+    })),
     playerPositions: [...playerPositions].map(([player, position]) => ({
       player,
       at: { ...position.at },
@@ -3869,6 +3882,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const remainingSecs = recovery.remainingSecs - elapsedSecs
         if (remainingSecs > 0) {
           eyeOfEnderRecoveries.set(key, { ...recovery, remainingSecs })
+          worldChanged = true
           continue
         }
         eyeOfEnderRecoveries.delete(key)
@@ -3880,6 +3894,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         }
         entities.set(drop.entityId, drop)
         movedEntities.push({ _tag: 'EntitySpawnDelta', world: worldId, revision: 0, entity: drop })
+        worldChanged = true
       }
       const applyExplosion = (
         center: Readonly<{ x: number; y: number; z: number }>,

@@ -3296,10 +3296,16 @@ describe('multiplayer server authoritative state', () => {
       player: playerId('alice'),
       breaks: false,
     }))
+    expect(fixture.persisted.at(-1)?.eyeOfEnderRecoveries).toEqual([
+      expect.objectContaining({ remainingSecs: 2.5 }),
+    ])
 
     fixture.sent.length = 0
-    fixture.server.tick(2_500)
-    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+    fixture.server.tick(1_000)
+    const restored = makeFixture(fixture.persisted.at(-1))
+    restored.sent.length = 0
+    restored.server.tick(1_500)
+    expect(messages(restored.sent)).toContainEqual(expect.objectContaining({
       _tag: 'EntitySpawnDelta',
       entity: expect.objectContaining({
         _tag: 'item-drop',
