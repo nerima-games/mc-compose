@@ -171,6 +171,7 @@ import {
   syncWorld,
   wrapHotbarSelection,
   type ChunkRef,
+  type ChunkSyncPort,
   type RenderEntity,
 } from '@nerima-games/mc-render'
 import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
@@ -1795,6 +1796,13 @@ const bootGame = async (
   const initialChunkContext = makeDimensionChunkContext(initialDimension, world)
   dimensionContexts.set(initialDimension, initialChunkContext)
   let currentChunkContext = initialChunkContext
+  const chunkSync: ChunkSyncPort = {
+    update: Effect.suspend(() =>
+      syncWorld(worldRenderer, currentChunkContext.dirtyChunks, currentChunkContext.meshChunkFromStore, {
+        colorForChunk: currentChunkContext.colorForChunk,
+      }),
+    ),
+  }
   const leverKeyOf = (lever: Pick<PersistedLeverState, 'dimension' | 'position'>): string =>
     JSON.stringify([lever.dimension, lever.position.x, lever.position.y, lever.position.z])
   const leverStates = new Map<string, PersistedLeverState>(
@@ -2091,9 +2099,6 @@ const bootGame = async (
 
       if (changed.length > 0 || removed.length > 0) redstoneDirty = true
 
-      yield* syncWorld(worldRenderer, context.dirtyChunks, context.meshChunkFromStore, {
-        colorForChunk: context.colorForChunk,
-      })
       chunksStreamedIn += changed.length
       chunksDropped += removed.length
       canvas.setAttribute('data-chunks-meshed', String(context.streamLoaded.size))
@@ -2511,7 +2516,7 @@ const bootGame = async (
     capturedAtSecs: KernelMonotonicTimeSecs(0),
   }
 
-  const render = renderModule(undefined, undefined, worldRenderer, initialPose)
+  const render = renderModule(undefined, undefined, worldRenderer, initialPose, undefined, chunkSync)
 
   const registeredRender = await Effect.runPromise(
     Effect.provide(
