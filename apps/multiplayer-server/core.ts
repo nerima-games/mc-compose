@@ -79,6 +79,7 @@ import {
   tickStatusEffects,
   blockLoot,
   isBucketItem,
+  isWithinLightningStrikeRadius,
   dropRollsNeeded,
   explosionDamageAmount,
   explosionDamageAt,
@@ -3766,14 +3767,27 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         revision += 1
         stateChanged = true
         const target = [...players.values()][0]
+        const at = target === undefined
+          ? { x: 0, y: bounds.maxY, z: 0 }
+          : { x: target.at.x, y: target.at.y, z: target.at.z }
         postPersistenceDeltas.push({
           _tag: 'LightningStrikeDelta',
           world: worldId,
           revision,
-          at: target === undefined
-            ? { x: 0, y: bounds.maxY, z: 0 }
-            : { x: target.at.x, y: target.at.y, z: target.at.z },
+          at,
         })
+        for (const entity of entities.values()) {
+          if (
+            entity._tag !== 'living'
+            || entity.entityType !== CREEPER_KIND
+            || entity.mobState?.charged === true
+            || !isWithinLightningStrikeRadius(entity.at, at)
+          ) continue
+          entities.set(entity.entityId, {
+            ...entity,
+            mobState: { ...mobWireState(entity.mobState), charged: true },
+          })
+        }
       }
       thunderStrikeSequence = nextThunderStrikeSequence
     }
@@ -4179,7 +4193,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (entity.entityType === CREEPER_KIND) {
           const step = stepCreeperFuse(
             creeperFuseForSimulation(hostileMobState),
-            { distanceToTargetBlocks: targetEntry?.[2] },
+            {
+              distanceToTargetBlocks: targetEntry?.[2],
+              charged: hostileMobState.charged === true,
+            },
             creeperDeltaTime(elapsedSecs),
           )
           if (step.explosion !== undefined) {

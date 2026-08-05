@@ -2239,6 +2239,50 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.timeline.indexOf('persist')).toBeLessThan(fixture.timeline.indexOf('send'))
   })
 
+  it('charges Creepers within an authoritative thunder strike', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      timeWeather: { timeOfDay: 159, weather: 'thunder' },
+      entities: [{
+        _tag: 'living',
+        entityId: entityId('charged-creeper'),
+        entityType: 'creeper',
+        at: { x: 12, y: 65, z: -7 },
+        health: 20,
+        maxHealth: 20,
+      }, {
+        _tag: 'living',
+        entityId: entityId('distant-creeper'),
+        entityType: 'creeper',
+        at: { x: 15.1, y: 65, z: -7 },
+        health: 20,
+        maxHealth: 20,
+      }],
+    }, { x: 12, y: 65, z: -7 })
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(50)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta',
+      entity: expect.objectContaining({
+        entityId: 'charged-creeper',
+        mobState: expect.objectContaining({ charged: true }),
+      }),
+    }))
+    expect(fixture.persisted.at(-1)?.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        entityId: 'charged-creeper',
+        mobState: expect.objectContaining({ charged: true }),
+      }),
+      expect.objectContaining({
+        entityId: 'distant-creeper',
+        mobState: expect.not.objectContaining({ charged: true }),
+      }),
+    ]))
+  })
+
   it('ages item drops authoritatively and despawns them after five minutes', () => {
     const fixture = makeFixture(initialState())
     fixture.sent.length = 0
