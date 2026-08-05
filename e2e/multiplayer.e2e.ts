@@ -181,12 +181,39 @@ const receiveMessage = (socket: WebSocket): Promise<WireMessage> =>
     socket.once('message', onMessage)
   })
 
+const receiveMessageBefore = (socket: WebSocket, timeoutMs: number): Promise<WireMessage> =>
+  new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`timed out after ${String(timeoutMs)}ms`))
+    }, timeoutMs)
+    void receiveMessage(socket).then(
+      (message) => {
+        clearTimeout(timeout)
+        resolve(message)
+      },
+      (error: unknown) => {
+        clearTimeout(timeout)
+        reject(error)
+      },
+    )
+  })
+
 const receiveMessageWithTag = async (socket: WebSocket, tag: string): Promise<WireMessage> => {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const message = await receiveMessage(socket)
-    if (message._tag === tag) return message
+  const deadline = Date.now() + 5_000
+  const observedTags: string[] = []
+  try {
+    while (Date.now() < deadline) {
+      const message = await receiveMessageBefore(socket, deadline - Date.now())
+      if (message._tag === tag) return message
+      observedTags.push(message._tag)
+    }
+  } catch (error) {
+    throw new Error(
+      `did not receive ${tag} within 5000ms; observed ${observedTags.join(', ') || 'no messages'}`,
+      { cause: error },
+    )
   }
-  throw new Error(`did not receive ${tag} within three messages`)
+  throw new Error(`did not receive ${tag} within 5000ms; observed ${observedTags.join(', ') || 'no messages'}`)
 }
 
 const expectOutOfBoundsPlacementRejection = async (

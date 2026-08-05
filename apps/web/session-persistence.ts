@@ -2,6 +2,7 @@ import { Data, Effect, Option, Schema } from 'effect'
 import type { YieldableError } from 'effect/Cause'
 import { isValidWitherRuntimeSnapshot, type WitherRuntimeSnapshot } from '../multiplayer-shared/wither-runtime'
 
+import { isItemType } from '@nerima-games/mc-kernel'
 import {
   loadFrom,
   SaveKey,
@@ -20,6 +21,7 @@ import {
   INITIAL_WEATHER_STATE,
   isValidTimeState,
   isValidWeatherState,
+  durabilityForItem,
   maxStackCountForItem,
   storageFromInventory,
   validateContainerStorageSnapshot,
@@ -135,20 +137,53 @@ export const persistedItemDropMetadata = (behaviour: unknown): PersistedItemDrop
   }
 }
 
-const normalizePersistedEntityBehaviour = (kind: string, behaviour: unknown): unknown => {
-  if (kind !== 'dropped_item') return behaviour
-  const drop = asRecord(behaviour)
-  if (drop === undefined) return behaviour
-  const { customName: _customName, enchantments: _enchantments, ...base } = drop
-  return { ...base, ...persistedItemDropMetadata(drop) }
-}
-
 export const persistedItemDropLifetime = (behaviour: unknown): PersistedItemDropLifetime => {
   const elapsedSecs = asRecord(behaviour)?.['elapsedSecs']
   return {
     elapsedSecs: typeof elapsedSecs === 'number' && Number.isFinite(elapsedSecs)
       ? Math.max(0, elapsedSecs)
       : 0,
+  }
+}
+
+const normalizePersistedEntityBehaviour = (kind: string, behaviour: unknown): unknown => {
+  if (kind !== 'dropped_item') return behaviour
+  const drop = asRecord(behaviour)
+  if (drop === undefined) return behaviour
+
+  const item = drop['item']
+  const count = drop['count']
+  if (
+    typeof item !== 'string'
+    || !isItemType(item)
+    || typeof count !== 'number'
+    || !Number.isInteger(count)
+    || count <= 0
+    || count > maxStackCountForItem(item)
+  ) return behaviour
+
+  const enchantedItem = decodeEnchantedItem({
+    item,
+    durability: Object.hasOwn(drop, 'durability') ? drop['durability'] : durabilityForItem(item),
+    enchantments: Object.hasOwn(drop, 'enchantments') ? drop['enchantments'] : [],
+  })
+  if (!enchantedItem.ok || (enchantedItem.value.durability !== null && count !== 1)) return behaviour
+
+  const eligibleFromFrame = drop['eligibleFromFrame']
+  const customName = drop['customName']
+  return {
+    _tag: 'DroppedItem',
+    item: enchantedItem.value.item,
+    count,
+    durability: enchantedItem.value.durability,
+    ...(typeof eligibleFromFrame === 'number'
+      && Number.isInteger(eligibleFromFrame)
+      && eligibleFromFrame >= 0
+      ? { eligibleFromFrame }
+      : {}),
+    ...(typeof customName === 'string' && customName.trim().length > 0 ? { customName } : {}),
+    enchantments: enchantedItem.value.enchantments.map((enchantment) => ({ ...enchantment })),
+    elapsedSecs: persistedItemDropLifetime(drop).elapsedSecs,
   }
 }
 

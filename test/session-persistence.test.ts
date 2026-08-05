@@ -34,6 +34,7 @@ import {
   SPAWN_PLAYER_VITALS,
   emptyBrewingStandState,
   emptyStatusEffectState,
+  isDroppedItemBehaviour,
 } from '@nerima-games/mx-gameplay'
 
 import {
@@ -185,6 +186,40 @@ describe('dynamic entity persistence', () => {
     expect(persistedItemDropLifetime({ item: 'stone', count: 2 })).toEqual({ elapsedSecs: 0 })
     expect(persistedItemDropLifetime({ elapsedSecs: Number.POSITIVE_INFINITY })).toEqual({
       elapsedSecs: 0,
+    })
+  })
+
+  it('reconstructs persisted item drops accepted by the entity runtime', () => {
+    const roster = normalizePersistedEntityRoster({
+      entities: [{
+        id: 'drop-4',
+        kind: 'dropped_item',
+        feetPosition: { x: 1.5, y: 64, z: -2.5 },
+        healthPoints: 1,
+        behaviour: {
+          item: 'diamond_pickaxe',
+          count: 1,
+          durability: { current: 1500, max: 1561 },
+          customName: 'Fortune Miner',
+          enchantments: [{ id: 'fortune', level: 3 }],
+          elapsedSecs: 123.5,
+          eligibleFromFrame: 42,
+        },
+      }],
+      nextSerial: 5,
+    })
+
+    const behaviour = roster.entities[0]?.behaviour
+    expect(isDroppedItemBehaviour(behaviour)).toBe(true)
+    expect(behaviour).toEqual({
+      _tag: 'DroppedItem',
+      item: 'diamond_pickaxe',
+      count: 1,
+      durability: { current: 1500, max: 1561 },
+      customName: 'Fortune Miner',
+      enchantments: [{ id: 'fortune', level: 3 }],
+      elapsedSecs: 123.5,
+      eligibleFromFrame: 42,
     })
   })
 
@@ -387,6 +422,7 @@ describe('session persistence', () => {
               feetPosition: { x: 1.5, y: 64, z: -2.5 },
               healthPoints: 1,
               behaviour: {
+                _tag: 'DroppedItem',
                 item: 'diamond_pickaxe',
                 count: 1,
                 durability: { current: 1500, max: 1561 },
