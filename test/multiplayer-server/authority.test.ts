@@ -41,6 +41,11 @@ import {
   encodeAnvilCommand,
   type AnvilCommand,
 } from '../../apps/multiplayer-shared/anvil-network'
+import {
+  decodeEnchantingWireMessage,
+  encodeEnchantingCommand,
+  type EnchantingCommand,
+} from '../../apps/multiplayer-shared/enchanting-network'
 import { decodeSleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
 
@@ -65,7 +70,8 @@ const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage
     && decodePlayerDamageWireMessage(wire) === undefined
     && decodeCraftingWireMessage(wire) === undefined
     && decodeBrewingWireMessage(wire) === undefined
-    && decodeAnvilWireMessage(wire) === undefined).map((wire) => {
+    && decodeAnvilWireMessage(wire) === undefined
+    && decodeEnchantingWireMessage(wire) === undefined).map((wire) => {
     const decoded = decodeFrame(wire)
     if (Either.isLeft(decoded)) throw decoded.left
     return decoded.right
@@ -161,6 +167,8 @@ const makeFixture = (
     server.receive('socket-a', encodeCraftingCommand(command))
   const receiveAnvil = (command: AnvilCommand): ReceiveResult =>
     server.receive('socket-a', encodeAnvilCommand(command))
+  const receiveEnchanting = (command: EnchantingCommand): ReceiveResult =>
+    server.receive('socket-a', encodeEnchantingCommand(command))
   expect(receive({
     _tag: 'PlayerJoin',
     player: playerId('alice'),
@@ -169,7 +177,7 @@ const makeFixture = (
   }).accepted).toBe(true)
   persisted.length = 0
   timeline.length = 0
-  return { sent, persisted, timeline, receive, receiveDamage, receiveCrafting, receiveAnvil, server }
+  return { sent, persisted, timeline, receive, receiveDamage, receiveCrafting, receiveAnvil, receiveEnchanting, server }
 }
 
 describe('multiplayer server authoritative state', () => {
@@ -1637,6 +1645,65 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted).toHaveLength(1)
     expect(fixture.receiveAnvil({ ...command, commandId: 'anvil-spoof', player: 'bob', expectedRevision: 5 }))
       .toEqual({ accepted: false, reason: 'identity-spoof' })
+  })
+
+  it('authorizes enchanting with server-owned costs, metadata, and seed exactly once', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [
+            { item: 'iron_boots', count: 1, durability: { current: 195, max: 195 } },
+            { item: 'lapis_lazuli', count: 3 },
+            null,
+          ],
+          selectedSlot: 0,
+        },
+      }],
+      vitals: [{ player: playerId('alice'), state: { health: 3, hunger: 2, experience: 1_000 } }],
+    })
+    fixture.sent.length = 0
+    const command: EnchantingCommand = {
+      _tag: 'EnchantingCommand', commandId: 'enchant-1', player: 'alice', world: 'world-1',
+      expectedRevision: 4, slot: 0, offer: 0,
+    }
+
+    expect(fixture.receiveEnchanting(command).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta', revision: 5, player: 'alice',
+      state: expect.objectContaining({
+        slots: [
+          { item: 'iron_boots', count: 1, durability: { current: 195, max: 195 } },
+          { item: 'lapis_lazuli', count: 2 },
+          null,
+        ],
+      }),
+    }))
+    const vitals = messages(fixture.sent).find((message) => message._tag === 'PlayerVitalsDelta')
+    expect(vitals).toMatchObject({ revision: 5, player: 'alice', state: { experience: 910 } })
+    expect(fixture.sent.map(decodeEnchantingWireMessage)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta', world: 'world-1', revision: 5, player: 'alice',
+      seed: expect.any(Number),
+      items: [{
+        slot: 0,
+        item: {
+          item: 'iron_boots', durability: { current: 195, max: 195 },
+          enchantments: [{ id: 'protection', level: 2 }],
+        },
+      }],
+    })
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      enchantments: [{
+        player: 'alice', seed: expect.any(Number), items: [{ slot: 0, item: expect.objectContaining({ item: 'iron_boots' }) }],
+      }],
+    })
+
+    expect(fixture.receiveEnchanting(command).accepted).toBe(true)
+    expect(fixture.persisted).toHaveLength(1)
   })
 
   it('keeps NUL-boundary crafting cache keys distinct', () => {

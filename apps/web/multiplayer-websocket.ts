@@ -13,6 +13,7 @@ import {
 import { decodeCraftingWireMessage, encodeCraftingCommand, type CraftingCommand, type CraftingWireMessage } from '../multiplayer-shared/crafting-network'
 import { decodeBrewingWireMessage, encodeBrewingCommand, type BrewingCommand, type BrewingWireMessage } from '../multiplayer-shared/brewing-network'
 import { decodeAnvilWireMessage, encodeAnvilCommand, type AnvilCommand, type AnvilWireMessage } from '../multiplayer-shared/anvil-network'
+import { decodeEnchantingWireMessage, encodeEnchantingCommand, type EnchantingCommand, type EnchantingWireMessage } from '../multiplayer-shared/enchanting-network'
 import { decodeSleepWireMessage, type SleepWireMessage } from '../multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage, type WitherWireMessage } from '../multiplayer-shared/wither-network'
 
@@ -56,11 +57,13 @@ export interface BrowserWebSocketTransport extends TransportService {
   readonly craftingInbound: Queue.Dequeue<CraftingWireMessage>
   readonly brewingInbound: Queue.Dequeue<BrewingWireMessage>
   readonly anvilInbound: Queue.Dequeue<AnvilWireMessage>
+  readonly enchantingInbound: Queue.Dequeue<EnchantingWireMessage>
   readonly sendSleep: (message: SleepWireMessage) => Effect.Effect<void, TransportError>
   readonly sendPlayerDamage: (command: PlayerDamageCommand) => Effect.Effect<void, TransportError>
   readonly sendCrafting: (command: CraftingCommand) => Effect.Effect<void, TransportError>
   readonly sendBrewing: (command: BrewingCommand) => Effect.Effect<void, TransportError>
   readonly sendAnvil: (command: AnvilCommand) => Effect.Effect<void, TransportError>
+  readonly sendEnchanting: (command: EnchantingCommand) => Effect.Effect<void, TransportError>
   readonly state: () => WebSocketTransportState
 }
 
@@ -145,6 +148,7 @@ export const makeBrowserWebSocketTransport = (
     const craftingInbound = yield* Queue.unbounded<CraftingWireMessage>()
     const brewingInbound = yield* Queue.unbounded<BrewingWireMessage>()
     const anvilInbound = yield* Queue.unbounded<AnvilWireMessage>()
+    const enchantingInbound = yield* Queue.unbounded<EnchantingWireMessage>()
     const opened = yield* Deferred.make<void, TransportError>()
     const socket = yield* Effect.try({
       try: () => (options.socketFactory ?? defaultSocketFactory)(options.url),
@@ -182,6 +186,7 @@ export const makeBrowserWebSocketTransport = (
       if (shutdownInbound) Effect.runSync(Queue.shutdown(craftingInbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(brewingInbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(anvilInbound))
+      if (shutdownInbound) Effect.runSync(Queue.shutdown(enchantingInbound))
     }
 
     function handleOpen(): void {
@@ -288,6 +293,11 @@ export const makeBrowserWebSocketTransport = (
         Queue.unsafeOffer(anvilInbound, anvilMessage)
         return
       }
+      const enchantingMessage = decodeEnchantingWireMessage(event.data)
+      if (enchantingMessage !== undefined) {
+        Queue.unsafeOffer(enchantingInbound, enchantingMessage)
+        return
+      }
       Queue.unsafeOffer(inbound, event.data)
     }
 
@@ -353,6 +363,7 @@ export const makeBrowserWebSocketTransport = (
       Effect.runSync(Queue.shutdown(craftingInbound))
       Effect.runSync(Queue.shutdown(brewingInbound))
       Effect.runSync(Queue.shutdown(anvilInbound))
+      Effect.runSync(Queue.shutdown(enchantingInbound))
       if (shouldCloseSocket) socket.close(1000, 'transport disposed')
     })
 
@@ -366,6 +377,8 @@ export const makeBrowserWebSocketTransport = (
       send(encodeBrewingCommand(command))
     const sendAnvil = (command: AnvilCommand): Effect.Effect<void, TransportError> =>
       send(encodeAnvilCommand(command))
+    const sendEnchanting = (command: EnchantingCommand): Effect.Effect<void, TransportError> =>
+      send(encodeEnchantingCommand(command))
     return {
       send,
       inbound,
@@ -375,11 +388,13 @@ export const makeBrowserWebSocketTransport = (
       craftingInbound,
       brewingInbound,
       anvilInbound,
+      enchantingInbound,
       sendSleep,
       sendPlayerDamage,
       sendCrafting,
       sendBrewing,
       sendAnvil,
+      sendEnchanting,
       close,
       state: () => currentState,
     }

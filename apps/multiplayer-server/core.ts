@@ -22,7 +22,7 @@ import {
 import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, StackCount } from '@nerima-games/mc-kernel'
 import type { Dimension } from '@nerima-games/mc-worldgen'
-import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
+import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
@@ -100,6 +100,10 @@ import {
   type BrewingBottle,
   type BrewingStandState,
   type StatusEffectState,
+  applyEnchantmentOffer,
+  decodeEnchantedItem,
+  enchantmentOffers,
+  type EnchantedItem,
 } from '@nerima-games/mx-gameplay'
 import { Either, Option } from 'effect'
 import { DeltaTimeSecs } from '../../src/domain/kernel-vocabulary'
@@ -137,6 +141,14 @@ import {
   type AnvilWireMessage,
   type PlayerAnvilNamesDelta,
 } from '../multiplayer-shared/anvil-network'
+import {
+  decodeEnchantingWireMessage,
+  ENCHANTING_MAX_WIRE_LENGTH,
+  type EnchantingCommand,
+  type EnchantingCommandResult,
+  type EnchantingWireMessage,
+  type PlayerEnchantmentsDelta,
+} from '../multiplayer-shared/enchanting-network'
 import { spendExperienceLevels } from '../multiplayer-shared/anvil-repair'
 
 export type ClientId = string
@@ -161,6 +173,8 @@ export const brewingResultKey = (player: PlayerId, commandId: string): string =>
 const brewingFingerprint = (command: BrewingCommand): string => JSON.stringify(command)
 export const anvilResultKey = (player: PlayerId, commandId: string): string => JSON.stringify([player, commandId])
 const anvilFingerprint = (command: AnvilCommand): string => JSON.stringify(command)
+export const enchantingResultKey = (player: PlayerId, commandId: string): string => JSON.stringify([player, commandId])
+const enchantingFingerprint = (command: EnchantingCommand): string => JSON.stringify(command)
 
 const arrowHitProjection = (
   from: Readonly<{ x: number; y: number; z: number }>,
@@ -227,10 +241,15 @@ export interface MultiplayerServerState {
     player: PlayerId
     names: ReadonlyArray<Readonly<{ slot: number; name: string }>>
   }>>
+  readonly enchantments?: ReadonlyArray<Readonly<{
+    player: PlayerId
+    seed: number
+    items: ReadonlyArray<Readonly<{ slot: number; item: EnchantedItem }>>
+  }>>
 }
 
 export type ReceiveResult =
-  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | PlayerDamageWireMessage | CraftingCommand | BrewingCommand | AnvilCommand }>
+  | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | PlayerDamageWireMessage | CraftingCommand | BrewingCommand | AnvilCommand | EnchantingCommand }>
   | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' | 'invalid-command' }>
 
 interface ConnectedClient {
@@ -746,6 +765,18 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         .map(({ slot, name }) => [slot, name]),
     )]),
   )
+  const enchantments = new Map<PlayerId, { seed: number; items: Map<number, EnchantedItem> }>(
+    (options.initialState?.enchantments ?? []).flatMap(({ player, seed, items }) => {
+      if (!Number.isSafeInteger(seed) || seed < 0 || seed > 0xffff_ffff) return []
+      const decodedItems = items.flatMap(({ slot, item }) => {
+        const decoded = decodeEnchantedItem(item)
+        return Number.isSafeInteger(slot) && slot >= 0 && slot < DEFAULT_INVENTORY_SLOTS && decoded.ok
+          ? [[slot, decoded.value] as const]
+          : []
+      })
+      return [[player, { seed, items: new Map(decodedItems) }] as const]
+    }),
+  )
   let villagerTrades: AuthoritativeSnapshot['villagerTrades'] = (options.initialState?.villagerTrades ?? []).map((state) => ({
     ...state,
     offers: state.offers.map((offer) => ({
@@ -780,6 +811,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const craftingResults = new Map<string, Readonly<{ fingerprint: string; result: CraftingCommandResult }>>()
   const brewingResults = new Map<string, Readonly<{ fingerprint: string; result: BrewingCommandResult }>>()
   const anvilResults = new Map<string, Readonly<{ fingerprint: string; result: AnvilCommandResult }>>()
+  const enchantingResults = new Map<string, Readonly<{ fingerprint: string; result: EnchantingCommandResult }>>()
   const cachePlayerDamageResult = (
     key: string,
     fingerprint: string,
@@ -807,6 +839,12 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (anvilResults.size <= commandResultLimit) return
     const oldestKey = anvilResults.keys().next().value
     if (oldestKey !== undefined) anvilResults.delete(oldestKey)
+  }
+  const cacheEnchantingResult = (key: string, fingerprint: string, result: EnchantingCommandResult): void => {
+    enchantingResults.set(key, { fingerprint, result })
+    if (enchantingResults.size <= commandResultLimit) return
+    const oldestKey = enchantingResults.keys().next().value
+    if (oldestKey !== undefined) enchantingResults.delete(oldestKey)
   }
   const lastWitherAttackMs = new Map<PlayerId, number>()
   const hungerActors = new Map<PlayerId, HungerActor>()
@@ -875,6 +913,9 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const sendAnvil = (client: ConnectedClient, message: AnvilWireMessage): void => {
     client.send(JSON.stringify(message) as WireText)
   }
+  const sendEnchanting = (client: ConnectedClient, message: EnchantingWireMessage): void => {
+    client.send(JSON.stringify(message) as WireText)
+  }
 
   const broadcastWither = (message: WitherWireMessage): void => {
     for (const client of clients.values()) if (client.playerId !== null) sendWither(client, message)
@@ -892,6 +933,19 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       names: names === undefined
         ? []
         : [...names].sort(([left], [right]) => left - right).map(([slot, name]) => ({ slot, name })),
+    }
+  }
+  const enchantmentsDelta = (player: PlayerId): PlayerEnchantmentsDelta => {
+    const state = enchantments.get(player)
+    return {
+      _tag: 'PlayerEnchantmentsDelta',
+      world: worldId,
+      revision,
+      player,
+      seed: state?.seed ?? (options.seed >>> 0),
+      items: state === undefined
+        ? []
+        : [...state.items].sort(([left], [right]) => left - right).map(([slot, item]) => ({ slot, item })),
     }
   }
 
@@ -1063,6 +1117,11 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       player,
       names: [...names].sort(([left], [right]) => left - right).map(([slot, name]) => ({ slot, name })),
     })),
+    enchantments: [...enchantments].map(([player, state]) => ({
+      player,
+      seed: state.seed,
+      items: [...state.items].sort(([left], [right]) => left - right).map(([slot, item]) => ({ slot, item })),
+    })),
   })
 
   const notifyStateChanged = (): void => options.onStateChanged?.(persistentState())
@@ -1072,6 +1131,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       inventories.set(player, { slots: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), durability: Array.from({ length: DEFAULT_INVENTORY_SLOTS }, () => null), equipment: emptyEquipmentState(), selectedSlot: 0 })
     }
     if (!anvilNames.has(player)) anvilNames.set(player, new Map())
+    if (!enchantments.has(player)) enchantments.set(player, { seed: options.seed >>> 0, items: new Map() })
     if (!vitals.has(player)) vitals.set(player, { ...DEFAULT_VITALS })
     if (!statusEffects.has(player)) statusEffects.set(player, emptyStatusEffectState())
     const playerVitals = vitals.get(player) as MutableVitalsState
@@ -2092,7 +2152,8 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if ((frame.length > PLAYER_DAMAGE_MAX_WIRE_LENGTH && frame.includes('"_tag":"PlayerDamageCommand"'))
       || (frame.length > CRAFTING_MAX_WIRE_LENGTH && frame.includes('"_tag":"CraftingCommand"'))
       || (frame.length > BREWING_MAX_WIRE_LENGTH && frame.includes('"_tag":"BrewingCommand"'))
-      || (frame.length > ANVIL_MAX_WIRE_LENGTH && frame.includes('"_tag":"AnvilCommand"'))) {
+      || (frame.length > ANVIL_MAX_WIRE_LENGTH && frame.includes('"_tag":"AnvilCommand"'))
+      || (frame.length > ENCHANTING_MAX_WIRE_LENGTH && frame.includes('"_tag":"EnchantingCommand"'))) {
       return { accepted: false, reason: 'malformed-frame' }
     }
     const craftingMessage = decodeCraftingWireMessage(frame)
@@ -2211,6 +2272,100 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       sendAnvil(client, anvilNamesDelta(playerId))
       sendAnvil(client, result)
       return { accepted: true, message: anvilMessage }
+    }
+    const enchantingMessage = decodeEnchantingWireMessage(frame)
+    if (enchantingMessage?._tag === 'EnchantingCommand') {
+      if (client.playerId === null) return { accepted: false, reason: 'join-required' }
+      const command = enchantingMessage
+      const playerId = client.playerId
+      const resultKey = enchantingResultKey(playerId, command.commandId)
+      const fingerprint = enchantingFingerprint(command)
+      const cached = enchantingResults.get(resultKey)
+      if (cached !== undefined) {
+        if (cached.fingerprint !== fingerprint) return { accepted: false, reason: 'invalid-command' }
+        sendEnchanting(client, cached.result)
+        return cached.result.accepted
+          ? { accepted: true, message: enchantingMessage }
+          : { accepted: false, reason: cached.result.reason === 'unauthorized-player' ? 'identity-spoof' : cached.result.reason === 'wrong-world' ? 'wrong-world' : 'invalid-command' }
+      }
+      const rejectEnchanting = (
+        reason: Extract<EnchantingCommandResult, { accepted: false }>['reason'],
+        receiveReason: Extract<ReceiveResult, { accepted: false }>['reason'] = 'invalid-command',
+      ): ReceiveResult => {
+        const result: EnchantingCommandResult = { _tag: 'EnchantingCommandResult', commandId: command.commandId, accepted: false, revision, reason }
+        cacheEnchantingResult(resultKey, fingerprint, result)
+        sendEnchanting(client, result)
+        return { accepted: false, reason: receiveReason }
+      }
+      if (command.player !== playerId) return rejectEnchanting('unauthorized-player', 'identity-spoof')
+      if (command.world !== worldId) return rejectEnchanting('wrong-world', 'wrong-world')
+      if (command.expectedRevision !== revision) return rejectEnchanting('stale-revision')
+      const inventory = inventories.get(playerId)
+      const presence = players.get(playerId)
+      const playerVitals = vitals.get(playerId)
+      if (inventory === undefined || presence === undefined || playerVitals === undefined || playerVitals.health <= 0) return rejectEnchanting('invalid-command')
+      const stack = inventory.slots[command.slot]
+      if (stack === null || stack === undefined) return rejectEnchanting('no-item')
+      if (!isItemType(stack.item)) return rejectEnchanting('invalid-item')
+      const current = enchantments.get(playerId) ?? { seed: options.seed >>> 0, items: new Map<number, EnchantedItem>() }
+      const item = decodeEnchantedItem({
+        item: stack.item,
+        durability: inventory.durability[command.slot] ?? null,
+        enchantments: current.items.get(command.slot)?.enchantments ?? [],
+      })
+      if (!item.ok) return rejectEnchanting('invalid-item')
+      const lapis = inventory.slots.reduce(
+        (total, candidate) => total + (candidate?.item === 'lapis_lazuli' ? candidate.count : 0),
+        0,
+      )
+      const outcome = applyEnchantmentOffer({
+        seed: current.seed,
+        bookshelfCount: 15,
+        playerLevel: levelForTotalExperience(playerVitals.experience),
+        lapis,
+        item: item.value,
+      }, enchantmentOffers(current.seed, 15)[command.offer])
+      if (!outcome.ok) {
+        const reason: Extract<EnchantingCommandResult, { accepted: false }>['reason'] =
+          outcome.reason === 'invalid_state' || outcome.reason === 'invalid_offer'
+            ? 'invalid-command'
+            : outcome.reason === 'no_item'
+              ? 'no-item'
+              : outcome.reason === 'invalid_item'
+                ? 'invalid-item'
+                : outcome.reason === 'incompatible_item'
+                  ? 'incompatible-item'
+                  : outcome.reason === 'conflicting_enchantment'
+                    ? 'conflicting-enchantment'
+                    : outcome.reason === 'insufficient_level'
+                      ? 'insufficient-level'
+                      : 'insufficient-lapis'
+        return rejectEnchanting(reason)
+      }
+      if (outcome.state.item === null) return rejectEnchanting('no-item')
+      let remainingLapis = lapis - outcome.state.lapis
+      for (let slot = 0; slot < inventory.slots.length && remainingLapis > 0; slot += 1) {
+        const candidate = inventory.slots[slot]
+        if (candidate?.item !== 'lapis_lazuli') continue
+        const consumed = Math.min(candidate.count, remainingLapis)
+        inventory.slots[slot] = consumed === candidate.count ? null : { ...candidate, count: candidate.count - consumed }
+        if (consumed === candidate.count) inventory.durability[slot] = null
+        remainingLapis -= consumed
+      }
+      if (remainingLapis !== 0) return rejectEnchanting('insufficient-lapis')
+      current.seed = outcome.state.seed
+      current.items.set(command.slot, outcome.state.item)
+      enchantments.set(playerId, current)
+      playerVitals.experience = totalExperienceAtLevel(outcome.state.playerLevel)
+      revision += 1
+      const result: EnchantingCommandResult = { _tag: 'EnchantingCommandResult', commandId: command.commandId, accepted: true, revision }
+      cacheEnchantingResult(resultKey, fingerprint, result)
+      notifyStateChanged()
+      broadcast({ _tag: 'PlayerInventoryDelta', world: presence.world, revision, player: playerId, state: inventorySnapshot(inventory) })
+      broadcast({ _tag: 'PlayerVitalsDelta', world: presence.world, revision, player: playerId, state: vitalsSnapshot(playerVitals) })
+      sendEnchanting(client, enchantmentsDelta(playerId))
+      sendEnchanting(client, result)
+      return { accepted: true, message: enchantingMessage }
     }
     const brewingMessage = decodeBrewingWireMessage(frame)
     if (brewingMessage?._tag === 'BrewingCommand') {
@@ -2524,6 +2679,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       })
       sendMessage(client, authoritativeSnapshot())
       sendAnvil(client, anvilNamesDelta(message.player))
+      sendEnchanting(client, enchantmentsDelta(message.player))
       for (const { at, state } of brewingStands.values()) {
         sendBrewing(client, { _tag: 'BrewingStandDelta', world: worldId, revision, at: { ...at }, state: copyBrewingStandState(state) })
       }

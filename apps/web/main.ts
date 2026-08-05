@@ -388,6 +388,10 @@ import {
   type AnvilCommandResult,
 } from '../multiplayer-shared/anvil-network'
 import {
+  type EnchantingCommand,
+  type EnchantingCommandResult,
+} from '../multiplayer-shared/enchanting-network'
+import {
   advanceEyeOfEnderRuntime,
   eyeOfEnderRenderDescriptors,
   eyeOfEnderRuntimeSnapshot,
@@ -3001,6 +3005,7 @@ const bootGame = async (
   let nextCraftingCommand = 0
   let nextBrewingCommand = 0
   let nextAnvilCommand = 0
+  let nextEnchantingCommand = 0
   let nextVillagerTradeCommand = 0
   let pendingVitalsCommand: CommandId | null = null
   let pendingInventoryCommand: {
@@ -3042,6 +3047,9 @@ type MultiplayerInventorySelection = Readonly<{
     readonly commandId: string
   } | null = null
   let pendingAnvilCommand: {
+    readonly commandId: string
+  } | null = null
+  let pendingEnchantingCommand: {
     readonly commandId: string
   } | null = null
   let activeBrewingStandAt: { readonly x: number; readonly y: number; readonly z: number } | undefined
@@ -3481,6 +3489,24 @@ type MultiplayerInventorySelection = Readonly<{
     return true
   }
 
+  const requestEnchanting = (offer: 0 | 1 | 2): boolean => {
+    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingEnchantingCommand !== null) return false
+    nextEnchantingCommand += 1
+    const commandId = `enchanting-${String(nextEnchantingCommand)}`
+    pendingEnchantingCommand = { commandId }
+    const command: EnchantingCommand = {
+      _tag: 'EnchantingCommand',
+      commandId,
+      player: String(multiplayer.query.player),
+      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      expectedRevision: multiplayerRevision,
+      slot: selectedHotbarIndex,
+      offer,
+    }
+    Effect.runSync(multiplayer.transport.sendEnchanting(command))
+    return true
+  }
+
   const resyncAnvil = (): void => {
     if (multiplayer === undefined) return
     Effect.runSync(multiplayer.host.enqueueOutbound({
@@ -3516,6 +3542,37 @@ type MultiplayerInventorySelection = Readonly<{
       multiplayerRevision = Math.max(multiplayerRevision, message.revision)
       for (const key of [...customNames.keys()]) if (/^\d+$/u.test(key)) customNames.delete(key)
       for (const { slot, name } of message.names) customNames.set(String(slot), name)
+      renderPlayerUi()
+    }
+  }
+
+  const applyEnchantingResult = (message: EnchantingCommandResult): void => {
+    if (multiplayer === undefined || pendingEnchantingCommand?.commandId !== message.commandId) return
+    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+    pendingEnchantingCommand = null
+    if (message.accepted) return
+    enchantingStatus = `Cannot enchant: ${message.reason}`
+    resyncAnvil()
+    renderPlayerUi()
+  }
+
+  const drainEnchantingInbound = (): void => {
+    if (multiplayer === undefined) return
+    const currentWorld = String(WorldId.make(Effect.runSync(playerApi.dimension)))
+    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.enchantingInbound))) {
+      if (message._tag === 'EnchantingCommandResult') {
+        applyEnchantingResult(message)
+        continue
+      }
+      if (
+        message.world !== currentWorld
+        || message.revision < multiplayerRevision
+        || message.player !== String(multiplayer.query.player)
+      ) continue
+      multiplayerRevision = Math.max(multiplayerRevision, message.revision)
+      enchantmentSeed = message.seed
+      for (const key of [...enchantedItems.keys()]) if (/^\d+$/u.test(key)) enchantedItems.delete(key)
+      for (const { slot, item } of message.items) enchantedItems.set(String(slot), item)
       renderPlayerUi()
     }
   }
@@ -5698,7 +5755,9 @@ type MultiplayerInventorySelection = Readonly<{
 
   const activateEnchantingOffer = (slot: 0 | 1 | 2): void => {
     if (multiplayer !== undefined) {
-      enchantingStatus = 'Enchanting is not yet available in multiplayer'
+      enchantingStatus = requestEnchanting(slot)
+        ? 'Applying enchantment...'
+        : 'Enchanting is unavailable'
       renderPlayerUi()
       return
     }
@@ -8102,6 +8161,7 @@ type MultiplayerInventorySelection = Readonly<{
       drainCraftingInbound()
       drainBrewingInbound()
       drainAnvilInbound()
+      drainEnchantingInbound()
       drainPlayerDamageInbound()
       const outcome = Effect.runSyncExit(runFrame(deltaSecs))
       if (swimmingState.active && mountedVehicle === undefined) {
@@ -9999,6 +10059,7 @@ type MultiplayerInventorySelection = Readonly<{
         drainCraftingInbound()
         drainBrewingInbound()
         drainAnvilInbound()
+        drainEnchantingInbound()
         drainPlayerDamageInbound()
       }, 100)
       surface.onCleanup(() => {
