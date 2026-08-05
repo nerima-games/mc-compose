@@ -1720,9 +1720,12 @@ const bootGame = async (
     nowSecs: number,
   ): void => {
     const timeState = Effect.runSync(time.snapshot)
-    const lightningSequence = state.weather === 'thunder'
-      ? Math.floor(timeState.ticks / (60 * 8))
+    const receivedLightning = authoritativeLightning !== undefined && authoritativeLightning.expiresAtSecs >= nowSecs
+      ? authoritativeLightning
       : undefined
+    const lightningSequence = receivedLightning?.sequence ?? (state.weather === 'thunder'
+      ? Math.floor(timeState.ticks / (60 * 8))
+      : undefined)
     const intensity = state.weather === 'clear' ? 0 : 1
     const camera = {
       x: pose.feetPosition.x,
@@ -1742,7 +1745,7 @@ const bootGame = async (
       : {
           id: `weather-thunder-${String(lightningSequence)}`,
           occurredAtSecs: nowSecs,
-          position: { x: camera.x + 24, y: camera.y + 12, z: camera.z + 12 },
+          position: receivedLightning?.at ?? { x: camera.x + 24, y: camera.y + 12, z: camera.z + 12 },
         }
     weatherAudio.update({
       mode: state.weather,
@@ -3032,6 +3035,7 @@ const bootGame = async (
   const requestIdFor = (scope: string, sequence: number): string =>
     `${scope}-${multiplayerCommandSessionId}-${String(sequence)}`
   let multiplayerRevision = 0
+  let authoritativeLightning: Readonly<{ sequence: number; at: Vec3; expiresAtSecs: number }> | undefined
   const multiplayerEntities = new Map<string, AuthoritativeEntityState>()
   let nextVitalsCommand = 0
   let nextEntityCommand = 0
@@ -4036,6 +4040,15 @@ type MultiplayerInventorySelection = Readonly<{
         if (message.revision < multiplayerRevision) return
         multiplayerRevision = message.revision
         applyNetworkTimeWeather(message.state)
+        break
+      case 'LightningStrikeDelta':
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        authoritativeLightning = {
+          sequence: message.revision,
+          at: { ...message.at },
+          expiresAtSecs: performance.now() / 1_000 + 0.35,
+        }
         break
       case 'ContainerDelta':
         if (message.revision < multiplayerRevision) return

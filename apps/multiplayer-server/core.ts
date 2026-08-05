@@ -382,6 +382,7 @@ const mobWireState = (value: unknown): MobWireState => {
     ...(typeof state['persistent'] === 'boolean' ? { persistent: state['persistent'] } : {}),
     ...(typeof state['named'] === 'boolean' ? { named: state['named'] } : {}),
     ...(typeof state['tamed'] === 'boolean' ? { tamed: state['tamed'] } : {}),
+    ...(typeof state['charged'] === 'boolean' ? { charged: state['charged'] } : {}),
   }
 }
 
@@ -505,6 +506,7 @@ const DEFAULT_WEATHER_CLOCK: WeatherClockState = {
 }
 const MINECRAFT_DAY_TICKS = 24_000
 const MINECRAFT_TICK_MS = 50
+const THUNDER_STRIKE_INTERVAL_TICKS = 160
 const ITEM_DROP_LIFESPAN_TICKS = 6_000
 const ARROW_LIFESPAN_TICKS = 1_200
 const ARROW_GRAVITY = 9.8
@@ -877,6 +879,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   let weatherClock: WeatherClockState = isWeatherClockState(options.initialState?.weatherClock)
     ? { ...options.initialState.weatherClock }
     : { ...DEFAULT_WEATHER_CLOCK }
+  let thunderStrikeSequence = Math.floor(timeWeather.timeOfDay / THUNDER_STRIKE_INTERVAL_TICKS)
   const containers = new Map<string, MutableContainerState>(
     (options.initialState?.containers ?? []).map((state) => [state.containerId, {
       containerId: state.containerId,
@@ -3575,6 +3578,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       case 'PlayerVitalsDelta':
       case 'PlayerFishingDelta':
       case 'WorldTimeWeatherDelta':
+      case 'LightningStrikeDelta':
       case 'ContainerDelta':
       case 'FurnaceDelta':
       case 'VillagerTradeDelta':
@@ -3754,6 +3758,24 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         remainingSecs: nextWeather.remainingSecs,
         seed: durationDraw?.seed ?? weatherClock.seed,
       }
+      const nextThunderStrikeSequence = Math.floor(timeWeather.timeOfDay / THUNDER_STRIKE_INTERVAL_TICKS)
+      if (
+        timeWeather.weather === 'thunder'
+        && nextThunderStrikeSequence !== thunderStrikeSequence
+      ) {
+        revision += 1
+        stateChanged = true
+        const target = [...players.values()][0]
+        postPersistenceDeltas.push({
+          _tag: 'LightningStrikeDelta',
+          world: worldId,
+          revision,
+          at: target === undefined
+            ? { x: 0, y: bounds.maxY, z: 0 }
+            : { x: target.at.x, y: target.at.y, z: target.at.z },
+        })
+      }
+      thunderStrikeSequence = nextThunderStrikeSequence
     }
     if (elapsedSecs > 0) {
       for (const furnace of furnaces.values()) {

@@ -2216,6 +2216,29 @@ describe('multiplayer server authoritative state', () => {
     })
   })
 
+  it('replicates thunder strikes at the authoritative player position', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      timeWeather: { timeOfDay: 159, weather: 'thunder' },
+    }, { x: 12, y: 65, z: -7 })
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(50)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'LightningStrikeDelta',
+      world: 'world-1',
+      revision: 5,
+      at: { x: 12, y: 65, z: -7 },
+    }))
+    expect(fixture.persisted.at(-1)?.timeWeather).toEqual({
+      timeOfDay: 160,
+      weather: 'thunder',
+    })
+    expect(fixture.timeline.indexOf('persist')).toBeLessThan(fixture.timeline.indexOf('send'))
+  })
+
   it('ages item drops authoritatively and despawns them after five minutes', () => {
     const fixture = makeFixture(initialState())
     fixture.sent.length = 0
