@@ -3268,7 +3268,7 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted.at(-1)).toMatchObject({ revision: 9 })
   })
 
-  it('consumes Eyes of Ender only through an authoritative command', () => {
+  it('broadcasts and recovers Eyes of Ender only through an authoritative command', () => {
     const fixture = makeFixture({
       ...initialState(),
       inventories: [{
@@ -3280,7 +3280,7 @@ describe('multiplayer server authoritative state', () => {
 
     expect(fixture.receive({
       _tag: 'ThrowEyeOfEnderCommand',
-      commandId: commandId('throw-eye'),
+      commandId: commandId('eye-recovery'),
       player: playerId('alice'),
       world: worldId('world-1'),
       expectedRevision: 4,
@@ -3289,6 +3289,22 @@ describe('multiplayer server authoritative state', () => {
       _tag: 'PlayerInventoryDelta',
       revision: 5,
       state: expect.objectContaining({ slots: [{ item: 'eye_of_ender', count: 1 }] }),
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EyeOfEnderThrown',
+      revision: 5,
+      player: playerId('alice'),
+      breaks: false,
+    }))
+
+    fixture.sent.length = 0
+    fixture.server.tick(2_500)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntitySpawnDelta',
+      entity: expect.objectContaining({
+        _tag: 'item-drop',
+        stack: { item: 'eye_of_ender', count: 1 },
+      }),
     }))
 
     const withoutEye = makeFixture(initialState())

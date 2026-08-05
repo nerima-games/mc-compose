@@ -3953,6 +3953,24 @@ type MultiplayerInventorySelection = Readonly<{
         multiplayerStatus.textContent = `Connected to multiplayer server (${dimension})`
         break
       }
+      case 'EyeOfEnderThrown': {
+        if (message.revision < multiplayerRevision) return
+        multiplayerRevision = message.revision
+        const dimension = dimensionFromWorld(message.world)
+        if (dimension === undefined || dimension !== currentChunkContext.dimension) break
+        const dx = message.target.x - message.origin.x
+        const dz = message.target.z - message.origin.z
+        canvas.setAttribute('data-stronghold-direction', String(Math.atan2(dx, -dz)))
+        canvas.setAttribute('data-stronghold-distance', String(Math.round(Math.hypot(dx, dz))))
+        eyeOfEnderRuntimeState = launchRuntimeEyeOfEnder(eyeOfEnderRuntimeState, {
+          dimension,
+          position: message.origin,
+          target: message.target,
+          breaks: message.breaks,
+        })
+        queueEndAudio('eyeThrow', message.origin)
+        break
+      }
       case 'EntitySpawnDelta':
       case 'EntityUpdateDelta':
         if (message.revision < multiplayerRevision) return
@@ -4811,28 +4829,27 @@ type MultiplayerInventorySelection = Readonly<{
   const useEndFeature = (): Effect.Effect<boolean> => Effect.gen(function* () {
     if (multiplayer !== undefined) {
       const dimension = yield* playerApi.dimension
-      const pose = yield* playerApi.pose
       const inventory = yield* world.inventory.snapshot
       const selected = inventory.slots[selectedHotbarIndex]
       if (dimension !== 'overworld' || selected?.item !== 'eye_of_ender') return false
-      const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
-      if (Option.isNone(site)) return false
-      const center = endPortalCenterForStronghold(site.value)
       const target = yield* targetedBlock()
-      const offset = target === undefined ? undefined : END_PORTAL_FRAME_OFFSETS.find((candidate) =>
-        center.x + candidate.dx === target.position.x
-        && center.y === target.position.y
-        && center.z + candidate.dz === target.position.z)
-      if (target?.block === END_PORTAL_BLOCK.FRAME_EMPTY && offset !== undefined) {
-        return sendEndProgressCommand({
-          _tag: 'InsertEyeIntoEndPortalFrameCommand',
-          frame: target.position,
-        })
+      if (target?.block === END_PORTAL_BLOCK.FRAME_EMPTY) {
+        const pose = yield* playerApi.pose
+        const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
+        if (Option.isSome(site)) {
+          const center = endPortalCenterForStronghold(site.value)
+          const offset = END_PORTAL_FRAME_OFFSETS.find((candidate) =>
+            center.x + candidate.dx === target.position.x
+            && center.y === target.position.y
+            && center.z + candidate.dz === target.position.z)
+          if (offset !== undefined) {
+            return sendEndProgressCommand({
+              _tag: 'InsertEyeIntoEndPortalFrameCommand',
+              frame: target.position,
+            })
+          }
+        }
       }
-      const dx = site.value.x - pose.feetPosition.x
-      const dz = site.value.z - pose.feetPosition.z
-      canvas.setAttribute('data-stronghold-direction', String(Math.atan2(dx, -dz)))
-      canvas.setAttribute('data-stronghold-distance', String(Math.round(Math.hypot(dx, dz))))
       return sendEndProgressCommand({ _tag: 'ThrowEyeOfEnderCommand' })
     }
     const dimension = yield* playerApi.dimension
@@ -8914,7 +8931,7 @@ type MultiplayerInventorySelection = Readonly<{
         )
         eyeOfEnderRuntimeState = advancedEyes.state
         for (const settlement of advancedEyes.settlements) {
-          if (!settlement.breaks) {
+          if (!settlement.breaks && multiplayer === undefined) {
             Effect.runSync(spawnDroppedItems(world.entities, [{
               item: 'eye_of_ender',
               count: 1,

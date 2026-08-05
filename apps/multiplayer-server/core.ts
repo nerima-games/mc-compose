@@ -399,6 +399,19 @@ const deterministicRoll = (input: string): number => {
   return (hash >>> 0) / 0x1_0000_0000
 }
 
+const EYE_OF_ENDER_FLIGHT_SECS = 2.5
+
+const eyeOfEnderDestination = (
+  origin: Readonly<{ x: number; y: number; z: number }>,
+  target: Readonly<{ x: number; y: number; z: number }>,
+): Readonly<{ x: number; y: number; z: number }> => {
+  const dx = target.x - origin.x
+  const dz = target.z - origin.z
+  const horizontalDistance = Math.hypot(dx, dz)
+  const scale = horizontalDistance === 0 ? 0 : Math.min(horizontalDistance, 12) / horizontalDistance
+  return { x: origin.x + dx * scale, y: origin.y + 8, z: origin.z + dz * scale }
+}
+
 interface MutableInventoryState {
   readonly slots: Array<ItemStack | null>
   readonly durability: Array<{ readonly current: number; readonly max: number } | null>
@@ -810,6 +823,11 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const entities = new Map<string, AuthoritativeEntityState>(
     (options.initialState?.entities ?? []).map((entity) => [entity.entityId, entity]),
   )
+  const eyeOfEnderRecoveries = new Map<string, Readonly<{
+    entityId: AuthoritativeEntityState['entityId']
+    at: Readonly<{ x: number; y: number; z: number }>
+    remainingSecs: number
+  }>>()
   const fallingPending = new Map<string, BlockPos>()
   const bowDrawStartedAt = new Map<PlayerId, number>()
   const fishingSessions = new Map<PlayerId, { session: FishingSession; slot: number; water: BlockPos }>()
@@ -1644,6 +1662,20 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           return { accepted: false, reason: 'insufficient-items' }
         }
 
+        const site = nearestStrongholdSite(options.seed, actor.at.x, actor.at.z)
+        if (Option.isNone(site)) return { accepted: false, reason: 'invalid-command' }
+        const origin = { x: actor.at.x, y: actor.at.y + EYE_LEVEL_OFFSET, z: actor.at.z }
+        const target = endPortalCenterForStronghold(site.value)
+        const breaks = deterministicRoll(`${String(options.seed)}:${String(message.player)}:${String(message.commandId)}:eye-break`) < 0.2
+        const recoveryEntityId = `${String(message.player)}:eye:${String(message.commandId)}:recovery` as AuthoritativeEntityState['entityId']
+        if (!breaks) {
+          eyeOfEnderRecoveries.set(String(recoveryEntityId), {
+            entityId: recoveryEntityId,
+            at: eyeOfEnderDestination(origin, target),
+            remainingSecs: EYE_OF_ENDER_FLIGHT_SECS,
+          })
+        }
+
         inventory.slots[inventory.selectedSlot] = selected.count === 1
           ? null
           : { ...selected, count: selected.count - 1 }
@@ -1656,6 +1688,15 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
             revision: nextRevision,
             player: message.player,
             state: inventorySnapshot(inventory),
+          }],
+          messages: (nextRevision) => [{
+            _tag: 'EyeOfEnderThrown',
+            world: actor.world,
+            revision: nextRevision,
+            player: message.player,
+            origin,
+            target,
+            breaks,
           }],
         }
       }
@@ -3495,6 +3536,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       case 'EntitySpawnDelta':
       case 'EntityUpdateDelta':
       case 'EntityDespawnDelta':
+      case 'EyeOfEnderThrown':
       case 'AuthoritativeCommandAccepted':
       case 'AuthoritativeCommandRejected':
         return { accepted: false, reason: 'identity-spoof' }
@@ -3823,6 +3865,22 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       const damagedPlayers = new Set<PlayerId>()
       const deadPlayers = new Set<PlayerId>()
       let worldChanged = false
+      for (const [key, recovery] of eyeOfEnderRecoveries) {
+        const remainingSecs = recovery.remainingSecs - elapsedSecs
+        if (remainingSecs > 0) {
+          eyeOfEnderRecoveries.set(key, { ...recovery, remainingSecs })
+          continue
+        }
+        eyeOfEnderRecoveries.delete(key)
+        const drop: AuthoritativeEntityState = {
+          _tag: 'item-drop',
+          entityId: recovery.entityId,
+          at: recovery.at,
+          stack: { item: 'eye_of_ender', count: 1 },
+        }
+        entities.set(drop.entityId, drop)
+        movedEntities.push({ _tag: 'EntitySpawnDelta', world: worldId, revision: 0, entity: drop })
+      }
       const applyExplosion = (
         center: Readonly<{ x: number; y: number; z: number }>,
         explosion: Explosion,
