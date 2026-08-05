@@ -1,6 +1,7 @@
 import { describe, expect, it } from '@effect/vitest'
 import { Effect, Layer, Option } from 'effect'
 
+import { CHUNK_SIZE_XZ, chunkCoord } from '@nerima-games/mc-kernel'
 import {
   SaveKey,
   StorageError,
@@ -23,9 +24,7 @@ import {
   type Inventory,
 } from '@nerima-games/mc-sim'
 import {
-  CHUNK_SIZE_XZ,
   CHUNK_VOLUME,
-  chunkCoord,
   type Chunk,
   type ChunkSource,
   type Dimension,
