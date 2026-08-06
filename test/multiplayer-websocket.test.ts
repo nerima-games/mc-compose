@@ -347,6 +347,22 @@ describe('browser websocket transport', () => {
         revision: 2,
       },
     ] as const
+    const craftingFrames = [
+      {
+        _tag: 'CraftingCommand',
+        commandId: 'craft-1',
+        player: 'alice',
+        world: 'world',
+        expectedRevision: 1,
+        grid: { width: 2, height: 2, cells: ['oak_log', null, null, null] },
+      },
+      {
+        _tag: 'CraftingCommandResult',
+        commandId: 'craft-1',
+        accepted: true,
+        revision: 2,
+      },
+    ] as const
 
     socket.emit('message', { data: 'first' })
     socket.emit('message', { data: JSON.stringify(sleepFrames[0]) })
@@ -360,6 +376,8 @@ describe('browser websocket transport', () => {
     socket.emit('message', { data: JSON.stringify(sleepFrames[2]) })
     socket.emit('message', { data: JSON.stringify(witherFrames[2]) })
     socket.emit('message', { data: JSON.stringify(playerDamageFrames[1]) })
+    socket.emit('message', { data: JSON.stringify(craftingFrames[0]) })
+    socket.emit('message', { data: JSON.stringify(craftingFrames[1]) })
 
     expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.inbound)))).toEqual([
       'first',
@@ -374,6 +392,9 @@ describe('browser websocket transport', () => {
     )
     expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.playerDamageInbound)))).toEqual(
       playerDamageFrames,
+    )
+    expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.craftingInbound)))).toEqual(
+      craftingFrames,
     )
   })
 
@@ -418,7 +439,17 @@ describe('browser websocket transport', () => {
       amount: 1,
     }
     await Effect.runPromise(throwing.sendPlayerDamage(command))
-    expect(throwingSocket.sent).toEqual([JSON.stringify(command)])
+    const witherCommand = {
+      _tag: 'DamageWither' as const,
+      actor: 'alice',
+      requestId: 'wither-send',
+      expectedRevision: 3,
+      id: 'wither-1',
+      amount: 4,
+      kind: 'melee' as const,
+    }
+    await Effect.runPromise(throwing.sendWither(witherCommand))
+    expect(throwingSocket.sent).toEqual([JSON.stringify(command), JSON.stringify({ _tag: 'WitherCommand', command: witherCommand })])
     throwingSocket.sendFailure = new Error('write rejected')
     const sendResult = await Effect.runPromise(Effect.either(throwing.send('frame' as WireText)))
     expect(Either.isLeft(sendResult)).toBe(true)
@@ -439,6 +470,7 @@ describe('browser websocket transport', () => {
     expect(transport.state()).toBe('closed')
     expect(await Effect.runPromise(Queue.isShutdown(transport.inbound))).toBe(true)
     expect(await Effect.runPromise(Queue.isShutdown(transport.playerDamageInbound))).toBe(true)
+    expect(await Effect.runPromise(Queue.isShutdown(transport.craftingInbound))).toBe(true)
   })
 
   it('reports construction and invalid capacity failures as typed errors', async () => {

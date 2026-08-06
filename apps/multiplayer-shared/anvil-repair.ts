@@ -14,14 +14,13 @@ export const spendExperienceLevels = (
   if (!Number.isFinite(totalExperience) || totalExperience < 0) return undefined
   if (!Number.isSafeInteger(levels) || levels < 0) return undefined
   const currentLevel = levelForTotalExperience(totalExperience)
-  const levelCost = levels
-  if (currentLevel < levelCost) return undefined
-  if (levelCost === 0) return totalExperience
+  if (currentLevel < levels) return undefined
+  if (levels === 0) return totalExperience
 
   const progress = (
     totalExperience - totalExperienceAtLevel(currentLevel)
   ) / experienceCostOfLevel(currentLevel)
-  const nextLevel = currentLevel - levelCost
+  const nextLevel = currentLevel - levels
   return totalExperienceAtLevel(nextLevel)
     + Math.floor(progress * experienceCostOfLevel(nextLevel))
 }

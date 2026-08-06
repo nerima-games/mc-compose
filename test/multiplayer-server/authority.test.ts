@@ -2,6 +2,7 @@ import {
   decodeFrame,
   encodeFrame,
   type CommandId,
+  type ContainerKind,
   type EntityId,
   type NetworkMessage,
   type PlayerId,
@@ -14,11 +15,13 @@ import { describe, expect, it } from 'vitest'
 
 import {
   makeMultiplayerServerCore,
+  craftingResultKey,
   type MultiplayerServerOptions,
   playerDamageResultKey,
   type MultiplayerServerState,
   type ReceiveResult,
 } from '../../apps/multiplayer-server/core'
+import { makeMultiplayerRedstoneRuntime } from '../../apps/multiplayer-server/redstone-runtime'
 import {
   decodePlayerDamageWireMessage,
   encodePlayerDamageCommand,
@@ -28,8 +31,25 @@ import {
   PLAYER_DAMAGE_MAX_WIRE_LENGTH,
   type PlayerDamageCommand,
 } from '../../apps/multiplayer-shared/player-damage-network'
+import {
+  decodeCraftingWireMessage,
+  encodeCraftingCommand,
+  type CraftingCommand,
+} from '../../apps/multiplayer-shared/crafting-network'
+import { decodeBrewingWireMessage } from '../../apps/multiplayer-shared/brewing-network'
+import {
+  decodeAnvilWireMessage,
+  encodeAnvilCommand,
+  type AnvilCommand,
+} from '../../apps/multiplayer-shared/anvil-network'
+import {
+  decodeEnchantingWireMessage,
+  encodeEnchantingCommand,
+  type EnchantingCommand,
+} from '../../apps/multiplayer-shared/enchanting-network'
 import { decodeSleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
+import { decodeEnderDragonWireMessage } from '../../apps/multiplayer-shared/ender-dragon-network'
 
 const playerId = (value: string): PlayerId => value as PlayerId
 const playerName = (value: string): PlayerName => value as PlayerName
@@ -49,7 +69,12 @@ const frame = (message: NetworkMessage): WireText => {
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
   frames.filter((wire) => decodeSleepWireMessage(wire) === undefined
     && decodeWitherWireMessage(wire) === undefined
-    && decodePlayerDamageWireMessage(wire) === undefined).map((wire) => {
+    && decodeEnderDragonWireMessage(wire) === undefined
+    && decodePlayerDamageWireMessage(wire) === undefined
+    && decodeCraftingWireMessage(wire) === undefined
+    && decodeBrewingWireMessage(wire) === undefined
+    && decodeAnvilWireMessage(wire) === undefined
+    && decodeEnchantingWireMessage(wire) === undefined).map((wire) => {
     const decoded = decodeFrame(wire)
     if (Either.isLeft(decoded)) throw decoded.left
     return decoded.right
@@ -74,7 +99,7 @@ const initialState = (): MultiplayerServerState => ({
   }],
   vitals: [{ player: playerId('alice'), state: { health: 3, hunger: 2, experience: 7 } }],
   timeWeather: { timeOfDay: 6_000, weather: 'clear' },
-  containers: [{ containerId: 'world-1:1,64,0', slots: [null, { item: 'apple', count: 2 }] }],
+  containers: [{ containerId: 'world-1:1,64,0', kind: 'chest', slots: [null, { item: 'apple', count: 2 }] }],
   furnaces: [{
     furnaceId: '["world-1",2,64,0]',
     input: null,
@@ -117,7 +142,7 @@ const makeFixture = (
   state: MultiplayerServerState = initialState(),
   joinAt: Readonly<{ x: number; y: number; z: number }> = { x: 0, y: 64, z: 0 },
   difficulty: 'peaceful' | 'easy' | 'normal' | 'hard' = 'normal',
-  serverOptions: Partial<Pick<MultiplayerServerOptions, 'generatedBlockAt' | 'now' | 'passableBlocks' | 'spawnAt'>> = {},
+  serverOptions: Partial<Pick<MultiplayerServerOptions, 'allowedBlocks' | 'generatedBlockAt' | 'now' | 'passableBlocks' | 'spawnAt'>> = {},
 ) => {
   const sent: Array<WireText> = []
   const persisted: Array<MultiplayerServerState> = []
@@ -141,6 +166,12 @@ const makeFixture = (
   const receive = (message: NetworkMessage): ReceiveResult => server.receive('socket-a', frame(message))
   const receiveDamage = (command: PlayerDamageCommand): ReceiveResult =>
     server.receive('socket-a', encodePlayerDamageCommand(command))
+  const receiveCrafting = (command: CraftingCommand): ReceiveResult =>
+    server.receive('socket-a', encodeCraftingCommand(command))
+  const receiveAnvil = (command: AnvilCommand): ReceiveResult =>
+    server.receive('socket-a', encodeAnvilCommand(command))
+  const receiveEnchanting = (command: EnchantingCommand): ReceiveResult =>
+    server.receive('socket-a', encodeEnchantingCommand(command))
   expect(receive({
     _tag: 'PlayerJoin',
     player: playerId('alice'),
@@ -149,7 +180,7 @@ const makeFixture = (
   }).accepted).toBe(true)
   persisted.length = 0
   timeline.length = 0
-  return { sent, persisted, timeline, receive, receiveDamage, server }
+  return { sent, persisted, timeline, receive, receiveDamage, receiveCrafting, receiveAnvil, receiveEnchanting, server }
 }
 
 describe('multiplayer server authoritative state', () => {
@@ -161,6 +192,18 @@ describe('multiplayer server authoritative state', () => {
       inventories: [{
         player: playerId('alice'),
         state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 2 }, null], selectedSlot: 0 },
+      }],
+      enchantments: [{
+        player: playerId('alice'),
+        seed: 42,
+        items: [{
+          slot: 0,
+          item: {
+            item: 'bow',
+            durability: { current: 384, max: 384 },
+            enchantments: [{ id: 'power', level: 1 }],
+          },
+        }],
       }],
       entities: [{
         _tag: 'living', entityId: entityId('bow-target'), entityType: 'zombie',
@@ -186,13 +229,29 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'bow-release', revision: 5 }),
       expect.objectContaining({
         _tag: 'PlayerInventoryDelta',
-        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 1 }, null], selectedSlot: 0 },
+        state: expect.objectContaining({
+          slots: [{ item: 'bow', count: 1, durability: { current: 383, max: 384 } }, { item: 'arrow', count: 1 }, null],
+          selectedSlot: 0,
+        }),
       }),
       expect.objectContaining({
         _tag: 'EntitySpawnDelta',
-        entity: expect.objectContaining({ _tag: 'arrow', owner: 'alice', damage: expect.any(Number) }),
+        entity: expect.objectContaining({ _tag: 'arrow', owner: 'alice', damage: 14 }),
       }),
     ]))
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      enchantments: [{
+        player: 'alice',
+        items: [{
+          slot: 0,
+          item: {
+            item: 'bow',
+            durability: { current: 383, max: 384 },
+            enchantments: [{ id: 'power', level: 1 }],
+          },
+        }],
+      }],
+    })
     fixture.sent.length = 0
 
     fixture.server.tick(100)
@@ -201,12 +260,285 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'bow-release:arrow' }),
       expect.objectContaining({
         _tag: 'EntityUpdateDelta',
-        entity: expect.objectContaining({ entityId: 'bow-target', health: expect.any(Number) }),
+        entity: expect.objectContaining({ entityId: 'bow-target', health: 6 }),
       }),
     ]))
     expect(fixture.persisted.at(-1)?.entities).toEqual(expect.arrayContaining([
       expect.objectContaining({ entityId: 'bow-target', health: expect.any(Number) }),
     ]))
+  })
+
+  it('breaks a bow on its final authoritative shot', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'bow', count: 1, durability: { current: 1, max: 384 } }, { item: 'arrow', count: 1 }, null],
+          selectedSlot: 0,
+        },
+      }],
+    }, undefined, 'normal', { now: () => now })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('final-bow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('final-bow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta',
+        state: expect.objectContaining({ slots: [null, null, null], selectedSlot: 0 }),
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({ _tag: 'arrow', owner: 'alice' }),
+      }),
+    ]))
+  })
+
+  it('turns a block-hit arrow into an authoritative pickup', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 1 }, null], selectedSlot: 0 },
+      }],
+    }, undefined, 'normal', {
+      now: () => now,
+      generatedBlockAt: (position) => position.y === 63 || (position.x === 0 && position.y === 65 && position.z === -3) ? 'stone' : null,
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('embedded-arrow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('embedded-arrow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    const pickupSpawn = messages(fixture.sent).find((message) => message._tag === 'EntitySpawnDelta'
+      && message.entity._tag === 'item-drop' && message.entity.stack.item === 'arrow')
+    expect(pickupSpawn).toMatchObject({
+      _tag: 'EntitySpawnDelta', revision: 6,
+      entity: { _tag: 'item-drop', at: { x: 0, y: 65.5, z: -2 }, stack: { item: 'arrow', count: 1 } },
+    })
+    if (pickupSpawn?._tag !== 'EntitySpawnDelta' || pickupSpawn.entity._tag !== 'item-drop') {
+      throw new Error('missing embedded arrow pickup')
+    }
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'EntityPickupCommand', commandId: commandId('pickup-embedded-arrow'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 6, entityId: pickupSpawn.entity.entityId,
+    }).accepted).toBe(true)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'AuthoritativeCommandAccepted', commandId: 'pickup-embedded-arrow', revision: 7 }),
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: pickupSpawn.entity.entityId, revision: 7 }),
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta', revision: 7,
+        state: expect.objectContaining({
+          slots: [{ item: 'bow', count: 1, durability: { current: 383, max: 384 } }, { item: 'arrow', count: 1 }, null],
+        }),
+      }),
+    ]))
+    expect(fixture.persisted.at(-1)).toMatchObject({ revision: 7, entities: [] })
+  })
+
+  it('stops an arrow at a wall before it can damage a player behind it', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 1 }, null], selectedSlot: 0 },
+      }],
+      vitals: [
+        { player: playerId('alice'), state: { health: 20, hunger: 20, experience: 0 } },
+        { player: playerId('bob'), state: { health: 20, hunger: 20, experience: 0 } },
+      ],
+    }, undefined, 'normal', {
+      now: () => now,
+      generatedBlockAt: (position) => position.y === 63 || (position.x === 0 && position.y === 65 && position.z === -1) ? 'stone' : null,
+    })
+    expect(fixture.server.connect('socket-b', () => undefined)).toBe(true)
+    expect(fixture.server.receive('socket-b', frame({
+      _tag: 'PlayerJoin', player: playerId('bob'), name: playerName('Bob'), at: { x: 0, y: 64, z: -3.2 },
+    })).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('wall-bow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('wall-bow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    expect(messages(fixture.sent)).not.toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', player: playerId('bob'),
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntitySpawnDelta',
+      entity: expect.objectContaining({
+        _tag: 'item-drop', at: { x: 0, y: 65.5, z: 0 }, stack: { item: 'arrow', count: 1 },
+      }),
+    }))
+  })
+
+  it('applies a bow arrow to the nearest opposing player and synchronizes their vitals', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 2 }, null], selectedSlot: 0 },
+      }],
+      vitals: [
+        { player: playerId('alice'), state: { health: 20, hunger: 20, experience: 0 } },
+        { player: playerId('bob'), state: { health: 20, hunger: 20, experience: 0 } },
+      ],
+    }, undefined, 'normal', {
+      now: () => now,
+      generatedBlockAt: (position) => position.y === 63 ? 'stone' : null,
+    })
+    const bobSent: WireText[] = []
+    expect(fixture.server.connect('socket-b', (wire) => bobSent.push(wire))).toBe(true)
+    expect(fixture.server.receive('socket-b', frame({
+      _tag: 'PlayerJoin', player: playerId('bob'), name: playerName('Bob'), at: { x: 0, y: 64, z: -3.2 },
+    })).accepted).toBe(true)
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('player-bow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('player-bow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    const vitalsDelta = messages(fixture.sent).find((message) =>
+      message._tag === 'PlayerVitalsDelta' && message.player === playerId('bob'),
+    )
+    expect(vitalsDelta).toEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', player: 'bob', state: expect.objectContaining({ health: expect.any(Number) }),
+    }))
+    if (vitalsDelta?._tag !== 'PlayerVitalsDelta') throw new Error('missing opposing-player vitals delta')
+    expect(vitalsDelta.state.health).toBeLessThan(20)
+    expect(messages(fixture.sent)).not.toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', player: 'alice',
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityDespawnDelta', entityId: 'player-bow-release:arrow',
+    }))
+    expect(fixture.persisted.at(-1)?.vitals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ player: 'alice', state: expect.objectContaining({ health: 20 }) }),
+      expect.objectContaining({ player: 'bob', state: expect.objectContaining({ health: vitalsDelta.state.health }) }),
+    ]))
+  })
+
+  it('applies lethal player arrow damage through authoritative death drops', () => {
+    let now = 0
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [
+        {
+          player: playerId('alice'),
+          state: { slots: [{ item: 'bow', count: 1 }, { item: 'arrow', count: 1 }, null], selectedSlot: 0 },
+        },
+        {
+          player: playerId('bob'),
+          state: { slots: [{ item: 'apple', count: 1 }, null, null], selectedSlot: 0 },
+        },
+      ],
+      vitals: [
+        { player: playerId('alice'), state: { health: 20, hunger: 20, experience: 0 } },
+        { player: playerId('bob'), state: { health: 1, hunger: 20, experience: 7 } },
+      ],
+    }, undefined, 'normal', {
+      now: () => now,
+      generatedBlockAt: (position) => position.y === 63 ? 'stone' : null,
+    })
+    expect(fixture.server.connect('socket-b', () => undefined)).toBe(true)
+    expect(fixture.server.receive('socket-b', frame({
+      _tag: 'PlayerJoin', player: playerId('bob'), name: playerName('Bob'), at: { x: 0, y: 64, z: -3.2 },
+    })).accepted).toBe(true)
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('lethal-player-bow-start'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'start',
+    }).accepted).toBe(true)
+    now = 1_000
+    expect(fixture.receive({
+      _tag: 'BowUseCommand', commandId: commandId('lethal-player-bow-release'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, action: 'release',
+    }).accepted).toBe(true)
+    fixture.sent.length = 0
+
+    fixture.server.tick(100)
+
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerVitalsDelta', player: 'bob', state: expect.objectContaining({ health: 0, experience: 0 }),
+      }),
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta', player: 'bob', state: expect.objectContaining({ slots: [null, null, null] }),
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({
+          _tag: 'item-drop',
+          entityId: 'player:bob:death:6:0',
+          at: { x: 0, y: 64, z: -3.2 },
+          stack: { item: 'apple', count: 1 },
+        }),
+      }),
+      expect.objectContaining({ _tag: 'EntityDespawnDelta', entityId: 'lethal-player-bow-release:arrow' }),
+    ]))
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      vitals: expect.arrayContaining([
+        expect.objectContaining({ player: 'bob', state: expect.objectContaining({ health: 0, experience: 0 }) }),
+      ]),
+      inventories: expect.arrayContaining([
+        expect.objectContaining({ player: 'bob', state: expect.objectContaining({ slots: [null, null, null] }) }),
+      ]),
+      entities: expect.arrayContaining([
+        expect.objectContaining({ entityId: 'player:bob:death:6:0', stack: { item: 'apple', count: 1 } }),
+      ]),
+    })
   })
 
   it('ignites TNT and resolves its explosion on the server', () => {
@@ -230,7 +562,7 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({
         _tag: 'PlayerInventoryDelta',
         player: playerId('alice'),
-        state: { selectedSlot: 0, slots: [null, null, null] },
+        state: expect.objectContaining({ selectedSlot: 0, slots: [null, null, null] }),
       }),
       expect.objectContaining({ _tag: 'EntitySpawnDelta', revision: 5, entity: expect.objectContaining({ _tag: 'primed-tnt', burnedSecs: 0 }) }),
       expect.objectContaining({
@@ -264,7 +596,7 @@ describe('multiplayer server authoritative state', () => {
     expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
       _tag: 'PlayerInventoryDelta',
       player: playerId('alice'),
-      state: { selectedSlot: 0, slots: [null, null, null] },
+      state: expect.objectContaining({ selectedSlot: 0, slots: [null, null, null] }),
     }))
     expect(fixture.persisted.at(-1)?.entities).not.toContainEqual(expect.objectContaining({
       entityId: 'ignite-tnt:tnt',
@@ -316,7 +648,7 @@ describe('multiplayer server authoritative state', () => {
         _tag: 'PlayerInventoryDelta',
         revision: 5,
         player: playerId('alice'),
-        state: { selectedSlot: 0, slots: [{ item: 'ender_pearl', count: 1 }, null, null] },
+        state: expect.objectContaining({ selectedSlot: 0, slots: [{ item: 'ender_pearl', count: 1 }, null, null] }),
       }),
       expect.objectContaining({
         _tag: 'PlayerVitalsDelta',
@@ -467,8 +799,7 @@ describe('multiplayer server authoritative state', () => {
         player: playerId('alice'),
         state: {
           selectedSlot: 0,
-          slots: [{ item: 'fishing_rod', count: 1 }, { item: 'stone', count: 64 }, { item: 'coal', count: 64 }],
-          durability: [{ current: 64, max: 64 }, null, null],
+          slots: [{ item: 'fishing_rod', count: 1, durability: { current: 64, max: 64 } }, { item: 'stone', count: 64 }, { item: 'coal', count: 64 }],
         },
       }],
     }, undefined, 'normal', {
@@ -508,7 +839,11 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({
         _tag: 'PlayerInventoryDelta',
         player: playerId('alice'),
-        state: expect.objectContaining({ durability: [{ current: 63, max: 64 }, null, null] }),
+        state: expect.objectContaining({
+          slots: expect.arrayContaining([
+            expect.objectContaining({ item: 'fishing_rod', count: 1, durability: { current: 63, max: 64 } }),
+          ]),
+        }),
       }),
       expect.objectContaining({
         _tag: 'PlayerFishingDelta', player: playerId('alice'), state: { phase: 'idle', result: 'caught' },
@@ -518,6 +853,30 @@ describe('multiplayer server authoritative state', () => {
         entity: expect.objectContaining({ _tag: 'item-drop', at: { x: 0, y: 64, z: 0 } }),
       }),
     ]))
+  })
+
+  it('rejects stacked fishing rods before simulation', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          selectedSlot: 0,
+          slots: [{ item: 'fishing_rod', count: 2, durability: { current: 64, max: 64 } }],
+        },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'FishingCommand', action: 'cast', commandId: commandId('stacked-fishing-rod'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+    }).accepted).toBe(true)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerFishingDelta', revision: 5, player: playerId('alice'), state: { phase: 'idle', result: 'invalid-rod' },
+    }))
   })
 
   it('moves unsupported sand through the server snapshot after its support is broken', () => {
@@ -826,6 +1185,58 @@ describe('multiplayer server authoritative state', () => {
       expectedRevision: 4,
       action: { _tag: 'move-item', source: 0, destination: 1, count: 1 },
     }).accepted).toBe(false)
+  })
+
+  it('moves durable equipment through authoritative inventory commands', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'iron_helmet', count: 1, durability: { current: 80, max: 165 } }, null],
+          selectedSlot: 0,
+        },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('equip-helmet'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'equip-item', source: 0, equipmentSlot: 'head' },
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: 5,
+      state: expect.objectContaining({
+        slots: [null, null],
+        equipment: expect.objectContaining({
+          head: { item: 'iron_helmet', count: 1, durability: { current: 80, max: 165 } },
+        }),
+      }),
+    }))
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('unequip-helmet'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 5,
+      action: { _tag: 'unequip-item', equipmentSlot: 'head', destination: 1 },
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: 6,
+      state: expect.objectContaining({
+        slots: [null, { item: 'iron_helmet', count: 1, durability: { current: 80, max: 165 } }],
+        equipment: expect.objectContaining({ head: null }),
+      }),
+    }))
   })
 
   it('drops inventory items at the authoritative player position exactly once', () => {
@@ -1293,6 +1704,226 @@ describe('multiplayer server authoritative state', () => {
       .not.toBe(playerDamageResultKey(playerId('alice\u0000part'), commandId('tail')))
   })
 
+  it('crafts from server inventory and caches the accepted result', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'oak_log', count: 1 }, null], selectedSlot: 0 },
+      }],
+    })
+    fixture.sent.length = 0
+    const command: CraftingCommand = {
+      _tag: 'CraftingCommand', commandId: 'craft-1', player: 'alice', world: 'world-1', expectedRevision: 4,
+      grid: { width: 2, height: 2, cells: ['oak_log', null, null, null] },
+    }
+
+    expect(fixture.receiveCrafting(command).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta', revision: 5, player: 'alice',
+      state: expect.objectContaining({ slots: [{ item: 'oak_planks', count: 4 }, null] }),
+    }))
+    expect(fixture.sent.map(decodeCraftingWireMessage)).toContainEqual({
+      _tag: 'CraftingCommandResult', commandId: 'craft-1', accepted: true, revision: 5,
+    })
+    expect(fixture.receiveCrafting(command).accepted).toBe(true)
+    expect(fixture.persisted).toHaveLength(1)
+  })
+
+  it('rejects a crafting grid not backed by server inventory', () => {
+    const fixture = makeFixture()
+    fixture.sent.length = 0
+    expect(fixture.receiveCrafting({
+      _tag: 'CraftingCommand', commandId: 'craft-missing', player: 'alice', world: 'world-1', expectedRevision: 4,
+      grid: { width: 2, height: 2, cells: ['oak_log', null, null, null] },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(fixture.sent.map(decodeCraftingWireMessage)).toContainEqual({
+      _tag: 'CraftingCommandResult', commandId: 'craft-missing', accepted: false, revision: 4, reason: 'missing-ingredients',
+    })
+    expect(fixture.persisted).toEqual([])
+  })
+
+  it('authorizes anvil repair and naming exactly once', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [
+            { item: 'bow', count: 1, durability: { current: 10, max: 384 } },
+            { item: 'iron_ingot', count: 2 },
+            null,
+          ],
+          selectedSlot: 0,
+        },
+      }],
+    })
+    fixture.sent.length = 0
+    const command: AnvilCommand = {
+      _tag: 'AnvilCommand', commandId: 'anvil-1', player: 'alice', world: 'world-1',
+      expectedRevision: 4, slot: 0, name: 'Hunter',
+    }
+
+    expect(fixture.receiveAnvil(command).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta', revision: 5, player: 'alice',
+      state: expect.objectContaining({
+        slots: [
+          { item: 'bow', count: 1, durability: { current: 384, max: 384 } },
+          { item: 'iron_ingot', count: 1 },
+          null,
+        ],
+      }),
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta', revision: 5, player: 'alice',
+      state: { health: 3, hunger: 2, experience: 0 },
+    }))
+    expect(fixture.sent.map(decodeAnvilWireMessage)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta', world: 'world-1', revision: 5, player: 'alice',
+      names: [{ slot: 0, name: 'Hunter' }],
+    })
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      anvilNames: [{ player: 'alice', names: [{ slot: 0, name: 'Hunter' }] }],
+    })
+
+    expect(fixture.receiveAnvil(command).accepted).toBe(true)
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.receiveAnvil({ ...command, commandId: 'anvil-spoof', player: 'bob', expectedRevision: 5 }))
+      .toEqual({ accepted: false, reason: 'identity-spoof' })
+  })
+
+  it('authorizes enchanting with server-owned costs, metadata, and seed exactly once', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [
+            { item: 'iron_boots', count: 1, durability: { current: 195, max: 195 } },
+            { item: 'lapis_lazuli', count: 3 },
+            null,
+          ],
+          selectedSlot: 0,
+        },
+      }],
+      vitals: [{ player: playerId('alice'), state: { health: 3, hunger: 2, experience: 1_000 } }],
+    })
+    fixture.sent.length = 0
+    const command: EnchantingCommand = {
+      _tag: 'EnchantingCommand', commandId: 'enchant-1', player: 'alice', world: 'world-1',
+      expectedRevision: 4, slot: 0, offer: 0,
+    }
+
+    expect(fixture.receiveEnchanting(command).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta', revision: 5, player: 'alice',
+      state: expect.objectContaining({
+        slots: [
+          { item: 'iron_boots', count: 1, durability: { current: 195, max: 195 } },
+          { item: 'lapis_lazuli', count: 2 },
+          null,
+        ],
+      }),
+    }))
+    const vitals = messages(fixture.sent).find((message) => message._tag === 'PlayerVitalsDelta')
+    expect(vitals).toMatchObject({ revision: 5, player: 'alice', state: { experience: 910 } })
+    expect(fixture.sent.map(decodeEnchantingWireMessage)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta', world: 'world-1', revision: 5, player: 'alice',
+      seed: expect.any(Number),
+      items: [{
+        slot: 0,
+        item: {
+          item: 'iron_boots', durability: { current: 195, max: 195 },
+          enchantments: [{ id: 'protection', level: 2 }],
+        },
+      }],
+    })
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      enchantments: [{
+        player: 'alice', seed: expect.any(Number), items: [{ slot: 0, item: expect.objectContaining({ item: 'iron_boots' }) }],
+      }],
+    })
+
+    expect(fixture.receiveEnchanting(command).accepted).toBe(true)
+    expect(fixture.persisted).toHaveLength(1)
+  })
+
+  it('preserves named enchanted items through inventory moves and world drops', () => {
+    const state = initialState()
+    const enchantedBoots = {
+      item: 'iron_boots' as const,
+      durability: { current: 195, max: 195 },
+      enchantments: [{ id: 'protection' as const, level: 2 }],
+    }
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'iron_boots', count: 1, durability: { current: 195, max: 195 } }, null],
+          selectedSlot: 0,
+        },
+      }],
+      anvilNames: [{ player: playerId('alice'), names: [{ slot: 0, name: 'Traveler' }] }],
+      enchantments: [{ player: playerId('alice'), seed: 42, items: [{ slot: 0, item: enchantedBoots }] }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand', commandId: commandId('move-metadata'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+      action: { _tag: 'move-item', source: 0, destination: 1, count: 1 },
+    }).accepted).toBe(true)
+    expect(fixture.sent.map(decodeAnvilWireMessage)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta', world: 'world-1', revision: 5, player: 'alice',
+      names: [{ slot: 1, name: 'Traveler' }],
+    })
+    expect(fixture.sent.map(decodeEnchantingWireMessage)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta', world: 'world-1', revision: 5, player: 'alice', seed: 42,
+      items: [{ slot: 1, item: enchantedBoots }],
+    })
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand', commandId: commandId('drop-metadata'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 5,
+      action: { _tag: 'drop-item', source: 1, destination: 'world', count: 1 },
+    }).accepted).toBe(true)
+    const drop = messages(fixture.sent).find((message) => message._tag === 'EntitySpawnDelta')
+    if (drop?._tag !== 'EntitySpawnDelta') throw new Error('missing metadata item drop')
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'EntityPickupCommand', commandId: commandId('pickup-metadata'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 6, entityId: drop.entity.entityId,
+    }).accepted).toBe(true)
+    expect(fixture.sent.map(decodeAnvilWireMessage)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta', world: 'world-1', revision: 7, player: 'alice',
+      names: [{ slot: 0, name: 'Traveler' }],
+    })
+    expect(fixture.sent.map(decodeEnchantingWireMessage)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta', world: 'world-1', revision: 7, player: 'alice', seed: 42,
+      items: [{ slot: 0, item: enchantedBoots }],
+    })
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      revision: 7,
+      anvilNames: [{ player: 'alice', names: [{ slot: 0, name: 'Traveler' }] }],
+      enchantments: [{ player: 'alice', seed: 42, items: [{ slot: 0, item: enchantedBoots }] }],
+    })
+  })
+
+  it('keeps NUL-boundary crafting cache keys distinct', () => {
+    expect(craftingResultKey(playerId('alice'), commandId('part\u0000tail')))
+      .not.toBe(craftingResultKey(playerId('alice\u0000part'), commandId('tail')))
+  })
+
   it('accepts fractional player damage produced by armor mitigation', () => {
     const wire = JSON.stringify({
       _tag: 'PlayerDamageCommand', commandId: 'damage-fractional', player: 'alice',
@@ -1463,7 +2094,7 @@ describe('multiplayer server authoritative state', () => {
     ])
   })
 
-  it('authoritatively updates time, containers, furnaces, and persistent state', () => {
+  it('rejects client world changes while updating containers, furnaces, and persistent state', () => {
     const fixture = makeFixture()
     fixture.sent.length = 0
 
@@ -1474,13 +2105,13 @@ describe('multiplayer server authoritative state', () => {
       world: worldId('world-1'),
       expectedRevision: 4,
       action: { _tag: 'set-weather', weather: 'rain' },
-    }).accepted).toBe(true)
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
     expect(fixture.receive({
       _tag: 'ContainerCommand',
       commandId: commandId('container-1'),
       player: playerId('alice'),
       world: worldId('world-1'),
-      expectedRevision: 5,
+      expectedRevision: 4,
       containerId: 'world-1:1,64,0',
       action: {
         _tag: 'move-item',
@@ -1494,7 +2125,7 @@ describe('multiplayer server authoritative state', () => {
       commandId: commandId('furnace-fuel-1'),
       player: playerId('alice'),
       world: worldId('world-1'),
-      expectedRevision: 6,
+      expectedRevision: 5,
       furnaceId: '["world-1",2,64,0]',
       action: {
         _tag: 'move-item',
@@ -1508,7 +2139,7 @@ describe('multiplayer server authoritative state', () => {
       commandId: commandId('furnace-output-1'),
       player: playerId('alice'),
       world: worldId('world-1'),
-      expectedRevision: 7,
+      expectedRevision: 6,
       furnaceId: '["world-1",2,64,0]',
       action: {
         _tag: 'take-output',
@@ -1520,23 +2151,35 @@ describe('multiplayer server authoritative state', () => {
 
     const output = messages(fixture.sent)
     expect(output).toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeCommandRejected',
+      commandId: 'weather-1',
+      reason: 'invalid-command',
+      revision: 4,
+      resyncRequired: false,
+    }))
+    expect(output).not.toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeCommandAccepted',
+      commandId: 'weather-1',
+    }))
+    expect(output).not.toContainEqual(expect.objectContaining({ _tag: 'WorldTimeWeatherDelta' }))
+    expect(output).toContainEqual(expect.objectContaining({
       _tag: 'ContainerDelta',
-      revision: 6,
-      state: { containerId: 'world-1:1,64,0', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] },
+      revision: 5,
+      state: { containerId: 'world-1:1,64,0', kind: 'chest', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] },
     }))
     expect(output).toContainEqual(expect.objectContaining({
       _tag: 'FurnaceDelta',
-      revision: 8,
+      revision: 7,
       state: expect.objectContaining({ fuel: { item: 'coal', count: 1 }, output: { item: 'iron-ingot', count: 1 } }),
     }))
     expect(fixture.persisted.at(-1)).toMatchObject({
-      revision: 8,
-      timeWeather: { timeOfDay: 6_000, weather: 'rain' },
+      revision: 7,
+      timeWeather: { timeOfDay: 6_000, weather: 'clear' },
       inventories: [{
         player: 'alice',
         state: { slots: [{ item: 'stone', count: 3 }, { item: 'coal', count: 2 }, { item: 'iron-ingot', count: 1 }] },
       }],
-      containers: [{ containerId: 'world-1:1,64,0', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] }],
+      containers: [{ containerId: 'world-1:1,64,0', kind: 'chest', slots: [{ item: 'stone', count: 2 }, { item: 'apple', count: 2 }] }],
       furnaces: [{ furnaceId: '["world-1",2,64,0]', fuel: { item: 'coal', count: 1 }, output: { item: 'iron-ingot', count: 1 } }],
     })
   })
@@ -1611,6 +2254,107 @@ describe('multiplayer server authoritative state', () => {
       _tag: 'WorldTimeWeatherDelta',
       state: { timeOfDay: 1, weather: 'clear' },
     }))
+  })
+
+  it('advances weather deterministically and resumes the persisted weather clock', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      weatherClock: { remainingSecs: 0.05, seed: 1 },
+    })
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(50)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'WorldTimeWeatherDelta',
+      state: { timeOfDay: 6_001, weather: 'thunder' },
+    }))
+    const persisted = fixture.persisted.at(-1)
+    expect(persisted).toMatchObject({
+      timeWeather: { timeOfDay: 6_001, weather: 'thunder' },
+      weatherClock: { seed: 282_475_249 },
+    })
+    if (persisted?.weatherClock === undefined) throw new Error('weather clock must be persisted')
+
+    const resumed = makeFixture(persisted)
+    resumed.persisted.length = 0
+    resumed.server.tick(50)
+
+    expect(resumed.persisted.at(-1)).toMatchObject({
+      timeWeather: { timeOfDay: 6_002, weather: 'thunder' },
+      weatherClock: {
+        remainingSecs: persisted.weatherClock.remainingSecs - 0.05,
+        seed: persisted.weatherClock.seed,
+      },
+    })
+  })
+
+  it('replicates thunder strikes at the authoritative player position', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      timeWeather: { timeOfDay: 159, weather: 'thunder' },
+    }, { x: 12, y: 65, z: -7 })
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(50)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'LightningStrikeDelta',
+      world: 'world-1',
+      revision: 5,
+      at: { x: 12, y: 65, z: -7 },
+    }))
+    expect(fixture.persisted.at(-1)?.timeWeather).toEqual({
+      timeOfDay: 160,
+      weather: 'thunder',
+    })
+    expect(fixture.timeline.indexOf('persist')).toBeLessThan(fixture.timeline.indexOf('send'))
+  })
+
+  it('charges Creepers within an authoritative thunder strike', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      timeWeather: { timeOfDay: 159, weather: 'thunder' },
+      entities: [{
+        _tag: 'living',
+        entityId: entityId('charged-creeper'),
+        entityType: 'creeper',
+        at: { x: 12, y: 65, z: -7 },
+        health: 20,
+        maxHealth: 20,
+      }, {
+        _tag: 'living',
+        entityId: entityId('distant-creeper'),
+        entityType: 'creeper',
+        at: { x: 15.1, y: 65, z: -7 },
+        health: 20,
+        maxHealth: 20,
+      }],
+    }, { x: 12, y: 65, z: -7 })
+    fixture.sent.length = 0
+    fixture.persisted.length = 0
+
+    fixture.server.tick(50)
+
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntityUpdateDelta',
+      entity: expect.objectContaining({
+        entityId: 'charged-creeper',
+        mobState: expect.objectContaining({ charged: true }),
+      }),
+    }))
+    expect(fixture.persisted.at(-1)?.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        entityId: 'charged-creeper',
+        mobState: expect.objectContaining({ charged: true }),
+      }),
+      expect.objectContaining({
+        entityId: 'distant-creeper',
+        mobState: expect.not.objectContaining({ charged: true }),
+      }),
+    ]))
   })
 
   it('ages item drops authoritatively and despawns them after five minutes', () => {
@@ -2048,7 +2792,7 @@ describe('multiplayer server authoritative state', () => {
         { at: { x: 20, y: 64, z: 0 }, block: 'chest' },
         { at: { x: 21, y: 64, z: 0 }, block: 'furnace' },
       ],
-      containers: [{ containerId: 'world-1:20,64,0', slots: [] }],
+      containers: [{ containerId: 'world-1:20,64,0', kind: 'chest', slots: [] }],
       furnaces: [{
         furnaceId: '["world-1",21,64,0]',
         input: null,
@@ -2225,7 +2969,7 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.persisted.at(-1)).toMatchObject({
       revision: 7,
       inventories: [{ player: 'alice', state: { slots: [null, null] } }],
-      containers: [{ containerId: 'world-1:1,64,0', slots: [] }],
+      containers: [{ containerId: 'world-1:1,64,0', kind: 'chest', slots: Array.from({ length: 27 }, () => null) }],
       furnaces: [{
         furnaceId: '["world-1",2,64,0]',
         input: null,
@@ -2240,7 +2984,7 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({
         _tag: 'AuthoritativeSnapshot',
         revision: 5,
-        containers: [{ containerId: 'world-1:1,64,0', slots: [] }],
+        containers: [{ containerId: 'world-1:1,64,0', kind: 'chest', slots: Array.from({ length: 27 }, () => null) }],
       }),
       expect.objectContaining({
         _tag: 'AuthoritativeSnapshot',
@@ -2274,6 +3018,393 @@ describe('multiplayer server authoritative state', () => {
       expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 8, containers: [] }),
       expect.objectContaining({ _tag: 'AuthoritativeSnapshot', revision: 9, containers: [], furnaces: [] }),
     ]))
+  })
+
+  it('applies hopper transfers from redstone ticks through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 1, y: 65, z: 0 }, block: 'chest' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'hopper' },
+        { at: { x: 1, y: 63, z: 0 }, block: 'chest' },
+      ],
+      containers: [
+        { containerId: 'world-1:1,65,0', kind: 'chest', slots: [{ item: 'apple', count: 2 }] },
+        { containerId: 'world-1:1,64,0', kind: 'hopper', slots: Array.from({ length: 5 }, () => null) },
+        { containerId: 'world-1:1,63,0', kind: 'chest', slots: Array.from({ length: 27 }, () => null) },
+      ],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(400)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      containers: expect.arrayContaining([
+        { containerId: 'world-1:1,65,0', kind: 'chest', slots: [{ item: 'apple', count: 1 }] },
+        { containerId: 'world-1:1,64,0', kind: 'hopper', slots: [{ item: 'apple', count: 1 }, null, null, null, null] },
+      ]),
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 5, state: expect.objectContaining({ containerId: 'world-1:1,65,0' }) }),
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 5, state: expect.objectContaining({ containerId: 'world-1:1,64,0' }) }),
+    ]))
+
+    fixture.sent.length = 0
+    runtime.tick(400)
+
+    expect(fixture.persisted).toHaveLength(2)
+    expect(fixture.persisted[1]).toMatchObject({
+      revision: 6,
+      containers: expect.arrayContaining([
+        { containerId: 'world-1:1,64,0', kind: 'hopper', slots: [null, null, null, null, null] },
+        { containerId: 'world-1:1,63,0', kind: 'chest', slots: [{ item: 'apple', count: 1 }, ...Array.from({ length: 26 }, () => null)] },
+      ]),
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 6, state: expect.objectContaining({ containerId: 'world-1:1,64,0' }) }),
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 6, state: expect.objectContaining({ containerId: 'world-1:1,63,0' }) }),
+    ]))
+  })
+
+  it('applies dispenser triggers from redstone ticks through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'redstone_torch' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'dispenser' },
+      ],
+      containers: [
+        { containerId: 'world-1:1,64,0', kind: 'dispenser', slots: [{ item: 'apple', count: 2 }, ...Array.from({ length: 8 }, () => null)] },
+      ],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      containers: [{ containerId: 'world-1:1,64,0', kind: 'dispenser', slots: [{ item: 'apple', count: 1 }, ...Array.from({ length: 8 }, () => null)] }],
+      entities: [expect.objectContaining({
+        _tag: 'item-drop',
+        at: { x: 1.5, y: 64.5, z: -0.25 },
+        stack: { item: 'apple', count: 1 },
+      })],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 5, state: expect.objectContaining({ containerId: 'world-1:1,64,0' }) }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        revision: 5,
+        entity: expect.objectContaining({ _tag: 'item-drop', at: { x: 1.5, y: 64.5, z: -0.25 }, stack: { item: 'apple', count: 1 } }),
+      }),
+    ]))
+  })
+
+  it('applies dropper triggers from redstone ticks through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'redstone_torch' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'dropper' },
+      ],
+      containers: [
+        { containerId: 'world-1:1,64,0', kind: 'dropper', slots: [{ item: 'apple', count: 2 }, ...Array.from({ length: 8 }, () => null)] },
+      ],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      containers: [{ containerId: 'world-1:1,64,0', kind: 'dropper', slots: [{ item: 'apple', count: 1 }, ...Array.from({ length: 8 }, () => null)] }],
+      entities: [expect.objectContaining({
+        _tag: 'item-drop',
+        at: { x: 1.5, y: 64.5, z: -0.25 },
+        stack: { item: 'apple', count: 1 },
+      })],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ _tag: 'ContainerDelta', revision: 5, state: expect.objectContaining({ containerId: 'world-1:1,64,0' }) }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        revision: 5,
+        entity: expect.objectContaining({ _tag: 'item-drop', at: { x: 1.5, y: 64.5, z: -0.25 }, stack: { item: 'apple', count: 1 } }),
+      }),
+    ]))
+  })
+
+  it('persists and broadcasts redstone lamp state through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'redstone_torch' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'redstone_lamp' },
+      ],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      blocks: expect.arrayContaining([{ at: { x: 1, y: 64, z: 0 }, block: 'redstone_lamp_lit' }]),
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        revision: 5,
+        blocks: expect.arrayContaining([{ world: worldId('world-1'), at: { x: 1, y: 64, z: 0 }, block: 'redstone_lamp_lit' }]),
+      }),
+    ]))
+  })
+
+  it('powers a redstone lamp from a server-owned comparator container reading', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 1 }, block: 'chest' },
+        { at: { x: 0, y: 64, z: 0 }, block: 'comparator' },
+        { at: { x: 0, y: 64, z: -1 }, block: 'redstone_lamp' },
+      ],
+      containers: [
+        { containerId: 'world-1:0,64,1', kind: 'chest', slots: [{ item: 'apple', count: 32 }, ...Array.from({ length: 26 }, () => null)] },
+      ],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      blocks: expect.arrayContaining([{ at: { x: 0, y: 64, z: -1 }, block: 'redstone_lamp_lit' }]),
+    })
+  })
+
+  it('toggles levers authoritatively and publishes the state in snapshots', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [{ at: { x: 1, y: 64, z: 0 }, block: 'lever' }],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'ToggleLeverCommand', commandId: commandId('toggle-lever'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, lever: { x: 1, y: 64, z: 0 },
+    })).toMatchObject({ accepted: true })
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      levers: [{ at: { x: 1, y: 64, z: 0 }, active: true }],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        revision: 5,
+        levers: [{ at: { x: 1, y: 64, z: 0 }, active: true }],
+      }),
+    ]))
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'ToggleLeverCommand', commandId: commandId('toggle-lever-stale'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4, lever: { x: 1, y: 64, z: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeCommandRejected', commandId: 'toggle-lever-stale', reason: 'stale-revision', revision: 5,
+    }))
+
+    expect(fixture.receive({
+      _tag: 'ToggleLeverCommand', commandId: commandId('toggle-missing-lever'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 5, lever: { x: 2, y: 64, z: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+  })
+
+  it('powers a redstone lamp from server-owned lever state', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'lever' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'redstone_lamp' },
+      ],
+      levers: [{ at: { x: 0, y: 64, z: 0 }, active: true }],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      blocks: expect.arrayContaining([{ at: { x: 1, y: 64, z: 0 }, block: 'redstone_lamp_lit' }]),
+      levers: [{ at: { x: 0, y: 64, z: 0 }, active: true }],
+    })
+  })
+
+  it('persists and broadcasts powered door state through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'redstone_torch' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'door' },
+      ],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      blocks: expect.arrayContaining([{ at: { x: 1, y: 64, z: 0 }, block: 'door_open' }]),
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        revision: 5,
+        blocks: expect.arrayContaining([{ world: worldId('world-1'), at: { x: 1, y: 64, z: 0 }, block: 'door_open' }]),
+      }),
+    ]))
+  })
+
+  it('persists and broadcasts powered rail state through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'redstone_torch' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'powered_rail' },
+      ],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      poweredRails: [{ at: { x: 1, y: 64, z: 0 }, powered: true }],
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        revision: 5,
+        poweredRails: [{ at: { x: 1, y: 64, z: 0 }, powered: true }],
+      }),
+    ]))
+
+    runtime.tick(100)
+    expect(fixture.persisted).toHaveLength(1)
+
+    expect(fixture.server.applyPoweredRailState({ x: 1, y: 64, z: 0 }, false)).toBe(true)
+    expect(fixture.persisted).toHaveLength(2)
+    expect(fixture.persisted[1]).toMatchObject({
+      revision: 6,
+      poweredRails: [{ at: { x: 1, y: 64, z: 0 }, powered: false }],
+    })
+  })
+
+  it('persists and broadcasts a powered sticky piston move through server authority', async () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'redstone_torch' },
+        { at: { x: 1, y: 64, z: 0 }, block: 'piston' },
+        { at: { x: 1, y: 64, z: -1 }, block: 'stone' },
+      ],
+      containers: [],
+      furnaces: [],
+    })
+    fixture.sent.length = 0
+    const runtime = await makeMultiplayerRedstoneRuntime([{ dimension: 'overworld', core: fixture.server }])
+
+    runtime.tick(100)
+
+    expect(fixture.persisted).toHaveLength(1)
+    expect(fixture.persisted[0]).toMatchObject({
+      revision: 5,
+      blocks: expect.arrayContaining([
+        { at: { x: 1, y: 64, z: -1 }, block: 'piston_head' },
+        { at: { x: 1, y: 64, z: -2 }, block: 'stone' },
+      ]),
+    })
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'WorldSnapshot',
+        revision: 5,
+        blocks: expect.arrayContaining([
+          { world: worldId('world-1'), at: { x: 1, y: 64, z: -1 }, block: 'piston_head' },
+          { world: worldId('world-1'), at: { x: 1, y: 64, z: -2 }, block: 'stone' },
+        ]),
+      }),
+    ]))
+  })
+
+  it('creates each storage block with its typed capacity', () => {
+    const storageCases: ReadonlyArray<readonly [ContainerKind, number]> = [
+      ['chest', 27],
+      ['shulker_box', 27],
+      ['dispenser', 9],
+      ['dropper', 9],
+      ['hopper', 5],
+    ]
+
+    for (const [kind, capacity] of storageCases) {
+      const fixture = makeFixture({
+        ...initialState(),
+        blocks: [],
+        containers: [],
+        furnaces: [],
+        inventories: [{
+          player: playerId('alice'),
+          state: { slots: [{ item: kind, count: 1 }], selectedSlot: 0 },
+        }],
+      }, undefined, 'normal', { allowedBlocks: new Set([kind]) })
+      fixture.sent.length = 0
+
+      expect(fixture.receive({
+        _tag: 'BlockPlace',
+        player: playerId('alice'),
+        world: worldId('world-1'),
+        at: { x: 1, y: 64, z: 0 },
+        block: kind,
+      }).accepted).toBe(true)
+      expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+        _tag: 'AuthoritativeSnapshot',
+        containers: [{
+          containerId: 'world-1:1,64,0',
+          kind,
+          slots: Array.from({ length: capacity }, () => null),
+        }],
+      }))
+    }
   })
 
   it('consumes placed blocks and rejects placement without inventory', () => {
@@ -2335,5 +3466,65 @@ describe('multiplayer server authoritative state', () => {
       block: 'stone',
     })).toEqual({ accepted: false, reason: 'invalid-mutation' })
     expect(fixture.persisted.at(-1)).toMatchObject({ revision: 9 })
+  })
+
+  it('broadcasts and recovers Eyes of Ender only through an authoritative command', () => {
+    const fixture = makeFixture({
+      ...initialState(),
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'eye_of_ender', count: 2 }], selectedSlot: 0 },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'ThrowEyeOfEnderCommand',
+      commandId: commandId('eye-recovery'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: 5,
+      state: expect.objectContaining({ slots: [{ item: 'eye_of_ender', count: 1 }] }),
+    }))
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EyeOfEnderThrown',
+      revision: 5,
+      player: playerId('alice'),
+      breaks: false,
+    }))
+    expect(fixture.persisted.at(-1)?.eyeOfEnderRecoveries).toEqual([
+      expect.objectContaining({ remainingSecs: 2.5 }),
+    ])
+
+    fixture.sent.length = 0
+    fixture.server.tick(1_000)
+    const restored = makeFixture(fixture.persisted.at(-1))
+    restored.sent.length = 0
+    restored.server.tick(1_500)
+    expect(messages(restored.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'EntitySpawnDelta',
+      entity: expect.objectContaining({
+        _tag: 'item-drop',
+        stack: { item: 'eye_of_ender', count: 1 },
+      }),
+    }))
+
+    const withoutEye = makeFixture(initialState())
+    withoutEye.sent.length = 0
+    expect(withoutEye.receive({
+      _tag: 'ThrowEyeOfEnderCommand',
+      commandId: commandId('throw-no-eye'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(messages(withoutEye.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'AuthoritativeCommandRejected',
+      reason: 'insufficient-items',
+    }))
   })
 })

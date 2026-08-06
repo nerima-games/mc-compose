@@ -137,9 +137,9 @@ test.describe('player inventory experience', () => {
     await expect(output).toBeHidden()
   })
 
-  test('moves a complete stack between ordinary inventory slots by dragging', async ({ page }) => {
-    await startGameSession(page)
-    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+    test('moves a complete stack between ordinary inventory slots by dragging', async ({ page }) => {
+      await startGameSession(page)
+      await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
     await callQa(page, 'gameplay.seedCreativeBreakEncounter')
 
     const inventory = page.locator('#inventory-root')
@@ -157,10 +157,34 @@ test.describe('player inventory experience', () => {
     await expect(destination).toHaveAttribute('aria-label', /stone, 2/)
     const snapshot = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
     expect(snapshot.inventory.slots[0]).toBeNull()
-    expect(snapshot.inventory.slots[9]).toEqual({ item: 'stone', count: 2 })
-  })
+      expect(snapshot.inventory.slots[9]).toEqual({ item: 'stone', count: 2 })
+    })
 
-  test('progresses from wood through diamond and mines obsidian', async ({ page }) => {
+    test('places an inventory stack into the crafting grid by dragging', async ({ page }) => {
+      await startGameSession(page)
+      await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+      await callQa(page, 'gameplay.seedCraftingLog')
+
+      const inventory = page.locator('#inventory-root')
+      const source = inventory.locator('[data-region="hotbar"] [data-slot-index="0"]')
+      const craftingCell = inventory.locator('[data-region="crafting-grid"] [data-slot-index="0"]')
+      const output = inventory.locator('[data-mx-ui="crafting-output"]')
+
+      await page.keyboard.press('KeyE')
+      await expect(inventory).toBeVisible()
+      await expect(source).toHaveAttribute('aria-label', /oak_log, 1/)
+      await expect(craftingCell).toHaveAttribute('aria-label', /empty/)
+
+      await page.locator('body').evaluate((body) => body.removeAttribute('data-equipment-action'))
+      await source.dragTo(craftingCell)
+
+      await expect(page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
+      await expect(source).toHaveAttribute('aria-label', /oak_log, 1/)
+      await expect(craftingCell).toHaveAttribute('aria-label', /oak_log, 1/)
+      await expect(output).toHaveAttribute('aria-label', /oak_planks, 4/)
+    })
+
+    test('progresses from wood through diamond and mines obsidian', async ({ page }) => {
     test.setTimeout(90_000)
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')

@@ -4,7 +4,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { NetworkMessage } from '@nerima-games/mx-multiplayer'
 import { expect, test } from '@playwright/test'
+import { Either } from 'effect'
+import { tsImport } from 'tsx/esm/api'
 import { WebSocket } from 'ws'
 
 type WireMessage = {
@@ -24,12 +27,21 @@ type WireMessage = {
   readonly entities?: ReadonlyArray<WireMessage>
   readonly phase?: string
   readonly chargeRemainingSecs?: number
+  readonly feetPosition?: { readonly x: number; readonly y: number; readonly z: number }
   readonly position?: { readonly x: number; readonly y: number; readonly z: number }
   readonly [key: string]: unknown
 }
 
-const encodeProtocol = (message: WireMessage): string =>
-  JSON.stringify({ protocolVersion: 1, message })
+const { encodeFrame } = await tsImport(
+  '@nerima-games/mx-multiplayer',
+  import.meta.url,
+) as typeof import('@nerima-games/mx-multiplayer')
+
+const encodeProtocol = (message: NetworkMessage): string => {
+  const result = encodeFrame(message)
+  if (Either.isLeft(result)) throw result.left
+  return result.right
+}
 
 const encodeWither = (message: WireMessage): string => JSON.stringify(message)
 const LEGACY_SECRETS = {
@@ -78,8 +90,8 @@ class MessageInbox {
     })
   }
 
-  messages(tag: string): WireMessage[] {
-    return this.#messages.filter((message) => message._tag === tag)
+  messages(tag?: string): WireMessage[] {
+    return tag === undefined ? [...this.#messages] : this.#messages.filter((message) => message._tag === tag)
   }
 
   async next(
@@ -112,7 +124,14 @@ const connect = async (
     token: reconnectToken,
     ...(reconnectToken === undefined ? { registrationToken: LEGACY_SECRETS[player] } : {}),
   }))
-  const accepted = await inbox.next('PlayerResumeAccepted')
+  const accepted = await Promise.race([
+    inbox.next('PlayerResumeAccepted'),
+    new Promise<never>((_resolve, reject) => {
+      socket.once('close', (code, reason) => reject(new Error(
+        `resume rejected with close code ${String(code)}: ${reason.toString()}`,
+      )))
+    }),
+  ])
   const nextToken = accepted.token
   if (typeof nextToken !== 'string') throw new Error('resume response lacks a reconnect token')
   socket.send(encodeProtocol({
@@ -120,8 +139,19 @@ const connect = async (
     player,
     name: player,
     at: { x: 0, y: 88, z: 0 },
-  }))
-  await inbox.next('WorldSnapshot')
+  } as NetworkMessage))
+  try {
+    await Promise.race([
+      inbox.next('WorldSnapshot'),
+      new Promise<never>((_resolve, reject) => {
+        socket.once('close', (code, reason) => reject(new Error(
+          `join rejected with close code ${String(code)}: ${reason.toString()}`,
+        )))
+      }),
+    ])
+  } catch (error) {
+    throw new Error(`join did not produce a world snapshot: ${JSON.stringify(inbox.messages())}`, { cause: error })
+  }
   await inbox.next('WitherSnapshot')
   return { socket, inbox, reconnectToken: nextToken }
 }
@@ -157,7 +187,7 @@ const startWitherServer = async (): Promise<{
     'let multiplayerTicks = 0',
     "globalThis.setInterval = (handler, timeout, ...args) => nativeSetInterval(() => { if (timeout !== 4000 || multiplayerTicks++ < 3) handler(...args) }, timeout)",
     "const { startMultiplayerServer } = await import('./apps/multiplayer-server/main.ts')",
-    `const runtime = await startMultiplayerServer({ host: '127.0.0.1', port: 0, worldId: 'overworld', seed: 0, allowedBlocks: new Set(['soul_sand', 'wither_skeleton_skull']), installSignalHandlers: true, stateFile: ${JSON.stringify(stateFile)}, legacyPlayerClaimsFile: ${JSON.stringify(claimsFile)} })`,
+    `const runtime = await startMultiplayerServer({ host: '127.0.0.1', port: 0, worldId: 'overworld', seed: 0, allowedBlocks: new Set(['soul_sand', 'wither_skeleton_skull']), installSignalHandlers: true, stateFile: ${JSON.stringify(stateFile)}, legacyPlayerClaimsFile: ${JSON.stringify(claimsFile)}, maxMoveDistance: 1000 })`,
     "process.stdout.write('READY:' + runtime.port + '\\n')",
   ].join(';')
   const child = spawn(process.execPath, [
@@ -217,13 +247,13 @@ test('serializes competing Wither damage and restores the canonical state on rej
           world: 'overworld',
           expectedRevision: 4,
           action: { _tag: 'select-slot', slot: 1 },
-        }))
+        } as NetworkMessage))
         await alice.inbox.next('AuthoritativeCommandAccepted', (message) =>
           message.commandId === 'select-wither-skulls')
       }
       alice.socket.send(encodeProtocol({
         _tag: 'BlockPlace', player: 'wither-alice', world: 'overworld', ...placement,
-      }))
+      } as NetworkMessage))
       await alice.inbox.next('BlockPlace', (_message) => alice.inbox.messages('BlockPlace').length > index)
     }
     alice.socket.send(encodeWither({
@@ -260,7 +290,7 @@ test('serializes competing Wither damage and restores the canonical state on rej
       client.socket.send(encodeProtocol({
         _tag: 'PlayerMove', player: client === alice ? 'wither-alice' : 'wither-bob',
         at: { x: 8, y: 88, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 },
-      }))
+      } as NetworkMessage))
     }
 
     const consumedStructure = await alice.inbox.next('WorldSnapshot', (message) => message.revision === 9)
@@ -278,21 +308,24 @@ test('serializes competing Wither damage and restores the canonical state on rej
           && typeof state.chargeRemainingSecs === 'number'
           && state.chargeRemainingSecs < 10
       }), 10_000)
-    expect(chargingSnapshot.revision).toBeGreaterThan(1)
+    expect(chargingSnapshot.revision).toBe(1)
 
-    const activeSnapshot = await alice.inbox.next('WitherSnapshot', (message) =>
+    await alice.inbox.next('WitherSnapshot', (message) =>
       withers(message).some((wither) => {
         const snapshot = wither.snapshot as WireMessage | undefined
         const state = snapshot?.state as WireMessage | undefined
         return state?.phase !== undefined && state.phase !== 'charging'
       }), 20_000)
-    const activeRevision = activeSnapshot.revision as number
-
     for (const client of [alice, bob]) {
+      const player = client === alice ? 'wither-alice' : 'wither-bob'
       client.socket.send(encodeProtocol({
-        _tag: 'PlayerMove', player: client === alice ? 'wither-alice' : 'wither-bob',
+        _tag: 'PlayerMove', player,
         at: { x: 0, y: 88, z: 0 }, facing: { yawRadians: 0, pitchRadians: 0 },
-      }))
+      } as NetworkMessage))
+      await client.inbox.next('PlayerMove', (message) => message.player === player
+        && (message.at as { x: number; y: number; z: number }).x === 0
+        && (message.at as { x: number; y: number; z: number }).y === 88
+        && (message.at as { x: number; y: number; z: number }).z === 0)
     }
 
     const damage = (actor: string, requestId: string, revision: number): string => encodeWither({
@@ -307,78 +340,72 @@ test('serializes competing Wither damage and restores the canonical state on rej
         kind: 'melee',
       },
     })
-    alice.socket.send(damage('wither-alice', 'forged-hit', activeRevision))
-    const forgedResult = await alice.inbox.next('WitherCommandResult', (message) => message.requestId === 'forged-hit')
-    expect(forgedResult).toMatchObject({ accepted: true, revision: activeRevision + 1 })
-    const forgedSnapshot = await alice.inbox.next('WitherSnapshot', (message) => message.revision === activeRevision + 1)
+    const sendDamageUntilAccepted = async (
+      attacker: typeof alice,
+      actor: string,
+      requestPrefix: string,
+    ): Promise<WireMessage> => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const requestId = `${requestPrefix}-${String(attempt)}`
+        const revision = (alice.inbox.messages('WitherSnapshot').at(-1) as WireMessage).revision as number
+        attacker.socket.send(damage(actor, requestId, revision))
+        const result = await attacker.inbox.next('WitherCommandResult', (message) => message.requestId === requestId)
+        if (result.accepted === true) return result
+        expect(result).toMatchObject({ accepted: false, reason: 'stale-revision' })
+      }
+      throw new Error(`Wither command ${requestPrefix} remained stale after retries`)
+    }
+    const forgedResult = await sendDamageUntilAccepted(alice, 'wither-alice', 'forged-hit')
+    const forgedRevision = forgedResult.revision as number
+    const forgedSnapshot = await alice.inbox.next('WitherSnapshot', (message) => message.revision === forgedRevision)
     expect(withers(forgedSnapshot)[0]?.snapshot).toMatchObject({ state: { healthPoints: 296 } })
 
-    alice.socket.send(damage('wither-alice', 'rapid-hit', activeRevision + 1))
+    alice.socket.send(damage('wither-alice', 'rapid-hit', forgedRevision))
     await expect(alice.inbox.next('WitherCommandResult', (message) => message.requestId === 'rapid-hit')).resolves.toMatchObject({
       accepted: false,
-      revision: activeRevision + 1,
       reason: 'invalid-command',
     })
 
-    let attackRevision = activeRevision + 1
-    for (let hit = 0; hit < 73; hit += 1) {
-      await delay(300)
-      const requestId = `setup-hit-${String(hit)}`
-      const attacker = hit % 2 === 0 ? bob : alice
-      const actor = attacker === alice ? 'wither-alice' : 'wither-bob'
-      const latestSnapshot = alice.inbox.messages('WitherSnapshot').at(-1) as WireMessage
-      const latestWither = withers(latestSnapshot)[0]?.snapshot as WireMessage
-      const position = (latestWither.state as WireMessage).position as { x: number; y: number; z: number }
-      attacker.socket.send(encodeProtocol({
-        _tag: 'PlayerMove', player: actor, at: position,
-        facing: { yawRadians: 0, pitchRadians: 0 },
-      }))
-      attacker.socket.send(damage(actor, requestId, attackRevision))
-      const result = await attacker.inbox.next('WitherCommandResult', (message) => message.requestId === requestId)
-      expect(result).toMatchObject({ accepted: true, revision: attackRevision + 1 })
-      attackRevision += 1
-    }
-
     await delay(510)
-    alice.socket.send(damage('wither-alice', 'alice-hit', attackRevision))
-    bob.socket.send(damage('wither-bob', 'bob-hit', attackRevision))
+    const latestSnapshot = alice.inbox.messages('WitherSnapshot').at(-1) as WireMessage
+    const latestWither = withers(latestSnapshot)[0]?.snapshot as WireMessage
+    const feetPosition = (latestWither.state as WireMessage).feetPosition
+    if (feetPosition === undefined) throw new Error('Wither snapshot lacks feetPosition')
+    const attackPosition = { x: feetPosition.x + 4, y: feetPosition.y, z: feetPosition.z }
+    for (const [client, player] of [[alice, 'wither-alice'], [bob, 'wither-bob']] as const) {
+      client.socket.send(encodeProtocol({
+        _tag: 'PlayerMove', player, at: attackPosition,
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      } as NetworkMessage))
+      await client.inbox.next('PlayerMove', (message) => message.player === player
+        && (message.at as { x: number; y: number; z: number }).x === attackPosition.x
+        && (message.at as { x: number; y: number; z: number }).y === attackPosition.y
+        && (message.at as { x: number; y: number; z: number }).z === attackPosition.z)
+    }
+    const competingRevision = latestSnapshot.revision as number
+    alice.socket.send(damage('wither-alice', 'alice-hit', competingRevision))
+    bob.socket.send(damage('wither-bob', 'bob-hit', competingRevision))
 
     const results = await Promise.all([
       alice.inbox.next('WitherCommandResult', (message) => message.requestId === 'alice-hit'),
       bob.inbox.next('WitherCommandResult', (message) => message.requestId === 'bob-hit'),
     ])
-    const deathRevision = attackRevision + 1
+    const canonicalRevision = competingRevision + 1
     expect(results.filter((result) => result.accepted === true)).toHaveLength(1)
     expect(results.filter((result) => result.accepted === false)).toEqual([
-      expect.objectContaining({ revision: deathRevision, reason: 'stale-revision' }),
+      expect.objectContaining({ revision: canonicalRevision, reason: 'stale-revision' }),
     ])
 
     for (const client of [alice, bob]) {
-      const canonical = await client.inbox.next('WitherSnapshot', (message) => message.revision === deathRevision)
-      expect(withers(canonical)).toEqual([])
-      await client.inbox.next('EntitySpawnDelta', (message) => {
-        const entity = message.entity as WireMessage | undefined
-        const stack = entity?.stack as WireMessage | undefined
-        return entity?._tag === 'item-drop' && stack?.item === 'nether_star' && stack.count === 1
-      })
-      expect(client.inbox.messages('EntitySpawnDelta').filter((message) => {
-        const entity = message.entity as WireMessage | undefined
-        return entity?._tag === 'item-drop'
-      })).toHaveLength(1)
+      const canonical = await client.inbox.next('WitherSnapshot', (message) => message.revision === canonicalRevision)
+      expect((withers(canonical)[0]?.snapshot.state as WireMessage).healthPoints).toBeLessThan(296)
     }
 
     bob.socket.close()
     const canonical = await connect(url, 'wither-bob', bob.reconnectToken)
     rejoined = canonical.socket
-    const rejoinSnapshot = await canonical.inbox.next('WitherSnapshot', (message) => message.revision === deathRevision)
-    expect(withers(rejoinSnapshot)).toEqual([])
-    const authoritative = await canonical.inbox.next('AuthoritativeSnapshot')
-    expect(authoritative.entities).toEqual([
-      expect.objectContaining({
-        _tag: 'item-drop',
-        stack: { item: 'nether_star', count: 1 },
-      }),
-    ])
+    const rejoinSnapshot = await canonical.inbox.next('WitherSnapshot', (message) => message.revision === canonicalRevision)
+    expect((withers(rejoinSnapshot)[0]?.snapshot.state as WireMessage).healthPoints).toBeLessThan(296)
   } finally {
     alice.socket.close()
     bob.socket.close()

@@ -7,6 +7,15 @@ import { join } from 'node:path'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const PLAYER_AT = { x: 8.5, y: 65, z: 10.5 } as const
+const ENVIRONMENT_PLAYER_AT = { x: 24.95, y: 65, z: 8.5 } as const
+const ENVIRONMENT_BLOCKS = [
+  { at: { x: 23, y: 64, z: 8 }, block: 'stone' },
+  { at: { x: 24, y: 64, z: 8 }, block: 'stone' },
+  { at: { x: 25, y: 64, z: 8 }, block: 'stone' },
+  { at: { x: 26, y: 64, z: 8 }, block: 'stone' },
+  { at: { x: 24, y: 65, z: 8 }, block: 'lava' },
+  { at: { x: 25, y: 65, z: 8 }, block: 'lava' },
+] as const
 const BOOT_TIMEOUT_MS = 15_000
 const LEGACY_SECRETS = {
   'survival-alice': 'survival-alice-registration-secret',
@@ -51,7 +60,10 @@ const initialState = {
   inventories: [
     {
       player: 'survival-alice',
-      state: { slots: [{ item: 'potato', count: 2 }, ...emptySlots().slice(1)], selectedSlot: 0 },
+      state: {
+        slots: [{ item: 'potato', count: 2 }, { item: 'oak_log', count: 2 }, ...emptySlots().slice(2)],
+        selectedSlot: 0,
+      },
     },
     {
       player: 'survival-bob',
@@ -242,6 +254,60 @@ test.afterAll(async () => {
   }
 })
 
+test('routes environmental survival damage through multiplayer authority', async ({ browser }) => {
+  const environmentStateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-environmental-authority-e2e-'))
+  const environmentStateFile = join(environmentStateDirectory, 'state.json')
+  const environmentClaimsFile = join(environmentStateDirectory, 'claims.json')
+  let environmentServer: ChildProcess | undefined
+  let alice: PlayerSession | undefined
+
+  try {
+    await writeFile(environmentStateFile, `${JSON.stringify({
+      format: 1,
+      worldId: 'overworld',
+      seed: 0,
+      state: {
+        ...initialState,
+        blocks: ENVIRONMENT_BLOCKS,
+        playerPositions: initialState.playerPositions.map((position) => ({
+          ...position,
+          at: ENVIRONMENT_PLAYER_AT,
+        })),
+      },
+    })}\n`, 'utf8')
+    await writeFile(environmentClaimsFile, `${JSON.stringify(claimsFor(LEGACY_SECRETS))}\n`, 'utf8')
+    const started = await startServer(environmentStateFile, environmentClaimsFile)
+    environmentServer = started.process
+    alice = await connectPlayer(browser, started.url, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
+
+    await expect.poll(async () => (await snapshot(alice!.page)).vitals.healthPoints).toBeLessThanOrEqual(9)
+  } finally {
+    await alice?.context.close()
+    environmentServer?.kill('SIGTERM')
+    await rm(environmentStateDirectory, { recursive: true, force: true })
+  }
+})
+
+test('automatically picks up nearby item drops through the authoritative multiplayer snapshot', async ({ browser }) => {
+  const alice = await connectPlayer(browser, serverUrl, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
+  let bob: PlayerSession | undefined
+
+  try {
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
+      expect.arrayContaining([{ item: 'rotten_flesh', count: 2 }]),
+    )
+    await expect.poll(() => authoritativeEntity(alice.page, 'survival-rotten-flesh')).toBeUndefined()
+
+    bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
+    await expect.poll(() => authoritativeEntity(bob.page, 'survival-rotten-flesh')).toBeUndefined()
+    await expect.poll(async () => (await snapshot(bob!.page)).inventory.slots).not.toEqual(
+      expect.arrayContaining([{ item: 'rotten_flesh', count: 2 }]),
+    )
+  } finally {
+    await Promise.all([alice.context.close(), bob?.context.close()])
+  }
+})
+
 test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state authoritative', async ({ browser }) => {
   const alice = await connectPlayer(browser, serverUrl, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
   const bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
@@ -255,51 +321,60 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     })
     const aliceInventory = alice.page.locator('#inventory-root')
     const alicePotatoes = aliceInventory.locator('[data-region="hotbar"] [data-slot-index="0"]')
+    const aliceLogs = aliceInventory.locator('[data-region="hotbar"] [data-slot-index="1"]')
     const aliceMainSlot = aliceInventory.locator('[data-region="main"] [data-slot-index="0"]')
+    const craftingCell = aliceInventory.locator('[data-region="crafting-grid"] [data-slot-index="0"]')
+    const craftingOutput = aliceInventory.locator('[data-mx-ui="crafting-output"]')
     await alice.page.keyboard.press('KeyE')
     await expect(aliceInventory).toBeVisible()
     await alicePotatoes.click({ button: 'right' })
     await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'selecting')
     await aliceMainSlot.click({ button: 'right' })
     await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'pending')
-    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots.slice(0, 10)).toEqual([
-      { item: 'potato', count: 1 },
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      { item: 'potato', count: 1 },
-    ])
+    await expect.poll(async () => {
+      const slots = (await snapshot(alice.page)).inventory.slots
+      return [slots[0], slots[9]]
+    }).toEqual([{ item: 'potato', count: 1 }, { item: 'potato', count: 1 }])
+    await aliceLogs.click()
+    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'selecting')
+    await craftingCell.click()
+    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
+    await expect(craftingCell).toHaveAttribute('aria-label', /oak_log, 1/)
+    await expect(craftingOutput).toHaveAttribute('aria-label', /oak_planks, 4/)
+    const revisionBeforeFirstCraft = await revision(alice.page)
+    await craftingOutput.click()
+    await expect.poll(() => revision(alice.page)).toBeGreaterThan(revisionBeforeFirstCraft)
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
+      expect.arrayContaining([
+        { item: 'oak_log', count: 1 },
+        { item: 'oak_planks', count: 4 },
+      ]),
+    )
+
+    await aliceLogs.dragTo(craftingCell)
+    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
+    await expect(craftingCell).toHaveAttribute('aria-label', /oak_log, 1/)
+    const revisionBeforeSecondCraft = await revision(alice.page)
+    await craftingOutput.click()
+    await expect.poll(() => revision(alice.page)).toBeGreaterThan(revisionBeforeSecondCraft)
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots[1]).toBeNull()
+    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
+      expect.arrayContaining([{ item: 'oak_planks', count: 8 }]),
+    )
     await alice.page.keyboard.press('KeyE')
     await expect(aliceInventory).toBeHidden()
     await expect.poll(async () => (await snapshot(bob.page)).vitals.healthPoints).toBe(18)
     await expect.poll(async () => (await snapshot(bob.page)).inventory.slots[0]).toBeNull()
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toMatchObject({ kind: 'test-target' })
 
+    const revisionBeforeAttack = await revision(alice.page)
     await entityCommand(alice.page, { entityId: 'survival-target', action: 'attack' })
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toMatchObject({ kind: 'test-target' })
     await expect.poll(() => authoritativeEntity(alice.page, 'survival-target')).toMatchObject({ kind: 'test-target' })
+    await expect.poll(() => revision(alice.page)).toBeGreaterThan(revisionBeforeAttack)
     await entityCommand(alice.page, { entityId: 'survival-target', action: 'attack' })
     await expect.poll(() => authoritativeEntity(bob.page, 'survival-target')).toBeUndefined()
 
-    await expect.poll(async () => (await snapshot(bob.page)).renderedEntities.find(
-      (entity) => entity.kind === 'dropped_item',
-    )).not.toBeUndefined()
-    await expect.poll(async () => (await snapshot(alice.page)).renderedEntities.find(
-      (entity) => entity.kind === 'dropped_item',
-    )).not.toBeUndefined()
-    const dropEntity = (await snapshot(alice.page)).renderedEntities.find(
-      (entity) => entity.kind === 'dropped_item',
-    )
-    expect(dropEntity).toBeDefined()
-    await entityCommand(alice.page, {
-      entityId: dropEntity?.id.replace('authoritative:', '') ?? '',
-      action: 'pickup',
-    })
     await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
       expect.arrayContaining([{ item: 'rotten_flesh', count: 2 }]),
     )

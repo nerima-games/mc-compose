@@ -17,6 +17,7 @@ interface ReconnectTokenHashes {
 export interface ReconnectAuth {
   readonly has: (player: string) => boolean
   readonly issue: (player: string) => Promise<string | undefined>
+  readonly reissue: (player: string) => Promise<string | undefined>
   readonly rotate: (player: string, token: string) => Promise<string | undefined>
 }
 
@@ -118,6 +119,19 @@ export const createReconnectAuth = async (stateFile?: string): Promise<Reconnect
         await persist()
       } catch (error) {
         hashes.delete(player)
+        throw error
+      }
+      return token
+    }),
+    reissue: (player) => mutate(async () => {
+      const expected = hashes.get(player)
+      if (player.length === 0 || expected === undefined) return undefined
+      const token = randomBytes(RECONNECT_TOKEN_BYTES).toString('base64url')
+      hashes.set(player, { current: hashToken(token).toString('hex') })
+      try {
+        await persist()
+      } catch (error) {
+        hashes.set(player, expected)
         throw error
       }
       return token

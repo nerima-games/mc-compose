@@ -1,6 +1,7 @@
 import { describe, expect, it } from '@effect/vitest'
 import { Effect, Layer, Option } from 'effect'
 
+import { CHUNK_SIZE_XZ, chunkCoord } from '@nerima-games/mc-kernel'
 import {
   SaveKey,
   StorageError,
@@ -23,9 +24,7 @@ import {
   type Inventory,
 } from '@nerima-games/mc-sim'
 import {
-  CHUNK_SIZE_XZ,
   CHUNK_VOLUME,
-  chunkCoord,
   type Chunk,
   type ChunkSource,
   type Dimension,
@@ -34,6 +33,7 @@ import {
   SPAWN_PLAYER_VITALS,
   emptyBrewingStandState,
   emptyStatusEffectState,
+  isDroppedItemBehaviour,
 } from '@nerima-games/mx-gameplay'
 
 import {
@@ -42,6 +42,7 @@ import {
   EMPTY_ENTITY_ROSTERS,
   EMPTY_VILLAGER_STATE,
   SESSION_FORMAT_NAME,
+  SESSION_FORMAT_VERSION,
   deleteSession,
   listSessions,
   loadSession,
@@ -89,9 +90,10 @@ const sessionState = (seed: number): SessionState => {
       slots: Array.from({ length: INVENTORY_SLOT_COUNT }, (_, index) => inventory.slots[index]),
     } as Inventory),
     containerStorage: {
-      version: 1,
+      version: 2,
       containers: [{
         id: 'overworld:4,65,-2',
+        kind: 'chest',
         slots: Array.from(
           { length: 27 },
           (_, index) => index === 0
@@ -183,6 +185,40 @@ describe('dynamic entity persistence', () => {
     expect(persistedItemDropLifetime({ item: 'stone', count: 2 })).toEqual({ elapsedSecs: 0 })
     expect(persistedItemDropLifetime({ elapsedSecs: Number.POSITIVE_INFINITY })).toEqual({
       elapsedSecs: 0,
+    })
+  })
+
+  it('reconstructs persisted item drops accepted by the entity runtime', () => {
+    const roster = normalizePersistedEntityRoster({
+      entities: [{
+        id: 'drop-4',
+        kind: 'dropped_item',
+        feetPosition: { x: 1.5, y: 64, z: -2.5 },
+        healthPoints: 1,
+        behaviour: {
+          item: 'diamond_pickaxe',
+          count: 1,
+          durability: { current: 1500, max: 1561 },
+          customName: 'Fortune Miner',
+          enchantments: [{ id: 'fortune', level: 3 }],
+          elapsedSecs: 123.5,
+          eligibleFromFrame: 42,
+        },
+      }],
+      nextSerial: 5,
+    })
+
+    const behaviour = roster.entities[0]?.behaviour
+    expect(isDroppedItemBehaviour(behaviour)).toBe(true)
+    expect(behaviour).toEqual({
+      _tag: 'DroppedItem',
+      item: 'diamond_pickaxe',
+      count: 1,
+      durability: { current: 1500, max: 1561 },
+      customName: 'Fortune Miner',
+      enchantments: [{ id: 'fortune', level: 3 }],
+      elapsedSecs: 123.5,
+      eligibleFromFrame: 42,
     })
   })
 
@@ -385,6 +421,7 @@ describe('session persistence', () => {
               feetPosition: { x: 1.5, y: 64, z: -2.5 },
               healthPoints: 1,
               behaviour: {
+                _tag: 'DroppedItem',
                 item: 'diamond_pickaxe',
                 count: 1,
                 durability: { current: 1500, max: 1561 },
@@ -620,7 +657,7 @@ describe('session persistence', () => {
     return Effect.gen(function* () {
       const loaded = Option.getOrThrow(yield* loadSession('legacy-v11'))
 
-      expect(loaded.state.containerStorage).toEqual({ version: 1, containers: [] })
+      expect(loaded.state.containerStorage).toEqual({ version: 2, containers: [] })
       expect(storage.envelope(key)?.version).toBe(11)
     }).pipe(Effect.provide(storage.layer))
   })
@@ -686,6 +723,60 @@ describe('session persistence', () => {
     }).pipe(Effect.provide(storage.layer))
   })
 
+  it.effect('normalizes malformed entity rosters during current session decode', () => {
+    const storage = controlledStorage()
+    const key = sessionHeadKey('current-entity-roster')
+    storage.setEnvelope(key, {
+      format: SESSION_FORMAT_NAME,
+      version: SESSION_FORMAT_VERSION,
+      payload: {
+        sessionId: 'current-entity-roster',
+        revision: 'r1',
+        metadata: defaultMetadata,
+        state: {
+          ...sessionState(42),
+          entities: {
+            overworld: {
+              entities: [
+                {
+                  id: 'zombie-1',
+                  kind: 'zombie',
+                  feetPosition: { x: 1, y: 65, z: -2 },
+                  healthPoints: 20,
+                  behaviour: { target: 'local-player' },
+                },
+                { id: 'broken', kind: 'zombie' },
+              ],
+              nextSerial: 3.7,
+            },
+            nether: null,
+            end: { entities: [], nextSerial: -4 },
+          },
+        },
+        chunks: [],
+      },
+    })
+
+    return Effect.gen(function* () {
+      const loaded = Option.getOrThrow(yield* loadSession('current-entity-roster'))
+
+      expect(loaded.state.entities).toEqual({
+        overworld: {
+          entities: [{
+            id: 'zombie-1',
+            kind: 'zombie',
+            feetPosition: { x: 1, y: 65, z: -2 },
+            healthPoints: 20,
+            behaviour: { target: 'local-player' },
+          }],
+          nextSerial: 3,
+        },
+        nether: EMPTY_ENTITY_ROSTER,
+        end: { entities: [], nextSerial: 0 },
+      })
+    }).pipe(Effect.provide(storage.layer))
+  })
+
   it.effect('rejects v11 container storage explicitly set to undefined', () => {
     const storage = controlledStorage()
     const sessionId = 'undefined-v11-container-storage'
@@ -724,8 +815,8 @@ describe('session persistence', () => {
         state: {
           ...sessionState(42),
           containerStorage: {
-            version: 1,
-            containers: [{ id: '', slots: [] }],
+            version: 2,
+            containers: [{ id: '', kind: 'chest', slots: [] }],
           },
         },
         chunks: [],

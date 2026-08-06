@@ -13,7 +13,11 @@ import type { Dimension } from '@nerima-games/mc-worldgen'
 import { Either } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { makeMultiplayerServerCore, type ReceiveResult } from '../../apps/multiplayer-server/core'
+import { makeMultiplayerServerCore, type MultiplayerServerOptions, type MultiplayerServerState, type ReceiveResult } from '../../apps/multiplayer-server/core'
+import { decodeAnvilWireMessage } from '../../apps/multiplayer-shared/anvil-network'
+import { decodeBrewingWireMessage } from '../../apps/multiplayer-shared/brewing-network'
+import { decodeEnderDragonWireMessage, type EnderDragonWireMessage } from '../../apps/multiplayer-shared/ender-dragon-network'
+import { decodeEnchantingWireMessage } from '../../apps/multiplayer-shared/enchanting-network'
 import { decodeSleepWireMessage, type SleepWireMessage } from '../../apps/multiplayer-shared/sleep-network'
 import { decodeWitherWireMessage, type WitherWireMessage } from '../../apps/multiplayer-shared/wither-network'
 
@@ -28,7 +32,7 @@ const frame = (message: NetworkMessage): WireText => {
 }
 
 const messages = (frames: ReadonlyArray<WireText>): ReadonlyArray<NetworkMessage> =>
-  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined && decodeWitherWireMessage(wire) === undefined).map((wire) => {
+  frames.filter((wire) => decodeSleepWireMessage(wire) === undefined && decodeWitherWireMessage(wire) === undefined && decodeEnderDragonWireMessage(wire) === undefined && decodeBrewingWireMessage(wire) === undefined && decodeAnvilWireMessage(wire) === undefined && decodeEnchantingWireMessage(wire) === undefined).map((wire) => {
     const result = decodeFrame(wire)
     if (Either.isLeft(result)) throw result.left
     return result.right
@@ -43,6 +47,24 @@ const sleepMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<SleepWire
 const witherMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<WitherWireMessage> =>
   frames.flatMap((wire) => {
     const message = decodeWitherWireMessage(wire)
+    return message === undefined ? [] : [message]
+  })
+
+const enderDragonMessages = (frames: ReadonlyArray<WireText>): ReadonlyArray<EnderDragonWireMessage> =>
+  frames.flatMap((wire) => {
+    const message = decodeEnderDragonWireMessage(wire)
+    return message === undefined ? [] : [message]
+  })
+
+const anvilMessages = (frames: ReadonlyArray<WireText>) =>
+  frames.flatMap((wire) => {
+    const message = decodeAnvilWireMessage(wire)
+    return message === undefined ? [] : [message]
+  })
+
+const enchantingMessages = (frames: ReadonlyArray<WireText>) =>
+  frames.flatMap((wire) => {
+    const message = decodeEnchantingWireMessage(wire)
     return message === undefined ? [] : [message]
   })
 
@@ -72,7 +94,11 @@ const makeFixture = (
   spawnAt?: { x: number; y: number; z: number },
   initialWeather: 'clear' | 'rain' | 'thunder' = 'clear',
   dimension: Dimension = 'overworld',
+  options: Pick<MultiplayerServerOptions, 'staticBlocks' | 'onEndPortalUse' | 'onNetherPortalUse'> & Readonly<{
+    metadata?: Pick<MultiplayerServerState, 'anvilNames' | 'enchantments'>
+  }> = {},
 ) => {
+  const { metadata, ...serverOptions } = options
   const sent = new Map<string, Array<WireText>>()
   let nowMs = 0
   const server = makeMultiplayerServerCore({
@@ -83,6 +109,7 @@ const makeFixture = (
     bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
     generatedBlockAt,
     ...(spawnAt === undefined ? {} : { spawnAt }),
+    ...serverOptions,
     now: () => nowMs,
     initialState: {
       revision: 0,
@@ -96,6 +123,7 @@ const makeFixture = (
       containers: [],
       furnaces: [],
       villagerTrades: [],
+      ...metadata,
     },
   })
   const connect = (clientId: string): Array<WireText> => {
@@ -110,8 +138,11 @@ const makeFixture = (
     server.receive(clientId, JSON.stringify(message) as WireText)
   const receiveWither = (clientId: string, message: WitherWireMessage): ReceiveResult =>
     server.receive(clientId, JSON.stringify(message) as WireText)
+  const receiveEnderDragon = (clientId: string, message: EnderDragonWireMessage): ReceiveResult =>
+    server.receive(clientId, JSON.stringify(message) as WireText)
   const advanceTime = (elapsedMs: number): void => { nowMs += elapsedMs }
-  return { server, sent, connect, receive, receiveSleep, receiveWither, advanceTime }
+  const tick = (elapsedMs: number): void => server.tick(elapsedMs)
+  return { server, sent, connect, receive, receiveSleep, receiveWither, receiveEnderDragon, advanceTime, tick }
 }
 
 describe('authoritative multiplayer server core', () => {
@@ -596,6 +627,7 @@ describe('authoritative multiplayer server core', () => {
         })
       }
     }
+    expect(witherMessages(aliceFrames).at(-1)).toMatchObject({ _tag: 'WitherSnapshot', revision: 1 })
     aliceFrames.length = 0
     bobFrames.length = 0
     for (let hit = 0; hit < 74; hit += 1) {
@@ -603,7 +635,7 @@ describe('authoritative multiplayer server core', () => {
       expect(fixture.receiveWither('socket-a', {
         _tag: 'WitherCommand',
         command: {
-          _tag: 'DamageWither', actor: 'alice', requestId: `setup-${String(hit)}`, expectedRevision: hit + 2,
+          _tag: 'DamageWither', actor: 'alice', requestId: `setup-${String(hit)}`, expectedRevision: hit + 1,
           id: 'wither-1', amount: 300, kind: 'melee',
         },
       })).toEqual(expect.objectContaining({ accepted: true }))
@@ -614,7 +646,7 @@ describe('authoritative multiplayer server core', () => {
     const lethal = (actor: string, requestId: string): WitherWireMessage => ({
       _tag: 'WitherCommand',
       command: {
-        _tag: 'DamageWither', actor, requestId, expectedRevision: 76,
+        _tag: 'DamageWither', actor, requestId, expectedRevision: 75,
         id: 'wither-1', amount: 300, kind: 'melee',
       },
     })
@@ -622,14 +654,14 @@ describe('authoritative multiplayer server core', () => {
     expect(fixture.receiveWither('socket-a', lethal('alice', 'hit-a'))).toEqual(expect.objectContaining({ accepted: true }))
     expect(fixture.receiveWither('socket-b', lethal('bob', 'hit-b'))).toEqual(expect.objectContaining({ accepted: false }))
     expect(witherMessages(aliceFrames)).toContainEqual(expect.objectContaining({
-      _tag: 'WitherCommandResult', requestId: 'hit-a', accepted: true, revision: 77,
+      _tag: 'WitherCommandResult', requestId: 'hit-a', accepted: true, revision: 76,
     }))
     expect(witherMessages(bobFrames)).toContainEqual(expect.objectContaining({
-      _tag: 'WitherCommandResult', requestId: 'hit-b', accepted: false, revision: 77, reason: 'stale-revision',
+      _tag: 'WitherCommandResult', requestId: 'hit-b', accepted: false, revision: 76, reason: 'stale-revision',
     }))
     for (const frames of [aliceFrames, bobFrames]) {
       expect(witherMessages(frames)).toContainEqual(expect.objectContaining({
-        _tag: 'WitherSnapshot', revision: 77,
+        _tag: 'WitherSnapshot', revision: 76,
         snapshot: expect.objectContaining({ withers: [] }),
       }))
       expect(messages(frames).filter((message) => message._tag === 'EntitySpawnDelta')).toEqual([
@@ -643,7 +675,7 @@ describe('authoritative multiplayer server core', () => {
     const rejoinedFrames = fixture.connect('socket-b2')
     fixture.receive('socket-b2', join('bob'))
     expect(witherMessages(rejoinedFrames)).toContainEqual(expect.objectContaining({
-      _tag: 'WitherSnapshot', revision: 77,
+      _tag: 'WitherSnapshot', revision: 76,
       snapshot: expect.objectContaining({ withers: [] }),
     }))
     expect(messages(rejoinedFrames)).toContainEqual(expect.objectContaining({
@@ -692,7 +724,7 @@ describe('authoritative multiplayer server core', () => {
     valid.receiveWither('socket-a', {
       _tag: 'WitherCommand',
       command: {
-        _tag: 'DamageWither', actor: 'alice', requestId: 'forged', expectedRevision: 2,
+        _tag: 'DamageWither', actor: 'alice', requestId: 'forged', expectedRevision: 1,
         id: 'wither-1', amount: 300, kind: 'melee',
       },
     })
@@ -766,5 +798,176 @@ describe('authoritative multiplayer server core', () => {
         }),
       }),
     ]))
+  })
+
+  it('accepts End portal travel only for a server-owned portal block', () => {
+    const usedPortals: Array<Extract<NetworkMessage, { readonly _tag: 'EndPortalUseCommand' }>> = []
+    const fixture = makeFixture(undefined, undefined, undefined, undefined, undefined, {
+      staticBlocks: [{ at: { x: 1, y: 64, z: 0 }, block: 'end_portal' }],
+      onEndPortalUse: (_clientId, command) => usedPortals.push(command),
+    })
+    fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+
+    const valid = {
+      _tag: 'EndPortalUseCommand',
+      commandId: 'end-valid' as CommandId,
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: fixture.server.snapshot().revision,
+      portal: { x: 1, y: 64, z: 0 },
+    } as const satisfies NetworkMessage
+    expect(fixture.receive('socket-a', valid)).toEqual(expect.objectContaining({ accepted: true }))
+    expect(usedPortals).toEqual([valid])
+
+    expect(fixture.receive('socket-a', {
+      ...valid,
+      commandId: 'end-forged' as CommandId,
+      portal: { x: 2, y: 64, z: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(usedPortals).toEqual([valid])
+  })
+
+  it('accepts Nether portal travel only for a server-owned portal block', () => {
+    const usedPortals: Array<Extract<NetworkMessage, { readonly _tag: 'NetherPortalUseCommand' }>> = []
+    const fixture = makeFixture(undefined, undefined, undefined, undefined, undefined, {
+      staticBlocks: [{ at: { x: 1, y: 64, z: 0 }, block: 'nether_portal' }],
+      onNetherPortalUse: (_clientId, command) => usedPortals.push(command),
+    })
+    fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+
+    const valid = {
+      _tag: 'NetherPortalUseCommand',
+      commandId: 'nether-valid' as CommandId,
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: fixture.server.snapshot().revision,
+      portal: { x: 1, y: 64, z: 0 },
+    } as const satisfies NetworkMessage
+    expect(fixture.receive('socket-a', valid)).toEqual(expect.objectContaining({ accepted: true }))
+    expect(usedPortals).toEqual([valid])
+
+    expect(fixture.receive('socket-a', {
+      ...valid,
+      commandId: 'nether-forged' as CommandId,
+      portal: { x: 2, y: 64, z: 0 },
+    })).toEqual({ accepted: false, reason: 'invalid-command' })
+    expect(usedPortals).toEqual([valid])
+  })
+
+  it('moves player authority between realms and sends an arrival snapshot', () => {
+    const enchantedStone = { item: 'stone' as const, durability: null, enchantments: [] }
+    const source = makeFixture(() => null, 6_000, undefined, 'clear', 'overworld', {
+      metadata: {
+        anvilNames: [{ player: playerId('alice'), names: [{ slot: 0, name: 'Endbringer' }] }],
+        enchantments: [{ player: playerId('alice'), seed: 73, items: [{ slot: 0, item: enchantedStone }] }],
+      },
+    })
+    source.connect('socket-a')
+    source.receive('socket-a', join('alice'))
+
+    const destinationFrames: Array<WireText> = []
+    const destination = makeMultiplayerServerCore({
+      worldId: 'end',
+      dimension: 'end',
+      seed: 42,
+      allowedBlocks: new Set(['end_stone', 'end_portal']),
+      bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
+      staticBlocks: [{ at: { x: 0, y: 64, z: 0 }, block: 'end_portal' }],
+    })
+    expect(destination.connect('socket-a', (wire) => destinationFrames.push(wire))).toBe(true)
+
+    const transfer = source.server.detachPlayer('socket-a')
+    expect(transfer).toBeDefined()
+    expect(source.server.snapshot().players).toEqual([])
+    expect(destination.acceptRealmTransfer('socket-a', transfer!, {
+      commandId: 'end-transfer' as CommandId,
+      fromWorld: worldId('world-1'),
+      at: { x: 0, y: 65, z: 0 },
+      facing: { yawRadians: 1, pitchRadians: 0 },
+    })).toBe(true)
+
+    expect(messages(destinationFrames)).toContainEqual(expect.objectContaining({
+      _tag: 'RealmTransferSnapshot',
+      commandId: 'end-transfer',
+      player: playerId('alice'),
+      fromWorld: worldId('world-1'),
+      destinationWorld: worldId('end'),
+      at: { x: 0, y: 65, z: 0 },
+      authoritativeSnapshot: expect.objectContaining({
+        inventories: [expect.objectContaining({ player: playerId('alice') })],
+        vitals: [expect.objectContaining({ player: playerId('alice') })],
+      }),
+      worldSnapshot: expect.objectContaining({ world: worldId('end') }),
+    }))
+    expect(anvilMessages(destinationFrames)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta',
+      world: worldId('end'),
+      revision: 0,
+      player: playerId('alice'),
+      names: [{ slot: 0, name: 'Endbringer' }],
+    })
+    expect(enchantingMessages(destinationFrames)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta',
+      world: worldId('end'),
+      revision: 0,
+      player: playerId('alice'),
+      seed: 73,
+      items: [{ slot: 0, item: enchantedStone }],
+    })
+  })
+
+  it('authoritatively resolves Ender Dragon attacks and completion rewards', () => {
+    const fixture = makeFixture(() => null, 6_000, { x: 20, y: 76, z: 0 }, 'clear', 'end')
+    const frames = fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+    frames.length = 0
+
+    for (let hit = 0; hit < 50; hit += 1) {
+      if (hit > 0) fixture.advanceTime(500)
+      expect(fixture.receiveEnderDragon('socket-a', {
+        _tag: 'EnderDragonCommand',
+        command: { _tag: 'DamageEnderDragon', actor: 'alice', requestId: `hit-${String(hit)}`, expectedRevision: hit },
+      })).toEqual(expect.objectContaining({ accepted: true }))
+    }
+
+    expect(enderDragonMessages(frames)).toContainEqual(expect.objectContaining({
+      _tag: 'EnderDragonSnapshot', revision: 50,
+      snapshot: expect.objectContaining({ phase: 'dead', health: 0, rewardEmitted: true }),
+    }))
+    expect(messages(frames)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerVitalsDelta',
+        player: playerId('alice'),
+        state: expect.objectContaining({ experience: 12_000 }),
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({ _tag: 'item-drop', stack: { item: 'dragon_egg', count: 1 } }),
+      }),
+    ]))
+    expect(fixture.server.snapshot().blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ at: { x: 0, y: 64, z: 0 }, block: 'end_portal' }),
+    ]))
+  })
+
+  it('authoritatively applies Ender Dragon charge damage in the End dimension', () => {
+    const fixture = makeFixture(() => null, 6_000, { x: 8, y: 72, z: 0 }, 'clear', 'end')
+    const frames = fixture.connect('socket-a')
+    fixture.receive('socket-a', join('alice'))
+    frames.length = 0
+
+    fixture.tick(14_000)
+
+    expect(enderDragonMessages(frames)).toContainEqual(expect.objectContaining({
+      _tag: 'EnderDragonSnapshot',
+      snapshot: expect.objectContaining({ phase: 'charging' }),
+    }))
+    expect(messages(frames)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerVitalsDelta',
+      player: playerId('alice'),
+      state: expect.objectContaining({ health: 10 }),
+    }))
   })
 })

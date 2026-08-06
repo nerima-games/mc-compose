@@ -10,8 +10,22 @@ import {
   type PlayerDamageCommand,
   type PlayerDamageWireMessage,
 } from '../multiplayer-shared/player-damage-network'
+import { decodeCraftingWireMessage, encodeCraftingCommand, type CraftingCommand, type CraftingWireMessage } from '../multiplayer-shared/crafting-network'
+import { decodeBrewingWireMessage, encodeBrewingCommand, type BrewingCommand, type BrewingWireMessage } from '../multiplayer-shared/brewing-network'
+import { decodeAnvilWireMessage, encodeAnvilCommand, type AnvilCommand, type AnvilWireMessage } from '../multiplayer-shared/anvil-network'
+import { decodeEnchantingWireMessage, encodeEnchantingCommand, type EnchantingCommand, type EnchantingWireMessage } from '../multiplayer-shared/enchanting-network'
 import { decodeSleepWireMessage, type SleepWireMessage } from '../multiplayer-shared/sleep-network'
-import { decodeWitherWireMessage, type WitherWireMessage } from '../multiplayer-shared/wither-network'
+import {
+  decodeWitherWireMessage,
+  type WitherCommand,
+  type WitherWireMessage,
+} from '../multiplayer-shared/wither-network'
+import {
+  decodeEnderDragonWireMessage,
+  encodeEnderDragonCommand,
+  type EnderDragonCommand,
+  type EnderDragonWireMessage,
+} from '../multiplayer-shared/ender-dragon-network'
 
 export type WebSocketTransportState = 'connecting' | 'open' | 'closed'
 
@@ -49,9 +63,20 @@ export interface BrowserWebSocketTransport extends TransportService {
   readonly close: Effect.Effect<void>
   readonly sleepInbound: Queue.Dequeue<SleepWireMessage>
   readonly witherInbound: Queue.Dequeue<WitherWireMessage>
+  readonly enderDragonInbound: Queue.Dequeue<EnderDragonWireMessage>
   readonly playerDamageInbound: Queue.Dequeue<PlayerDamageWireMessage>
+  readonly craftingInbound: Queue.Dequeue<CraftingWireMessage>
+  readonly brewingInbound: Queue.Dequeue<BrewingWireMessage>
+  readonly anvilInbound: Queue.Dequeue<AnvilWireMessage>
+  readonly enchantingInbound: Queue.Dequeue<EnchantingWireMessage>
   readonly sendSleep: (message: SleepWireMessage) => Effect.Effect<void, TransportError>
+  readonly sendWither: (command: WitherCommand) => Effect.Effect<void, TransportError>
+  readonly sendEnderDragon: (command: EnderDragonCommand) => Effect.Effect<void, TransportError>
   readonly sendPlayerDamage: (command: PlayerDamageCommand) => Effect.Effect<void, TransportError>
+  readonly sendCrafting: (command: CraftingCommand) => Effect.Effect<void, TransportError>
+  readonly sendBrewing: (command: BrewingCommand) => Effect.Effect<void, TransportError>
+  readonly sendAnvil: (command: AnvilCommand) => Effect.Effect<void, TransportError>
+  readonly sendEnchanting: (command: EnchantingCommand) => Effect.Effect<void, TransportError>
   readonly state: () => WebSocketTransportState
 }
 
@@ -74,6 +99,9 @@ type PlayerResumeAccepted = {
   readonly token: string
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
 const decodePlayerResumeAccepted = (frame: string): PlayerResumeAccepted | undefined => {
   let value: unknown
   try {
@@ -81,8 +109,8 @@ const decodePlayerResumeAccepted = (frame: string): PlayerResumeAccepted | undef
   } catch {
     return undefined
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const record = value as Record<string, unknown>
+  if (!isRecord(value)) return undefined
+  const record = value
   const keys = Object.keys(record)
   if (
     keys.length !== 3 ||
@@ -129,7 +157,12 @@ export const makeBrowserWebSocketTransport = (
     const inbound = yield* Queue.unbounded<WireText>()
     const sleepInbound = yield* Queue.unbounded<SleepWireMessage>()
     const witherInbound = yield* Queue.unbounded<WitherWireMessage>()
+    const enderDragonInbound = yield* Queue.unbounded<EnderDragonWireMessage>()
     const playerDamageInbound = yield* Queue.unbounded<PlayerDamageWireMessage>()
+    const craftingInbound = yield* Queue.unbounded<CraftingWireMessage>()
+    const brewingInbound = yield* Queue.unbounded<BrewingWireMessage>()
+    const anvilInbound = yield* Queue.unbounded<AnvilWireMessage>()
+    const enchantingInbound = yield* Queue.unbounded<EnchantingWireMessage>()
     const opened = yield* Deferred.make<void, TransportError>()
     const socket = yield* Effect.try({
       try: () => (options.socketFactory ?? defaultSocketFactory)(options.url),
@@ -163,7 +196,12 @@ export const makeBrowserWebSocketTransport = (
       if (shutdownInbound) Effect.runSync(Queue.shutdown(inbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(sleepInbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(witherInbound))
+      if (shutdownInbound) Effect.runSync(Queue.shutdown(enderDragonInbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(playerDamageInbound))
+      if (shutdownInbound) Effect.runSync(Queue.shutdown(craftingInbound))
+      if (shutdownInbound) Effect.runSync(Queue.shutdown(brewingInbound))
+      if (shutdownInbound) Effect.runSync(Queue.shutdown(anvilInbound))
+      if (shutdownInbound) Effect.runSync(Queue.shutdown(enchantingInbound))
     }
 
     function handleOpen(): void {
@@ -207,10 +245,8 @@ export const makeBrowserWebSocketTransport = (
           parsed = undefined
         }
         if (
-          typeof parsed === 'object' &&
-          parsed !== null &&
-          !Array.isArray(parsed) &&
-          (parsed as Record<string, unknown>)['_tag'] === 'PlayerResumeAccepted'
+          isRecord(parsed) &&
+          parsed['_tag'] === 'PlayerResumeAccepted'
         ) {
           if (!awaitingResume) return
           const accepted = decodePlayerResumeAccepted(event.data)
@@ -247,17 +283,42 @@ export const makeBrowserWebSocketTransport = (
         Queue.unsafeOffer(sleepInbound, sleepMessage)
         return
       }
-      const witherMessage = decodeWitherWireMessage(event.data as WireText)
+      const witherMessage = decodeWitherWireMessage(event.data)
       if (witherMessage !== undefined) {
         Queue.unsafeOffer(witherInbound, witherMessage)
         return
       }
-      const playerDamageMessage = decodePlayerDamageWireMessage(event.data as WireText)
+      const enderDragonMessage = decodeEnderDragonWireMessage(event.data)
+      if (enderDragonMessage !== undefined) {
+        Queue.unsafeOffer(enderDragonInbound, enderDragonMessage)
+        return
+      }
+      const playerDamageMessage = decodePlayerDamageWireMessage(event.data)
       if (playerDamageMessage !== undefined) {
         Queue.unsafeOffer(playerDamageInbound, playerDamageMessage)
         return
       }
-      Queue.unsafeOffer(inbound, event.data as WireText)
+      const craftingMessage = decodeCraftingWireMessage(event.data)
+      if (craftingMessage !== undefined) {
+        Queue.unsafeOffer(craftingInbound, craftingMessage)
+        return
+      }
+      const brewingMessage = decodeBrewingWireMessage(event.data)
+      if (brewingMessage !== undefined) {
+        Queue.unsafeOffer(brewingInbound, brewingMessage)
+        return
+      }
+      const anvilMessage = decodeAnvilWireMessage(event.data)
+      if (anvilMessage !== undefined) {
+        Queue.unsafeOffer(anvilInbound, anvilMessage)
+        return
+      }
+      const enchantingMessage = decodeEnchantingWireMessage(event.data)
+      if (enchantingMessage !== undefined) {
+        Queue.unsafeOffer(enchantingInbound, enchantingMessage)
+        return
+      }
+      Queue.unsafeOffer(inbound, event.data)
     }
 
     function handleClose(event: WebSocketCloseEvent): void {
@@ -318,22 +379,50 @@ export const makeBrowserWebSocketTransport = (
       Effect.runSync(Queue.shutdown(inbound))
       Effect.runSync(Queue.shutdown(sleepInbound))
       Effect.runSync(Queue.shutdown(witherInbound))
+      Effect.runSync(Queue.shutdown(enderDragonInbound))
       Effect.runSync(Queue.shutdown(playerDamageInbound))
+      Effect.runSync(Queue.shutdown(craftingInbound))
+      Effect.runSync(Queue.shutdown(brewingInbound))
+      Effect.runSync(Queue.shutdown(anvilInbound))
+      Effect.runSync(Queue.shutdown(enchantingInbound))
       if (shouldCloseSocket) socket.close(1000, 'transport disposed')
     })
 
     const sendSleep = (message: SleepWireMessage): Effect.Effect<void, TransportError> =>
-      send(JSON.stringify(message) as WireText)
+      send(JSON.stringify(message))
+    const sendWither = (command: WitherCommand): Effect.Effect<void, TransportError> =>
+      send(JSON.stringify({ _tag: 'WitherCommand', command }))
+    const sendEnderDragon = (command: EnderDragonCommand): Effect.Effect<void, TransportError> =>
+      send(encodeEnderDragonCommand(command))
     const sendPlayerDamage = (command: PlayerDamageCommand): Effect.Effect<void, TransportError> =>
       send(encodePlayerDamageCommand(command))
+    const sendCrafting = (command: CraftingCommand): Effect.Effect<void, TransportError> =>
+      send(encodeCraftingCommand(command))
+    const sendBrewing = (command: BrewingCommand): Effect.Effect<void, TransportError> =>
+      send(encodeBrewingCommand(command))
+    const sendAnvil = (command: AnvilCommand): Effect.Effect<void, TransportError> =>
+      send(encodeAnvilCommand(command))
+    const sendEnchanting = (command: EnchantingCommand): Effect.Effect<void, TransportError> =>
+      send(encodeEnchantingCommand(command))
     return {
       send,
       inbound,
       sleepInbound,
       witherInbound,
+      enderDragonInbound,
       playerDamageInbound,
+      craftingInbound,
+      brewingInbound,
+      anvilInbound,
+      enchantingInbound,
       sendSleep,
+      sendWither,
+      sendEnderDragon,
       sendPlayerDamage,
+      sendCrafting,
+      sendBrewing,
+      sendAnvil,
+      sendEnchanting,
       close,
       state: () => currentState,
     }

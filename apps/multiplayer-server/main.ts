@@ -6,45 +6,68 @@ import { dirname } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 
-import { blockTypeOfId } from '@nerima-games/mc-kernel'
 import {
   blockPosition,
-  CHUNK_HEIGHT,
+  blockTypeOfId,
   chunkCoordOfBlock,
+  localCoordOfBlock,
+} from '@nerima-games/mc-kernel'
+import { CHEST_CONTAINER_CAPACITY } from '@nerima-games/mc-sim'
+import {
+  CHUNK_HEIGHT,
   generateChunkAt,
   getBlockAt,
-  localCoordOfBlock,
   type Chunk,
   type Dimension,
 } from '@nerima-games/mc-worldgen'
 import {
   AuthoritativeSnapshot,
+  EntityId as EntityIdSchema,
   PlayerId as PlayerIdSchema,
   decodeFrame,
   type BlockPos,
+  type CommandId,
   type Orientation,
   type PlayerId,
   type WireText,
+  type WorldId,
 } from '@nerima-games/mx-multiplayer'
 import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
 
-import { makeMultiplayerServerCore, type MultiplayerServerState } from './core'
+import { WITHER_MAX_WIRE_LENGTH } from '../multiplayer-shared/wither-network'
+import {
+  isWeatherClockState,
+  makeMultiplayerServerCore,
+  type MultiplayerServerCore,
+  type MultiplayerServerState,
+} from './core'
 import { loadLegacyPlayerClaims } from './legacy-player-claims'
 import { createReconnectAuth } from './reconnect-auth'
+import { makeMultiplayerRedstoneRuntime } from './redstone-runtime'
 import { isAllowedWebSocketOrigin, resolveTransportSecurity } from './transport-security'
 
 const DEFAULT_BLOCKS = [
   'bedrock',
+  'chest',
   'coal_ore',
   'cobblestone',
   'dirt',
+  'dispenser',
+  'door',
+  'dropper',
   'grass_block',
   'gravel',
   'iron_ore',
+  'hopper',
+  'lever',
   'oak_leaves',
   'oak_log',
   'oak_planks',
+  'piston',
+  'redstone_lamp',
+  'redstone_torch',
+  'redstone_wire',
   'sand',
   'stone',
 ] as const
@@ -64,6 +87,7 @@ export interface MultiplayerRuntimeOptions {
   readonly tlsKey?: string
   readonly allowedOrigins?: string
   readonly legacyPlayerClaimsFile?: string
+  readonly maxMoveDistance?: number
 }
 
 export interface MultiplayerRuntime {
@@ -197,6 +221,16 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
   })
   if (blocks.length !== blocksValue.length) return undefined
 
+  const poweredRailsValue = state['poweredRails']
+  if (poweredRailsValue !== undefined && !Array.isArray(poweredRailsValue)) return undefined
+  const poweredRails = poweredRailsValue === undefined
+    ? []
+    : poweredRailsValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !isBlockPos(entry['at']) || typeof entry['powered'] !== 'boolean') return []
+        return [{ at: entry['at'], powered: entry['powered'] }]
+      })
+  if (poweredRailsValue !== undefined && poweredRails.length !== poweredRailsValue.length) return undefined
+
   const playerPositionsValue = state['playerPositions']
   if (playerPositionsValue !== undefined && !Array.isArray(playerPositionsValue)) return undefined
   const playerPositions = playerPositionsValue === undefined
@@ -208,6 +242,23 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
       })
   if (playerPositionsValue !== undefined && playerPositions.length !== playerPositionsValue.length) return undefined
 
+  const eyeOfEnderRecoveriesValue = state['eyeOfEnderRecoveries']
+  if (eyeOfEnderRecoveriesValue !== undefined && !Array.isArray(eyeOfEnderRecoveriesValue)) return undefined
+  const eyeOfEnderRecoveries = eyeOfEnderRecoveriesValue === undefined
+    ? []
+    : eyeOfEnderRecoveriesValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !isPlayerPosition(entry['at']) || typeof entry['remainingSecs'] !== 'number'
+          || !Number.isFinite(entry['remainingSecs']) || entry['remainingSecs'] <= 0) return []
+        const entityId = Schema.decodeUnknownEither(EntityIdSchema)(entry['entityId'])
+        return Either.isLeft(entityId)
+          ? []
+          : [{ entityId: entityId.right, at: entry['at'], remainingSecs: entry['remainingSecs'] }]
+      })
+  if (eyeOfEnderRecoveriesValue !== undefined && eyeOfEnderRecoveries.length !== eyeOfEnderRecoveriesValue.length) return undefined
+
+  const weatherClock = state['weatherClock']
+  if (weatherClock !== undefined && !isWeatherClockState(weatherClock)) return undefined
+
   const decoded = Schema.decodeUnknownEither(AuthoritativeSnapshot)({
     _tag: 'AuthoritativeSnapshot',
     world: worldId,
@@ -215,7 +266,17 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     inventories: state['inventories'] ?? [],
     vitals: state['vitals'] ?? [],
     timeWeather: state['timeWeather'] ?? { timeOfDay: 6_000, weather: 'clear' },
-    containers: state['containers'] ?? [],
+    containers: Array.isArray(state['containers'])
+      ? state['containers'].map((container) => {
+          if (!isRecord(container) || container['kind'] !== undefined) return container
+          const slots = Array.isArray(container['slots']) ? container['slots'] : []
+          return {
+            ...container,
+            kind: 'chest',
+            slots: [...slots, ...Array.from({ length: Math.max(0, CHEST_CONTAINER_CAPACITY - slots.length) }, () => null)],
+          }
+        })
+      : [],
     furnaces: state['furnaces'] ?? [],
     villagerTrades: state['villagerTrades'] ?? [],
     entities: state['entities'] ?? [],
@@ -225,13 +286,16 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
   return {
     revision: snapshot.revision,
     blocks,
+    poweredRails,
     inventories: snapshot.inventories,
     vitals: snapshot.vitals,
     timeWeather: snapshot.timeWeather,
+    ...(weatherClock === undefined ? {} : { weatherClock }),
     containers: snapshot.containers,
     furnaces: snapshot.furnaces,
     villagerTrades: snapshot.villagerTrades,
     entities: snapshot.entities ?? [],
+    eyeOfEnderRecoveries,
     playerPositions,
     ...(state['wither'] === undefined ? {} : { wither: state['wither'] as NonNullable<MultiplayerServerState['wither']> }),
     ...(Number.isInteger(state['witherRevision']) ? { witherRevision: state['witherRevision'] as number } : {}),
@@ -400,18 +464,108 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     : createLatestStatePersistence((state: MultiplayerServerState) =>
         writeServerState(options.stateFile as string, options.worldId, options.seed, state),
       )
+  const endStateFile = options.stateFile === undefined ? undefined : `${options.stateFile}.end`
+  const endInitialState = endStateFile === undefined
+    ? undefined
+    : await loadServerState(endStateFile, 'end', options.seed)
+  const endPersistence = endStateFile === undefined
+    ? undefined
+    : createLatestStatePersistence((state: MultiplayerServerState) =>
+        writeServerState(endStateFile, 'end', options.seed, state),
+      )
+  const netherStateFile = options.stateFile === undefined ? undefined : `${options.stateFile}.nether`
+  const netherInitialState = netherStateFile === undefined
+    ? undefined
+    : await loadServerState(netherStateFile, 'nether', options.seed)
+  const netherPersistence = netherStateFile === undefined
+    ? undefined
+    : createLatestStatePersistence((state: MultiplayerServerState) =>
+        writeServerState(netherStateFile, 'nether', options.seed, state),
+      )
   const generatedBlockAt = makeGeneratedBlockAt(options.seed)
-  const core = makeMultiplayerServerCore({
+  const overworldSpawnAt = findSpawnAt(generatedBlockAt)
+  const netherSpawnAt = findSpawnAt(generatedBlockAt)
+  const endSpawnAt: BlockPos = { x: 0, y: 64, z: 0 }
+  const overworldNetherPortalAt: BlockPos = { x: overworldSpawnAt.x - 1, y: overworldSpawnAt.y, z: overworldSpawnAt.z }
+  const netherPortalAt: BlockPos = { x: netherSpawnAt.x + 1, y: netherSpawnAt.y, z: netherSpawnAt.z }
+  const endStaticBlocks = [
+    ...Array.from({ length: 49 }, (_, index) => ({
+      at: { x: (index % 7) - 3, y: 63, z: Math.floor(index / 7) - 3 },
+      block: 'end_stone',
+    })),
+    { at: { x: 1, y: 64, z: 0 }, block: 'end_portal' },
+  ]
+  const activeRealms = new Map<string, MultiplayerServerCore>()
+  let overworldCore: MultiplayerServerCore
+  let netherCore: MultiplayerServerCore
+  let endCore: MultiplayerServerCore
+  const transferPlayer = (
+    clientId: string,
+    source: MultiplayerServerCore,
+    destination: MultiplayerServerCore,
+    destinationAt: BlockPos,
+    command: Readonly<{ commandId: CommandId; world: WorldId }>,
+  ): void => {
+    const transfer = source.detachPlayer(clientId)
+    if (transfer === undefined) return
+    if (!destination.acceptRealmTransfer(clientId, transfer, {
+      commandId: command.commandId,
+      fromWorld: command.world,
+      at: destinationAt,
+      facing: transfer.facing,
+    })) return
+    activeRealms.set(clientId, destination)
+  }
+  overworldCore = makeMultiplayerServerCore({
     worldId: options.worldId,
     dimension: dimensionForWorld(options.worldId),
     seed: options.seed,
     allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
     generatedBlockAt,
-    spawnAt: findSpawnAt(generatedBlockAt),
+    spawnAt: overworldSpawnAt,
+    staticBlocks: [
+      { at: overworldNetherPortalAt, block: 'nether_portal' },
+    ],
     ...(initialState === undefined ? {} : { initialState }),
     ...(persistence === undefined ? {} : { onStateChanged: persistence.request }),
-    passableBlocks: new Set(['water']),
+    ...(options.maxMoveDistance === undefined ? {} : { maxMoveDistance: options.maxMoveDistance }),
+    passableBlocks: new Set(['water', 'end_portal', 'nether_portal']),
+    onEndPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, endCore, endSpawnAt, command),
+    onNetherPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, netherCore, netherSpawnAt, command),
   })
+  netherCore = makeMultiplayerServerCore({
+    worldId: 'nether',
+    dimension: 'nether',
+    seed: options.seed,
+    allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
+    generatedBlockAt,
+    spawnAt: netherSpawnAt,
+    staticBlocks: [{ at: netherPortalAt, block: 'nether_portal' }],
+    ...(netherInitialState === undefined ? {} : { initialState: netherInitialState }),
+    ...(netherPersistence === undefined ? {} : { onStateChanged: netherPersistence.request }),
+    ...(options.maxMoveDistance === undefined ? {} : { maxMoveDistance: options.maxMoveDistance }),
+    passableBlocks: new Set(['water', 'nether_portal']),
+    onNetherPortalUse: (clientId, command) => transferPlayer(clientId, netherCore, overworldCore, overworldSpawnAt, command),
+  })
+  endCore = makeMultiplayerServerCore({
+    worldId: 'end',
+    dimension: 'end',
+    seed: options.seed,
+    allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
+    generatedBlockAt: () => null,
+    spawnAt: endSpawnAt,
+    staticBlocks: endStaticBlocks,
+    ...(endInitialState === undefined ? {} : { initialState: endInitialState }),
+    ...(endPersistence === undefined ? {} : { onStateChanged: endPersistence.request }),
+    ...(options.maxMoveDistance === undefined ? {} : { maxMoveDistance: options.maxMoveDistance }),
+    passableBlocks: new Set(['water', 'end_portal']),
+    onEndPortalUse: (clientId, command) => transferPlayer(clientId, endCore, overworldCore, overworldSpawnAt, command),
+  })
+  const redstoneRuntime = await makeMultiplayerRedstoneRuntime([
+    { dimension: dimensionForWorld(options.worldId), core: overworldCore },
+    { dimension: 'nether', core: netherCore },
+    { dimension: 'end', core: endCore },
+  ])
   const requestHandler: RequestListener = (request, response) => {
     if (request.method === 'GET' && request.url === '/health') {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
@@ -427,7 +581,8 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
         key: await readFile(transportSecurity.tlsKey as string),
       }, requestHandler)
     : createServer(requestHandler)
-  const sockets = new WebSocketServer({ noServer: true })
+  // The largest protocol frame is the Wither payload; reject larger frames before decoding or queuing commands.
+  const sockets = new WebSocketServer({ noServer: true, maxPayload: WITHER_MAX_WIRE_LENGTH })
   const activePlayers = new Map<string, string>()
   const reservedPlayers = new Set<string>()
 
@@ -458,7 +613,10 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       if (activePlayer !== undefined && activePlayers.get(activePlayer) === clientId) {
         activePlayers.delete(activePlayer)
       }
-      core.disconnect(clientId)
+      activeRealms.delete(clientId)
+      overworldCore.disconnect(clientId)
+      netherCore.disconnect(clientId)
+      endCore.disconnect(clientId)
     }
     const rejectHandshake = (): void => {
       if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'reconnect authentication failed')
@@ -472,14 +630,16 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       reservedPlayers.add(player)
       try {
         let token: string | undefined
+        const verifiedLegacyRegistration = resume.token === undefined
+          && resume.registrationToken !== undefined
+          && legacyPlayerClaims?.has(player) === true
+          && legacyPlayerClaims.verify(player, resume.registrationToken)
         if (reconnectAuth.has(player)) {
-          token = resume.token === undefined ? undefined : await reconnectAuth.rotate(player, resume.token)
+          token = resume.token === undefined
+            ? (verifiedLegacyRegistration ? await reconnectAuth.reissue(player) : undefined)
+            : await reconnectAuth.rotate(player, resume.token)
         } else if (legacyPlayers.has(player)) {
-          token = resume.registrationToken !== undefined
-            && legacyPlayerClaims?.has(player) === true
-            && legacyPlayerClaims.verify(player, resume.registrationToken)
-            ? await reconnectAuth.issue(player)
-            : undefined
+          token = verifiedLegacyRegistration ? await reconnectAuth.issue(player) : undefined
         } else {
           token = await reconnectAuth.issue(player)
         }
@@ -495,16 +655,20 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
         rejectHandshake()
       }
     }
-    core.connect(clientId, (frame) => {
+    const send = (frame: WireText): void => {
       if (socket.readyState === WebSocket.OPEN) socket.send(frame)
-    })
+    }
+    overworldCore.connect(clientId, send)
+    netherCore.connect(clientId, send)
+    endCore.connect(clientId, send)
     socket.on('message', (data, isBinary) => {
       if (isBinary) return
       const frame = data.toString() as WireText
       _messageQueue = _messageQueue.then(async () => {
         if (disconnected) return
         if (activePlayer !== undefined) {
-          core.receive(clientId, frame)
+          const realm = activeRealms.get(clientId)
+          if (realm !== undefined) realm.receive(clientId, frame)
           return
         }
         if (authenticatedPlayer === undefined) {
@@ -526,7 +690,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
           rejectHandshake()
           return
         }
-        const result = core.receive(clientId, frame)
+        const result = overworldCore.receive(clientId, frame)
         if (!result.accepted) {
           reservedPlayers.delete(authenticatedPlayer)
           rejectHandshake()
@@ -534,6 +698,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
         }
         activePlayer = authenticatedPlayer
         activePlayers.set(activePlayer, clientId)
+        activeRealms.set(clientId, overworldCore)
         reservedPlayers.delete(activePlayer)
       }).catch(() => rejectHandshake())
     })
@@ -547,7 +712,10 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     const now = performance.now()
     const elapsedMs = Math.max(0, now - lastTickAt)
     lastTickAt = now
-    core.tick(elapsedMs)
+    redstoneRuntime.tick(elapsedMs)
+    overworldCore.tick(elapsedMs)
+    netherCore.tick(elapsedMs)
+    endCore.tick(elapsedMs)
   }, 50)
   let closing: Promise<void> | undefined
   const signalHandlers = new Map<NodeJS.Signals, () => void>()
@@ -560,7 +728,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       sockets.close()
       server.close((error) => error === undefined ? resolve() : reject(error))
     }).then(async () => {
-      await persistence?.drain()
+      await Promise.all([persistence?.drain(), netherPersistence?.drain(), endPersistence?.drain()])
     })
     return closing
   }

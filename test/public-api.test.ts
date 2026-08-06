@@ -154,8 +154,8 @@ describe('the prime directive, as a surface check', () => {
         'network:outbound', // EXTENSION
         'camera-mirror',
         'chunk-sync',
-        'render',
         'post-fx',
+        'render',
         'hud-sync',
       ])
     }),
@@ -201,8 +201,8 @@ describe('the prime directive, as a surface check', () => {
         ['network:outbound', ['outbound']],
         ['camera-mirror', ['camera-mirror']],
         ['chunk-sync', ['chunk-sync', 'mesh-sync']],
-        ['render', ['render', 'draw']],
         ['post-fx', ['post-fx']],
+        ['render', ['render', 'draw']],
         ['hud-sync', ['hud-sync', 'ui:']],
       ])
     }),
