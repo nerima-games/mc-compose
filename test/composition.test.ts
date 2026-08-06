@@ -20,7 +20,7 @@ import {
   monotonicSecs,
   MonotonicTimeSecs,
   type FrameServices,
-} from '../src/domain/kernel-vocabulary'
+} from '@nerima-games/mc-kernel'
 import { StageId, type StageOrderError, type StagePhase } from '../src/domain/stage-order'
 import { STAGE_HUD_SYNC, STAGE_INPUT, STAGE_RENDER, STANDARD_STAGE_SKELETON } from '../src/domain/stage-skeleton'
 

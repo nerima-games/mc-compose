@@ -415,7 +415,7 @@ import {
   registerModule,
   type GameModule,
 } from '../../src/domain/composition'
-import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../src/domain/kernel-vocabulary'
+import { DeltaTimeSecs, type MonotonicTimeSecs } from '@nerima-games/mc-kernel'
 
 type WithoutAuthority<T> = T extends unknown
   ? Omit<T, 'commandId' | 'player' | 'world' | 'expectedRevision'>
@@ -521,7 +521,7 @@ import {
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
  *
- * `domain/kernel-vocabulary.ts` is explicit that this is not part of the
+ * `@nerima-games/mc-kernel` is explicit that this is not part of the
  * `DeltaTimeSecs` brand and is not applied by mc-compose: "It is a simulation
  * invariant belonging to whoever produces the delta". The host produces it, so
  * the host clamps it — and without the clamp a backgrounded tab returns for its
@@ -2494,9 +2494,9 @@ const bootGame = async (
    * The starting pose, derived from the generated surface height.
    *
    * The TYPE IS DERIVED FROM THE FUNCTION rather than named, because
-   * `CameraPoseSnapshot` lives in mc-render's kernel-vocabulary MIRROR and
-   * `index.ts` deliberately keeps that out of the barrel — consumers take
-   * kernel's vocabulary from `@nerima-games/mc-kernel`, which is not published.
+   * `CameraPoseSnapshot` is exported by `@nerima-games/mc-kernel`; this package's
+   * `index.ts` deliberately keeps that type out of its barrel, so consumers take
+   * the camera contract from the published kernel package.
    * `Parameters<typeof renderModule>[3]` follows the signature instead, so a
    * change to it fails here rather than drifting.
    *

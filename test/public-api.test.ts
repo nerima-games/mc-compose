@@ -61,7 +61,7 @@ describe('public API surface', () => {
         // browser runtime lifecycle composition
         'startBrowserSession',
         // kernel's branded delta, re-exported so a host can construct one
-        // without reaching into `domain/kernel-vocabulary.ts`
+        // without reaching into the package's internal modules
         'DeltaTimeSecs',
         // session lifecycle
         'WorldId',

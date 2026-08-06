@@ -16,7 +16,7 @@ plan.md §3.15 検証:
 | QA API | 名前空間マージ・衝突拒否・インストール | `test/qa-api.test.ts`(15 tests) |
 | Modding 入口 | 名前空間予約・一級モジュール性 | `test/modding.test.ts`(16 tests) |
 | 公開 API + 規範 | バレルのピン留め + ゲームルール名の検査 + **フェーズ所属のピン留め** | `test/public-api.test.ts`(7 tests) |
-| kernel ミラーの忠実性 | 公開時に差し替えられること | `test/kernel-mirror.test.ts`(7 tests) |
+| 公開済み mc-kernel の直接利用 | 共有型を package 境界から解決すること | `test/composition.test.ts` と `pnpm typecheck` |
 | 依存境界 | ホワイトリスト・推移閉包・`Date.now()` 禁止 | `test/check-dependency-whitelist.test.ts`(46 tests) |
 | 公開 API ロック | スナップショット生成・差分描画 | `test/api-lock.test.ts`(26 tests) |
 | **ロスター実在性ゲート** | 転記が兄弟リポジトリの実ソースと一致するか | `test/check-roster-manifest.test.ts`(19 tests) |
