@@ -28,7 +28,7 @@
  * decision inside its own `run`, in the repository that owns it.
  */
 import { Effect, Either, Layer } from 'effect'
-import type { DeltaTimeSecs, FrameServices } from './kernel-vocabulary'
+import type { DeltaTimeSecs, FrameServices } from '@nerima-games/mc-kernel'
 import {
   describeStagePlanWarnings,
   resolveStageOrder,
@@ -43,14 +43,14 @@ import { STANDARD_STAGE_SKELETON } from './stage-skeleton'
 /**
  * Seconds since the previous frame, BRANDED, exactly as kernel brands it.
  *
- * Re-exported from `domain/kernel-vocabulary.ts` rather than declared here: it
+ * Re-exported from `@nerima-games/mc-kernel` rather than declared here: it
  * used to be a bare `type DeltaTimeSecs = number` at the one place in the whole
  * roster that actually calls `StageRegistration.run`, which meant every stage
- * in every module was handed a value nobody had validated. See that file for
+ * in every module was handed a value nobody had validated. See the kernel contract for
  * why the §3.4 clamp is still not part of the brand.
  */
-export { DeltaTimeSecs } from './kernel-vocabulary'
-export type { FrameServices } from './kernel-vocabulary'
+export { DeltaTimeSecs } from '@nerima-games/mc-kernel'
+export type { FrameServices } from '@nerima-games/mc-kernel'
 
 /**
  * One unit of per-frame work. Mirrors mc-kernel's `StageRegistration`.
@@ -61,11 +61,11 @@ export type { FrameServices } from './kernel-vocabulary'
  * REGRESSION: it used to be `Effect<void>`. Requirements do not erase
  * themselves, so kernel's `Effect<void, never, ClockPort>` was not assignable
  * to it and a stage written against the real contract could not be composed at
- * all. `composeGame` compiled only because `mx-gameplay`, `mx-redstone` and
- * `mx-ui` each set `FrameServices = never` in their own mirrors — and all three
- * commit to deleting those files the moment kernel publishes, at which point
- * this repository would have stopped compiling. `test/composition.test.ts`
- * pins the assignability directly.
+ * all. `composeGame` compiled only while the local contracts in
+ * `mx-gameplay`, `mx-redstone` and `mx-ui` narrowed `FrameServices` to
+ * `never`. The implementation now imports the contract from
+ * `@nerima-games/mc-kernel`, and `test/composition.test.ts` pins the
+ * assignability directly.
  *
  * The error channel stays `never`: a stage that can fail at runtime handles or
  * defects its own failure, because there is no sensible frame-level recovery

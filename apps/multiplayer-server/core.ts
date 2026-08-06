@@ -128,7 +128,7 @@ import {
   type EnchantedItem,
 } from '@nerima-games/mx-gameplay'
 import { Either, Option } from 'effect'
-import { DeltaTimeSecs } from '../../src/domain/kernel-vocabulary'
+import { DeltaTimeSecs } from '@nerima-games/mc-kernel'
 import {
   SleepAuthority,
   decodeSleepWireMessage,
