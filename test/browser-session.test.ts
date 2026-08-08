@@ -106,6 +106,34 @@ describe('startBrowserSession', () => {
     }),
   )
 
+  it.effect('rolls back successful starts when a later runtime is interrupted', () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      const entered = yield* Deferred.make<void>()
+      const waitForInterrupt = yield* Deferred.make<GameModule>()
+      const blockedRuntime: BrowserRuntimeModule = {
+        name: 'render',
+        start: Effect.gen(function* () {
+          log.push('start:render')
+          yield* Deferred.succeed(entered, undefined)
+          return yield* Deferred.await(waitForInterrupt)
+        }),
+        stop: Effect.sync(() => {
+          log.push('stop:render')
+        }),
+      }
+      const fiber = yield* Effect.fork(startBrowserSession([
+        runtime('sim', log),
+        blockedRuntime,
+      ], { compose: { skeleton: [] } }))
+
+      yield* Deferred.await(entered)
+      yield* Fiber.interrupt(fiber)
+
+      expect(log).toStrictEqual(['start:sim', 'start:render', 'stop:sim'])
+    }),
+  )
+
   it.effect('rolls back all runtimes when stage composition fails', () =>
     Effect.gen(function* () {
       const log: Array<string> = []
