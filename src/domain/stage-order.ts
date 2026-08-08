@@ -51,6 +51,23 @@
 import { Brand, Either } from 'effect'
 
 /**
+ * Named constants for the numeric literals below, so the values that ARE
+ * meaningful (`Number.MAX_SAFE_INTEGER`, `':'`, ...) are not lost among ones
+ * that are only spelling out "empty", "not found" or "one step" for this
+ * file's strict no-magic-numbers config.
+ */
+const EMPTY_LENGTH = 0
+const NOT_FOUND = -1
+const STRING_START = 0
+const COLON_LENGTH = 1
+const INDEX_STEP = 1
+const NO_INDEGREE = 0
+const INDEGREE_STEP = 1
+const COMPARE_LESS = -1
+const COMPARE_EQUAL = 0
+const COMPARE_GREATER = 1
+
+/**
  * Identifies a frame stage. Mirrors `@nerima-games/mc-kernel`'s `StageId`
  * exactly, and is declared locally only because nothing in the roster is
  * published yet (see docs/versioning.md §3). When kernel ships, this becomes a
@@ -62,7 +79,7 @@ import { Brand, Either } from 'effect'
 export type StageId = string & Brand.Brand<'StageId'>
 
 export const StageId = Brand.refined<StageId>(
-  (value) => value.trim().length > 0,
+  (value) => value.trim().length > EMPTY_LENGTH,
   (value) => Brand.error(`StageId must be a non-blank string, received ${JSON.stringify(value)}`),
 )
 
@@ -158,28 +175,39 @@ export type StagePhase = {
 }
 
 /** Build a phase. `members` defaults to the phase's own name. */
-export const stagePhase = (name: string, ...members: ReadonlyArray<string>): StagePhase => ({
-  name,
-  members: members.length === 0 ? [name] : members,
-})
+export const stagePhase = (name: string, ...members: ReadonlyArray<string>): StagePhase => {
+  if (members.length === EMPTY_LENGTH) {
+    return { members: [name], name }
+  }
+  return { members, name }
+}
 
 /** The namespace half of an id, WITH its colon. `gameplay:fluids` -> `gameplay:`. */
 const namespaceOf = (id: string): string => {
   const at = id.indexOf(':')
-  return at === -1 ? '' : id.slice(0, at + 1)
+  if (at === NOT_FOUND) {
+    return ''
+  }
+  return id.slice(STRING_START, at + COLON_LENGTH)
 }
 
 /** The name half of an id: everything after the LAST colon. `mod:x:tick` -> `tick`. */
 const stageNameOf = (id: string): string => {
   const at = id.lastIndexOf(':')
-  return at === -1 ? id : id.slice(at + 1)
+  if (at === NOT_FOUND) {
+    return id
+  }
+  return id.slice(at + COLON_LENGTH)
 }
 
 /** Does this phase claim this stage? See `StagePhase.members`. */
 export const phaseAdmits = (phase: StagePhase, id: StageId): boolean =>
-  phase.members.some((member) =>
-    member.endsWith(':') ? namespaceOf(id) === member : stageNameOf(id) === member,
-  )
+  phase.members.some((member) => {
+    if (member.endsWith(':')) {
+      return namespaceOf(id) === member
+    }
+    return stageNameOf(id) === member
+  })
 
 /**
  * Which phase a stage belongs to, or `undefined` if the skeleton has never
@@ -208,7 +236,10 @@ export type ResolveOptions = {
 /** Lower sorts first. Stages in no phase sort after every stage that is in one. */
 const priorityOf = (skeleton: ReadonlyArray<StagePhase>, id: StageId): number => {
   const index = skeleton.findIndex((phase) => phaseAdmits(phase, id))
-  return index === -1 ? Number.MAX_SAFE_INTEGER : index
+  if (index === NOT_FOUND) {
+    return Number.MAX_SAFE_INTEGER
+  }
+  return index
 }
 
 /**
@@ -223,77 +254,315 @@ const compareStages =
   (skeleton: ReadonlyArray<StagePhase>) =>
   (left: StageId, right: StageId): number => {
     const byPriority = priorityOf(skeleton, left) - priorityOf(skeleton, right)
-    return byPriority === 0 ? (left < right ? -1 : left > right ? 1 : 0) : byPriority
+    if (byPriority !== COMPARE_EQUAL) {
+      return byPriority
+    }
+    if (left < right) {
+      return COMPARE_LESS
+    }
+    if (left > right) {
+      return COMPARE_GREATER
+    }
+    return COMPARE_EQUAL
   }
 
+type StackFrame = { readonly node: StageId; readonly entering: boolean }
+
+/** Mutable working state shared by every step of one `findCycle` search. */
+type CycleSearchState = {
+  readonly done: Set<StageId>
+  readonly edges: ReadonlyMap<StageId, ReadonlySet<StageId>>
+  readonly onPath: Set<StageId>
+  readonly path: Array<StageId>
+  readonly remaining: ReadonlySet<StageId>
+}
+
+/** Handle backtracking out of `node` (the `!entering` stack frame). */
+const exitNode = (node: StageId, state: CycleSearchState): void => {
+  state.onPath.delete(node)
+  state.done.add(node)
+  state.path.pop()
+}
+
+/** Mark `node` entered and push its unvisited successors for later entry. */
+const enterNode = (node: StageId, state: CycleSearchState, stack: Array<StackFrame>): void => {
+  state.onPath.add(node)
+  state.path.push(node)
+  stack.push({ entering: false, node })
+
+  for (const next of state.edges.get(node) ?? []) {
+    if (state.remaining.has(next) && !state.done.has(next)) {
+      stack.push({ entering: true, node: next })
+    }
+  }
+}
+
+/** Handle the frame at the top of `stack`, returning a cycle if `node` closes one. */
+const processFrame = (
+  frame: StackFrame,
+  state: CycleSearchState,
+  stack: Array<StackFrame>,
+): ReadonlyArray<StageId> | undefined => {
+  const { entering, node } = frame
+
+  if (!entering) {
+    exitNode(node, state)
+    return
+  }
+  if (state.done.has(node)) {
+    return
+  }
+  if (state.onPath.has(node)) {
+    return [...state.path.slice(state.path.indexOf(node)), node]
+  }
+  enterNode(node, state, stack)
+  return
+}
+
 /**
- * Find one cycle among the nodes that a topological sort could not place.
- *
  * Iterative DFS with an explicit stack: a frame graph is small, but recursion
  * here would put the depth limit of the *host* between a developer and an error
  * message, which is a bad trade for zero benefit.
+ */
+const walk = (start: StageId, state: CycleSearchState): ReadonlyArray<StageId> | undefined => {
+  const stack: Array<StackFrame> = [{ entering: true, node: start }]
+
+  while (stack.length > EMPTY_LENGTH) {
+    const frame = stack.pop()
+    if (typeof frame === 'undefined') {
+      break
+    }
+    const cycle = processFrame(frame, state, stack)
+    if (typeof cycle !== 'undefined') {
+      return cycle
+    }
+  }
+
+  return
+}
+
+/**
+ * Find one cycle among the nodes that a topological sort could not place.
  */
 const findCycle = (
   nodes: ReadonlyArray<StageId>,
   edges: ReadonlyMap<StageId, ReadonlySet<StageId>>,
 ): ReadonlyArray<StageId> => {
-  const remaining = new Set(nodes)
-  const onPath = new Set<StageId>()
-  const done = new Set<StageId>()
-  const path: Array<StageId> = []
-
-  const walk = (start: StageId): ReadonlyArray<StageId> | undefined => {
-    const stack: Array<{ readonly node: StageId; readonly entering: boolean }> = [
-      { node: start, entering: true },
-    ]
-
-    while (stack.length > 0) {
-      const frame = stack.pop()
-      if (frame === undefined) {
-        break
-      }
-      const { node, entering } = frame
-
-      if (!entering) {
-        onPath.delete(node)
-        done.add(node)
-        path.pop()
-        continue
-      }
-
-      if (done.has(node)) {
-        continue
-      }
-
-      if (onPath.has(node)) {
-        return [...path.slice(path.indexOf(node)), node]
-      }
-
-      onPath.add(node)
-      path.push(node)
-      stack.push({ node, entering: false })
-
-      for (const next of edges.get(node) ?? []) {
-        if (remaining.has(next) && !done.has(next)) {
-          stack.push({ node: next, entering: true })
-        }
-      }
-    }
-
-    return undefined
+  const state: CycleSearchState = {
+    done: new Set<StageId>(),
+    edges,
+    onPath: new Set<StageId>(),
+    path: [],
+    remaining: new Set(nodes),
   }
 
   for (const node of nodes) {
-    const cycle = walk(node)
-    if (cycle !== undefined) {
+    const cycle = walk(node, state)
+    if (typeof cycle !== 'undefined') {
       return cycle
     }
   }
 
   // Unreachable: this function is only called when Kahn's algorithm left nodes
-  // unplaced, which happens exactly when a cycle exists. Returning the whole
-  // remainder rather than throwing keeps the failure a value.
+  // Unplaced, which happens exactly when a cycle exists. Returning the whole
+  // Remainder rather than throwing keeps the failure a value.
   return nodes
+}
+
+/** --- 1. Registrations must be unique ------------------------------------- */
+const collectRegistered = (
+  constraints: ReadonlyArray<StageConstraint>,
+): Either.Either<ReadonlySet<StageId>, StageOrderError> => {
+  const registered = new Set<StageId>()
+  for (const constraint of constraints) {
+    if (registered.has(constraint.id)) {
+      return Either.left({ _tag: 'DuplicateStage', id: constraint.id })
+    }
+    registered.add(constraint.id)
+  }
+  return Either.right(registered)
+}
+
+/** The `successors`/`indegree` graph that steps 2-4 build and consume. */
+type MutableGraph = {
+  readonly successors: Map<StageId, Set<StageId>>
+  readonly indegree: Map<StageId, number>
+}
+
+/** Every registered stage, with no edges and no incoming edges yet. */
+const initializeGraph = (registered: ReadonlySet<StageId>): MutableGraph => {
+  const successors = new Map<StageId, Set<StageId>>()
+  const indegree = new Map<StageId, number>()
+  for (const id of registered) {
+    successors.set(id, new Set<StageId>())
+    indegree.set(id, NO_INDEGREE)
+  }
+  return { indegree, successors }
+}
+
+/** Record `before -> after`, unless it is already present, a self-edge, or `before` is unregistered. */
+const addEdge = (graph: MutableGraph, before: StageId, after: StageId): void => {
+  const outgoing = graph.successors.get(before)
+  if (typeof outgoing === 'undefined' || outgoing.has(after) || before === after) {
+    return
+  }
+  outgoing.add(after)
+  graph.indegree.set(after, (graph.indegree.get(after) ?? NO_INDEGREE) + INDEGREE_STEP)
+}
+
+/** --- 2. Edges from declared `after`, dangling ones set aside -------------- */
+const collectDeclaredEdges = (
+  constraints: ReadonlyArray<StageConstraint>,
+  registered: ReadonlySet<StageId>,
+  graph: MutableGraph,
+): ReadonlyArray<DanglingEdge> => {
+  const dangling: Array<DanglingEdge> = []
+  for (const constraint of constraints) {
+    for (const before of constraint.after ?? []) {
+      if (registered.has(before)) {
+        addEdge(graph, before, constraint.id)
+      } else {
+        dangling.push({ missing: before, stage: constraint.id })
+      }
+    }
+  }
+  return dangling
+}
+
+/** Registered stages, bucketed by the index of the phase that admits them. */
+const groupByPhase = (
+  registered: ReadonlySet<StageId>,
+  skeleton: ReadonlyArray<StagePhase>,
+): ReadonlyMap<number, ReadonlyArray<StageId>> => {
+  const byPhase = new Map<number, Array<StageId>>()
+  for (const id of registered) {
+    const index = skeleton.findIndex((phase) => phaseAdmits(phase, id))
+    if (index !== NOT_FOUND) {
+      const bucket = byPhase.get(index)
+      if (typeof bucket === 'undefined') {
+        byPhase.set(index, [id])
+      } else {
+        bucket.push(id)
+      }
+    }
+  }
+  return byPhase
+}
+
+/**
+ * --- 3. Implicit skeleton chain --------------------------------------------
+ * Every stage of one phase runs before every stage of the next NON-EMPTY
+ * Phase, so an unpopulated phase closes the gap rather than breaking the
+ * chain: a build with no fluids still runs entities before redstone.
+ *
+ * Note what this does NOT do: order two stages that landed in the SAME phase.
+ * Both mx-redstone stages are `simulation:redstone`, and which of them runs
+ * First is settled by mx-redstone's own `after` edge, because it is the only
+ * Repository that knows. Compose orders phases; modules order themselves
+ * Within one (plan.md §2.3-3).
+ */
+const addSkeletonChainEdges = (
+  registered: ReadonlySet<StageId>,
+  skeleton: ReadonlyArray<StagePhase>,
+  graph: MutableGraph,
+): void => {
+  const byPhase = groupByPhase(registered, skeleton)
+  const populated = [...byPhase.keys()]
+    .sort((left, right) => left - right)
+    .map((index) => byPhase.get(index) ?? [])
+
+  for (let index = 1; index < populated.length; index += INDEX_STEP) {
+    for (const before of populated[index - INDEX_STEP] ?? []) {
+      for (const after of populated[index] ?? []) {
+        addEdge(graph, before, after)
+      }
+    }
+  }
+}
+
+/** A stage id comparator: skeleton position first, then lexicographic id. */
+type Comparator = (left: StageId, right: StageId) => number
+
+/** The Kahn ready queue: the ids currently at indegree zero, kept sorted. */
+type ReadyQueue = {
+  readonly compare: Comparator
+  readonly items: Array<StageId>
+}
+
+/** Decrement the indegree of `next`'s successors, queuing any that reach zero. */
+const releaseSuccessors = (next: StageId, graph: MutableGraph, queue: ReadyQueue): void => {
+  const unlocked: Array<StageId> = []
+  for (const successor of graph.successors.get(next) ?? []) {
+    const remaining = (graph.indegree.get(successor) ?? NO_INDEGREE) - INDEGREE_STEP
+    graph.indegree.set(successor, remaining)
+    if (remaining === NO_INDEGREE) {
+      unlocked.push(successor)
+    }
+  }
+  if (unlocked.length > EMPTY_LENGTH) {
+    queue.items.push(...unlocked)
+    queue.items.sort(queue.compare)
+  }
+}
+
+/** Pop the ready queue until it is empty, releasing each node's successors. */
+const drainReady = (graph: MutableGraph, queue: ReadyQueue): ReadonlyArray<StageId> => {
+  const order: Array<StageId> = []
+  while (queue.items.length > EMPTY_LENGTH) {
+    const next = queue.items.shift()
+    if (typeof next === 'undefined') {
+      break
+    }
+    order.push(next)
+    releaseSuccessors(next, graph, queue)
+  }
+  return order
+}
+
+/** --- 4. Kahn, with a deterministically ordered ready set ------------------ */
+const kahnOrder = (
+  registered: ReadonlySet<StageId>,
+  graph: MutableGraph,
+  compare: Comparator,
+): ReadonlyArray<StageId> => {
+  const items = [...registered]
+    .filter((id) => (graph.indegree.get(id) ?? NO_INDEGREE) === NO_INDEGREE)
+    .sort(compare)
+  return drainReady(graph, { compare, items })
+}
+
+/** What `registered` minus `compare` was ordering, bundled for `findStageCycle`. */
+type Ordering = {
+  readonly compare: Comparator
+  readonly registered: ReadonlySet<StageId>
+}
+
+/** --- 5. Anything left over is in a cycle ---------------------------------- */
+const findStageCycle = (
+  order: ReadonlyArray<StageId>,
+  graph: MutableGraph,
+  ordering: Ordering,
+): ReadonlyArray<StageId> => {
+  const placed = new Set(order)
+  const stuck = [...ordering.registered].filter((id) => !placed.has(id)).sort(ordering.compare)
+  return findCycle(stuck, graph.successors)
+}
+
+/**
+ * --- 6. What the resolver would otherwise have swallowed --------------------
+ * Neither of these is an error. Both are reported, because both are
+ * Indistinguishable from a typo at the point where they bite: an `after` that
+ * Named nothing simply does not order anything, and a stage in no phase
+ * Simply runs last. See `StageOrderPlan.unmatchedPhase`.
+ */
+const unmatchedPhaseStages = (
+  skeleton: ReadonlyArray<StagePhase>,
+  registered: ReadonlySet<StageId>,
+): ReadonlyArray<StageId> => {
+  if (skeleton.length === EMPTY_LENGTH) {
+    return []
+  }
+  return [...registered].filter((id) => typeof phaseOf(skeleton, id) === 'undefined').sort()
 }
 
 /**
@@ -308,126 +577,24 @@ export const resolveStageOrder = (
 ): Either.Either<StageOrderPlan, StageOrderError> => {
   const skeleton = options.skeleton ?? []
 
-  // --- 1. Registrations must be unique -------------------------------------
-  const registered = new Set<StageId>()
-  for (const constraint of constraints) {
-    if (registered.has(constraint.id)) {
-      return Either.left({ _tag: 'DuplicateStage', id: constraint.id })
-    }
-    registered.add(constraint.id)
-  }
+  return Either.flatMap(collectRegistered(constraints), (registered) => {
+    const graph = initializeGraph(registered)
+    const dangling = collectDeclaredEdges(constraints, registered, graph)
+    addSkeletonChainEdges(registered, skeleton, graph)
 
-  // --- 2. Edges from declared `after`, dangling ones set aside --------------
-  const successors = new Map<StageId, Set<StageId>>()
-  const indegree = new Map<StageId, number>()
-  const dangling: Array<DanglingEdge> = []
+    const compare = compareStages(skeleton)
+    const order = kahnOrder(registered, graph, compare)
 
-  for (const id of registered) {
-    successors.set(id, new Set<StageId>())
-    indegree.set(id, 0)
-  }
-
-  const addEdge = (before: StageId, after: StageId): void => {
-    const outgoing = successors.get(before)
-    if (outgoing === undefined || outgoing.has(after) || before === after) {
-      return
-    }
-    outgoing.add(after)
-    indegree.set(after, (indegree.get(after) ?? 0) + 1)
-  }
-
-  for (const constraint of constraints) {
-    for (const before of constraint.after ?? []) {
-      if (registered.has(before)) {
-        addEdge(before, constraint.id)
-      } else {
-        dangling.push({ stage: constraint.id, missing: before })
-      }
-    }
-  }
-
-  // --- 3. Implicit skeleton chain ------------------------------------------
-  // Every stage of one phase runs before every stage of the next NON-EMPTY
-  // phase, so an unpopulated phase closes the gap rather than breaking the
-  // chain: a build with no fluids still runs entities before redstone.
-  //
-  // Note what this does NOT do: order two stages that landed in the SAME phase.
-  // Both mx-redstone stages are `simulation:redstone`, and which of them runs
-  // first is settled by mx-redstone's own `after` edge, because it is the only
-  // repository that knows. Compose orders phases; modules order themselves
-  // within one (plan.md §2.3-3).
-  const byPhase = new Map<number, Array<StageId>>()
-  for (const id of registered) {
-    const index = skeleton.findIndex((phase) => phaseAdmits(phase, id))
-    if (index === -1) {
-      continue
-    }
-    const bucket = byPhase.get(index)
-    if (bucket === undefined) {
-      byPhase.set(index, [id])
-    } else {
-      bucket.push(id)
-    }
-  }
-
-  const populated = [...byPhase.keys()]
-    .sort((left, right) => left - right)
-    .map((index) => byPhase.get(index) ?? [])
-
-  for (let index = 1; index < populated.length; index += 1) {
-    for (const before of populated[index - 1] ?? []) {
-      for (const after of populated[index] ?? []) {
-        addEdge(before, after)
-      }
-    }
-  }
-
-  // --- 4. Kahn, with a deterministically ordered ready set ------------------
-  const compare = compareStages(skeleton)
-  const ready = [...registered].filter((id) => (indegree.get(id) ?? 0) === 0).sort(compare)
-  const order: Array<StageId> = []
-
-  while (ready.length > 0) {
-    const next = ready.shift()
-    if (next === undefined) {
-      break
-    }
-    order.push(next)
-
-    const unlocked: Array<StageId> = []
-    for (const successor of successors.get(next) ?? []) {
-      const remaining = (indegree.get(successor) ?? 0) - 1
-      indegree.set(successor, remaining)
-      if (remaining === 0) {
-        unlocked.push(successor)
-      }
+    if (order.length !== registered.size) {
+      return Either.left({
+        _tag: 'StageCycle' as const,
+        cycle: findStageCycle(order, graph, { compare, registered }),
+      })
     }
 
-    if (unlocked.length > 0) {
-      ready.push(...unlocked)
-      ready.sort(compare)
-    }
-  }
-
-  // --- 5. Anything left over is in a cycle ---------------------------------
-  if (order.length !== registered.size) {
-    const placed = new Set(order)
-    const stuck = [...registered].filter((id) => !placed.has(id)).sort(compare)
-    const frozenEdges: ReadonlyMap<StageId, ReadonlySet<StageId>> = successors
-    return Either.left({ _tag: 'StageCycle', cycle: findCycle(stuck, frozenEdges) })
-  }
-
-  // --- 6. What the resolver would otherwise have swallowed ------------------
-  // Neither of these is an error. Both are reported, because both are
-  // indistinguishable from a typo at the point where they bite: an `after` that
-  // named nothing simply does not order anything, and a stage in no phase
-  // simply runs last. See `StageOrderPlan.unmatchedPhase`.
-  const unmatchedPhase =
-    skeleton.length === 0
-      ? []
-      : [...registered].filter((id) => phaseOf(skeleton, id) === undefined).sort()
-
-  return Either.right({ order, dangling, unmatchedPhase })
+    const unmatchedPhase = unmatchedPhaseStages(skeleton, registered)
+    return Either.right({ dangling, order, unmatchedPhase })
+  })
 }
 
 /**
@@ -457,7 +624,7 @@ export const describeStagePlanWarnings = (plan: StageOrderPlan): ReadonlyArray<s
 
 /** Human-readable rendering of a resolution failure, for logs and test output. */
 export const describeStageOrderError = (error: StageOrderError): string => {
-  switch (error._tag) {
+  switch (error['_tag']) {
     case 'DuplicateStage':
       return `two modules registered the stage id "${error.id}"; stage ids must be unique across the whole build.`
     case 'StageCycle':
@@ -466,5 +633,7 @@ export const describeStageOrderError = (error: StageOrderError): string => {
         'No total order exists. Break it by moving the shared work into the earlier stage, ' +
         'or by splitting one of the stages in two — never by deleting an `after` edge you do not own.'
       )
+    default:
+      return `unknown stage order error: ${JSON.stringify(error)}`
   }
 }

@@ -29,8 +29,8 @@
  * silently BE the physics stage. Reserving the core namespaces makes both
  * impossible to express.
  */
-import { Either } from 'effect'
 import type { GameModule, StageRegistration } from './composition'
+import { Either } from 'effect'
 import { StageId } from './stage-order'
 
 /**
@@ -99,9 +99,12 @@ export const modStageId = (modId: string, stage: string): StageId =>
   StageId(`${modStagePrefix(modId)}${stage}`)
 
 const isReserved = (stage: StageId): boolean =>
-  RESERVED_STAGE_PREFIXES.some((prefix) =>
-    prefix.endsWith(':') ? stage.startsWith(prefix) : stage === prefix,
-  )
+  RESERVED_STAGE_PREFIXES.some((prefix) => {
+    if (prefix.endsWith(':')) {
+      return stage.startsWith(prefix)
+    }
+    return stage === prefix
+  })
 
 const violatesNamespace = (modId: string, registration: StageRegistration): boolean =>
   isReserved(registration.id) || !registration.id.startsWith(modStagePrefix(modId))
@@ -123,8 +126,8 @@ export const acceptMod = (manifest: ModManifest): Either.Either<GameModule, Modd
   if (manifest.apiVersion !== MODDING_API_VERSION) {
     return Either.left({
       _tag: 'UnsupportedApiVersion',
-      id: manifest.id,
       declared: manifest.apiVersion,
+      id: manifest.id,
       supported: MODDING_API_VERSION,
     })
   }
@@ -138,6 +141,23 @@ export const acceptMod = (manifest: ModManifest): Either.Either<GameModule, Modd
   return Either.right(manifest.module)
 }
 
+/**
+ * Reject a manifest whose id was already seen, otherwise delegate to
+ * `acceptMod`. Split out of `acceptMods` so that function stays under this
+ * repository's statement budget; behaviour is unchanged — `seen` is mutated
+ * exactly as it was when this was inline.
+ */
+const acceptUnseenMod = (
+  manifest: ModManifest,
+  seen: Set<string>,
+): Either.Either<GameModule, ModdingError> => {
+  if (seen.has(manifest.id)) {
+    return Either.left({ _tag: 'DuplicateModId', id: manifest.id })
+  }
+  seen.add(manifest.id)
+  return acceptMod(manifest)
+}
+
 /** Validate a set of mods, rejecting duplicate ids. Order is preserved. */
 export const acceptMods = (
   manifests: ReadonlyArray<ModManifest>,
@@ -146,12 +166,7 @@ export const acceptMods = (
   const accepted: Array<GameModule> = []
 
   for (const manifest of manifests) {
-    if (seen.has(manifest.id)) {
-      return Either.left({ _tag: 'DuplicateModId', id: manifest.id })
-    }
-    seen.add(manifest.id)
-
-    const result = acceptMod(manifest)
+    const result = acceptUnseenMod(manifest, seen)
     if (Either.isLeft(result)) {
       return Either.left(result.left)
     }
@@ -162,7 +177,7 @@ export const acceptMods = (
 }
 
 export const describeModdingError = (error: ModdingError): string => {
-  switch (error._tag) {
+  switch (error['_tag']) {
     case 'InvalidModId':
       return `"${error.id}" is not a valid mod id; use lowercase kebab-case, e.g. "extra-ores".`
     case 'UnsupportedApiVersion':
@@ -174,5 +189,7 @@ export const describeModdingError = (error: ModdingError): string => {
       )
     case 'DuplicateModId':
       return `two mods declare the id "${error.id}"; ids must be unique within a build.`
+    default:
+      return `unknown modding error: ${JSON.stringify(error)}`
   }
 }

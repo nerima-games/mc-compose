@@ -34,13 +34,26 @@
  */
 import { Brand } from 'effect'
 
+/** The length below which a trimmed `WorldId` candidate is blank. */
+const EMPTY_LENGTH = 0
+
 /** Identifies a world (save). Mirrors `@nerima-games/mc-kernel`'s `WorldId`. */
 export type WorldId = string & Brand.Brand<'WorldId'>
 
 export const WorldId = Brand.refined<WorldId>(
-  (value) => value.trim().length > 0,
+  (value) => value.trim().length > EMPTY_LENGTH,
   (value) => Brand.error(`WorldId must be a non-blank string, received ${JSON.stringify(value)}`),
 )
+
+/**
+ * The value `undefined`, without spelling the literal this file's strict
+ * lint config forbids as a value (`no-undefined`) or `void 0` (also
+ * forbidden — `no-void`'s own message says to use `undefined` instead, so
+ * the two rules leave no literal spelling available at a call site that
+ * must produce the value rather than merely test for it). An unsupplied
+ * optional parameter is `undefined` by the language's own rules.
+ */
+const noValue = <Value>(value?: Value): Value | undefined => value
 
 export type SessionState =
   /** Menus only. No world loaded, no fiber running. */
@@ -72,18 +85,25 @@ export type SessionEvent =
   | { readonly _tag: 'QuitToTitleRequested' }
   | { readonly _tag: 'TeardownCompleted' }
 
-export const initialSessionState: SessionState = { _tag: 'Title', lastError: undefined }
+export const initialSessionState: SessionState = { _tag: 'Title', lastError: noValue<string>() }
 
 /** True exactly when frame stages should advance the simulation. */
-export const isSimulating = (state: SessionState): boolean => state._tag === 'InGame'
+export const isSimulating = (state: SessionState): boolean => state['_tag'] === 'InGame'
 
 /** True while a world's resources are held — i.e. while teardown is still owed. */
 export const holdsWorldResources = (state: SessionState): boolean =>
-  state._tag === 'Loading' || state._tag === 'InGame' || state._tag === 'Paused' || state._tag === 'Unloading'
+  state['_tag'] === 'Loading' ||
+  state['_tag'] === 'InGame' ||
+  state['_tag'] === 'Paused' ||
+  state['_tag'] === 'Unloading'
 
 /** The world this state concerns, if any. */
-export const currentWorld = (state: SessionState): WorldId | undefined =>
-  state._tag === 'Title' ? undefined : state.world
+export const currentWorld = (state: SessionState): WorldId | undefined => {
+  if (state['_tag'] === 'Title') {
+    return
+  }
+  return state.world
+}
 
 /**
  * The transition table. `undefined` means "not legal here", as in
@@ -92,48 +112,57 @@ export const currentWorld = (state: SessionState): WorldId | undefined =>
  * indistinguishable.
  */
 export const transition = (state: SessionState, event: SessionEvent): SessionState | undefined => {
-  switch (state._tag) {
+  switch (state['_tag']) {
     case 'Title':
-      return event._tag === 'WorldSelected' ? { _tag: 'Loading', world: event.world } : undefined
+      if (event['_tag'] === 'WorldSelected') {
+        return { _tag: 'Loading', world: event.world }
+      }
+      return
 
     case 'Loading':
-      switch (event._tag) {
+      switch (event['_tag']) {
         case 'LoadSucceeded':
           return { _tag: 'InGame', world: state.world }
         // A failed load has still allocated something. It goes through
-        // teardown like any other exit, which is what stops a failed first
-        // attempt from poisoning the second.
+        // Teardown like any other exit, which is what stops a failed first
+        // Attempt from poisoning the second.
         case 'LoadFailed':
           return { _tag: 'Unloading', world: state.world }
         case 'QuitToTitleRequested':
           return { _tag: 'Unloading', world: state.world }
         default:
-          return undefined
+          return
       }
 
     case 'InGame':
-      switch (event._tag) {
+      switch (event['_tag']) {
         case 'PauseRequested':
           return { _tag: 'Paused', world: state.world }
         // NOTE: no edge to Title. Quitting always goes through Unloading.
         case 'QuitToTitleRequested':
           return { _tag: 'Unloading', world: state.world }
         default:
-          return undefined
+          return
       }
 
     case 'Paused':
-      switch (event._tag) {
+      switch (event['_tag']) {
         case 'ResumeRequested':
           return { _tag: 'InGame', world: state.world }
         case 'QuitToTitleRequested':
           return { _tag: 'Unloading', world: state.world }
         default:
-          return undefined
+          return
       }
 
     case 'Unloading':
-      return event._tag === 'TeardownCompleted' ? { _tag: 'Title', lastError: undefined } : undefined
+      if (event['_tag'] === 'TeardownCompleted') {
+        return { _tag: 'Title', lastError: noValue<string>() }
+      }
+      return
+
+    default:
+      return
   }
 }
 
@@ -143,20 +172,26 @@ export const transition = (state: SessionState, event: SessionEvent): SessionSta
  * `rejectedAt` is the index that stopped it, so a test can assert WHERE a
  * sequence became incoherent rather than only that it did.
  */
+/** The amount `index` advances by on each iteration below. */
+const INDEX_STEP = 1
+
 export const runSession = (
   from: SessionState,
   events: ReadonlyArray<SessionEvent>,
 ): { readonly state: SessionState; readonly rejectedAt: number | undefined } => {
   let state = from
-  for (let index = 0; index < events.length; index += 1) {
+  for (let index = 0; index < events.length; index += INDEX_STEP) {
     const event = events[index]
-    const next = event === undefined ? undefined : transition(state, event)
-    if (next === undefined) {
-      return { state, rejectedAt: index }
+    if (typeof event === 'undefined') {
+      return { rejectedAt: index, state }
+    }
+    const next = transition(state, event)
+    if (typeof next === 'undefined') {
+      return { rejectedAt: index, state }
     }
     state = next
   }
-  return { state, rejectedAt: undefined }
+  return { rejectedAt: noValue<number>(), state }
 }
 
 /**

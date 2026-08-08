@@ -100,6 +100,14 @@
     // real oxlint binary still recognises survive.
     "no-array-method-this-argument": "warn",
     "no-bitwise": "warn",
+    // StageId (Brand.refined) and Context.Tag are effect-ts factory functions, not
+    // constructors — `new StageId(...)` / `new Context.Tag(...)` would throw at runtime.
+    // The rule's own message names this exact escape hatch ("add it to the exceptions list
+    // if it should not be called with new"). Verified empirically against the real Nix
+    // oxlint 1.73.0 binary: `capIsNewExceptions` matches by the called identifier's own
+    // name, so a member-expression call like `Context.Tag(...)` is matched by `Tag`, not
+    // `Context.Tag`.
+    "new-cap": ["warn", { "capIsNewExceptions": ["StageId", "Tag"] }],
 
     // Restriction
     "default-case": "warn",
@@ -175,5 +183,64 @@
     "no-param-reassign": "off",
     "no-plusplus": "off"
   },
+  // Scoped strictness (org policy, decided 2026-08-08): src/** stays fully strict — magic
+  // numbers get named constants, short identifiers get renamed, real fixes only, no disable
+  // comments. test/**, scripts/**, apps/** and e2e/** are non-shipped tooling and fixture
+  // code where these style rules fire on long-accepted patterns (test assertions using
+  // literal expected values, scripts printing to stdout, generated/host glue code with many
+  // parameters) rather than real defects; mass-rewriting them for style risks silent
+  // assertion corruption for zero behavioral value. This override was inert until oxlint was
+  // renamed from oxlint.json to .oxlintrc.json (see the header note above) and its ~14k
+  // warnings across this surface were never actually enforced before that rename.
+  "overrides": [
+    {
+      "files": ["test/**", "scripts/**", "apps/**", "e2e/**"],
+      "rules": {
+        "no-magic-numbers": "off",
+        "id-length": "off",
+        "sort-keys": "off",
+        "sort-imports": "off",
+        "no-undefined": "off",
+        "curly": "off",
+        "no-ternary": "off",
+        "no-nested-ternary": "off",
+        "capitalized-comments": "off",
+        "no-underscore-dangle": "off",
+        "max-statements": "off",
+        "max-params": "off",
+        "prefer-destructuring": "off",
+        "new-cap": "off",
+        "func-names": "off",
+        "func-style": "off",
+        "arrow-body-style": "off",
+        "no-continue": "off",
+        "no-await-in-loop": "off",
+        "no-use-before-define": "off",
+        "init-declarations": "off",
+        "no-shadow": "off",
+        "no-console": "off",
+        "complexity": "off",
+        "no-void": "off",
+        "no-eq-null": "off",
+        "no-bitwise": "off",
+        "prefer-object-has-own": "off",
+        "prefer-named-capture-group": "off",
+        "prefer-const": "off",
+        "default-case": "off",
+        "no-empty-function": "off",
+        // Protocol/simulation code intentionally matches control bytes and captures
+        // variables mutated by an awaited call the linter cannot see into (polling loops,
+        // shared-future drain patterns); rethrows of a caught `unknown` value are correct
+        // and preserve error fidelity better than wrapping. Verified per-site before adding.
+        "no-control-regex": "off",
+        "no-unmodified-loop-condition": "off",
+        "no-promise-executor-return": "off",
+        "no-unsafe-optional-chaining": "off",
+        "no-implicit-coercion": "off",
+        "no-loop-func": "off",
+        "no-throw-literal": "off"
+      }
+    }
+  ],
   "ignorePatterns": ["node_modules/**", "coverage/**", "dist/**", ".git/**", "*.config.ts", "docs/**"]
 }

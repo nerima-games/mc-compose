@@ -24,7 +24,7 @@
       "@nerima-games/mc-render": "0.2.14",
       "@nerima-games/mc-sim": "0.1.42",
       "@nerima-games/mc-worldgen": "0.1.14",
-      "@nerima-games/mx-gameplay": "0.2.1"
+      "@nerima-games/mx-gameplay": "0.3.1"
     }
   },
   "publishConfig": {

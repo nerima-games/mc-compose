@@ -37,7 +37,7 @@
  * make a tile-index bug look like a texture.
  */
 import * as THREE from 'three'
-import { Context, Effect } from 'effect'
+import { Context, Effect, Layer, Scope } from 'effect'
 import {
   ATLAS_COLUMNS,
   browserInputLayer,
@@ -51,7 +51,6 @@ import {
   type MeshQuad,
   type MirroredCameraState,
 } from '@nerima-games/mc-render'
-import { Layer, Scope } from 'effect'
 
 const VIEWPORT = { width: 640, height: 360 }
 

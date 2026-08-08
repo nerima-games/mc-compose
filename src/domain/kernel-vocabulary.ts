@@ -45,6 +45,9 @@
  */
 import { Brand, Context, Effect, Layer } from 'effect'
 
+/** The floor of the non-negative range every quantity below is checked against. */
+const MIN_SECONDS = 0
+
 // ---------------------------------------------------------------------------
 // Quantities — mirrors mc-kernel/domain/quantities.ts
 // ---------------------------------------------------------------------------
@@ -67,7 +70,7 @@ import { Brand, Context, Effect, Layer } from 'effect'
 export type DeltaTimeSecs = number & Brand.Brand<'DeltaTimeSecs'>
 
 export const DeltaTimeSecs = Brand.refined<DeltaTimeSecs>(
-  (value) => Number.isFinite(value) && value >= 0,
+  (value) => Number.isFinite(value) && value >= MIN_SECONDS,
   (value) => Brand.error(`DeltaTimeSecs must be a finite, non-negative number of seconds, received ${value}`),
 )
 
@@ -78,7 +81,7 @@ export const DeltaTimeSecs = Brand.refined<DeltaTimeSecs>(
 export type MonotonicTimeSecs = number & Brand.Brand<'MonotonicTimeSecs'>
 
 export const MonotonicTimeSecs = Brand.refined<MonotonicTimeSecs>(
-  (value) => Number.isFinite(value) && value >= 0,
+  (value) => Number.isFinite(value) && value >= MIN_SECONDS,
   (value) => Brand.error(`MonotonicTimeSecs must be a finite, non-negative number of seconds, received ${value}`),
 )
 
