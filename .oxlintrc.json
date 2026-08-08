@@ -128,9 +128,16 @@
     // mx-redstone, mx-ui and mx-multiplayer (all declared in package.json#dependencies),
     // plus mc-kernel (universally importable, and therefore deliberately absent from both
     // package.json's allowlist reasoning and this list — DEPENDENCY_POLICY.md §2 rule 5).
-    // Unlike every other Tier, there is close to nothing left to forbid here; the two
-    // `patterns` entries below are the two things that are NOT licensed even though they
-    // are reachable on disk. (The `effect` entry moved into `paths` here too — the bare
+    // As of this PR, mc-playground-kit is ALSO a real `dependencies` entry, not the usual
+    // devDependency-only exception (DEPENDENCY_POLICY.md §3): apps/web/main.ts's shipped
+    // production bootstrap (container/canvas mount, network pump, cleanup lifecycle) calls
+    // `makeBrowserPreview` unconditionally, so this repository is the one place in the org
+    // where that harness is legitimately runtime code, not test/preview-only glue. The
+    // `no-restricted-imports` pattern that used to ban it here has been removed accordingly
+    // — DEPENDENCY_POLICY.md §3 updated to record the exception.
+    // Unlike every other Tier, there is close to nothing left to forbid here; the one
+    // `patterns` entry below is the only thing that is NOT licensed even though it is
+    // reachable on disk. (The `effect` entry moved into `paths` here too — the bare
     // object form used previously is not part of the rule's real schema, which requires
     // `paths`/`patterns` wrapper keys; https://oxc.rs/docs/guide/usage/linter/rules/eslint/no-restricted-imports.)
     //
@@ -161,10 +168,6 @@
           }
         ],
         "patterns": [
-          {
-            "regex": "^@nerima-games/mc-playground-kit(/.*)?$",
-            "message": "mc-playground-kit is devDependency-only (DEPENDENCY_POLICY.md §3); it must never be imported from shipped composition code."
-          },
           {
             "regex": "^@nerima-games/(mc-noise|mc-meshing|mc-physics)(/.*)?$",
             "message": "mc-compose reaches these only transitively through mc-worldgen/mc-sim/mc-render. Reaching through a dependency is not an import licence (DEPENDENCY_POLICY.md §2, no-transitive-closure)."
