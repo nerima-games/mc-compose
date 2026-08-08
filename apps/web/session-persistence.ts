@@ -2,7 +2,7 @@ import { Data, Effect, Option, Schema } from 'effect'
 import type { YieldableError } from 'effect/Cause'
 import { isValidWitherRuntimeSnapshot, type WitherRuntimeSnapshot } from '../multiplayer-shared/wither-runtime'
 
-import { ChunkAxis, isItemType, type ChunkCoord } from '@nerima-games/mc-kernel'
+import { isItemType } from '@nerima-games/mc-kernel'
 import {
   loadFrom,
   SaveKey,
@@ -40,8 +40,10 @@ import {
 } from '@nerima-games/mc-sim'
 import {
   CHUNK_FORMAT,
+  ChunkAxis,
   chunkSnapshotOf,
   type Chunk,
+  type ChunkCoord,
   type ChunkSource,
   type ChunkStoreApi,
   type Dimension,

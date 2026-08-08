@@ -6,17 +6,15 @@ import { dirname } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 
-import {
-  blockPosition,
-  blockTypeOfId,
-  chunkCoordOfBlock,
-  localCoordOfBlock,
-} from '@nerima-games/mc-kernel'
+import { blockTypeOfId } from '@nerima-games/mc-kernel'
 import { CHEST_CONTAINER_CAPACITY } from '@nerima-games/mc-sim'
 import {
+  blockPosition,
   CHUNK_HEIGHT,
+  chunkCoordOfBlock,
   generateChunkAt,
   getBlockAt,
+  localCoordOfBlock,
   type Chunk,
   type Dimension,
 } from '@nerima-games/mc-worldgen'

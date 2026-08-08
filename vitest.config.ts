@@ -2,21 +2,24 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
+// A sibling mc-audio checkout is a local-monorepo convenience, not a guarantee: CI's
+// actions/checkout only clones mc-compose itself, with no sibling repos on disk. When no
+// sibling source is found, fall back to the installed @nerima-games/mc-audio package (the
+// registry dependency already declared in package.json) instead of throwing — every other
+// @nerima-games/* dependency in this suite resolves that way already.
 const audioSource = ['../mc-audio/src/index.ts', '../../../../mc-audio/src/index.ts']
   .map((relativePath) => new URL(relativePath, import.meta.url))
   .find((url) => existsSync(url))
 
-if (!audioSource) {
-  throw new Error('Unable to locate the mc-audio source checkout')
-}
-
 export default defineConfig({
   resolve: {
-    alias: {
-      // mc-audio migrated its entry point to src/index.ts (PACKAGE_STANDARD.md);
-      // this alias follows it there rather than the pre-migration path.
-      '@nerima-games/mc-audio': fileURLToPath(audioSource),
-    },
+    alias: audioSource
+      ? {
+          // mc-audio migrated its entry point to src/index.ts (PACKAGE_STANDARD.md);
+          // this alias follows it there rather than the pre-migration path.
+          '@nerima-games/mc-audio': fileURLToPath(audioSource),
+        }
+      : {},
   },
   test: {
     environment: 'node',
