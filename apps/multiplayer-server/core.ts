@@ -21,8 +21,10 @@ import {
   type WorldId,
   type WorldSnapshot,
   type ContainerKind,
+  type HungerActor,
+  type HungerCommand,
+  type HungerEvent,
 } from '@nerima-games/mx-multiplayer'
-import type { HungerActor, HungerCommand, HungerEvent } from '@nerima-games/mx-multiplayer'
 import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, propertyOfBlockId, StackCount } from '@nerima-games/mc-kernel'
 import { pistonPositionAt, validatePistonPlan, type PistonCellRead, type PistonMovementPlan } from '@nerima-games/mx-redstone'
 import { END_PORTAL_BLOCK, END_PORTAL_FRAME_OFFSETS, endPortalCenterForStronghold, nearestStrongholdSite, type Dimension } from '@nerima-games/mc-worldgen'
