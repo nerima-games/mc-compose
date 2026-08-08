@@ -57,7 +57,7 @@ import {
   FixedClockLayer,
   MonotonicTimeSecs,
   type FrameServices,
-} from '@nerima-games/mc-kernel'
+} from '../../src/domain/kernel-vocabulary'
 import {
   describeStageOrderError,
   phaseOf,

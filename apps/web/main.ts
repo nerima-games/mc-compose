@@ -96,10 +96,8 @@ import {
 } from '@nerima-games/mc-audio'
 import {
   blockIdOf,
-  blockPosition,
   blockTypeOfId,
   capabilityOfBlockId,
-  chunkCoord,
   MonotonicTimeSecs as KernelMonotonicTimeSecs,
   position,
   propertyOfBlockId,
@@ -144,6 +142,8 @@ import {
 } from '@nerima-games/mc-sim'
 import {
   biomeFor,
+  blockPosition,
+  chunkCoord,
   chunkSnapshotOf,
   DEFAULT_TERRAIN_LEVELS,
   detectCompletedEndPortal,
@@ -415,7 +415,7 @@ import {
   registerModule,
   type GameModule,
 } from '../../src/domain/composition'
-import { DeltaTimeSecs, type MonotonicTimeSecs } from '@nerima-games/mc-kernel'
+import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../src/domain/kernel-vocabulary'
 
 type WithoutAuthority<T> = T extends unknown
   ? Omit<T, 'commandId' | 'player' | 'world' | 'expectedRevision'>
@@ -521,7 +521,7 @@ import {
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
  *
- * `@nerima-games/mc-kernel` is explicit that this is not part of the
+ * `domain/kernel-vocabulary.ts` is explicit that this is not part of the
  * `DeltaTimeSecs` brand and is not applied by mc-compose: "It is a simulation
  * invariant belonging to whoever produces the delta". The host produces it, so
  * the host clamps it — and without the clamp a backgrounded tab returns for its
@@ -2494,9 +2494,9 @@ const bootGame = async (
    * The starting pose, derived from the generated surface height.
    *
    * The TYPE IS DERIVED FROM THE FUNCTION rather than named, because
-   * `CameraPoseSnapshot` is exported by `@nerima-games/mc-kernel`; this package's
-   * `index.ts` deliberately keeps that type out of its barrel, so consumers take
-   * the camera contract from the published kernel package.
+   * `CameraPoseSnapshot` lives in mc-render's kernel-vocabulary MIRROR and
+   * `index.ts` deliberately keeps that out of the barrel — consumers take
+   * kernel's vocabulary from `@nerima-games/mc-kernel`, which is not published.
    * `Parameters<typeof renderModule>[3]` follows the signature instead, so a
    * change to it fails here rather than drifting.
    *
@@ -5714,15 +5714,9 @@ type MultiplayerInventorySelection = Readonly<{
       if (multiplayer === undefined) Effect.runSync(inventoryInteraction.craftOnce())
       else requestCrafting()
     } else if (target.region === 'crafting-grid') {
-      const action = actionTarget === null ? null : { kind: 'click' as const, target: actionTarget }
-      if (multiplayer !== undefined && multiplayerInventorySelection !== null && action !== null) {
-        const selection = multiplayerInventorySelection
-        draftCraftingFromInventory(action, selection.source, target.index)
-      } else {
-        if (pendingCrafting !== null) return
-        Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
-        Effect.runSync(inventoryInteraction.preview())
-      }
+      if (pendingCrafting !== null) return
+      Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
+      Effect.runSync(inventoryInteraction.preview())
     } else if (target.region === 'hotbar') {
       Effect.runSync(inventoryInteraction.clickInventoryItem(target.index, button))
     } else if (target.region === 'main') {
@@ -5872,30 +5866,6 @@ type MultiplayerInventorySelection = Readonly<{
     return true
   }
 
-  const draftCraftingFromInventory = (
-    action: InventoryAction,
-    source: number,
-    cell: number,
-  ): void => {
-    if (pendingCrafting !== null) {
-      rejectInventoryAction(action, 'Crafting update is pending')
-      return
-    }
-    if (inventoryInteraction.state().inventoryCarried !== undefined) {
-      rejectInventoryAction(action, 'Place the carried stack first')
-      return
-    }
-    if (Effect.runSync(world.inventory.snapshot).slots[source] === undefined) {
-      rejectInventoryAction(action, 'Source slot is empty')
-      return
-    }
-    multiplayerInventorySelection = null
-    Effect.runSync(inventoryInteraction.clickInventoryItem(source, 'left'))
-    Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(cell))
-    Effect.runSync(inventoryInteraction.preview())
-    completeInventoryAction()
-  }
-
   const dispatchInventoryAction = (action: InventoryAction): void => {
     if (action.kind === 'drag') {
       if (action.source.kind === 'slot' && action.target.kind === 'equipment-slot') {
@@ -5914,7 +5884,18 @@ type MultiplayerInventorySelection = Readonly<{
           const sourceSlot = inventorySlotOf(action.source)
           const targetSlot = inventorySlotOf(action.target)
           if (sourceSlot !== undefined && action.target.region === 'crafting-grid') {
-            draftCraftingFromInventory(action, sourceSlot, action.target.index)
+            if (multiplayer !== undefined) {
+              rejectInventoryAction(action, 'Crafting drag is unavailable in multiplayer')
+            } else if (pendingCrafting !== null) {
+              rejectInventoryAction(action, 'Crafting update is pending')
+            } else if (inventoryInteraction.state().inventoryCarried !== undefined) {
+              rejectInventoryAction(action, 'Place the carried stack first')
+            } else {
+              Effect.runSync(inventoryInteraction.clickInventoryItem(sourceSlot, 'left'))
+              Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(action.target.index))
+              Effect.runSync(inventoryInteraction.preview())
+              completeInventoryAction()
+            }
             return
           }
           if (sourceSlot === undefined || targetSlot === undefined) {

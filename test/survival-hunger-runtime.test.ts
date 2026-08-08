@@ -6,7 +6,7 @@ import {
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { makeSurvivalHungerCoordinator } from '../apps/web/survival-hunger-runtime'
-import type { DeltaTimeSecs } from '@nerima-games/mc-kernel'
+import type { DeltaTimeSecs } from '../src/domain/kernel-vocabulary'
 
 type HungerVitals = SurvivalHungerState['vitals']
 

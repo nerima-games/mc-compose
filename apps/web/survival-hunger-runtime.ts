@@ -7,7 +7,7 @@ import {
   type SurvivalHungerTickOutcome,
 } from '@nerima-games/mx-gameplay'
 import { Effect } from 'effect'
-import type { DeltaTimeSecs } from '@nerima-games/mc-kernel'
+import type { DeltaTimeSecs } from '../../src/domain/kernel-vocabulary'
 
 type HungerVitals = SurvivalHungerState['vitals']
 

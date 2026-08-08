@@ -67,7 +67,7 @@
 
 import { Effect, Ref } from 'effect'
 import { EMPTY_MODULE_LAYER, type GameModule, type StageRegistration } from '../../src/domain/composition'
-import { monotonicSecs } from '@nerima-games/mc-kernel'
+import { monotonicSecs } from '../../src/domain/kernel-vocabulary'
 import { StageId } from '../../src/domain/stage-order'
 
 /** One `StageRegistration` as some repository actually writes it down. */

@@ -111,8 +111,9 @@ const PREVIEW_CAMERA = cameraFrom(START_POSE)
  * A quad as the fixture stores it: mc-meshing's `Quad`, plus its resolved tile.
  *
  * The TILE IS BAKED IN because resolving it needs `blockId -> name`, and the
- * names are mc-kernel's closed union, imported from the published package. It
- * is not among the siblings that `vite.config.ts` resolves. `domain/block-texture-map.ts`'s `BlockNameLookup`
+ * names are mc-kernel's closed union — which this repository can import under
+ * rule 4 but which is not published and so is not among the siblings
+ * `vite.config.ts` resolves. `domain/block-texture-map.ts`'s `BlockNameLookup`
  * header is the same argument from mc-render's side: the vocabulary is carried
  * whole or not carried, and this page needs a number, not a union.
  */

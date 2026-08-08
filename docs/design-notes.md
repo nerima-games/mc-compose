@@ -428,13 +428,15 @@ E2E の本数が増え続けるなら、それは compose にロジックが溜�
 `Effect<void, never, ClockPort>` はその型に代入できない。
 
 にもかかわらず `composeGame` がコンパイルできていたのは、`mx-gameplay` / `mx-redstone` / `mx-ui` が
-それぞれのローカル契約で `FrameServices = never` と宣言していたからにすぎない。
-その契約が kernel の公開契約と一致していないことが、直接 import への移行で明らかになった。
+それぞれのミラーで `FrameServices = never` と宣言していたからにすぎない。
+3 つとも kernel 公開時にそのファイルを削除すると明言している。**その瞬間に落ちる時限爆弾だった。**
 
 **本実装での対処**: `run` は `Effect<void, never, FrameServices>` を返す。
-`FrameServices` は公開済み `@nerima-games/mc-kernel` の `ClockPort` から導出している —
-mx-* がローカル契約を持っていたのに対し、このリポジトリは stage の著者ではなく提供者なので、
-名前を書けないものは discharge できない。直接 import により、型と実行時の Tag が同じ公開契約を参照する。
+`FrameServices` は `domain/kernel-vocabulary.ts` で `ClockPort` として宣言してある —
+mx-* が `never` に留めているのに対しこのリポジトリが Tag を再掲するのは、
+**compose は stage の著者ではなく提供者**であり、名前を書けないものは discharge できないからである。
+Tag は文字列キーで解決されるので、`'@nerima-games/mc-kernel/ClockPort'` から作ったミラーは
+実行時に kernel のサービスそのものである。`test/kernel-mirror.test.ts` が形を固定している。
 
 discharge は `ComposedGame.runFrameWith(services: Layer<FrameServices>)` である。
 この経路に `any` は 1 つも無いので、`Effect.provide` は要求を**消去ではなく除去**する。

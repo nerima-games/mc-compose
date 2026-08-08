@@ -60,10 +60,7 @@ const initialState = {
   inventories: [
     {
       player: 'survival-alice',
-      state: {
-        slots: [{ item: 'potato', count: 2 }, { item: 'oak_log', count: 2 }, ...emptySlots().slice(2)],
-        selectedSlot: 0,
-      },
+      state: { slots: [{ item: 'potato', count: 2 }, ...emptySlots().slice(1)], selectedSlot: 0 },
     },
     {
       player: 'survival-bob',
@@ -321,10 +318,7 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     })
     const aliceInventory = alice.page.locator('#inventory-root')
     const alicePotatoes = aliceInventory.locator('[data-region="hotbar"] [data-slot-index="0"]')
-    const aliceLogs = aliceInventory.locator('[data-region="hotbar"] [data-slot-index="1"]')
     const aliceMainSlot = aliceInventory.locator('[data-region="main"] [data-slot-index="0"]')
-    const craftingCell = aliceInventory.locator('[data-region="crafting-grid"] [data-slot-index="0"]')
-    const craftingOutput = aliceInventory.locator('[data-mx-ui="crafting-output"]')
     await alice.page.keyboard.press('KeyE')
     await expect(aliceInventory).toBeVisible()
     await alicePotatoes.click({ button: 'right' })
@@ -333,34 +327,18 @@ test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state 
     await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'pending')
     await expect.poll(async () => {
       const slots = (await snapshot(alice.page)).inventory.slots
-      return [slots[0], slots[9]]
-    }).toEqual([{ item: 'potato', count: 1 }, { item: 'potato', count: 1 }])
-    await aliceLogs.click()
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'selecting')
-    await craftingCell.click()
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
-    await expect(craftingCell).toHaveAttribute('aria-label', /oak_log, 1/)
-    await expect(craftingOutput).toHaveAttribute('aria-label', /oak_planks, 4/)
-    const revisionBeforeFirstCraft = await revision(alice.page)
-    await craftingOutput.click()
-    await expect.poll(() => revision(alice.page)).toBeGreaterThan(revisionBeforeFirstCraft)
-    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
-      expect.arrayContaining([
-        { item: 'oak_log', count: 1 },
-        { item: 'oak_planks', count: 4 },
-      ]),
-    )
-
-    await aliceLogs.dragTo(craftingCell)
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
-    await expect(craftingCell).toHaveAttribute('aria-label', /oak_log, 1/)
-    const revisionBeforeSecondCraft = await revision(alice.page)
-    await craftingOutput.click()
-    await expect.poll(() => revision(alice.page)).toBeGreaterThan(revisionBeforeSecondCraft)
-    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots[1]).toBeNull()
-    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots).toEqual(
-      expect.arrayContaining([{ item: 'oak_planks', count: 8 }]),
-    )
+      return [slots[0], ...slots.slice(2, 10)]
+    }).toEqual([
+      { item: 'potato', count: 1 },
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      { item: 'potato', count: 1 },
+    ])
     await alice.page.keyboard.press('KeyE')
     await expect(aliceInventory).toBeHidden()
     await expect.poll(async () => (await snapshot(bob.page)).vitals.healthPoints).toBe(18)
