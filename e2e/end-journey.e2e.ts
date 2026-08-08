@@ -186,8 +186,16 @@ test('completes and persists a survival End journey without progression-state se
   const thrownEye = (await snapshot(page)).eyesOfEnder[0]
   expect(thrownEye).toBeDefined()
   const renderedEyeId = `projectile:${thrownEye?.id ?? ''}`
-  expect((await snapshot(page)).renderedEntities.find((entity) => entity.id === renderedEyeId))
-    .toMatchObject({ kind: 'eye_of_ender', feetPosition: thrownEye?.position })
+  // The eye of ender is a moving projectile, so its position and the rendered
+  // entity's feetPosition must come from the SAME snapshot call. Comparing
+  // against `thrownEye.position` captured above would race the projectile's
+  // own motion across the two async page.evaluate round-trips.
+  const atThrow = await snapshot(page)
+  expect(atThrow.renderedEntities.find((entity) => entity.id === renderedEyeId))
+    .toMatchObject({
+      kind: 'eye_of_ender',
+      feetPosition: atThrow.eyesOfEnder.find((eye) => eye.id === thrownEye?.id)?.position,
+    })
   await expect.poll(async () => {
     const current = await snapshot(page)
     const position = current.eyesOfEnder.find((eye) => eye.id === thrownEye?.id)?.position
