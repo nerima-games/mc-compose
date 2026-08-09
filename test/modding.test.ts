@@ -201,6 +201,49 @@ describe('reserved stage namespaces', () => {
   )
 })
 
+describe('describeModdingError', () => {
+  it.effect('explains an invalid mod id', () =>
+    Effect.sync(() => {
+      const message = describeModdingError({ _tag: 'InvalidModId', id: 'ExtraOres' })
+      expect(message).toContain('"ExtraOres"')
+      expect(message).toContain('lowercase kebab-case')
+    }),
+  )
+
+  it.effect('explains an unsupported modding API version', () =>
+    Effect.sync(() => {
+      const message = describeModdingError({
+        _tag: 'UnsupportedApiVersion',
+        id: 'extra-ores',
+        declared: MODDING_API_VERSION + 1,
+        supported: MODDING_API_VERSION,
+      })
+      expect(message).toContain('extra-ores')
+      expect(message).toContain(String(MODDING_API_VERSION + 1))
+      expect(message).toContain(String(MODDING_API_VERSION))
+    }),
+  )
+
+  it.effect('explains a duplicate mod id', () =>
+    Effect.sync(() => {
+      const message = describeModdingError({ _tag: 'DuplicateModId', id: 'extra-ores' })
+      expect(message).toContain('"extra-ores"')
+      expect(message).toContain('ids must be unique within a build')
+    }),
+  )
+
+  // Defensive fallback: `ModdingError` is exhaustively typed, but a value
+  // reaching this function at runtime is not guaranteed to have been produced
+  // by `acceptMod` itself — e.g. a future error tag added on one side of a
+  // module boundary before the other side is updated.
+  it.effect('describes an unrecognised error tag rather than throwing', () =>
+    Effect.sync(() => {
+      const bogus = { _tag: 'SomethingNew' } as unknown as ModdingError
+      expect(describeModdingError(bogus)).toContain('unknown modding error')
+    }),
+  )
+})
+
 describe('a mod is not a second-class module', () => {
   // REGRESSION: `acceptMod` returns a plain GameModule, merged by `composeGame`
   // exactly like mx-gameplay's. No mod-specific hook, no priority, no pre/post

@@ -88,6 +88,60 @@ const COMMAND_PATTERN = /^[a-z][A-Za-z0-9]*$/u
 export const qaKey = (namespace: string, command: string): string => `${namespace}.${command}`
 
 /**
+ * Validate and merge one namespace entry's commands into the accumulating
+ * registry. Split out of `mergeNamespaceEntry` so both functions stay under
+ * this repository's statement budget; behaviour is unchanged — `registry` is
+ * mutated exactly as it was when this was inline.
+ */
+const mergeCommands = (
+  entry: QaNamespace,
+  registry: Map<string, QaCommand>,
+): QaApiError | undefined => {
+  for (const [command, run] of Object.entries(entry.commands)) {
+    if (!COMMAND_PATTERN.test(command)) {
+      return { _tag: 'InvalidCommandName', command, namespace: entry.namespace }
+    }
+    const key = qaKey(entry.namespace, command)
+    // Unreachable via `buildQaRegistry`: `key` is `namespace.command`, and by
+    // The time this runs, `mergeNamespaceEntry` has already rejected any
+    // Repeat of `entry.namespace` as `DuplicateNamespace` — so this namespace
+    // Is merged exactly once. Within that one merge, `command` is drawn from
+    // `Object.entries(entry.commands)`, and a JS object literal cannot carry
+    // Two identical keys. No path can make `registry` already hold `key`.
+    // Kept as a guard against a future loosening of the namespace check —
+    // `DuplicateCommand` itself is a real, tested value (see
+    // `describeQaApiError`'s tests); only this production site is dead.
+    if (registry.has(key)) {
+      return { _tag: 'DuplicateCommand', key }
+    }
+    registry.set(key, run)
+  }
+  return
+}
+
+/**
+ * Validate and merge one namespace entry into the accumulating registry.
+ *
+ * Split out of `buildQaRegistry` so that function stays under this
+ * repository's statement budget; behaviour is unchanged — `seenNamespaces`
+ * and `registry` are mutated exactly as they were when this was inline.
+ */
+const mergeNamespaceEntry = (
+  entry: QaNamespace,
+  seenNamespaces: Set<string>,
+  registry: Map<string, QaCommand>,
+): QaApiError | undefined => {
+  if (!NAMESPACE_PATTERN.test(entry.namespace)) {
+    return { _tag: 'InvalidNamespace', namespace: entry.namespace }
+  }
+  if (seenNamespaces.has(entry.namespace)) {
+    return { _tag: 'DuplicateNamespace', namespace: entry.namespace }
+  }
+  seenNamespaces.add(entry.namespace)
+  return mergeCommands(entry, registry)
+}
+
+/**
  * Merge module QA namespaces into one registry.
  *
  * Every failure mode is a NAME collision, and every one is fatal rather than
@@ -101,23 +155,9 @@ export const buildQaRegistry = (
   const registry = new Map<string, QaCommand>()
 
   for (const entry of namespaces) {
-    if (!NAMESPACE_PATTERN.test(entry.namespace)) {
-      return Either.left({ _tag: 'InvalidNamespace', namespace: entry.namespace })
-    }
-    if (seenNamespaces.has(entry.namespace)) {
-      return Either.left({ _tag: 'DuplicateNamespace', namespace: entry.namespace })
-    }
-    seenNamespaces.add(entry.namespace)
-
-    for (const [command, run] of Object.entries(entry.commands)) {
-      if (!COMMAND_PATTERN.test(command)) {
-        return Either.left({ _tag: 'InvalidCommandName', namespace: entry.namespace, command })
-      }
-      const key = qaKey(entry.namespace, command)
-      if (registry.has(key)) {
-        return Either.left({ _tag: 'DuplicateCommand', key })
-      }
-      registry.set(key, run)
+    const error = mergeNamespaceEntry(entry, seenNamespaces, registry)
+    if (typeof error !== 'undefined') {
+      return Either.left(error)
     }
   }
 
@@ -143,11 +183,14 @@ export const readInstalledQaApi = (
   target: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, QaCommand>> | undefined => {
   const published = target[QA_GLOBAL_KEY]
-  return published === undefined ? undefined : (published as Readonly<Record<string, QaCommand>>)
+  if (typeof published === 'undefined') {
+    return
+  }
+  return published as Readonly<Record<string, QaCommand>>
 }
 
 export const describeQaApiError = (error: QaApiError): string => {
-  switch (error._tag) {
+  switch (error['_tag']) {
     case 'InvalidNamespace':
       return `"${error.namespace}" is not a valid QA namespace; use lowercase kebab/dot segments, e.g. "gameplay" or "gameplay.fluids".`
     case 'InvalidCommandName':
@@ -156,5 +199,7 @@ export const describeQaApiError = (error: QaApiError): string => {
       return `the QA namespace "${error.namespace}" was contributed twice; each module owns exactly one.`
     case 'DuplicateCommand':
       return `the QA command "${error.key}" was contributed twice. Shadowing is rejected: an E2E test calling a shadowed command tests the wrong module and passes.`
+    default:
+      return `unknown QA API error: ${JSON.stringify(error)}`
   }
 }

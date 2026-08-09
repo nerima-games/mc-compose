@@ -278,6 +278,39 @@ describe('cycle detection', () => {
     }),
   )
 
+  // REGRESSION: the cycle search revisits a shared descendant through more
+  // than one path (a "diamond" — two branches that rejoin before either
+  // reaches the cycle). The first path to reach the shared node fully
+  // resolves it (finds no cycle through it, marks it done); the search must
+  // then recognise it as already-resolved via the SECOND path too, rather
+  // than re-exploring it or misreporting it as part of the cycle.
+  // `p1` points at both `x` and `w`; `w` leads to `p2`, which ALSO points at
+  // `x`. Only `cyc1`/`cyc2` are actually cyclic — `p1`/`p2`/`w`/`x` are merely
+  // stuck because they transitively depend on `cyc1`.
+  it.effect('does not miscount a shared descendant reached through two paths', () =>
+    Effect.sync(() => {
+      const error = failure(
+        resolveStageOrder([
+          stage('cyc2', 'cyc1'),
+          stage('cyc1', 'cyc2'),
+          stage('x', 'p1', 'p2'),
+          stage('w', 'p1'),
+          stage('p2', 'w'),
+          stage('p1', 'cyc1'),
+        ]),
+      )
+
+      expect(error?._tag).toBe('StageCycle')
+      const cycle = error?._tag === 'StageCycle' ? [...error.cycle] : []
+      expect(new Set(cycle)).toStrictEqual(new Set(['cyc1', 'cyc2']))
+      expect(cycle[0]).toBe(cycle[cycle.length - 1])
+      expect(cycle).not.toContain('x')
+      expect(cycle).not.toContain('w')
+      expect(cycle).not.toContain('p1')
+      expect(cycle).not.toContain('p2')
+    }),
+  )
+
   it.effect('explains a cycle in a message a human can act on', () =>
     Effect.sync(() => {
       const error = failure(resolveStageOrder([stage('a', 'b'), stage('b', 'a')]))
@@ -307,6 +340,16 @@ describe('duplicate stage ids', () => {
       const error = failure(resolveStageOrder([stage('a'), stage('a')]))
       const message = error === undefined ? '' : describeStageOrderError(error)
       expect(message).toContain('unique across the whole build')
+    }),
+  )
+
+  // Defensive fallback: `StageOrderError` is exhaustively typed, but a value
+  // reaching this function at runtime is not guaranteed to have been produced
+  // by `resolveStageOrder` itself.
+  it.effect('describes an unrecognised error tag rather than throwing', () =>
+    Effect.sync(() => {
+      const bogus = { _tag: 'SomethingNew' } as unknown as StageOrderError
+      expect(describeStageOrderError(bogus)).toContain('unknown stage order error')
     }),
   )
 })

@@ -25,6 +25,27 @@ const snapshot = (page: Page): Promise<GameplaySnapshot> =>
 const horizontalDistance = (left: Position, right: Position): number =>
   Math.hypot(right.x - left.x, right.z - left.z)
 
+// A fixed "wait N ms, sample once" check assumes a frame budget the test
+// runner does not actually guarantee, so a slow run reads as ongoing motion
+// when momentum has simply not finished decaying against wall-clock time yet.
+// Poll two consecutive samples 280ms apart instead, so the assertion tracks
+// the real condition (has horizontal drift actually stopped) rather than a
+// fixed-latency proxy for it.
+const awaitMovementSettled = (page: Page): Promise<void> => {
+  let previous: Position | undefined
+  return expect
+    .poll(
+      async () => {
+        const current = (await snapshot(page)).pose.feetPosition
+        const delta = previous === undefined ? Number.POSITIVE_INFINITY : horizontalDistance(previous, current)
+        previous = current
+        return delta
+      },
+      { timeout: 5_000, intervals: [280] },
+    )
+    .toBeLessThan(0.03)
+}
+
 const centerOf = async (page: Page, selector: string): Promise<{ readonly x: number; readonly y: number }> => {
   const box = await page.locator(selector).boundingBox()
   if (box === null) throw new Error(`touch target has no box: ${selector}`)
@@ -67,10 +88,7 @@ test.describe('touch input surface', () => {
     expect(horizontalDistance(beforeMove.pose.feetPosition, afterMove.pose.feetPosition)).toBeGreaterThan(0.05)
     // Ground movement retains physical momentum briefly after input is released.
     await page.waitForTimeout(1_100)
-    const afterEnd = await snapshot(page)
-    await page.waitForTimeout(280)
-    const settledAfterEnd = await snapshot(page)
-    expect(horizontalDistance(afterEnd.pose.feetPosition, settledAfterEnd.pose.feetPosition)).toBeLessThan(0.03)
+    await awaitMovementSettled(page)
 
     const lookStart = await centerOf(page, '[data-testid="touch-look-surface"]')
     const beforeLook = await snapshot(page)
@@ -97,20 +115,14 @@ test.describe('touch input surface', () => {
     await page.waitForTimeout(180)
     await dispatchTouch(client, 'touchCancel')
     await page.waitForTimeout(1_100)
-    const afterCancel = await snapshot(page)
-    await page.waitForTimeout(280)
-    const settledAfterCancel = await snapshot(page)
-    expect(horizontalDistance(afterCancel.pose.feetPosition, settledAfterCancel.pose.feetPosition)).toBeLessThan(0.03)
+    await awaitMovementSettled(page)
 
     const right = await centerOf(page, '[data-touch-action="moveRight"]')
     await dispatchTouch(client, 'touchStart', right)
     await page.waitForTimeout(180)
     await page.evaluate(() => window.dispatchEvent(new Event('blur')))
     await page.waitForTimeout(1_100)
-    const afterBlur = await snapshot(page)
-    await page.waitForTimeout(280)
-    const settledAfterBlur = await snapshot(page)
-    expect(horizontalDistance(afterBlur.pose.feetPosition, settledAfterBlur.pose.feetPosition)).toBeLessThan(0.03)
+    await awaitMovementSettled(page)
     await dispatchTouch(client, 'touchEnd')
   })
 })

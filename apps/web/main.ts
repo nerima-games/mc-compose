@@ -96,10 +96,8 @@ import {
 } from '@nerima-games/mc-audio'
 import {
   blockIdOf,
-  blockPosition,
   blockTypeOfId,
   capabilityOfBlockId,
-  chunkCoord,
   MonotonicTimeSecs as KernelMonotonicTimeSecs,
   position,
   propertyOfBlockId,
@@ -144,6 +142,8 @@ import {
 } from '@nerima-games/mc-sim'
 import {
   biomeFor,
+  blockPosition,
+  chunkCoord,
   chunkSnapshotOf,
   DEFAULT_TERRAIN_LEVELS,
   detectCompletedEndPortal,

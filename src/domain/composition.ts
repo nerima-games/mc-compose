@@ -27,16 +27,16 @@
  * whether one should run. A stage that should sometimes not run contains that
  * decision inside its own `run`, in the repository that owns it.
  */
-import { Effect, Either, Layer } from 'effect'
 import type { DeltaTimeSecs, FrameServices } from './kernel-vocabulary'
+import { Effect, Either, Layer } from 'effect'
 import {
-  describeStagePlanWarnings,
-  resolveStageOrder,
   type StageConstraint,
   type StageId,
   type StageOrderError,
   type StageOrderPlan,
   type StagePhase,
+  describeStagePlanWarnings,
+  resolveStageOrder,
 } from './stage-order'
 import { STANDARD_STAGE_SKELETON } from './stage-skeleton'
 
@@ -97,7 +97,7 @@ export type StageRegistration = {
  * provided typechecked and then died at runtime with `Service not found`, which
  * is the worst possible shape for this particular failure — `tsc` caught it
  * only incidentally, via `exactOptionalPropertyTypes`, and only sometimes.
- * `Layer`'s `RIn` is covariant (`out RIn`), so `Layer<X, E, R>` is assignable
+ * `Layer`'s `RIn` is covariant (`out RIn`), so `Layer<X, Err, R>` is assignable
  * to `Layer<never, unknown, never>` exactly when `R` is `never`. A module must
  * therefore arrive SELF-CONTAINED, which is not a new rule: modules are peers
  * (`Layer.merge`, never `Layer.provide`), and a module needing another
@@ -142,10 +142,10 @@ export const EMPTY_MODULE_LAYER: ModuleLayer = Layer.empty as unknown as ModuleL
  * appears. It is deliberately not erased there: the host is what discharges it,
  * and the host has the type to do so.
  */
-export type GameModule<ROut = never, E = unknown> = {
+export type GameModule<ROut = never, Err = unknown> = {
   /** For diagnostics only. Never branched on. */
   readonly name: string
-  readonly layers: Layer.Layer<ROut, E, never>
+  readonly layers: Layer.Layer<ROut, Err, never>
   readonly frameStages: ReadonlyArray<StageRegistration>
 }
 
@@ -154,7 +154,7 @@ export type GameModule<ROut = never, E = unknown> = {
  * composable module.
  *
  * Three lines, and it is the whole adapter between `mc-kernel`'s
- * `GameModule<ROut, E, RIn, RRegister>` and this repository's post-registration
+ * `GameModule<ROut, Err, RIn, RRegister>` and this repository's post-registration
  * `GameModule`. It qualifies under the prime directive as wiring: it inspects
  * no stage, decides nothing, and adds no behaviour — it evaluates a value the
  * module already computed and copies it into a record.
@@ -165,22 +165,22 @@ export type GameModule<ROut = never, E = unknown> = {
  * function exists rather than callers writing `Effect.map` by hand and losing
  * the parameter to inference on an erased boundary.
  */
-export const registerModule = <RRegister, ROut = never, E = unknown>(module: {
+export const registerModule = <RRegister, ROut = never, Err = unknown>(module: {
   readonly name: string
-  readonly layers: Layer.Layer<ROut, E, never>
+  readonly layers: Layer.Layer<ROut, Err, never>
   readonly frameStages: Effect.Effect<ReadonlyArray<StageRegistration>, never, RRegister>
-}): Effect.Effect<GameModule<ROut, E>, never, RRegister> =>
+}): Effect.Effect<GameModule<ROut, Err>, never, RRegister> =>
   Effect.map(module.frameStages, (frameStages) => ({
-    name: module.name,
-    layers: module.layers,
     frameStages,
+    layers: module.layers,
+    name: module.name,
   }))
 
-export type ComposedGame<ROut = never, E = unknown> = {
+export type ComposedGame<ROut = never, Err = unknown> = {
   /** The resolved total order, plus the dropped and the unrecognised. */
   readonly plan: StageOrderPlan
   /** Every module's services, merged. */
-  readonly layer: Layer.Layer<ROut, E, never>
+  readonly layer: Layer.Layer<ROut, Err, never>
   /**
    * Run one frame: every stage, once, in `plan.order`.
    *
@@ -234,8 +234,8 @@ export type ComposeOptions = {
  * between two experience modules, which plan.md §2.3-1 forbids outright.
  */
 type ModuleList = ReadonlyArray<GameModule<never, unknown>>
-type LayerOutput<T> = T extends Layer.Layer<infer ROut, unknown, never> ? ROut : never
-type LayerError<T> = T extends Layer.Layer<never, infer E, never> ? E : never
+type LayerOutput<LayerType> = LayerType extends Layer.Layer<infer ROut, unknown, never> ? ROut : never
+type LayerError<LayerType> = LayerType extends Layer.Layer<never, infer Err, never> ? Err : never
 type ModuleOutput<Modules extends ModuleList> = LayerOutput<Modules[number]['layers']>
 type ModuleError<Modules extends ModuleList> = LayerError<Modules[number]['layers']>
 
@@ -243,7 +243,7 @@ export const mergeModuleLayers = <const Modules extends ModuleList>(
   modules: Modules,
 ): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, never> => {
   // Seeded with EMPTY_MODULE_LAYER; see that constant for why `Layer.empty`
-  // cannot be used directly.
+  // Cannot be used directly.
   //
   let merged: ModuleLayer = EMPTY_MODULE_LAYER
   for (const module of modules) {
@@ -256,10 +256,12 @@ export const mergeModuleLayers = <const Modules extends ModuleList>(
 export const collectStages = (modules: ReadonlyArray<GameModule>): ReadonlyArray<StageRegistration> =>
   modules.flatMap((module) => [...module.frameStages])
 
-const asConstraint = (registration: StageRegistration): StageConstraint =>
-  registration.after === undefined
-    ? { id: registration.id }
-    : { id: registration.id, after: registration.after }
+const asConstraint = (registration: StageRegistration): StageConstraint => {
+  if (typeof registration.after === 'undefined') {
+    return { id: registration.id }
+  }
+  return { after: registration.after, id: registration.id }
+}
 
 /**
  * Compose modules into a runnable game.
@@ -279,23 +281,26 @@ export const composeGame = <const Modules extends ModuleList>(
     resolveStageOrder(stages.map(asConstraint), { skeleton }),
     (plan): ComposedGame<ModuleOutput<Modules>, ModuleError<Modules>> => {
       const byId = new Map(stages.map((stage) => [stage.id, stage] as const))
-      const ordered = plan.order.flatMap((id) => {
-        const stage = byId.get(id)
-        return stage === undefined ? [] : [stage]
-      })
+      // Non-null: `plan.order` is a permutation of `registered`, which
+      // `resolveStageOrder` built from exactly these `stages`' ids — and this
+      // Callback only runs on `Either.Right`, i.e. only once
+      // `collectRegistered` has already confirmed those ids are unique. So
+      // Every id `plan.order` yields is present in `byId`, built from the
+      // Same `stages` array.
+      const ordered = plan.order.map((id) => byId.get(id)!)
 
       // Note what is NOT here: no try/catch, no per-stage timing, no
-      // conditional skip, no budget. Adding any of them would be adding
-      // behaviour to the composition layer. Frame budgeting, if it is ever
-      // wanted, is a stage like any other and belongs to the module that
-      // owns the frame clock.
+      // Conditional skip, no budget. Adding any of them would be adding
+      // Behaviour to the composition layer. Frame budgeting, if it is ever
+      // Wanted, is a stage like any other and belongs to the module that
+      // Owns the frame clock.
       const runFrame = (dt: DeltaTimeSecs): Effect.Effect<void, never, FrameServices> =>
         Effect.forEach(ordered, (stage) => stage.run(dt), { discard: true })
 
       return {
-        plan,
         layer: mergeModuleLayers(modules),
         moduleNames: modules.map((module) => module.name),
+        plan,
         runFrame,
         runFrameWith: (services) => (dt) => Effect.provide(runFrame(dt), services),
         warnings: describeStagePlanWarnings(plan),

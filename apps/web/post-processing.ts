@@ -9,14 +9,12 @@ import {
   UnrealBloomPass,
 } from 'three/addons'
 import * as THREE from 'three'
-import type {
-  PostProcessingPass,
-  PostProcessingRendererFactory,
-} from '@nerima-games/mc-render'
 import {
   chainEffects,
+  type PostProcessingPass,
+  type PostProcessingRendererFactory,
+  type PostProcessingStep,
 } from '@nerima-games/mc-render'
-import type { PostProcessingStep } from '@nerima-games/mc-render'
 
 const signatureOf = (chain: ReadonlyArray<PostProcessingStep>): string =>
   chain.map(({ pass, effects }) => `${pass}:${effects.join(',')}`).join('|')

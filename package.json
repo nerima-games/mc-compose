@@ -24,7 +24,7 @@
       "@nerima-games/mc-render": "0.2.14",
       "@nerima-games/mc-sim": "0.1.42",
       "@nerima-games/mc-worldgen": "0.1.14",
-      "@nerima-games/mx-gameplay": "0.2.1"
+      "@nerima-games/mx-gameplay": "0.3.1"
     }
   },
   "publishConfig": {
@@ -68,22 +68,22 @@
   "dependencies": {
     "@nerima-games/mc-audio": "0.2.6",
     "@nerima-games/mc-kernel": "0.2.18",
-    "@nerima-games/mc-physics": "0.1.7",
+    "@nerima-games/mc-physics": "0.1.6",
     "@nerima-games/mc-render": "0.2.14",
     "@nerima-games/mc-save": "0.2.2",
     "@nerima-games/mc-sim": "0.1.42",
+    "@nerima-games/mc-playground-kit": "0.1.1",
     "@nerima-games/mc-worldgen": "0.1.14",
     "@nerima-games/mx-gameplay": "0.3.1",
     "@nerima-games/mx-multiplayer": "0.5.0",
-    "@nerima-games/mx-redstone": "0.2.7",
-    "@nerima-games/mx-ui": "0.3.8",
+    "@nerima-games/mx-redstone": "0.2.6",
+    "@nerima-games/mx-ui": "0.3.7",
     "effect": "^3.22.0"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.7.0",
     "@changesets/cli": "^2.31.1",
     "@effect/vitest": "^0.25.1",
-    "@nerima-games/mc-playground-kit": "0.1.1",
     "@playwright/test": "^1.50",
     "@types/node": "^22.19.11",
     "@types/three": "^0.170.0",

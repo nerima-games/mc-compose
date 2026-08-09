@@ -47,7 +47,7 @@
  * out because "it was like that in the reference implementation" is not a
  * reason, and because changing one of them silently changes the game.
  */
-import { StageId, stagePhase, type StagePhase } from './stage-order'
+import { StageId, type StagePhase, stagePhase } from './stage-order'
 
 /** Read input before anything reacts to it, so a frame acts on this frame's input. */
 export const STAGE_PHASE_INPUT: StagePhase = stagePhase('input', 'input')
@@ -346,9 +346,9 @@ export const SIMULATION_PHASES: ReadonlyArray<StagePhase> = [
 // ---------------------------------------------------------------------------
 //
 // A phase's name IS a stage id: it is what a module owning a whole phase
-// registers, and what `domain/modding.ts` reserves against a mod claiming it.
+// Registers, and what `domain/modding.ts` reserves against a mod claiming it.
 // Derived from the phases rather than written a second time, so the two cannot
-// drift apart the way the skeleton and the modules' real ids did.
+// Drift apart the way the skeleton and the modules' real ids did.
 
 /** @see STAGE_PHASE_INPUT */
 export const STAGE_INPUT: StageId = StageId(STAGE_PHASE_INPUT.name)

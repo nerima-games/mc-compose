@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { CHUNK_SIZE_XZ, chunkCoord } from '@nerima-games/mc-kernel'
 import {
+  CHUNK_SIZE_XZ,
   CHUNK_VOLUME,
+  chunkCoord,
   type Chunk,
   type Dimension,
 } from '@nerima-games/mc-worldgen'

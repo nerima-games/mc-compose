@@ -78,7 +78,10 @@ jobs:
       # rather than as an unconditional hard requirement.
       - name: Changeset status
         if: github.event_name == 'pull_request'
-        run: pnpm changeset status --since=main
+        # A PR checkout has no local branch literally named `main`, only
+        # `origin/main` (found+fixed identically in mc-save, mc-physics):
+        # --since=main fails with "Failed to find where HEAD diverged from main".
+        run: pnpm changeset status --since=origin/main
 
       # 4-metric 99% gate (TEST_STANDARD.md §3), applied immediately and
       # org-wide with no staged rollout. This repository's baseline was
