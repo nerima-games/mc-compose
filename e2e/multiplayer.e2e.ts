@@ -314,6 +314,27 @@ const startServer = (
     })
   })
 
+// `child.kill()` only sends the signal; it does not wait for the process to
+// actually exit. A `finally` block that killed the server and immediately
+// `rm(stateDirectory, { recursive: true })`'d its directory raced the child's
+// own shutdown writes to that directory, observed as
+// `ENOTEMPTY: directory not empty, rmdir '...'` and — worse — as orphaned
+// multiplayer-server processes still running (and still holding a port) long
+// after the run that spawned them finished, degrading later tests in the
+// same suite run. Wait for the real `exit` event before deleting anything,
+// escalating to SIGKILL if the process ignores SIGTERM.
+const stopServer = (child: ChildProcess): Promise<void> => {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve) => {
+    const forceKill = setTimeout(() => child.kill('SIGKILL'), 5_000)
+    child.once('exit', () => {
+      clearTimeout(forceKill)
+      resolve()
+    })
+    child.kill('SIGTERM')
+  })
+}
+
 const openPlayer = async (
   browser: Browser,
   worldName: string,
@@ -421,7 +442,7 @@ test('does not explode or mutate a Nether bed in multiplayer', async ({ page }) 
     expect(await canvasRevision(page)).toBe(revisionBeforeUse)
     await expect(page.locator('body')).not.toHaveAttribute('data-bed-explosion-request')
   } finally {
-    server.process.kill('SIGTERM')
+    await stopServer(server.process)
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
@@ -500,7 +521,7 @@ test('fires a bow through the authoritative multiplayer server', async ({ browse
     )
   } finally {
     await alice?.context.close()
-    server.process.kill('SIGTERM')
+    await stopServer(server.process)
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
@@ -619,7 +640,7 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     await expect.poll(async () => (await snapshot(reconnectedBob)).ignitionTarget.block).toBe(0)
   } finally {
     await Promise.all([alice.context.close(), bob.context.close()])
-    server.process.kill('SIGTERM')
+    await stopServer(server.process)
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })

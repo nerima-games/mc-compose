@@ -231,6 +231,26 @@ const startServer = (stateFile: string, claimsFile: string): Promise<{ process: 
     })
   })
 
+// `child.kill()` only sends the signal; it does not wait for the process to
+// actually exit. Deleting a server's state directory right after killing it
+// races the child's own shutdown writes to that directory, observed as
+// `ENOTEMPTY: directory not empty, rmdir '...'` and — worse — as orphaned
+// multiplayer-server processes still running (and still holding a port) long
+// after the run that spawned them finished, degrading later tests in the
+// same suite run. Wait for the real `exit` event before deleting anything,
+// escalating to SIGKILL if the process ignores SIGTERM.
+const stopServer = (child: ChildProcess): Promise<void> => {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve) => {
+    const forceKill = setTimeout(() => child.kill('SIGKILL'), 5_000)
+    child.once('exit', () => {
+      clearTimeout(forceKill)
+      resolve()
+    })
+    child.kill('SIGTERM')
+  })
+}
+
 test.beforeAll(async () => {
   stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-survival-e2e-'))
   const stateFile = join(stateDirectory, 'state.json')
@@ -248,7 +268,7 @@ test.beforeAll(async () => {
 })
 
 test.afterAll(async () => {
-  serverProcess?.kill('SIGTERM')
+  if (serverProcess !== undefined) await stopServer(serverProcess)
   if (stateDirectory !== undefined) {
     await rm(stateDirectory, { recursive: true, force: true })
   }
@@ -283,7 +303,7 @@ test('routes environmental survival damage through multiplayer authority', async
     await expect.poll(async () => (await snapshot(alice!.page)).vitals.healthPoints).toBeLessThanOrEqual(9)
   } finally {
     await alice?.context.close()
-    environmentServer?.kill('SIGTERM')
+    if (environmentServer !== undefined) await stopServer(environmentServer)
     await rm(environmentStateDirectory, { recursive: true, force: true })
   }
 })
