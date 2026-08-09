@@ -109,6 +109,26 @@ describe('teardown cannot be skipped', () => {
     }),
   )
 
+  it.effect('routes quitting from Loading through teardown too', () =>
+    Effect.sync(() => {
+      const loading: SessionState = { _tag: 'Loading', world: overworld }
+      expect(transition(loading, { _tag: 'QuitToTitleRequested' })).toStrictEqual({
+        _tag: 'Unloading',
+        world: overworld,
+      })
+    }),
+  )
+
+  it.effect('routes quitting from Paused through teardown too', () =>
+    Effect.sync(() => {
+      const paused: SessionState = { _tag: 'Paused', world: overworld }
+      expect(transition(paused, { _tag: 'QuitToTitleRequested' })).toStrictEqual({
+        _tag: 'Unloading',
+        world: overworld,
+      })
+    }),
+  )
+
   it.effect('reports that world resources are held in every state except Title', () =>
     Effect.sync(() => {
       expect(holdsWorldResources(initialSessionState)).toBe(false)
@@ -198,6 +218,45 @@ describe('illegal transitions', () => {
         { _tag: 'PauseRequested' },
       ])
       expect(rejectedAt).toBe(3)
+    }),
+  )
+})
+
+describe('defensive fallbacks', () => {
+  // Defensive fallback: `SessionEvent` is exhaustively typed per-state, but a
+  // value reaching `transition` at runtime is not guaranteed to have been
+  // constructed from the union — e.g. a message decoded from the network.
+  it.effect('rejects an event tag Loading does not recognise, rather than throwing', () =>
+    Effect.sync(() => {
+      const loading: SessionState = { _tag: 'Loading', world: overworld }
+      const bogus = { _tag: 'SomethingNew' } as unknown as SessionEvent
+      expect(transition(loading, bogus)).toBeUndefined()
+    }),
+  )
+
+  // Defensive fallback: `SessionState` is exhaustively typed, but a value
+  // reaching `transition` at runtime is not guaranteed to have been produced
+  // by this module's own transitions.
+  it.effect('rejects a state tag it does not recognise, rather than throwing', () =>
+    Effect.sync(() => {
+      const bogus = { _tag: 'SomethingNew' } as unknown as SessionState
+      expect(transition(bogus, { _tag: 'PauseRequested' })).toBeUndefined()
+    }),
+  )
+
+  // Defensive fallback: `events` is typed as `ReadonlyArray<SessionEvent>`,
+  // but nothing at runtime stops a caller from handing `runSession` an actual
+  // sparse array — a hole reads as `undefined` despite the element type never
+  // including it.
+  it.effect('rejects a hole in the event sequence, rather than throwing', () =>
+    Effect.sync(() => {
+      const events: Array<SessionEvent> = []
+      events[1] = { _tag: 'LoadSucceeded' }
+      // events[0] is a hole: never assigned, so `events[0]` reads as `undefined`.
+
+      const { state, rejectedAt } = runSession(initialSessionState, events)
+      expect(rejectedAt).toBe(0)
+      expect(state).toStrictEqual(initialSessionState)
     }),
   )
 })

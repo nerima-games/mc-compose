@@ -260,10 +260,14 @@ const compareStages =
     if (left < right) {
       return COMPARE_LESS
     }
-    if (left > right) {
-      return COMPARE_GREATER
-    }
-    return COMPARE_EQUAL
+    // Collapsed to a plain `<`, with no third `left === right` arm: as the
+    // Doc comment above states, this comparator is only ever invoked on ids
+    // Drawn from `registered`, a Set, so two distinct entries being compared
+    // Are never the same string — `left === right` would require comparing
+    // An id against itself, which no caller here does. `COMPARE_GREATER` is
+    // Therefore returned for "not less than", covering both "greater than"
+    // And the id-equality case that cannot occur.
+    return COMPARE_GREATER
   }
 
 type StackFrame = { readonly node: StageId; readonly entering: boolean }
@@ -290,7 +294,12 @@ const enterNode = (node: StageId, state: CycleSearchState, stack: Array<StackFra
   state.path.push(node)
   stack.push({ entering: false, node })
 
-  for (const next of state.edges.get(node) ?? []) {
+  // Non-null: `state.edges` is `graph.successors`, seeded by
+  // `initializeGraph` with an entry for every id in `registered`, and `node`
+  // Here is always such an id (it starts as a member of `nodes`, which is a
+  // Subset of `registered`, and is otherwise drawn from `edges.get(...)`
+  // Values, which are themselves always registered ids).
+  for (const next of state.edges.get(node)!) {
     if (state.remaining.has(next) && !state.done.has(next)) {
       stack.push({ entering: true, node: next })
     }
@@ -328,10 +337,10 @@ const walk = (start: StageId, state: CycleSearchState): ReadonlyArray<StageId> |
   const stack: Array<StackFrame> = [{ entering: true, node: start }]
 
   while (stack.length > EMPTY_LENGTH) {
-    const frame = stack.pop()
-    if (typeof frame === 'undefined') {
-      break
-    }
+    // Non-null: `stack` is local to this function, only ever populated by
+    // `push`ing `StackFrame` values (never `undefined`), and the loop guard
+    // Above guarantees `stack.length > 0` before every `pop()`.
+    const frame = stack.pop()!
     const cycle = processFrame(frame, state, stack)
     if (typeof cycle !== 'undefined') {
       return cycle
@@ -407,7 +416,11 @@ const addEdge = (graph: MutableGraph, before: StageId, after: StageId): void => 
     return
   }
   outgoing.add(after)
-  graph.indegree.set(after, (graph.indegree.get(after) ?? NO_INDEGREE) + INDEGREE_STEP)
+  // Non-null: `after` is always a registered id (either `constraint.id`,
+  // Itself one of `registered`, or a skeleton-phase member of `registered`),
+  // And `initializeGraph` seeds `graph.indegree` with an entry for every
+  // Registered id before any edge is added.
+  graph.indegree.set(after, graph.indegree.get(after)! + INDEGREE_STEP)
 }
 
 /** --- 2. Edges from declared `after`, dangling ones set aside -------------- */
@@ -467,13 +480,15 @@ const addSkeletonChainEdges = (
   graph: MutableGraph,
 ): void => {
   const byPhase = groupByPhase(registered, skeleton)
-  const populated = [...byPhase.keys()]
-    .sort((left, right) => left - right)
-    .map((index) => byPhase.get(index) ?? [])
+  // Non-null throughout below. `byPhase.get(index)` is looked up only for an
+  // `index` just drawn from `byPhase.keys()`, so the entry always exists.
+  // `populated[index - INDEX_STEP]`/`populated[index]` are indexed by a loop
+  // Bound (`1 <= index < populated.length`) that keeps both in range.
+  const populated = [...byPhase.keys()].sort((left, right) => left - right).map((index) => byPhase.get(index)!)
 
   for (let index = 1; index < populated.length; index += INDEX_STEP) {
-    for (const before of populated[index - INDEX_STEP] ?? []) {
-      for (const after of populated[index] ?? []) {
+    for (const before of populated[index - INDEX_STEP]!) {
+      for (const after of populated[index]!) {
         addEdge(graph, before, after)
       }
     }
@@ -492,8 +507,13 @@ type ReadyQueue = {
 /** Decrement the indegree of `next`'s successors, queuing any that reach zero. */
 const releaseSuccessors = (next: StageId, graph: MutableGraph, queue: ReadyQueue): void => {
   const unlocked: Array<StageId> = []
-  for (const successor of graph.successors.get(next) ?? []) {
-    const remaining = (graph.indegree.get(successor) ?? NO_INDEGREE) - INDEGREE_STEP
+  // Non-null throughout below: `next` and every `successor` it yields are
+  // Always registered ids (successors are only ever added between registered
+  // Ids — see `addEdge`), and `initializeGraph` seeds both
+  // `graph.successors` and `graph.indegree` with an entry for every
+  // Registered id up front.
+  for (const successor of graph.successors.get(next)!) {
+    const remaining = graph.indegree.get(successor)! - INDEGREE_STEP
     graph.indegree.set(successor, remaining)
     if (remaining === NO_INDEGREE) {
       unlocked.push(successor)
@@ -509,10 +529,11 @@ const releaseSuccessors = (next: StageId, graph: MutableGraph, queue: ReadyQueue
 const drainReady = (graph: MutableGraph, queue: ReadyQueue): ReadonlyArray<StageId> => {
   const order: Array<StageId> = []
   while (queue.items.length > EMPTY_LENGTH) {
-    const next = queue.items.shift()
-    if (typeof next === 'undefined') {
-      break
-    }
+    // Non-null: `queue.items` is local to `kahnOrder`'s call into this
+    // Function, only ever populated by `push`ing `StageId` values, and the
+    // Loop guard above guarantees `queue.items.length > 0` before every
+    // `shift()`.
+    const next = queue.items.shift()!
     order.push(next)
     releaseSuccessors(next, graph, queue)
   }
@@ -526,7 +547,10 @@ const kahnOrder = (
   compare: Comparator,
 ): ReadonlyArray<StageId> => {
   const items = [...registered]
-    .filter((id) => (graph.indegree.get(id) ?? NO_INDEGREE) === NO_INDEGREE)
+    // Non-null: `id` is drawn from `registered`, and `initializeGraph` seeds
+    // `graph.indegree` with an entry for every registered id before this
+    // Ever runs.
+    .filter((id) => graph.indegree.get(id)! === NO_INDEGREE)
     .sort(compare)
   return drainReady(graph, { compare, items })
 }

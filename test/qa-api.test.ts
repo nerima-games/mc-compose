@@ -95,6 +95,47 @@ describe('name collisions are fatal', () => {
   )
 })
 
+describe('describeQaApiError', () => {
+  it.effect('explains an invalid namespace', () =>
+    Effect.sync(() => {
+      const message = describeQaApiError({ _tag: 'InvalidNamespace', namespace: 'Gameplay' })
+      expect(message).toContain('"Gameplay"')
+      expect(message).toContain('lowercase kebab/dot segments')
+    }),
+  )
+
+  it.effect('explains an invalid command name', () =>
+    Effect.sync(() => {
+      const message = describeQaApiError({
+        _tag: 'InvalidCommandName',
+        namespace: 'gameplay',
+        command: 'BreakBlock',
+      })
+      expect(message).toContain('"BreakBlock"')
+      expect(message).toContain('namespace "gameplay"')
+      expect(message).toContain('lowerCamelCase')
+    }),
+  )
+
+  it.effect('explains a duplicate namespace', () =>
+    Effect.sync(() => {
+      const message = describeQaApiError({ _tag: 'DuplicateNamespace', namespace: 'ui' })
+      expect(message).toContain('"ui"')
+      expect(message).toContain('contributed twice')
+    }),
+  )
+
+  // Defensive fallback: `QaApiError` is exhaustively typed, but a value
+  // reaching this function at runtime is not guaranteed to have been produced
+  // by `buildQaRegistry` itself.
+  it.effect('describes an unrecognised error tag rather than throwing', () =>
+    Effect.sync(() => {
+      const bogus = { _tag: 'SomethingNew' } as unknown as QaApiError
+      expect(describeQaApiError(bogus)).toContain('unknown QA API error')
+    }),
+  )
+})
+
 describe('name shape', () => {
   it.effect('rejects a namespace that is not lowercase kebab/dot segments', () =>
     Effect.sync(() => {

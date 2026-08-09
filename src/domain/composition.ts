@@ -281,13 +281,13 @@ export const composeGame = <const Modules extends ModuleList>(
     resolveStageOrder(stages.map(asConstraint), { skeleton }),
     (plan): ComposedGame<ModuleOutput<Modules>, ModuleError<Modules>> => {
       const byId = new Map(stages.map((stage) => [stage.id, stage] as const))
-      const ordered = plan.order.flatMap((id) => {
-        const stage = byId.get(id)
-        if (typeof stage === 'undefined') {
-          return []
-        }
-        return [stage]
-      })
+      // Non-null: `plan.order` is a permutation of `registered`, which
+      // `resolveStageOrder` built from exactly these `stages`' ids — and this
+      // Callback only runs on `Either.Right`, i.e. only once
+      // `collectRegistered` has already confirmed those ids are unique. So
+      // Every id `plan.order` yields is present in `byId`, built from the
+      // Same `stages` array.
+      const ordered = plan.order.map((id) => byId.get(id)!)
 
       // Note what is NOT here: no try/catch, no per-stage timing, no
       // Conditional skip, no budget. Adding any of them would be adding

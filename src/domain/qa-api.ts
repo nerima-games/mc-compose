@@ -102,6 +102,15 @@ const mergeCommands = (
       return { _tag: 'InvalidCommandName', command, namespace: entry.namespace }
     }
     const key = qaKey(entry.namespace, command)
+    // Unreachable via `buildQaRegistry`: `key` is `namespace.command`, and by
+    // The time this runs, `mergeNamespaceEntry` has already rejected any
+    // Repeat of `entry.namespace` as `DuplicateNamespace` — so this namespace
+    // Is merged exactly once. Within that one merge, `command` is drawn from
+    // `Object.entries(entry.commands)`, and a JS object literal cannot carry
+    // Two identical keys. No path can make `registry` already hold `key`.
+    // Kept as a guard against a future loosening of the namespace check —
+    // `DuplicateCommand` itself is a real, tested value (see
+    // `describeQaApiError`'s tests); only this production site is dead.
     if (registry.has(key)) {
       return { _tag: 'DuplicateCommand', key }
     }
