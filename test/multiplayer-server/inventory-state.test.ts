@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import * as mcSim from '@nerima-games/mc-sim'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   addStackToInventory,
@@ -99,6 +100,13 @@ describe('inventory state operations', () => {
       feet: stack('iron_boots', 1, { current: 1, max: 195 }),
       offhand: null,
     })
+
+    const defaultEquipment = cloneInventory({
+      slots: [],
+      selectedSlot: 0,
+      equipment: equipment({ head: stack('iron_helmet') }),
+    } as InventoryState)
+    expect(defaultEquipment.equipment.head).toEqual(stack('iron_helmet', 1, { current: 165, max: 165 }))
 
     const noOptionalState = cloneInventory({
       slots: [stack('iron_leggings')],
@@ -270,6 +278,14 @@ describe('inventory state operations', () => {
     expect(unequipInventoryItem(implicitDestination, 'head', undefined)).toBeNull()
     expect(implicitDestination.slots).toEqual([stack('iron_helmet')])
     expect(implicitDestination.durability).toEqual([{ current: 165, max: 165 }])
+
+    const durabilityForItemSpy = vi.spyOn(mcSim, 'durabilityForItem')
+    durabilityForItemSpy.mockReturnValueOnce(null)
+    expect(equipInventoryItem(mutableInventory([stack('iron_helmet', 1, null)], { durability: [null] }), 0, 'head')).toBe('invalid-command')
+
+    durabilityForItemSpy.mockReturnValueOnce(null)
+    expect(unequipInventoryItem(mutableInventory([null], { equipment: equipment({ head: stack('iron_helmet', 1, null) }) }), 'head', 0)).toBe('invalid-command')
+    durabilityForItemSpy.mockRestore()
   })
 
   it('adds stack counts to existing and empty slots and returns overflow', () => {
@@ -283,6 +299,10 @@ describe('inventory state operations', () => {
     const spread = [stack('stone', 60), null]
     expect(addStackToInventory(spread, stack('stone', 10))).toBeNull()
     expect(spread).toEqual([stack('stone', 64), stack('stone', 6)])
+
+    const partialEmpty = [null, null]
+    expect(addStackToInventory(partialEmpty, stack('stone', 65))).toBeNull()
+    expect(partialEmpty).toEqual([stack('stone', 64), stack('stone')])
 
     const exactEmpty = [null]
     expect(addStackToInventory(exactEmpty, stack('stone', 64))).toBeNull()
