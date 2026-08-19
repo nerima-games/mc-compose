@@ -15,7 +15,7 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -34,7 +34,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          node-version: "24"
           cache: "pnpm"
 
       - name: Configure GitHub Packages authentication
@@ -43,32 +43,13 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install dependencies
-        # --ignore-scripts: pnpm 9 runs postinstall, and a fork PR can edit
+        # --ignore-scripts: a fork PR can edit
         # package.json and the lockfile consistently and still satisfy
         # --frozen-lockfile. Nothing here needs a lifecycle script.
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Type check
-        run: pnpm typecheck
-
-      # oxlint is provided by the Nix devShell (flake.nix), not a package.json
-      # devDependency — see flake.nix's comment on why. Installing Nix just for
-      # this one step is the org-wide trade-off (DEPENDENCY_POLICY.md §5
-      # "前提条件"): one pinned oxlint version instead of 16 repos each
-      # independently drifting on their own npm-resolved version.
-      - name: Set up Nix
-        uses: ./.github/actions/nix-setup
-        with:
-          cachix-cache: ${{ vars.CACHIX_CACHE }}
-          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      # oxlint's no-restricted-imports (.oxlintrc.json) is the enforcement
-      # mechanism for the Tier4 dependency policy (DEPENDENCY_POLICY.md §5).
-      - name: Lint
-        run: nix develop --command pnpm lint
-
-      - name: Test
-        run: pnpm test
+      - name: Verify
+        run: pnpm verify
 
       # RELEASE_STANDARD.md §1.2: catch a user-facing PR that forgot to add a
       # changeset. Only meaningful on a PR (there is nothing to diff against on
@@ -83,11 +64,7 @@ jobs:
         # --since=main fails with "Failed to find where HEAD diverged from main".
         run: pnpm changeset status --since=origin/main
 
-      # 4-metric 99% gate (TEST_STANDARD.md §3), applied immediately and
-      # org-wide with no staged rollout. This repository's baseline was
-      # unmeasured before this migration; the gate is enabled regardless of
-      # what the baseline turned out to be (TEST_STANDARD.md §4 / this repo's
-      # migration PR records the real number).
+      # All four source-coverage metrics are required to reach 100%.
       - name: Coverage
         run: pnpm test:coverage
 

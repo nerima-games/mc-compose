@@ -7,13 +7,10 @@
     "target": "ES2024",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    // Platform-agnostic: no DOM, no WebWorker, no Node globals. compose is the
-    // repository that will eventually be wired to a browser, so the restriction
-    // is deliberate: the stage-order resolver and the Layer merge are pure, and
-    // anything here that needs a platform is a sign that logic has leaked in
-    // (see docs/responsibility.md, the prime directive). The browser entry
-    // point gets its own tsconfig when it is added.
-    "lib": ["ES2024"],
+    // Runtime-agnostic: the DOM library is present only because Effect exposes
+    // Web-standard types in its public declarations; source code still does
+    // not receive browser or Node globals through `types`.
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "types": [],
 
     "allowJs": false,
@@ -48,19 +45,18 @@
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
     "moduleDetection": "force",
     "resolvePackageJsonExports": true,
     "resolvePackageJsonImports": true,
-    "skipLibCheck": true,
+    "skipLibCheck": false,
 
     "newLine": "lf",
     "stripInternal": true,
 
-    // No build step yet (see README 現状). Every tsconfig here is check-only;
-    // `package.json#exports` points at TypeScript source. The emitting
-    // build/publish pipeline is added when this repo reaches completion.
-    "noEmit": true,
-
-    "baseUrl": "."
+    // The package intentionally exports TypeScript source; the web application
+    // has its own Vite build, while these project configs remain check-only.
+    "noEmit": true
   }
 }

@@ -6,10 +6,9 @@
  * ---------------------------------------------------------------------------
  *
  * `test/e2e/roster.ts` is a TRANSCRIPTION of every stage id and `after` edge
- * the sibling repositories register. It has to be a transcription:
- * plan.md §6 Step 3 publishes bottom-up, nothing is on GitHub Packages yet, and
- * mc-compose's `node_modules` contains no `@nerima-games/*` at all — so there is
- * no import that would give the real registrations.
+ * the sibling repositories register. It has to be a transcription: package
+ * pins provide runtime and type contracts, but no import substitutes for
+ * sibling source-level stage ownership and file:line provenance.
  *
  * A transcription rots. This repository has already proved it: before the
  * roster manifest existed, two test files asserted against a list documented as
