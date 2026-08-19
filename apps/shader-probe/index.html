@@ -12,8 +12,8 @@
   named a check that did not exist. Three shader sources had landed, fully
   tested as STRINGS, and not one had been through a compiler.
 
-  It imports `@nerima-games/mc-render` and nothing else from the roster, which
-  is what keeps it inside `check-dependency-whitelist.ts`'s rule 3.
+  It imports `@nerima-games/mc-render` and nothing else from the roster. The
+  direct-import boundary is enforced by `.oxlintrc.json` and `pnpm lint`.
 -->
 <html lang="en">
   <head>

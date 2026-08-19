@@ -2,7 +2,7 @@
  * Layer merge + frame assembly. The second of the two things this repository
  * owns (the first is `domain/stage-skeleton.ts`).
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * Current composition contract.
  *
  * ---------------------------------------------------------------------------
  * The prime directive, restated where the code is
@@ -27,11 +27,15 @@
  * whether one should run. A stage that should sometimes not run contains that
  * decision inside its own `run`, in the repository that owns it.
  */
-import type { DeltaTimeSecs, FrameServices } from './kernel-vocabulary'
+import type {
+  DeltaTimeSecs,
+  FrameServices,
+  GameModule as KernelGameModule,
+  StageRegistration as KernelStageRegistration,
+} from '@nerima-games/mc-kernel'
 import { Effect, Either, Layer } from 'effect'
 import {
   type StageConstraint,
-  type StageId,
   type StageOrderError,
   type StageOrderPlan,
   type StagePhase,
@@ -43,39 +47,34 @@ import { STANDARD_STAGE_SKELETON } from './stage-skeleton'
 /**
  * Seconds since the previous frame, BRANDED, exactly as kernel brands it.
  *
- * Re-exported from `domain/kernel-vocabulary.ts` rather than declared here: it
+ * Re-exported from `@nerima-games/mc-kernel` rather than declared here: it
  * used to be a bare `type DeltaTimeSecs = number` at the one place in the whole
  * roster that actually calls `StageRegistration.run`, which meant every stage
- * in every module was handed a value nobody had validated. See that file for
- * why the §3.4 clamp is still not part of the brand.
+ * in every module was handed a value nobody had validated. The §3.4 clamp is
+ * still not part of the brand.
  */
-export { DeltaTimeSecs } from './kernel-vocabulary'
-export type { FrameServices } from './kernel-vocabulary'
+export { DeltaTimeSecs } from '@nerima-games/mc-kernel'
+export type { FrameServices } from '@nerima-games/mc-kernel'
 
 /**
- * One unit of per-frame work. Mirrors mc-kernel's `StageRegistration`.
+ * One unit of per-frame work at the composition boundary.
  *
  * `run` returns `Effect<void, never, FrameServices>` — the SAME three channels
- * kernel declares, and the R channel is the point.
+ * required by mc-kernel's `StageRegistration`, and the R channel is the point.
  *
  * REGRESSION: it used to be `Effect<void>`. Requirements do not erase
  * themselves, so kernel's `Effect<void, never, ClockPort>` was not assignable
  * to it and a stage written against the real contract could not be composed at
- * all. `composeGame` compiled only because `mx-gameplay`, `mx-redstone` and
- * `mx-ui` each set `FrameServices = never` in their own mirrors — and all three
- * commit to deleting those files the moment kernel publishes, at which point
- * this repository would have stopped compiling. `test/composition.test.ts`
- * pins the assignability directly.
+ * all. This post-registration shape is intentionally narrower than mc-kernel's
+ * generic `GameModule`: composition receives already-registered stages and
+ * only needs to order and run them. `test/composition.test.ts` pins the
+ * assignability directly.
  *
  * The error channel stays `never`: a stage that can fail at runtime handles or
  * defects its own failure, because there is no sensible frame-level recovery
  * for "physics failed on frame 12048".
  */
-export type StageRegistration = {
-  readonly id: StageId
-  readonly after?: ReadonlyArray<StageId>
-  readonly run: (dt: DeltaTimeSecs) => Effect.Effect<void, never, FrameServices>
-}
+export type StageRegistration = KernelStageRegistration
 
 /**
  * A self-contained module Layer at the composition boundary.
@@ -142,11 +141,17 @@ export const EMPTY_MODULE_LAYER: ModuleLayer = Layer.empty as unknown as ModuleL
  * appears. It is deliberately not erased there: the host is what discharges it,
  * and the host has the type to do so.
  */
-export type GameModule<ROut = never, Err = unknown> = {
+export type GameModule<ROut = never, Err = unknown> = Pick<
+  KernelGameModule<ROut, Err, never>,
+  'layers'
+> & {
   /** For diagnostics only. Never branched on. */
   readonly name: string
-  readonly layers: Layer.Layer<ROut, Err, never>
   readonly frameStages: ReadonlyArray<StageRegistration>
+}
+
+type RegisterableGameModule<ROut, Err, RRegister> = KernelGameModule<ROut, Err, never, RRegister> & {
+  readonly name: string
 }
 
 /**
@@ -165,11 +170,9 @@ export type GameModule<ROut = never, Err = unknown> = {
  * function exists rather than callers writing `Effect.map` by hand and losing
  * the parameter to inference on an erased boundary.
  */
-export const registerModule = <RRegister, ROut = never, Err = unknown>(module: {
-  readonly name: string
-  readonly layers: Layer.Layer<ROut, Err, never>
-  readonly frameStages: Effect.Effect<ReadonlyArray<StageRegistration>, never, RRegister>
-}): Effect.Effect<GameModule<ROut, Err>, never, RRegister> =>
+export const registerModule = <RRegister, ROut = never, Err = unknown>(
+  module: RegisterableGameModule<ROut, Err, RRegister>,
+): Effect.Effect<GameModule<ROut, Err>, never, RRegister> =>
   Effect.map(module.frameStages, (frameStages) => ({
     frameStages,
     layers: module.layers,

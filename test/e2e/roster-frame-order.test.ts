@@ -21,10 +21,10 @@
  *
  *   (b) THE BEHAVIOUR. Mining puts an item in the inventory.
  *
- * THIS FILE COVERS (a) AND NOT (b), and it cannot cover (b) today: nothing is
- * published, `node_modules` holds no `@nerima-games/*`, and mx-gameplay's break
- * rule has no mc-sim inventory to write into (docs/testing.md §3.4 records the
- * measurement). Faking the modules to get a green (b) would test the fake.
+ * THIS FILE COVERS (a), and it does not replace browser tests for (b). The
+ * current browser paths use pinned published packages; this manifest remains
+ * an independent stage-order audit and must not fake runtime modules to make
+ * a behavioural assertion green.
  *
  * So the subject here is `test/e2e/roster.ts` — the ids and `after` edges every
  * sibling really registers, transcribed with `file:line` provenance and kept
@@ -57,7 +57,7 @@ import {
   FixedClockLayer,
   MonotonicTimeSecs,
   type FrameServices,
-} from '../../src/domain/kernel-vocabulary'
+} from '@nerima-games/mc-kernel'
 import {
   describeStageOrderError,
   phaseOf,

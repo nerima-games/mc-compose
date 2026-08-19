@@ -2,8 +2,9 @@
  * Tests for `scripts/check-roster-manifest.ts` — the gate that keeps the E2E
  * roster manifest from drifting away from what the siblings actually register.
  *
- * The gate itself cannot run in CI (it needs the sibling checkouts, and nothing
- * is published — see the script's header). These tests can: they drive it
+ * The gate itself cannot run in CI (it needs the sibling source checkouts to
+ * compare manifests; published package contracts do not carry that provenance
+ * — see the script's header). These tests can: they drive it
  * through an in-memory filesystem, so `pnpm verify` still proves the gate
  * WORKS even where it cannot prove the manifest is CURRENT.
  *

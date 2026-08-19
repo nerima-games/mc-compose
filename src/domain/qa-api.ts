@@ -1,45 +1,17 @@
 /**
  * The QA / debug API surface.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
- *
- * ---------------------------------------------------------------------------
- * What this replaces
- * ---------------------------------------------------------------------------
- *
- * The reference implementation exposes a debug object on the window:
- *
- *   packages/app/application/main/qa-api.ts:171
- *     Reflect.set(window, '__TS_MINECRAFT_QA__', makeQaApi(deps, ...))
- *
- * Its QA surface is much larger than plan.md §3.15's "~1.4k" estimate. Measured
- * on 2026-07-26, all `qa-api*.ts` files plus `qa-spatial.ts` total **2,648
- * LOC** across 16 files (14 production + 2 test), split by concern:
- * qa-api-visual (181), qa-api-debug-state (179), qa-api (172),
- * qa-api-rendering (145), qa-api-world (121), qa-api-inventory (127),
- * qa-api-perf (105), qa-spatial (83), qa-api-combat (81), qa-api-mob-ai (51),
- * qa-api-redstone (49), qa-api-village (49), qa-api-env (33),
- * qa-api-settings (19).
- *
- * That size is the warning. A QA API is a place where "just one more accessor"
- * is always locally reasonable, and each accessor quietly grants the E2E suite
- * a private door into a module's internals — which is how the E2E suite becomes
- * the only thing that can verify anything.
- *
- * ---------------------------------------------------------------------------
- * The rule this file encodes
- * ---------------------------------------------------------------------------
+ * The browser host publishes this surface explicitly for Playwright and other
+ * deterministic smoke checks. Each command is owned by a registered module;
+ * mc-compose validates and merges the namespaces but does not reach into a
+ * module's private state.
  *
  * A QA command is NAMESPACED BY THE MODULE THAT OWNS IT, and mc-compose only
  * merges namespaces. compose does not author commands. If a QA command needs
  * to read mc-sim's inventory, mx-gameplay (or mc-sim) exposes it and compose
  * publishes it under that module's namespace. Writing the accessor here would
- * require compose to reach past the experience modules, which
- * `pnpm check:deps` rejects as `transitive-import` anyway.
- *
- * ---------------------------------------------------------------------------
- * Why nothing here touches `globalThis`
- * ---------------------------------------------------------------------------
+ * require compose to reach past the experience modules, which the dependency
+ * boundary enforced by `.oxlintrc.json` rejects as a transitive import.
  *
  * `installQaApi` takes the target object as an argument. Reaching for
  * `globalThis` or `window` would pin this repository to a platform (see
@@ -77,7 +49,6 @@ export type QaApiError =
   | { readonly _tag: 'InvalidNamespace'; readonly namespace: string }
   | { readonly _tag: 'InvalidCommandName'; readonly namespace: string; readonly command: string }
   | { readonly _tag: 'DuplicateNamespace'; readonly namespace: string }
-  | { readonly _tag: 'DuplicateCommand'; readonly key: string }
 
 /** The merged surface: fully-qualified key -> command. */
 export type QaRegistry = ReadonlyMap<string, QaCommand>
@@ -102,18 +73,6 @@ const mergeCommands = (
       return { _tag: 'InvalidCommandName', command, namespace: entry.namespace }
     }
     const key = qaKey(entry.namespace, command)
-    // Unreachable via `buildQaRegistry`: `key` is `namespace.command`, and by
-    // The time this runs, `mergeNamespaceEntry` has already rejected any
-    // Repeat of `entry.namespace` as `DuplicateNamespace` — so this namespace
-    // Is merged exactly once. Within that one merge, `command` is drawn from
-    // `Object.entries(entry.commands)`, and a JS object literal cannot carry
-    // Two identical keys. No path can make `registry` already hold `key`.
-    // Kept as a guard against a future loosening of the namespace check —
-    // `DuplicateCommand` itself is a real, tested value (see
-    // `describeQaApiError`'s tests); only this production site is dead.
-    if (registry.has(key)) {
-      return { _tag: 'DuplicateCommand', key }
-    }
     registry.set(key, run)
   }
   return
@@ -144,9 +103,9 @@ const mergeNamespaceEntry = (
 /**
  * Merge module QA namespaces into one registry.
  *
- * Every failure mode is a NAME collision, and every one is fatal rather than
- * last-one-wins. A silently shadowed QA command produces an E2E suite that
- * tests the wrong module and passes.
+ * Namespace collisions are fatal rather than last-one-wins. A silently
+ * shadowed QA namespace produces an E2E suite that tests the wrong module and
+ * passes.
  */
 export const buildQaRegistry = (
   namespaces: ReadonlyArray<QaNamespace>,
@@ -178,6 +137,13 @@ export const installQaApi = (target: Record<string, unknown>, registry: QaRegist
   target[QA_GLOBAL_KEY] = Object.fromEntries(registry)
 }
 
+const isInstalledQaApi = (value: unknown): value is Readonly<Record<string, QaCommand>> => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+  return Object.values(value).every((command) => typeof command === 'function')
+}
+
 /** Read back a published surface. Used by tests; mirrors what an E2E page does. */
 export const readInstalledQaApi = (
   target: Readonly<Record<string, unknown>>,
@@ -186,7 +152,10 @@ export const readInstalledQaApi = (
   if (typeof published === 'undefined') {
     return
   }
-  return published as Readonly<Record<string, QaCommand>>
+  if (!isInstalledQaApi(published)) {
+    return
+  }
+  return published
 }
 
 export const describeQaApiError = (error: QaApiError): string => {
@@ -197,8 +166,6 @@ export const describeQaApiError = (error: QaApiError): string => {
       return `"${error.command}" in namespace "${error.namespace}" is not a valid QA command name; use lowerCamelCase.`
     case 'DuplicateNamespace':
       return `the QA namespace "${error.namespace}" was contributed twice; each module owns exactly one.`
-    case 'DuplicateCommand':
-      return `the QA command "${error.key}" was contributed twice. Shadowing is rejected: an E2E test calling a shadowed command tests the wrong module and passes.`
     default:
       return `unknown QA API error: ${JSON.stringify(error)}`
   }

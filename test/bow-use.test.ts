@@ -15,7 +15,7 @@ const advance = (state: BowUseState, overrides: Partial<Parameters<typeof advanc
     selectedItem: 'bow',
     selectedSlotIndex: 2,
     arrowCount: 1,
-    deltaSecs: 0.1,
+    elapsedSecs: 0.1,
     ...overrides,
   })
 
@@ -54,7 +54,7 @@ describe('advanceBowUse', () => {
     expect(advance(drawing, {
       useHeld: true,
       selectedSlotIndex: 7,
-      deltaSecs: 0.25,
+      elapsedSecs: 0.25,
     }).state).toEqual({ _tag: 'Drawing', bowSlotIndex: 2, chargeSecs: 0.65 })
   })
 

@@ -4,7 +4,11 @@ import {
   itemStack,
   type PlayerStorage,
 } from '@nerima-games/mc-sim'
-import { applyAnvilOperation, spendExperienceLevels } from '../apps/multiplayer-shared/anvil-repair'
+import {
+  applyAnvilOperation,
+  planAnvilOperation,
+  spendExperienceLevels,
+} from '../apps/multiplayer-shared/anvil-repair'
 
 const storageWith = (
   entries: ReadonlyArray<readonly [number, Parameters<typeof itemStack>[0], number, PlayerStorage['inventoryDurability'][number]]>,
@@ -19,6 +23,35 @@ const storageWith = (
   return { ...storage, inventory: { slots }, inventoryDurability }
 }
 
+describe('planAnvilOperation', () => {
+  it('uses the kernel repair plan and reports its material and level costs', () => {
+    const plan = planAnvilOperation({
+      item: 'diamond_pickaxe',
+      durability: { current: 17, max: 1561 },
+      material: { item: 'iron_ingot', count: 2 },
+      name: '',
+      currentName: null,
+    })
+
+    expect(plan).toMatchObject({ ok: true, levelCost: 1, materialCost: 1 })
+    if (!plan.ok) return
+    expect(plan.output.durability).toEqual({ current: 1561, max: 1561 })
+  })
+
+  it('supports rename-only operations without a repair material', () => {
+    const plan = planAnvilOperation({
+      item: 'stone',
+      durability: null,
+      name: 'Polished Stone',
+      currentName: null,
+    })
+
+    expect(plan).toMatchObject({ ok: true, levelCost: 1, materialCost: 0 })
+    if (!plan.ok) return
+    expect(String(plan.output.customName)).toBe('Polished Stone')
+  })
+})
+
 describe('applyAnvilOperation', () => {
   it('consumes one iron and restores the selected item to its catalog maximum', () => {
     const storage = storageWith([
@@ -26,47 +59,41 @@ describe('applyAnvilOperation', () => {
       [8, 'iron_ingot', 2, null],
     ])
 
-    const repaired = applyAnvilOperation(storage, 3, true)
+    const repaired = applyAnvilOperation(storage, 3, { name: '', currentName: null })
 
-    expect(repaired?.inventory.slots[8]).toEqual(itemStack('iron_ingot', 1))
-    expect(repaired?.inventoryDurability[3]).toEqual({ current: 1561, max: 1561 })
+    expect(repaired?.storage.inventory.slots[8]).toEqual(itemStack('iron_ingot', 1))
+    expect(repaired?.storage.inventoryDurability[3]).toEqual({ current: 1561, max: 1561 })
     expect(storage.inventoryDurability[3]).toEqual({ current: 17, max: 1561 })
   })
 
-  it('supports renaming a non-damageable item while consuming iron', () => {
+  it('supports renaming a non-damageable item without consuming repair material', () => {
     const storage = storageWith([
       [0, 'stone', 1, null],
       [1, 'iron_ingot', 1, null],
     ])
 
-    const result = applyAnvilOperation(storage, 0, true)
+    const result = applyAnvilOperation(storage, 0, { name: 'Polished Stone', currentName: null })
 
-    expect(result?.inventory.slots[0]).toEqual(itemStack('stone', 1))
-    expect(result?.inventory.slots[1]).toBeUndefined()
-    expect(result?.inventoryDurability[1]).toBeNull()
+    expect(result?.storage.inventory.slots[0]).toEqual(itemStack('stone', 1))
+    expect(String(result?.output.customName)).toBe('Polished Stone')
+    expect(result?.storage.inventory.slots[1]).toEqual(itemStack('iron_ingot', 1))
   })
 
-  it('does not consume the selected iron stack as its own material', () => {
+  it('does not consume the selected iron stack when renaming it', () => {
     const onlyIron = storageWith([[0, 'iron_ingot', 2, null]])
-    const separateIron = storageWith([
-      [0, 'iron_ingot', 2, null],
-      [1, 'iron_ingot', 1, null],
-    ])
 
-    expect(applyAnvilOperation(onlyIron, 0, true)).toBeUndefined()
-    expect(applyAnvilOperation(separateIron, 0, true)?.inventory.slots).toEqual([
-      itemStack('iron_ingot', 2),
-      undefined,
-      ...Array.from({ length: 34 }, () => undefined),
-    ])
+    expect(
+      applyAnvilOperation(onlyIron, 0, { name: 'Named Iron', currentName: null })
+        ?.storage.inventory.slots[0],
+    ).toEqual(itemStack('iron_ingot', 2))
   })
 
   it('rejects missing inputs without changing storage', () => {
     const empty = emptyPlayerStorage()
     const noIron = storageWith([[0, 'iron_sword', 1, { current: 10, max: 250 }]])
 
-    expect(applyAnvilOperation(empty, 0, true)).toBeUndefined()
-    expect(applyAnvilOperation(noIron, 0, true)).toBeUndefined()
+    expect(applyAnvilOperation(empty, 0, { name: 'New Name', currentName: null })).toBeUndefined()
+    expect(applyAnvilOperation(noIron, 0, { name: '', currentName: null })).toBeUndefined()
     expect(noIron.inventoryDurability[0]).toEqual({ current: 10, max: 250 })
   })
 
@@ -76,7 +103,7 @@ describe('applyAnvilOperation', () => {
       [1, 'iron_ingot', 1, null],
     ])
 
-    expect(applyAnvilOperation(storage, 0, false)).toBeUndefined()
+    expect(applyAnvilOperation(storage, 0, { name: '', currentName: null })).toBeUndefined()
     expect(storage.inventory.slots[1]).toEqual(itemStack('iron_ingot', 1))
   })
 })

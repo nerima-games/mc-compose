@@ -691,7 +691,7 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
       // The real registrations, edges included, straight out of the manifest:
       // mx-redstone declares `effects after power`, mx-ui declares
       // `overlay-sync after hud-sync`, and four repositories declare
-      // `after sim:physics` — which dangles, because mc-sim registers nothing.
+      // `after sim:physics` — which now resolves because mc-sim registers it.
       const resolved = order(
         ROSTER.flatMap((module) =>
           module.stages.map((registration) => stage(registration.id, ...registration.after)),
@@ -707,7 +707,8 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
       expect(positionIn(resolved, 'ui:hud-sync')).toBeLessThan(
         positionIn(resolved, 'ui:overlay-sync'),
       )
-      // ...and the phases still hold everything else in place.
+      // ...and the phases still hold everything else in place. mc-sim now
+      // registers `sim:physics`, so the cross-module edges resolve against it.
       expect(resolved[0]).toBe('render:input')
       expect(resolved[resolved.length - 1]).toBe('ui:overlay-sync')
     }),
