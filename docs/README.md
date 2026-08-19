@@ -25,12 +25,12 @@ E2E でしか検証できなくなった。**それが本計画全体の出発�
 | ドキュメント | 内容 | 主な読者 |
 | --- | --- | --- |
 | [responsibility.md](./responsibility.md) | **PRIME DIRECTIVE。** 持つもの / 持たないもの / 規範の機械的強制 | **全員。最初に読む** |
-| [architecture.md](./architecture.md) | 4 階層アーキテクチャ、16 リポジトリ依存グラフ、本リポジトリの位置、名詞/動詞ルール、mc-playground-kit の devDependency 専用ルール、**mc-render 到達性の未解決問題** | 全員 |
+| [architecture.md](./architecture.md) | 4 階層アーキテクチャ、16 リポジトリ依存グラフ、本リポジトリの位置、名詞/動詞ルール、mc-playground-kit のブラウザ runtime 境界、mc-render の stage 所有 | 全員 |
 | [public-api.md](./public-api.md) | 公開 API 一覧と、それぞれの契約 | mod 作者・実装者 |
 | [design-notes.md](./design-notes.md) | 参照実装の実測知見。各項目が「名前付き回帰テスト」として書かれている | 実装者。**実装前に必読** |
 | [porting.md](./porting.md) | 移植計画。**LOC は実測値**(plan.md の見積りは 22 倍ずれている) | 実装者 |
 | [testing.md](./testing.md) | テスト戦略。公開package境界の実ブラウザ最終ゲート(§3.5) | 実装者・レビュアー |
-| [e2e-triage.md](./e2e-triage.md) | **参照実装 E2E 70 本を 1 本ずつ判定したもの。** compose に残る 25 本 / 降ろす 43 本 / 消える 2 本。「採掘 → インベントリ」が今日繋がらない理由を 3 つに分けて記録している(§4) | 実装者。E2E に着手するとき |
+| [e2e-triage.md](./e2e-triage.md) | **参照実装 E2E 70 本を 1 本ずつ判定したもの。** compose に残る 25 本 / 降ろす 43 本 / 消える 2 本。公開 package 境界での検証状況と残課題を記録している(§4) | 実装者。E2E に着手するとき |
 | [versioning.md](./versioning.md) | 0.x → 1.0.0、GitHub Packages、modding API バージョン | リリース担当 |
 
 ## 2. 読む順番
@@ -53,7 +53,8 @@ plan.md §3.15 が compose に割り当てた残りの責務である。
 
 ## 4. 現状
 
-このリポジトリは **叩き台(pre-audit first cut)** である。
+このリポジトリには初期監査の記録が残っているが、現行実装は公開 sibling package の
+`GameModule` / service を合成する production browser host として動作する。
 
 **確定している**(仕組みとして):
 
@@ -66,13 +67,12 @@ plan.md §3.15 が compose に割り当てた残りの責務である。
 - QA コマンドは所有モジュールが名前空間ごと提供し、compose はマージするだけ
 - mod は一級のモジュール。stage 名前空間だけが制約
 
-**確定していない**:
+**残っている課題**:
 
-- 4 つの体験モジュールの実合成(全モジュール未公開)
-- mc-kernel の契約型への切り替え(現在はローカル宣言のミラー)
-- ブラウザE2Eで未採用の振る舞い経路。現在は起動、RAF、QA観測、teardownに加え、
-  採掘からinventory更新までを公開package境界で検証する
-- `ModuleLayer` の精密な型。`RIn` は `never`、`composeGame` は推論した提供サービスの union を返す
-- **`sim:physics` を誰が登録するのか**([design-notes.md](./design-notes.md) DN-14)
-- **ネットワーク同期のフェーズを骨格のどこに置くか**(同 DN-15)
-- **`InventoryService` のインスタンスを誰が構築するのか**([e2e-triage.md](./e2e-triage.md) §4.3)
+- ブラウザ E2E の「1 回の block drop が同じ流れで inventory に入る」厳密な一回性シナリオ
+  (採掘・永続化・chest 操作などの周辺経路は検証済み)
+- stage が失敗したときに `Effect.catchAllCause` をどの層が張るかという運用方針
+
+`ModuleLayer` の型、`mc-sim` の `GameModule`、`InventoryService` の共有インスタンス、
+`BlockId` から canonical `ItemType` への橋渡しは、現行の公開 API と browser composition
+で解決済みである。初期調査時の未決記述は [e2e-triage.md](./e2e-triage.md) に履歴として残す。

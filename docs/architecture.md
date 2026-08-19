@@ -16,7 +16,9 @@ plan.md §2.2 の 4 階層。16 リポジトリはすべてこのいずれかに
 
 ## 2. 依存グラフ(16 リポジトリ全体)
 
-実線 = 実行時依存(`dependencies`)、点線 = プレビュー起動時のみ(`devDependencies`)。
+実線 = 実行時依存(`dependencies`)、点線 = 任意の tooling 依存。
+`mc-playground-kit` は `apps/web/main.ts` が実行時に使うブラウザホストなので、
+このリポジトリでは runtime dependency として描く。
 `mc-kernel` はどこからでも import 可能なため、エッジとしては描かない。
 
 ```mermaid
@@ -69,6 +71,7 @@ graph BT
   compose --> ui
   compose --> multiplayer
   compose --> render
+  compose --> kit
 
   style compose fill:#7f1d1d,color:#ffffff
   style devmeta stroke-dasharray: 5 5
@@ -76,13 +79,17 @@ graph BT
 
 > **mc-kernel は全リポジトリから import 可能。** グラフに描かないのは、
 > 全ノードから kernel へエッジを引くと図が読めなくなるためと、
-> `scripts/check-dependency-whitelist.ts` が `dependencyGraph` に kernel を書くことを
-> 設定エラーとして拒否するため(rule 4)。ただし `package.json` への記載は必要。
+> `.oxlintrc.json` の `no-restricted-imports` と `pnpm lint` が禁止境界を検査するためである。
+> runtime の package 解決に必要な記載は `package.json` に残す。
 
 ## 3. このリポジトリの位置
 
-mc-compose の直接依存は **4 つの体験モジュール + mc-render** である:
-mx-gameplay / mx-redstone / mx-ui / mx-multiplayer / mc-render。
+合成層 `src/` がゲームグラフとして直接扱うのは **4 つの体験モジュール + mc-render**
+である: mx-gameplay / mx-redstone / mx-ui / mx-multiplayer / mc-render。
+一方、package の runtime surface には、ブラウザ・サーバーの adapter が使う
+`mc-kernel` / `mc-sim` / `mc-worldgen` / `mc-save` / `mc-audio` などの公開 package と、
+ブラウザ起動配線を提供する `mc-playground-kit` も直接記載されている。
+これは `src/` がそれらのゲームルールを所有することを意味しない。
 
 mc-render のエッジは縦切りスパイクが足した唯一の tier 2 エッジで、根拠は §5 にある。
 「他モジュールの stage を登録するのは配線であってルールではない」が理由であり、
@@ -97,7 +104,7 @@ mc-compose -> mx-gameplay -> mc-sim -> mc-physics -> ...
 ```
 
 `pnpm install` すると `node_modules` にはこれら全部が物理的に置かれるが、
-**import は禁止**である。`pnpm check:deps` が `transitive-import` として非ゼロ終了する。
+合成層からの禁止された import は `.oxlintrc.json` と `pnpm lint` が検出する。
 
 これは規範の機械化された半分である。詳細は [responsibility.md](./responsibility.md) §3。
 
@@ -118,30 +125,27 @@ mc-sim の `InventoryService` を経由して実現する。
 compose が持つのは、名詞と動詞をどう束ねるかという**配線**だけである。
 配線に見えないものが入ってきたら、それは名詞か動詞であり、上の 2 階層のどちらかに属する。
 
-回帰テスト: `test/check-dependency-whitelist.test.ts` の
-`records no edge between any two experience modules`。
+回帰テスト: `test/public-api.test.ts` と roster の公開 package 境界検査。
 
-### 4.2 mc-playground-kit は devDependency 専用(plan.md §2.3-2)
+### 4.2 mc-playground-kit はブラウザホストの runtime dependency
 
-`mc-playground-kit` は「ミニ平地ワールド + カメラ + レンダラ + 入力を 1 秒で束ねる糊」であり、
-**プレビュー(dev アプリ)からのみ使う**。
+`mc-playground-kit` はブラウザの canvas / RAF / teardown とプレビュー起動を束ねる
+ホスト adapter であり、`apps/web/main.ts` が `makeBrowserPreview` を実行時に使う。
+したがって `package.json` の `dependencies` に置く。`build:web` で出荷されるブラウザ
+エントリから参照されるため、devDependency 専用にはできない。
 
-`dependencies` に入れてはならない理由は具体的である:
-**実行時入力サービスの所有者は mc-render であり、kit ではない**(plan.md §2.3-2)。
-kit を実行時依存にすると、出荷ビルドが「同梱されないハーネス」から入力を取ることになり、
-リリースビルドから入力処理が丸ごと消える。
+実行時の input / render stage の所有者は `mc-render` であり、kit は stage を登録する
+ゲームモジュールではない。`mc-render` は `render:input` / `render:camera-mirror` /
+`render:chunk-sync` / `render:draw` / `render:post-fx` を登録し、kit はブラウザの
+ライフサイクルからその公開 module を起動する。
 
-強制は 2 段構え:
+この境界は二段階で検証する:
 
-1. `scripts/check-dependency-whitelist.ts` の `DEV_ONLY_PACKAGES` が
-   `dependencies` への出現を `dev-only-package-in-dependencies` として拒否
-2. 出荷ソース(`index.ts` / `domain/`)からの import を
-   `dev-only-package-in-shipped-source` として拒否
+1. `package.json` の runtime dependency と `.oxlintrc.json` の直接 import 境界
+2. `pnpm typecheck:preview` / `pnpm build:web` / ブラウザ E2E と、
+   `test/public-api.test.ts`・roster の stage 所有検査
 
-**mc-compose は kit を devDependency としても使わない。** compose の検証は E2E であり、
-kit のミニ世界ではなく本物の合成済みゲームを対象とするためである。
-
-回帰テスト: `never names mc-playground-kit as a runtime edge`。
+compose の検証は kit のミニ世界ではなく、本物の合成済みゲームを対象とする。
 
 ### 4.3 stage 実行順序表は compose が唯一所有(plan.md §2.3-3)
 
@@ -188,9 +192,9 @@ compose がフェーズを並べ、モジュールは自分の `after` で**フ�
 1 本もエッジを出しておらず、フレームは辞書順に退化していた。
 経緯と回帰テストは [design-notes.md](./design-notes.md) DN-4.1。
 
-### 4.4 依存ホワイトリストは CI で強制(plan.md §2.3-5)
+### 4.4 依存境界は lint と CI で強制(plan.md §2.3-5)
 
-`pnpm check:deps` は違反があれば必ず非ゼロ終了する。
+`pnpm lint` は違反があれば必ず非ゼロ終了する。
 参照実装の `check-package-dag.ts` は警告を出して常に 0 で終了していた
 — 落ちないゲートはドキュメントであってゲートではない。
 
@@ -294,8 +298,9 @@ plan.md 本文に対してではない。§4.2 が実はネットワークにつ
 
 ### 5-1. なぜ 3 ではなく 2 なのか
 
-描画 stage の完全な import 集合は `mc-kernel` + `mc-sim`(読み取りのみ) + `mc-render` + `mc-meshing` で、
-これは**既に mc-render の行そのもの**である。3 を選ぶと、同じ行を持つノードを新設し、
+描画 stage の実装が必要とする import 集合は `mc-kernel` + `mc-sim`(読み取りのみ) + `mc-render` +
+`mc-meshing` で、これは**既に mc-render package の行そのもの**である。compose はその公開 module を
+受け取るだけで、`mc-meshing` を直接 import しない。3 を選ぶと、同じ行を持つノードを新設し、
 さらに `新モジュール -> mc-render` のエッジを足し、plan.md §2.1 にノードを 1 つ増やすことになる。
 
 そして描画 stage には**ゲームルールが 1 つも無い**。体験モジュール(plan.md §2.2)が所有するのは
@@ -306,15 +311,10 @@ VERB であり、これらを抱えたモジュールは VERB を 1 つも所有
 `InputService.endFrame`(`mc-render/application/input-service.ts`)はフレーム毎にちょうど 1 回
 呼ばれなければならない。**フレーム毎にちょうど 1 回起きるものは、定義上 stage である。**
 
-ところがロスター全体で登録されていた入力 stage は `mc-playground-kit` の `input:sample` **だけ**であり、
-kit は開発時専用で `dependencies` に置くことを rule 6 が禁じている。
-つまり**出荷ビルドには入力 stage が存在しなかった**。`justPressed` が永久にクリアされず、
-インベントリキーを 1 回押すと押しっぱなしのフレーム全部で再発火する。
-
-これは plan.md §2.3-2(「ランタイム入力は mc-render に置く。kit は開発時専用だから」)が
-防ぐために書かれた失敗そのもので、サービスの置き場所ではなく **stage の欠落**として再発していた。
-
-対応は `mc-render/stages/` である。詳細は mc-render `stages/stage-ids.ts` を参照。
+現在のロスターでは `mc-render` が `render:input` を含む入力・描画 stage を登録する。
+`mc-playground-kit` は stage の所有者ではなく、ブラウザの起動・canvas・RAF・teardown
+を提供する。したがって出荷ビルドの stage 所有権は `mc-render` にあり、kit の
+runtime dependency 化でその起動配線を出荷対象に含める。
 
 ### 5-3. なぜこれが prime directive を弱めないのか
 
@@ -323,15 +323,10 @@ compose は mc-render の `GameModule` を受け取り、その Layer を merge 
 リゾルバに渡す。mx-gameplay に対してやっている 3 つとまったく同じで、
 どのモジュールが何を描くかについては何も知らない。
 
-そして rule 3(推移閉包の禁止)は効き続ける。このエッジが許可するのは `mc-render` **だけ**であり、
-その背後は許可しない。`mc-meshing` と `mc-sim` は推移的に到達可能になるので、
-`not-whitelisted` ではなく `transitive-import` 違反になる — **メッセージが変わるだけで、
-ハードエラーであることは変わらない**。
+直接 import の境界は `.oxlintrc.json` の `no-restricted-imports` で検査する。公開された
+`mc-sim` / `mc-render` は dependencies として直接利用できる一方、`mc-meshing` は
+`mc-worldgen` / `mc-sim` / `mc-render` の背後にある package なので compose からの直接 import を
+拒否する。したがって、依存 package の内部実装を compose のルールとして複製することはない。
 
-`test/check-dependency-whitelist.test.ts` の 2 本がこれを固定している:
-
-- `reaches mc-render, because compose registers the renderer's stages`
-- `still cannot reach mc-meshing, now as a closure violation rather than a flat one`
-
-旧テスト `cannot reach mc-render or mc-meshing at all` は**削除ではなく反転**した。
-片側(mc-meshing に到達できない)は今も守るべき性質だからである。
+`pnpm lint` がこの境界を実行し、`test/public-api.test.ts` と
+`test/e2e/roster-frame-order.test.ts` が公開 API と stage 所有権・順序を固定している。

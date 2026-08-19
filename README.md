@@ -30,34 +30,35 @@ plan.md §3.15:
 
 ## 依存
 
-直接依存は 4 つの体験モジュール + mc-render:
-mx-gameplay / mx-redstone / mx-ui / mx-multiplayer / mc-render
-(加えて mc-kernel はどこからでも import 可)。
+`package.json#dependencies` は、合成に必要な公開パッケージを直接宣言している:
+`mc-audio` / `mc-kernel` / `mc-physics` / `mc-render` / `mc-save` / `mc-sim` /
+`mc-worldgen` / `mx-gameplay` / `mx-multiplayer` / `mx-redstone` / `mx-ui` / `effect`。
+ブラウザ起動の `makeBrowserPreview` を出荷エントリポイントから呼ぶため、
+`mc-playground-kit` も runtime dependency として宣言している。
 
-mc-render は縦切りスパイクが足した唯一の tier 2 エッジである。それ以前は
-**ロスターの誰も mc-render を実行時依存に宣言しておらず**、結果として出荷ビルドには
-入力 stage が 1 つも存在しなかった(唯一の入力 stage が開発時専用の mc-playground-kit にあった)。
-経緯は [docs/architecture.md](./docs/architecture.md) §5。
+`mc-render` は入力・描画 stage を所有し、`mc-playground-kit` はブラウザの起動配線を提供する。
+compose はこれらの公開 `GameModule` を合成するだけで、ゲームルールは持たない。
+依存の経緯と境界は [docs/architecture.md](./docs/architecture.md) §2–§5 にまとめている。
 
 **推移的には全リポジトリに到達する。だからこそ推移閉包の禁止がここで最も重要になる。**
 `pnpm install` すると `node_modules` には mc-noise / mc-meshing / mc-physics も物理的に置かれるが、
-**import は禁止**であり、規範としては `.oxlintrc.json`(旧 `oxlint.json`。oxlint はドット付きの
+**推移依存の import は禁止**であり、規範としては `.oxlintrc.json`(旧 `oxlint.json`。oxlint はドット付きの
 `.oxlintrc.json` しか自動検出しないため、以前の PR でファイル名を訂正した)の
 `no-restricted-imports`(Tier4 の 2 パターン)がその import を検出して `pnpm lint` を落とす。
-**oxlint はこの PR から package.json の devDependency ではなく Nix の devShell(`flake.nix`)提供**
-になっており(このリポジトリが以前固定していた `^0.12.0` は `no-restricted-imports` を一切実装して
-いなかった)、この機構は**このリポジトリで初めて機械的に効くようになった**: Nix 提供の oxlint
-(nixpkgs、この PR の時点で ~1.73)は `.oxlintrc.json` を `-c` なしで自動検出し、
-`no-restricted-imports` も実装している。実測確認済み ──
-`@nerima-games/mc-playground-kit` を import するファイルに対して実際に
-`eslint(no-restricted-imports)` が発火し、`pnpm lint`(`nix develop --command pnpm lint`)が
-非ゼロで落ちる。
+**oxlint は package.json の devDependency として固定**されており、このリポジトリが以前固定していた
+`^0.12.0` から更新された。現在のバイナリは `.oxlintrc.json` を `-c` なしで自動検出し、
+`no-restricted-imports` も実装している。`mc-playground-kit` はブラウザ起動のための直接依存なので、
+その import 自体は禁止せず、package.json に直接宣言していない推移的な
+`mc-meshing` / `mc-noise` などの直接 import を禁止する。`mc-sim` は現在、公開 API を
+ブラウザ host で合成するための直接依存として宣言しており、host が行うのは stage と
+service の登録・配線だけである。
 
-これが規範の機械化された半分である。mc-sim を直接必要とするルールは、体験モジュールに属するルールである。
+これが規範の機械化された半分である。ゲームルールを所有するのは引き続き sibling package であり、
+mc-compose の `mc-sim` import は公開 module の登録という合成配線に限定する。
 
-> **現状**: `package.json` の `dependencies` は org 標準の Tier4 グラフと一致しており、
-> mc-audio / mc-render / mc-save / mc-sim / mc-worldgen / mx-gameplay / mx-redstone / mx-ui /
-> mx-multiplayer(+ どこからでも import 可能な mc-kernel)を宣言している。
+> **現状**: `package.json` の依存先は公開パッケージの固定バージョンを使っている。
+> ソース互換性が必要なパッケージには pnpm patch を適用し、依存境界は `.oxlintrc.json` と
+> `pnpm lint` で検査する。
 > 依存契約(誰が誰に依存してよいか)は org リポジトリ `.github` の
 > [`DEPENDENCY_POLICY.md`](https://github.com/nerima-games/.github/blob/main/DEPENDENCY_POLICY.md)
 > に一本化されている。詳細は [docs/versioning.md](./docs/versioning.md) §3。
@@ -70,7 +71,7 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 | --- | --- |
 | [docs/README.md](./docs/README.md) | 索引と読む順番 |
 | [docs/responsibility.md](./docs/responsibility.md) | **PRIME DIRECTIVE。必読** |
-| [docs/architecture.md](./docs/architecture.md) | 4 階層、16 リポジトリ依存グラフ、mc-render 到達性の未解決問題 |
+| [docs/architecture.md](./docs/architecture.md) | 4 階層、16 リポジトリ依存グラフ、mc-playground-kit の browser runtime 境界、mc-render の stage 所有 |
 | [docs/public-api.md](./docs/public-api.md) | 公開 API と契約 |
 | [docs/design-notes.md](./docs/design-notes.md) | 参照実装の実測知見(回帰テスト名付き)。**必読** |
 | [docs/porting.md](./docs/porting.md) | 移植計画。LOC は実測値 |
@@ -87,21 +88,21 @@ mc-render は縦切りスパイクが足した唯一の tier 2 エッジであ�
 | 推移閉包の禁止 | A→B、B→C のとき A は C を import できない。依存は直接依存のみが import 許可を意味する |
 | kernel は例外 | mc-kernel はどこからでも import 可 |
 | 宣言と実体の一致 | import する `@nerima-games/*` は `package.json` に記載されていなければならない |
-| mc-playground-kit は devDependency 専用 | `dependencies` に入れてはならない。実行時依存になると、出荷ビルドから入力処理が消える |
+| mc-playground-kit の扱い | ブラウザ起動で `makeBrowserPreview` を使うため、このリポジトリでは runtime dependency。入力・描画 stage の所有者は mc-render |
 
 正典は org リポジトリ `.github` の `DEPENDENCY_POLICY.md`。実効機構(の設計)は各リポジトリの
 `.oxlintrc.json` の `no-restricted-imports` であり(このリポジトリの分は本ファイル内の
 Tier4 向けパターンを参照)、内容は Tier ごと・リポジトリごとに異なってよい
 (byte-identical は適合条件ではない)。旧 `scripts/check-dependency-whitelist.ts`(16 リポジトリ
 byte-for-byte テンプレート + `REPOSITORY_POLICY` 定数の差し替え方式)は org 標準から廃止済み。
-**oxlint が Nix 提供になったこの PR から、上記「実効機構」は実際に機能する**(理由は前節、および
-`.oxlintrc.json` 内のコメント)。`no-restricted-globals`(下記)も同様に、この PR から初めて発火する
+**oxlint を npm の devDependency として更新したことで、上記「実効機構」は実際に機能する**(理由は前節、および
+`.oxlintrc.json` 内のコメント)。`no-restricted-globals`(下記)も同様に、更新後のバイナリで発火する
 ようになった。
 
 ### `Date.now()` 禁止について
 
-Nix 提供の oxlint(この PR の時点で ~1.73)は `no-restricted-syntax` も `no-restricted-properties` も
-まだ実装していない(`oxlint --rules` に存在しない)。`no-restricted-globals` は実装されており
+現在の npm-pinned oxlint は `no-restricted-syntax` も `no-restricted-properties` も
+実装していない(`oxlint --rules` に存在しない)。`no-restricted-globals` は実装されており
 (`name` などのグローバルに対して実測で発火することを確認済み)、`Date.now()` はグローバル関数呼び出し
 であって bare global 参照ではないため、この禁止の対象には引き続きならない。
 
@@ -117,14 +118,13 @@ oxlint が `no-restricted-syntax` 相当を実装するまで存在しない(`.o
 ### セットアップ
 
 ```console
-$ direnv allow          # flake.nix の devShell で nodejs_22 + corepack + oxlint が入る
+$ direnv allow          # flake.nix の devShell で Node.js 24 + corepack が入る
 $ pnpm install
 ```
 
-Nix を使わない場合は Node.js 22 以上と pnpm 9.15.0(`corepack` 推奨)を用意する。ただし
-**oxlint は package.json の devDependency ではない**ので、Nix なしでは `pnpm lint` を動かす
-`oxlint` バイナリ自体が無い ── 別途 `oxlint` を自分で用意するか、Nix 経由(`nix develop --command
-pnpm lint`)で実行すること。
+Nix を使わない場合は Node.js 24 以上と pnpm 11.17.0(`corepack` 推奨)を用意する。
+`oxlint` は package.json の devDependency なので、`pnpm install` 後はそのまま `pnpm lint`
+を実行できる。
 
 > **注意**: ツールチェーンは `devenv.nix` から `flake.nix` + `flake.lock` に移行済みである。
 > `flake.lock` はコミットされているので、`nix develop`（`.envrc` は `use flake`）は
@@ -135,17 +135,17 @@ pnpm lint`)で実行すること。
 | コマンド | 内容 |
 | --- | --- |
 | `pnpm typecheck` | `tsconfig.build.json` と `tsconfig.test.json` の両方を型検査 |
-| `pnpm lint` | oxlint(このリポジトリ唯一の lint / format 設定。Nix 提供、`package.json` の devDependency ではない ── `direnv allow` 済みなら素の `pnpm lint`、そうでなければ `nix develop --command pnpm lint`。CI も後者)。**`--deny-warnings` 付きで走る**ため `warn` のルールもビルドを落とす設計で、`.oxlintrc.json` はこの PR から `-c` なしで実際に読み込まれる(前節「依存ルール」参照)。**その結果、このリポジトリで初めて実測した現在のベースラインは非ゼロ(数千件規模の warning)** ── oxlint 0.12.0 時代は設定自体が読まれておらず実質何も検査していなかったので、これは新規の後退ではなく「これまで一度も測っていなかった実数が初めて見えた」もの。個々の警告を消す作業はこの PR のスコープ外 |
+| `pnpm lint` | oxlint(このリポジトリ唯一の lint 設定。package.json の devDependency)。**`--deny-warnings` 付きで走る**ため `warn` のルールもビルドを落とす設計で、`.oxlintrc.json` は `-c` なしで自動的に読み込まれる。 |
 | `pnpm lint:fix` | oxlint の自動修正 |
 | `pnpm test` | vitest(`@effect/vitest` の `it.effect` が主 API) |
 | `pnpm test:watch` | vitest watch |
-| `pnpm test:coverage` | カバレッジ計測 + 4 指標 99% ゲート。`verify` には含まれない別ゲート(TEST_STANDARD.md §1/§3) |
+| `pnpm test:coverage` | カバレッジ計測 + statements / branches / functions / lines の 100% ゲート。`verify` には含まれない CI 別ゲート |
 | `pnpm e2e` | E2E だけを走らせる(`vitest run test/e2e`)。純粋なので `pnpm test` も `pnpm verify` も既に拾っている |
 | `pnpm check:roster` | `test/e2e/roster.ts` の転記が兄弟リポジトリの実ソースと一致するかを照合。**`verify` に入っていない** — 兄弟のチェックアウトが要り、CI には無いため([docs/testing.md](./docs/testing.md) §3.5) |
 | `pnpm typecheck:preview` | 公開済みパッケージ境界で `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) |
 | `pnpm e2e:browser` | Chromium で全 Playwright E2E を実行 |
 | `pnpm changeset` | ユーザー向け変更に `.changeset/*.md` を追加する(RELEASE_STANDARD.md §1) |
-| `pnpm verify` | `typecheck && lint && test`。CI と同じ内容 |
+| `pnpm verify` | `typecheck && typecheck:preview && build:web && lint && test`。CI の Verify と同じ内容 |
 
 ## 現状
 
@@ -196,11 +196,8 @@ mc-compose が所有するのはホスト配線、stage 順序、セッション
 
 確定している **仕組み(org 標準への移行)**:
 
-- **カバレッジ 4 指標 99% ゲートは有効。** org の一律ロールアウト決定(TEST_STANDARD.md §3)により、
-  完成条件を待たず有効化した。実測ベースライン(2026-08-01、このリポジトリで初めて計測):
-  statements 96.13% / branches 88.39% / functions 100% / lines 96.13%。
-  3 指標が未達であり CI は赤くなるが、これは既知・受容済みの結果であって延期の理由にしない
-  (TEST_STANDARD.md §4)
+- **カバレッジ 4 指標 100% ゲートは有効。** `vitest.config.ts` と CI の
+  `pnpm test:coverage` が statements / branches / functions / lines を検証する。
 
 ## License
 

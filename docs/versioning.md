@@ -2,42 +2,41 @@
 
 ## 1. 現在地
 
-- **package version**: `0.1.0`
-- **公開状態**: **未公開。** ビルド / publish パイプラインはまだ存在しない
-- **`package.json#exports`**: TypeScript ソースを直接指している(`./index.ts`)
+- **package version**: `0.1.48`
+- **ビルド**: `pnpm build:web` がブラウザ bundle を生成する
+- **`package.json#exports`**: TypeScript ソースを直接指している(`./src/index.ts`)
+- **公開状態**: この checkout からの publish 結果は未確認。publish workflow も未配置
 
-## 2. なぜ公開しないのか(plan.md §6 Step 0 / Step 3)
+## 2. 初期計画との関係
 
-plan.md §6 Step 0 item 2:
+初期計画(plan.md §6 Step 0 / Step 3)には、界面安定まで npm 公開と version bump を遅らせ、
+`@nerima-games/mc-dev-meta` の `workspace:*` 解決で開発する方針があった。
+
+plan.md §6 Step 0 item 2 の原文は次のとおりである:
 > 開発中は `workspace:*` 解決でモノレポ同等の DX。
 > **npm 公開・バージョン bump 運用は界面安定(4 週間 API ロック無変更)まで開始しない**
 
-plan.md §8 のリスク表:
+plan.md §8 のリスク表も、初期段階では次の理由で publish を遅らせるとしていた:
 > 新規構築初期は全界面が高 churn → npm 公開を遅らせ dev-meta workspace で開発。bump 連鎖を構造的に回避
 
-16 リポジトリが相互に依存する状態で早期に publish を始めると、
-mc-kernel の 1 行変更が 15 リポジトリの bump 連鎖を引き起こす。
-それを構造的に避けるため、開発中は `@nerima-games/mc-dev-meta` が
-15 リポジトリを 1 つの pnpm workspace に束ね、`workspace:*` で解決する。
+現在の mc-compose はこの初期状態から進み、公開済み sibling package の固定版を
+`package.json` と lockfile で解決している。初期計画の「未公開なので依存先が無い」という説明は、
+現在の実装状態の説明としては使わない。
 
-## 3. `dependencies` に依存先が 1 つも無い理由
+## 3. dependencies と互換性パッチ
 
-mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multiplayer / mc-render である。
-にもかかわらず `package.json` には `effect` しか無い。
+mc-compose は次の sibling package を runtime dependency として version pin している:
 
-理由は **ボトムアップの publish-then-pin** である:
+- `mc-audio`, `mc-kernel`, `mc-physics`, `mc-render`, `mc-save`, `mc-sim`, `mc-worldgen`
+- `mx-gameplay`, `mx-multiplayer`, `mx-redstone`, `mx-ui`
+- `mc-playground-kit` — ブラウザ bootstrap のための明示的な runtime 例外
 
-1. 依存順(kernel → noise/meshing/physics/save/audio → worldgen → sim → render → kit →
-   gameplay/redstone → ui → multiplayer → **compose**)に完成させる
-2. 完成した層から publish する
-3. 下流はそこで初めて**公開済みバージョンを pin** する
+`effect` も直接依存し、`pnpm-lock.yaml` はこれらの解決結果を固定する。
+一部の公開 package には、この checkout の TypeScript 6 / pnpm 11 環境との互換性を保つため、
+`patches/` の patch を `pnpm-workspace.yaml` で適用している。
 
-**mc-compose はこの順序の最後尾である。** つまり他の 15 リポジトリすべてが
-少なくとも 1 回は publish されるまで、ここに書ける `dependencies` は存在しない。
-
-**ポリシー側(`scripts/check-dependency-whitelist.ts` の `REPOSITORY_POLICY`)には
-5 つとも既に宣言してある**ので、契約は最初から機械可読な形で存在する。
-`package.json` があとから追いつく。
+`pnpm install --frozen-lockfile` が単独 checkout でこの境界を再現する検証手段であり、
+兄弟リポジトリの source alias や `workspace:*` を runtime 解決には使わない。
 
 ## 4. 0.x の間の約束
 
@@ -64,7 +63,7 @@ mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multipla
 3. **本体 LOC が 2,000 を超えていない**([porting.md](./porting.md) §2)。
    超えていたら、超えた分がどのモジュールに属するかを先に決める
 4. **ビルド / publish パイプラインが存在する**(§7)
-5. **カバレッジ 99% ゲートが有効**
+5. **カバレッジ 4 指標 100% ゲートが有効**
 
 条件 3 は他のリポジトリには無い。**このリポジトリだけは「小さいこと」が完成条件である。**
 
@@ -89,15 +88,17 @@ publish する理由があるとすれば:
 **mod API のためだけなら、mod 向け型を別パッケージに切り出す選択肢もある**
 — そのほうが「mod 作者が合成層の内部に触れられる」問題を避けられる。
 
-## 7. ビルドと publish(完成時に追加する)
+## 7. ビルドと publish
 
-現在 `tsconfig.base.json` は `noEmit: true` であり、**すべての tsconfig は検査専用**である。
-完成条件を満たした時点で以下を追加する:
+`pnpm build:web` は Vite のブラウザ向け bundle を生成する。`tsconfig.base.json` は
+`noEmit: true` で、TypeScript package の `.d.ts` / ESM emit はまだ設定していない。
+
+現在このリポジトリで未確認・未配置なのは次の項目である:
 
 - `.d.ts` + ESM を出す emit 用 tsconfig
-- ブラウザ向けバンドル(compose は最終的にアプリケーションでもある)
 - `package.json#exports` を `./dist/index.js` / `./dist/index.d.ts` に切り替え
 - GitHub Packages(`https://npm.pkg.github.com`)への publish ワークフロー
+- publish 用の versioning / changeset 運用
   — `publishConfig` は既に設定済み
 - changesets 運用(plan.md §6 Step 3)
 
