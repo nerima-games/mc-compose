@@ -106,6 +106,38 @@ describe('startBrowserSession', () => {
     }),
   )
 
+  it.effect('does not repeat rollback when startup failure is interrupted during rollback', () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      const stopEntered = yield* Deferred.make<void>()
+      const releaseStop = yield* Deferred.make<void>()
+      const rollbackRuntime: BrowserRuntimeModule = {
+        name: 'sim',
+        start: Effect.sync(() => {
+          log.push('start:sim')
+          return gameModule('sim')
+        }),
+        stop: Effect.gen(function* () {
+          log.push('stop:sim')
+          yield* Deferred.succeed(stopEntered, undefined)
+          yield* Deferred.await(releaseStop)
+        }),
+      }
+      const fiber = yield* Effect.fork(startBrowserSession([
+        rollbackRuntime,
+        runtime('render', log, { startError: 'no-render' }),
+      ]))
+
+      yield* Deferred.await(stopEntered)
+      yield* Fiber.interruptFork(fiber)
+      yield* Effect.yieldNow()
+      yield* Deferred.succeed(releaseStop, undefined)
+      yield* Fiber.await(fiber)
+
+      expect(log).toStrictEqual(['start:sim', 'start:render', 'stop:sim'])
+    }),
+  )
+
   it.effect('rolls back all runtimes when stage composition fails', () =>
     Effect.gen(function* () {
       const log: Array<string> = []

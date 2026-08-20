@@ -13,6 +13,7 @@ plan.md §3.15 検証:
 | stage 全順序の解決 | 決定性・循環検出・dangling・フェーズ所属・skeleton 連鎖 | `test/stage-order.test.ts` |
 | Layer 合成 + フレーム実行 | 解決順が**実際に実行を駆動する**こと | `test/composition.test.ts` |
 | セッションライフサイクル | 状態機械。**2 周目**が最重要 | `test/session.test.ts` |
+| ブラウザ session lifecycle | runtime の宣言順起動、完了済み runtime の逆順 rollback、割り込み時の冪等性 | `test/browser-session.test.ts` |
 | QA API | 名前空間マージ・衝突拒否・インストール | `test/qa-api.test.ts` |
 | Modding 入口 | 名前空間予約・一級モジュール性 | `test/modding.test.ts` |
 | 公開 API + 規範 | バレルのピン留め + ゲームルール名の検査 + **フェーズ所属のピン留め** | `test/public-api.test.ts` |
