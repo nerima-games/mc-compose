@@ -357,6 +357,10 @@ mc-compose はそれらを `BrowserRuntimeModule` として受け取り、ブラ
 rollback 中の停止失敗は元の start/compose 失敗を上書きせず、
 `BrowserSessionStartError.rollbackFailures` に併記される。
 
+起動中に割り込みを受けた場合も、成功済み runtime は逆順に rollback される。
+この rollback は `uninterruptible` として実行されるため、停止処理の途中で再度割り込まれない。
+`test/browser-session.test.ts` の割り込みテストは、後続 runtime の起動を停止した後に、先行 runtime の停止が一度だけ行われることを検証する。
+
 ## 5. セッションライフサイクル(`domain/session.ts`)
 
 ```typescript
