@@ -23,7 +23,7 @@ type Durability = { readonly current: number; readonly max: number }
 const stack = (item: string, count = 1, durability?: Durability | null): ItemStack => ({
   item,
   count,
-  ...(durability === undefined ? {} : { durability }),
+  ...(durability === undefined || durability === null ? {} : { durability }),
 })
 
 const mutableInventory = (
@@ -71,8 +71,8 @@ describe('inventory state operations', () => {
     }
 
     expect(cloneStack(null)).toBeNull()
-    expect(cloneStack(state.slots[0])).toEqual(state.slots[0])
-    expect(cloneStack(state.slots[0])).not.toBe(state.slots[0])
+    expect(cloneStack(state.slots[0]!)).toEqual(state.slots[0])
+    expect(cloneStack(state.slots[0]!)).not.toBe(state.slots[0])
 
     const cloned = cloneInventory(state)
     expect(cloned.selectedSlot).toBe(2)
