@@ -65,14 +65,6 @@ const stopRuntimes = (
     return failures
   })
 
-const rollbackAndFail = (
-  started: ReadonlyArray<BrowserRuntimeModule>,
-  error: Omit<BrowserSessionStartError, 'rollbackFailures'>,
-): Effect.Effect<never, BrowserSessionStartError> =>
-  Effect.flatMap(stopRuntimes(started), (rollbackFailures) =>
-    Effect.fail({ ...error, rollbackFailures }),
-  )
-
 /** The `failures.length` threshold below which no runtime failed to stop. */
 const NO_FAILURES = 0
 
@@ -87,29 +79,34 @@ const NO_FAILURES = 0
  */
 const unattributedModule = (moduleName?: string): string | undefined => moduleName
 
+type RollbackAndFail = (
+  error: Omit<BrowserSessionStartError, 'rollbackFailures'>,
+) => Effect.Effect<never, BrowserSessionStartError>
+
 type StartedRuntimes = {
-  readonly started: ReadonlyArray<BrowserRuntimeModule>
   readonly modules: ReadonlyArray<GameModule>
 }
 
 /**
- * Starts injected sibling runtimes in declaration order, rolling back and
- * failing on the first one that does not start.
+ * Starts injected sibling runtimes in declaration order, pushing each
+ * successfully started one onto `started`, and rolling back through
+ * `rollbackAndFail` on the first one that does not start.
  *
  * Split out of `startBrowserSession` so that function stays under this
  * repository's statement budget; behaviour is unchanged.
  */
 const startRuntimes = (
   runtimes: ReadonlyArray<BrowserRuntimeModule>,
+  started: Array<BrowserRuntimeModule>,
+  rollbackAndFail: RollbackAndFail,
 ): Effect.Effect<StartedRuntimes, BrowserSessionStartError> =>
   Effect.gen(function* startRuntimesGen() {
-    const started: Array<BrowserRuntimeModule> = []
     const modules: Array<GameModule> = []
 
     for (const runtime of runtimes) {
       const result = yield* Effect.either(runtime.start)
       if (Either.isLeft(result)) {
-        return yield* rollbackAndFail(started, {
+        return yield* rollbackAndFail({
           _tag: 'BrowserSessionStartError',
           cause: result.left,
           moduleName: runtime.name,
@@ -121,7 +118,7 @@ const startRuntimes = (
       modules.push(result.right)
     }
 
-    return { modules, started }
+    return { modules }
   })
 
 /**
@@ -132,33 +129,52 @@ export const startBrowserSession = (
   runtimes: ReadonlyArray<BrowserRuntimeModule>,
   options: StartBrowserSessionOptions = {},
 ): Effect.Effect<BrowserSession, BrowserSessionStartError> =>
-  Effect.gen(function* startBrowserSessionGen() {
-    const { started, modules } = yield* startRuntimes(runtimes)
+  Effect.suspend(() => {
+    const started: Array<BrowserRuntimeModule> = []
 
-    const composed = composeGame(modules, options.compose)
-    if (Either.isLeft(composed)) {
-      return yield* rollbackAndFail(started, {
-        _tag: 'BrowserSessionStartError',
-        cause: composed.left,
-        moduleName: unattributedModule(),
-        phase: 'compose',
-      })
-    }
+    return Effect.flatMap(Ref.make(false), (rolledBack) => {
+      const rollback = Effect.uninterruptible(
+        Effect.flatMap(Ref.getAndSet(rolledBack, true), (alreadyRolledBack) => {
+          if (alreadyRolledBack) {
+            return Effect.succeed([])
+          }
+          return stopRuntimes(started)
+        }),
+      )
+      const rollbackAndFail: RollbackAndFail = (error) =>
+        Effect.flatMap(rollback, (rollbackFailures) =>
+          Effect.fail({ ...error, rollbackFailures }),
+        )
 
-    const stopped = yield* Ref.make(false)
-    const stop = Effect.gen(function* stopSessionGen() {
-      if (yield* Ref.getAndSet(stopped, true)) {
-        return
-      }
+      return Effect.gen(function* startBrowserSessionGen() {
+        const { modules } = yield* startRuntimes(runtimes, started, rollbackAndFail)
 
-      const failures = yield* stopRuntimes(started)
-      if (failures.length > NO_FAILURES) {
-        return yield* Effect.fail({
-          _tag: 'BrowserSessionStopError' as const,
-          failures,
+        const composed = composeGame(modules, options.compose)
+        if (Either.isLeft(composed)) {
+          return yield* rollbackAndFail({
+            _tag: 'BrowserSessionStartError',
+            cause: composed.left,
+            moduleName: unattributedModule(),
+            phase: 'compose',
+          })
+        }
+
+        const stopped = yield* Ref.make(false)
+        const stop = Effect.gen(function* stopSessionGen() {
+          if (yield* Ref.getAndSet(stopped, true)) {
+            return
+          }
+
+          const failures = yield* stopRuntimes(started)
+          if (failures.length > NO_FAILURES) {
+            return yield* Effect.fail({
+              _tag: 'BrowserSessionStopError' as const,
+              failures,
+            })
+          }
         })
-      }
-    })
 
-    return { game: composed.right, stop }
+        return { game: composed.right, stop }
+      }).pipe(Effect.onInterrupt(() => Effect.asVoid(rollback)))
+    })
   })
