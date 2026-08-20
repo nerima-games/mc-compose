@@ -1,3 +1,4 @@
+import { ITEM_DURABILITY_CATALOG } from '@nerima-games/mc-sim'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -129,6 +130,31 @@ describe('inventory state operations', () => {
       null,
     ])
     expect(snapshot.equipment).toEqual(equipment({ head: stack('iron_helmet', 1, { current: 5, max: 165 }) }))
+  })
+
+  it('rejects equipment when the shared catalog has no durability definition', () => {
+    const catalog = ITEM_DURABILITY_CATALOG as Record<string, unknown>
+    const originalDefinition = catalog['iron_helmet']
+    delete catalog['iron_helmet']
+    try {
+      const cloned = cloneInventory({
+        slots: [null],
+        durability: [null],
+        selectedSlot: 0,
+        equipment: equipment({ head: stack('iron_helmet') }),
+      })
+      expect(cloned.equipment.head).toBeNull()
+
+      const toEquip = mutableInventory([stack('iron_helmet')])
+      expect(equipInventoryItem(toEquip, 0, 'head')).toBe('invalid-command')
+
+      const toUnequip = mutableInventory([null], {
+        equipment: equipment({ head: stack('iron_helmet') }),
+      })
+      expect(unequipInventoryItem(toUnequip, 'head', 0)).toBe('invalid-command')
+    } finally {
+      catalog['iron_helmet'] = originalDefinition
+    }
   })
 
   it('moves stacks only when source, destination, and capacity are valid', () => {
@@ -290,5 +316,9 @@ describe('inventory state operations', () => {
 
     const overflow = [stack('stone', 64)]
     expect(addStackToInventory(overflow, stack('stone'))).toEqual(stack('stone'))
+
+    const emptyOverflow = [null]
+    expect(addStackToInventory(emptyOverflow, stack('stone', 65))).toEqual(stack('stone'))
+    expect(emptyOverflow).toEqual([stack('stone', 64)])
   })
 })
