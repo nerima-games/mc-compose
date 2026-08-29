@@ -2,7 +2,7 @@
  * The browser E2E harness. The complete discovered suite is the final gate;
  * docs/e2e-triage.md records the historical 25-test reference migration.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * Browser acceptance harness for the production web and multiplayer surfaces.
  *
  * ---------------------------------------------------------------------------
  * This is NOT `pnpm e2e`, and the two names must not merge

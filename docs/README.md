@@ -25,7 +25,7 @@ E2E でしか検証できなくなった。**それが本計画全体の出発�
 | ドキュメント | 内容 | 主な読者 |
 | --- | --- | --- |
 | [responsibility.md](./responsibility.md) | **PRIME DIRECTIVE。** 持つもの / 持たないもの / 規範の機械的強制 | **全員。最初に読む** |
-| [architecture.md](./architecture.md) | 4 階層アーキテクチャ、16 リポジトリ依存グラフ、本リポジトリの位置、名詞/動詞ルール、mc-playground-kit の devDependency 専用ルール、**mc-render 到達性の未解決問題** | 全員 |
+| [architecture.md](./architecture.md) | 4 階層アーキテクチャ、16 リポジトリ依存グラフ、本リポジトリの位置、名詞/動詞ルール、mc-playground-kit の実行時依存、**mc-render 到達性を含む依存グラフの実装状況** | 全員 |
 | [public-api.md](./public-api.md) | 公開 API 一覧と、それぞれの契約 | mod 作者・実装者 |
 | [design-notes.md](./design-notes.md) | 参照実装の実測知見。各項目が「名前付き回帰テスト」として書かれている | 実装者。**実装前に必読** |
 | [porting.md](./porting.md) | 移植計画。**LOC は実測値**(plan.md の見積りは 22 倍ずれている) | 実装者 |
@@ -53,7 +53,7 @@ plan.md §3.15 が compose に割り当てた残りの責務である。
 
 ## 4. 現状
 
-このリポジトリは **叩き台(pre-audit first cut)** である。
+このリポジトリは、公開依存の契約を直接使う composition/runtime wiring の実装である。
 
 **確定している**(仕組みとして):
 
@@ -61,18 +61,14 @@ plan.md §3.15 が compose に割り当てた残りの責務である。
 - 順序表は**フェーズの列**。stage id は名前部分(または名前空間)で所属を宣言し、絶対位置は名乗れない
 - skeleton の暗黙エッジは stage が入ったフェーズの間だけに張り、空のフェーズは鎖を閉じる
 - Layer は `merge` であって `provide` ではない(モジュールは対等)
-- `runFrame` は delta をクランプせず、try/catch も計測も条件分岐も持たない
+- `runFrame` は simulation delta を 1–50 ms にクランプし、フレーム処理の失敗を起動失敗として記録する
 - セッションは `InGame` から `Title` へ直行できない。ティアダウンは通過必須の状態
 - QA コマンドは所有モジュールが名前空間ごと提供し、compose はマージするだけ
 - mod は一級のモジュール。stage 名前空間だけが制約
 
-**確定していない**:
+**残っている検証／改善項目**:
 
-- 4 つの体験モジュールの実合成(全モジュール未公開)
-- mc-kernel の契約型への切り替え(現在はローカル宣言のミラー)
-- ブラウザE2Eで未採用の振る舞い経路。現在は起動、RAF、QA観測、teardownに加え、
-  採掘からinventory更新までを公開package境界で検証する
-- `ModuleLayer` の精密な型。`RIn` は `never`、`composeGame` は推論した提供サービスの union を返す
-- **`sim:physics` を誰が登録するのか**([design-notes.md](./design-notes.md) DN-14)
-- **ネットワーク同期のフェーズを骨格のどこに置くか**(同 DN-15)
-- **`InventoryService` のインスタンスを誰が構築するのか**([e2e-triage.md](./e2e-triage.md) §4.3)
+- 公開 package 境界を通した 4 つの体験モジュールの実ブラウザ最終ゲート
+- 固定ポートを必要とするブラウザ E2E の共有環境での実行
+- 大きなブラウザ bundle の code splitting。現在の設定では Vite のチャンク警告を隠していない
+- 同一ブラウザプロファイルでの multiplayer reconnect 経路と、2 クライアント同時接続の実ブラウザ再現

@@ -2,7 +2,7 @@
 import {
   type ComposeOptions,
   type ComposedGame,
-  type GameModule,
+  type RegisteredGameModule,
   composeGame,
 } from './composition'
 import { Effect, Either, Ref } from 'effect'
@@ -17,7 +17,7 @@ import type { StageOrderError } from './stage-order'
  */
 export type BrowserRuntimeModule = {
   readonly name: string
-  readonly start: Effect.Effect<GameModule, unknown>
+  readonly start: Effect.Effect<RegisteredGameModule, unknown>
   readonly stop: Effect.Effect<void, unknown>
 }
 
@@ -89,7 +89,7 @@ const unattributedModule = (moduleName?: string): string | undefined => moduleNa
 
 type StartedRuntimes = {
   readonly started: ReadonlyArray<BrowserRuntimeModule>
-  readonly modules: ReadonlyArray<GameModule>
+  readonly modules: ReadonlyArray<RegisteredGameModule>
 }
 
 /**
@@ -104,7 +104,7 @@ const startRuntimes = (
 ): Effect.Effect<StartedRuntimes, BrowserSessionStartError> =>
   Effect.gen(function* startRuntimesGen() {
     const started: Array<BrowserRuntimeModule> = []
-    const modules: Array<GameModule> = []
+    const modules: Array<RegisteredGameModule> = []
 
     for (const runtime of runtimes) {
       const result = yield* Effect.either(runtime.start)

@@ -7,8 +7,11 @@ import { decodeFrame, encodeFrame, type NetworkMessage, type PlayerId, type Play
 import { Either } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
+import { endSurfaceHeightAt, generateEndChunkAt, generateNetherChunkAt } from '@nerima-games/mc-worldgen'
 
 import {
+  blockTypeFromWorldgenId,
+  makeEndArrivalMutations,
   makeGeneratedBlockAt,
   resolveMultiplayerRuntimeOptions,
   startMultiplayerServer,
@@ -286,6 +289,32 @@ describe('multiplayer WebSocket runtime', () => {
       && at.z === block.z
     ))).toBe(true)
     reconnect.close()
+  })
+
+  it('can source End and Nether blocks from the published terrain generators', () => {
+    const seed = 73
+    const endGeneratedBlockAt = makeGeneratedBlockAt(seed, generateEndChunkAt)
+    const netherGeneratedBlockAt = makeGeneratedBlockAt(seed, generateNetherChunkAt)
+    const endSurfaceY = endSurfaceHeightAt(seed, 0, 0)
+
+    expect(endSurfaceY).toBeDefined()
+    if (endSurfaceY === undefined) throw new Error('the central End island must have a surface')
+    expect(endGeneratedBlockAt({ x: 0, y: endSurfaceY, z: 0 })).toBe('end_stone')
+    expect(netherGeneratedBlockAt({ x: 0, y: 0, z: 0 })).toBe('bedrock')
+  })
+
+  it('uses the published End arrival descriptor for cross-dimension entry', () => {
+    const spawnAt = { x: 7, y: 80, z: -2 }
+    const mutations = makeEndArrivalMutations(spawnAt)
+
+    expect(mutations).toHaveLength(52)
+    expect(mutations).toContainEqual({ at: { x: 7, y: 79, z: -2 }, block: 'obsidian' })
+    expect(mutations).toContainEqual({ at: { x: 7, y: 80, z: -2 }, block: null })
+    expect(mutations).toContainEqual({ at: { x: 7, y: 82, z: -2 }, block: null })
+  })
+
+  it('rejects unknown worldgen block ids at the host boundary', () => {
+    expect(() => blockTypeFromWorldgenId(-1)).toThrow(/unknown block id/)
   })
 
   it('rejects active takeover, permits one lost-response recovery, and rejects replay and cross-player tokens', async () => {

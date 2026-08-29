@@ -85,10 +85,10 @@ const openTargetedStation = async (page: Page): Promise<void> => {
 //      stale focus was present but not obviously still blocking anything at
 //      click time.
 //   3. A failed run captured data-frames=22 at the moment of failure — a
-//      suspiciously low total RAF tick count — suggesting the game's frame
-//      loop may be throttled or delayed in this headless harness in a way
-//      that intermittently drops the queued right-click (nativeUseQueued in
-//      apps/web/main.ts) before a frame consumes it.
+//      suspiciously low total RAF tick count — suggesting renderer scheduling
+//      may be throttled or delayed in this headless harness. This evidence
+//      predates the current render:input stage's sole input-frame ownership
+//      and must be re-run before assigning the failure to an interaction path.
 //
 // Three fix attempts were tried and reverted because none were reliable
 // across repeated runs at genuinely low system load (verified via `uptime`):

@@ -47,17 +47,17 @@ import { describe, expect, it } from '@effect/vitest'
 import { Effect, Either, Layer, Option, Ref } from 'effect'
 import {
   composeGame,
-  DeltaTimeSecs,
   EMPTY_MODULE_LAYER,
   type ComposedGame,
-  type GameModule,
+  type RegisteredGameModule,
 } from '../../src/domain/composition'
 import {
+  DeltaTimeSecs,
   EpochMillis,
   FixedClockLayer,
   MonotonicTimeSecs,
   type FrameServices,
-} from '../../src/domain/kernel-vocabulary'
+} from '@nerima-games/mc-kernel'
 import {
   describeStageOrderError,
   phaseOf,
@@ -87,7 +87,7 @@ const FRAME_DELTA: DeltaTimeSecs = DeltaTimeSecs(1 / 60)
 const composeRoster = (
   options: {
     readonly skeleton?: ReadonlyArray<(typeof STANDARD_STAGE_SKELETON)[number]>
-    readonly modules?: ReadonlyArray<GameModule>
+    readonly modules?: ReadonlyArray<RegisteredGameModule>
   } = {},
 ): Effect.Effect<{
   readonly game: ComposedGame
@@ -765,7 +765,7 @@ describe('composition failures the roster could actually produce', () => {
   it.effect('rejects a second module claiming render:draw, and names it', () =>
     Effect.gen(function* () {
       const log = yield* Ref.make<ReadonlyArray<string>>([])
-      const impostor: GameModule = {
+      const impostor: RegisteredGameModule = {
         name: 'a-mod-that-should-not-have',
         layers: EMPTY_MODULE_LAYER,
         frameStages: [{ id: StageId('render:draw'), run: () => Effect.void }],

@@ -281,12 +281,12 @@ test.afterAll(async () => {
 // console listener) shows the actual defect: "boot failed: a frame stage
 // defected {_tag: Die, defect: AsyncFiberException: Fiber #242 cannot be
 // resolved synchronously...}" from apps/web/main.ts:8445-8450's
-// Effect.runSyncExit(runFrame(...)). Most likely cause: mx-multiplayer's
-// `multiplayer:inbound` stage (registration.ts) draining transport.inbound via
-// Queue.takeAll races against the queue shutdown apps/web/multiplayer-websocket.ts
-// triggers on socket close/error. Needs a focused debugging session with full
-// Cause.pretty() output in mx-multiplayer's registration.ts or
-// apps/web/multiplayer-websocket.ts, tracked separately.
+// Effect.runSyncExit(runFrame(...)). The earlier Queue.takeAll-versus-shutdown
+// hypothesis is invalidated: the browser transport now leaves the inbound
+// queue drainable after close/error, and the focused websocket regression covers
+// that lifecycle. The remaining defect is in the live registration/transport
+// failure path and needs a browser trace with full Cause.pretty() output from
+// mx-multiplayer's registration.ts or apps/web/multiplayer-websocket.ts.
 test.fixme('routes environmental survival damage through multiplayer authority', async ({ browser }) => {
   const environmentStateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-environmental-authority-e2e-'))
   const environmentStateFile = join(environmentStateDirectory, 'state.json')
@@ -333,9 +333,10 @@ test.fixme('automatically picks up nearby item drops through the authoritative m
     )
     await expect.poll(() => authoritativeEntity(alice.page, 'survival-rotten-flesh')).toBeUndefined()
 
-    bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
-    await expect.poll(() => authoritativeEntity(bob.page, 'survival-rotten-flesh')).toBeUndefined()
-    await expect.poll(async () => (await snapshot(bob!.page)).inventory.slots).not.toEqual(
+    const connectedBob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
+    bob = connectedBob
+    await expect.poll(() => authoritativeEntity(connectedBob.page, 'survival-rotten-flesh')).toBeUndefined()
+    await expect.poll(async () => (await snapshot(connectedBob.page)).inventory.slots).not.toEqual(
       expect.arrayContaining([{ item: 'rotten_flesh', count: 2 }]),
     )
   } finally {

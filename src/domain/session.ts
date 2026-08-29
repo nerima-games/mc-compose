@@ -1,7 +1,7 @@
 /**
  * Session lifecycle: title <-> game.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * CURRENT SESSION LIFECYCLE CONTRACT.
  *
  * ---------------------------------------------------------------------------
  * Why this is a state machine with a MANDATORY teardown state
@@ -32,18 +32,9 @@
  * modules that started the things; putting it here would be exactly the
  * accumulation this repository exists to prevent.
  */
-import { Brand } from 'effect'
+import { WorldId } from '@nerima-games/mc-kernel'
 
-/** The length below which a trimmed `WorldId` candidate is blank. */
-const EMPTY_LENGTH = 0
-
-/** Identifies a world (save). Mirrors `@nerima-games/mc-kernel`'s `WorldId`. */
-export type WorldId = string & Brand.Brand<'WorldId'>
-
-export const WorldId = Brand.refined<WorldId>(
-  (value) => value.trim().length > EMPTY_LENGTH,
-  (value) => Brand.error(`WorldId must be a non-blank string, received ${JSON.stringify(value)}`),
-)
+export { WorldId }
 
 /**
  * The value `undefined`, without spelling the literal this file's strict

@@ -872,9 +872,8 @@ describe('authoritative multiplayer server core', () => {
       worldId: 'end',
       dimension: 'end',
       seed: 42,
-      allowedBlocks: new Set(['end_stone', 'end_portal']),
+      allowedBlocks: new Set(['end_stone']),
       bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
-      staticBlocks: [{ at: { x: 0, y: 64, z: 0 }, block: 'end_portal' }],
     })
     expect(destination.connect('socket-a', (wire) => destinationFrames.push(wire))).toBe(true)
 
@@ -886,6 +885,10 @@ describe('authoritative multiplayer server core', () => {
       fromWorld: worldId('world-1'),
       at: { x: 0, y: 65, z: 0 },
       facing: { yawRadians: 1, pitchRadians: 0 },
+      blocks: [
+        { at: { x: 0, y: 64, z: 0 }, block: 'obsidian' },
+        { at: { x: 0, y: 65, z: 0 }, block: null },
+      ],
     })).toBe(true)
 
     expect(messages(destinationFrames)).toContainEqual(expect.objectContaining({
@@ -899,19 +902,26 @@ describe('authoritative multiplayer server core', () => {
         inventories: [expect.objectContaining({ player: playerId('alice') })],
         vitals: [expect.objectContaining({ player: playerId('alice') })],
       }),
-      worldSnapshot: expect.objectContaining({ world: worldId('end') }),
+      worldSnapshot: expect.objectContaining({
+        world: worldId('end'),
+        revision: 1,
+        blocks: expect.arrayContaining([
+          { at: { x: 0, y: 64, z: 0 }, block: 'obsidian', world: worldId('end') },
+          { at: { x: 0, y: 65, z: 0 }, block: null, world: worldId('end') },
+        ]),
+      }),
     }))
     expect(anvilMessages(destinationFrames)).toContainEqual({
       _tag: 'PlayerAnvilNamesDelta',
       world: worldId('end'),
-      revision: 0,
+      revision: 1,
       player: playerId('alice'),
       names: [{ slot: 0, name: 'Endbringer' }],
     })
     expect(enchantingMessages(destinationFrames)).toContainEqual({
       _tag: 'PlayerEnchantmentsDelta',
       world: worldId('end'),
-      revision: 0,
+      revision: 1,
       player: playerId('alice'),
       seed: 73,
       items: [{ slot: 0, item: enchantedStone }],
@@ -944,11 +954,15 @@ describe('authoritative multiplayer server core', () => {
       }),
       expect.objectContaining({
         _tag: 'EntitySpawnDelta',
-        entity: expect.objectContaining({ _tag: 'item-drop', stack: { item: 'dragon_egg', count: 1 } }),
+        entity: expect.objectContaining({
+          _tag: 'item-drop',
+          at: { x: 20, y: 76, z: 0 },
+          stack: { item: 'dragon_egg', count: 1 },
+        }),
       }),
     ]))
     expect(fixture.server.snapshot().blocks).toEqual(expect.arrayContaining([
-      expect.objectContaining({ at: { x: 0, y: 64, z: 0 }, block: 'end_portal' }),
+      expect.objectContaining({ at: { x: 20, y: 75, z: 0 }, block: 'end_portal' }),
     ]))
   })
 

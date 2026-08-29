@@ -1,7 +1,7 @@
 /**
  * The browser entry point. THE HOST.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * PRODUCTION HOST BOUNDARY.
  *
  * ---------------------------------------------------------------------------
  * What this file is, under the prime directive
@@ -10,10 +10,10 @@
  * `index.ts` says the only code added to this repository is Layer composition
  * and the stage order table. This file is neither — it is the HOST, the thing
  * `docs/porting.md` §2 names and `domain/composition.ts` keeps referring to as
- * "the host has the type to discharge it". It is not published: `package.json`
- * `files` lists `index.ts` and `domain` and does not list `apps`, and
- * `check-dependency-whitelist.ts`'s own `isToolingOrTestPath` agrees, treating
- * everything outside `index.ts` and `domain/` as tooling.
+ * "the host has the type to discharge it". It is not part of the published
+ * library surface: `package.json#files` intentionally ships `src/` and does
+ * not ship `apps/`. This file is the browser runtime host, not another domain
+ * package or public API entry point.
  *
  * So the rule this file lives under is not "no game rules" (it has none) but
  * "nothing here may be a rule some module should have owned". Concretely it
@@ -31,9 +31,9 @@
  *
  * `mc-render`, `mx-ui`, `mx-redstone` and `mx-gameplay` are composed. Gameplay
  * supplies its public production services, including the generated chunk
- * store shared with the renderer. `mx-multiplayer` remains outside this host
- * until a production `TransportPort` is selected; composing a test transport
- * would only verify the fake.
+ * store shared with the renderer. When a production WebSocket transport is
+ * available, `mx-multiplayer` is composed with its already-bound host stages;
+ * otherwise the network module is absent.
  *
  * ---------------------------------------------------------------------------
  * THERE IS A RENDERER NOW, AND THIS FILE STILL DOES NOT DRAW
@@ -63,19 +63,15 @@
  * ---------------------------------------------------------------------------
  *
  * It read: "No chunk geometry reaches the renderer because no world reaches
- * this page", and it argued that mc-worldgen and mc-meshing COULD NOT be
- * resolved here, for the reason under "WHY THREE MODULES AND NOT SIX".
+ * this page." That is no longer true: mx-gameplay's public world constructor
+ * supplies the generated ChunkStore used by gameplay collision, block edits
+ * and mc-render meshing.
  *
- * HALF OF THAT WAS RIGHT AND THE HALF THAT WAS WRONG IS THE INTERESTING ONE.
- * The wall it named is real: registering `gameplayModule` needs a `ChunkStore`,
- * an `EntityManager` and an `InventoryService`, and the only implementations
- * are test doubles. But DRAWING TERRAIN NEVER NEEDED `gameplayModule`. It
- * needed chunk geometry, and geometry is data.
- *
- * The blocker was stated as a CATEGORY ("registering a module needs services")
- * over a set that included a case which registers nothing — the fourth time
- * this project has recorded that shape (§0.1 of the residual-work document
- * counts the others).
+ * mx-gameplay also publishes the service implementations required by
+ * `gameplayModule`. This host deliberately uses the lower-level public stage
+ * factory instead, because it must inject the same current-dimension store,
+ * frame state, request queues and multiplayer authority that its input and
+ * network handlers mutate. The choice is host wiring, not a package boundary.
  *
  * WHAT IS ON THE SCREEN: a deterministic generated world, streamed around the
  * player through mx-gameplay's public world constructor. Gameplay collision,
@@ -98,11 +94,15 @@ import {
   blockIdOf,
   blockTypeOfId,
   capabilityOfBlockId,
+  DeltaTimeSecs,
   MonotonicTimeSecs as KernelMonotonicTimeSecs,
   position,
   propertyOfBlockId,
   StackCount,
+  StageId,
   type CameraPoseSnapshot,
+  type MonotonicTimeSecs,
+  WorldId,
 } from '@nerima-games/mc-kernel'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
@@ -168,13 +168,13 @@ import {
   makeProductionWorldRenderer,
   makeWorldRenderer,
   renderModule,
+  RENDER_STAGE_IDS,
   syncWorld,
   wrapHotbarSelection,
   type ChunkRef,
-  type ChunkSyncPort,
-  type RenderEntity,
 } from '@nerima-games/mc-render'
 import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
+import { projectRenderEntities } from './render-entity-projection'
 import { applyAnvilOperation, spendExperienceLevels } from '../multiplayer-shared/anvil-repair'
 import { excludeReservedPlacementConsumptions } from './placement-consumption'
 import {
@@ -350,7 +350,6 @@ import {
   PlayerId,
   PlayerName,
   TransportPort,
-  WorldId,
   type MultiplayerHost,
   type NetworkMessage,
   type AuthoritativeEntityState,
@@ -361,6 +360,7 @@ import {
   IDLE_BOW_USE,
   type BowUseState,
 } from './bow-use'
+import { FIRST_FRAME_SECS, frameDeltas } from './frame-timing'
 import {
   decodeProjectedEnchantedItem,
   projectEnchantedItem,
@@ -413,9 +413,8 @@ import {
   composeGame,
   EMPTY_MODULE_LAYER,
   registerModule,
-  type GameModule,
+  type RegisteredGameModule,
 } from '../../src/domain/composition'
-import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../src/domain/kernel-vocabulary'
 
 type WithoutAuthority<T> = T extends unknown
   ? Omit<T, 'commandId' | 'player' | 'world' | 'expectedRevision'>
@@ -517,23 +516,6 @@ import {
   sessionHref,
   type SessionRoute,
 } from './session-navigation'
-
-/**
- * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
- *
- * `domain/kernel-vocabulary.ts` is explicit that this is not part of the
- * `DeltaTimeSecs` brand and is not applied by mc-compose: "It is a simulation
- * invariant belonging to whoever produces the delta". The host produces it, so
- * the host clamps it — and without the clamp a backgrounded tab returns for its
- * first frame with a delta of several seconds, which every integrator in the
- * roster would step straight through a wall.
- */
-const FIRST_FRAME_SECS = 0.016
-const MIN_FRAME_SECS = 0.001
-const MAX_FRAME_SECS = 0.05
-
-const clampDelta = (raw: number): DeltaTimeSecs =>
-  DeltaTimeSecs(Math.min(Math.max(MIN_FRAME_SECS, raw), MAX_FRAME_SECS))
 
 /** How often the FPS readout is recomputed. Long enough to be a rate, short enough to watch. */
 
@@ -1322,11 +1304,8 @@ const bootGame = async (
     : creationMetadata ?? { name: sessionId, mode: 'survival' }
   const isCreativeMode = sessionMetadata.mode === 'creative'
 
-  // POINTER LOCK IS THE HOST'S TO ASK FOR. mc-render's `InputService` treats a
-  // click as a GAME action only while the pointer is locked, and as a UI click
-  // otherwise — the closed-world predicate `domain/input-bindings.ts` describes,
-  // and the reason a HUD click cannot steal the pointer. Without this, `attack`
-  // never fires and no block can be broken.
+  // mc-render's InputService owns pointer-lock state. The host supplies the
+  // policy that keeps UI modes from acquiring the game pointer.
   const inputLayer = browserInputLayer({
     targets: { window, document },
     canvas,
@@ -1335,33 +1314,6 @@ const bootGame = async (
     touchControls,
   })
 
-  // The gesture the browser requires: pointer lock can only be requested from a
-  // user activation, so the canvas asks on click.
-  //
-  // A REFUSAL IS NOT AN ERROR. Some environments decline pointer lock outright
-  // — Playwright on SwiftShader is one, and answers `WrongDocumentError` — and
-  // a host that let that reach the console would make every automated run
-  // report a failure it cannot do anything about. The game degrades exactly as
-  // mc-render's `UNAVAILABLE_POINTER_LOCK` describes: keyboard still works,
-  // clicks stay UI clicks, and `attack` does not fire.
-  canvas.addEventListener('click', (event) => {
-    if (event.isTrusted) audio.unlock()
-    if (inventoryOpen || tradeOpen || brewingOpen || document.pointerLockElement === canvas) {
-      return
-    }
-    try {
-      const requested: unknown = canvas.requestPointerLock()
-      if (requested instanceof Promise) {
-        requested.catch(() => {
-          canvas.setAttribute('data-pointer-lock', 'refused')
-        })
-      }
-    } catch {
-      // The attribute IS the record. A boolean nobody reads would be the
-      // unread-field shape this project keeps finding; a test can see this.
-      canvas.setAttribute('data-pointer-lock', 'refused')
-    }
-  })
   canvas.addEventListener('keydown', (event) => {
     if (event.isTrusted) audio.unlock()
   })
@@ -1797,13 +1749,14 @@ const bootGame = async (
   const initialChunkContext = makeDimensionChunkContext(initialDimension, world)
   dimensionContexts.set(initialDimension, initialChunkContext)
   let currentChunkContext = initialChunkContext
-  const chunkSync: ChunkSyncPort = {
-    update: Effect.suspend(() =>
-      syncWorld(worldRenderer, currentChunkContext.dirtyChunks, currentChunkContext.meshChunkFromStore, {
-        colorForChunk: currentChunkContext.colorForChunk,
-      }),
-    ),
-  }
+  const syncWorldFrame = Effect.suspend(() =>
+    syncWorld(
+      worldRenderer,
+      currentChunkContext.dirtyChunks,
+      currentChunkContext.meshChunkFromStore,
+      { colorForChunk: currentChunkContext.colorForChunk },
+    ).pipe(Effect.asVoid),
+  )
   const leverKeyOf = (lever: Pick<PersistedLeverState, 'dimension' | 'position'>): string =>
     JSON.stringify([lever.dimension, lever.position.x, lever.position.y, lever.position.z])
   const leverStates = new Map<string, PersistedLeverState>(
@@ -2482,23 +2435,14 @@ const bootGame = async (
     streamAround(currentChunkContext, spawnPose.feetPosition.x, spawnPose.feetPosition.z),
   )
 
-  // `renderModule()` is called for its `frameStages` only; its `layers` field
-  // is replaced by the browser adapter. The module's own header sanctions
-  // exactly this: "Pass it where `InputServiceLayer()` would go — `renderModule`'s
-  // `layers` is the same tag."
-  //
-  // The third argument is the `DrawPort` that `render:draw` calls. Its default
-  // is `NO_DRAW_TARGET`, which is what every Node consumer gets and what this
-  // page got until the renderer existed.
+  // mc-render owns input, camera, chunk-stage ordering, and drawing. The browser
+  // supplies world synchronization because this application owns the world store.
   /**
    * The starting pose, derived from the generated surface height.
    *
-   * The TYPE IS DERIVED FROM THE FUNCTION rather than named, because
-   * `CameraPoseSnapshot` lives in mc-render's kernel-vocabulary MIRROR and
-   * `index.ts` deliberately keeps that out of the barrel — consumers take
-   * kernel's vocabulary from `@nerima-games/mc-kernel`, which is not published.
-   * `Parameters<typeof renderModule>[3]` follows the signature instead, so a
-   * change to it fails here rather than drifting.
+   * The pose uses mc-kernel's public `CameraPoseSnapshot` contract. A change
+   * to that shared type therefore fails at this host boundary rather than
+   * leaving the renderer and host declarations to drift apart.
    *
    * The values are constructed with mc-kernel's branded constructors. The
    * brands have no runtime representation and the renderer reads five numbers
@@ -2516,15 +2460,32 @@ const bootGame = async (
     pitchRadians: spawnPose.pitchRadians,
     capturedAtSecs: KernelMonotonicTimeSecs(0),
   }
+  const WORLD_SYNC_STAGE_ID = StageId('render:world-sync')
 
-  const render = renderModule(undefined, undefined, worldRenderer, initialPose, undefined, chunkSync)
+  const render = renderModule(undefined, undefined, worldRenderer, initialPose)
+  const renderFrameStages = Effect.map(render.frameStages, (stages) => [
+    ...stages.map((stage) => {
+      if (stage.id !== RENDER_STAGE_IDS.draw && stage.id !== RENDER_STAGE_IDS.postFx) return stage
+      return {
+        ...stage,
+        after: [...(stage.after ?? []), WORLD_SYNC_STAGE_ID],
+      }
+    }),
+    {
+      id: WORLD_SYNC_STAGE_ID,
+      after: [RENDER_STAGE_IDS.chunkSync],
+      run: () => syncWorldFrame,
+    },
+  ])
 
   const registeredRender = await Effect.runPromise(
     Effect.provide(
       registerModule({
         name: '@nerima-games/mc-render',
-        layers: inputLayer,
-        frameStages: render.frameStages,
+        module: {
+          layers: inputLayer,
+          frameStages: renderFrameStages,
+        },
       }),
       inputContext,
     ),
@@ -2541,33 +2502,35 @@ const bootGame = async (
   const registeredUi = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mx-ui',
-      layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed(uiStages(uiFrameState)),
+      module: {
+        layers: EMPTY_MODULE_LAYER,
+        frameStages: Effect.succeed(uiStages(uiFrameState)),
+      },
     }),
   )
 
   const registeredRedstone = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mx-redstone',
-      layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed(runtimeRedstoneStages),
+      module: {
+        layers: EMPTY_MODULE_LAYER,
+        frameStages: Effect.succeed(runtimeRedstoneStages),
+      },
     }),
   )
 
   // -------------------------------------------------------------------------
-  // 2c. gameplayModule, and the four services it requires
+  // 2c. Public gameplay services and host-owned frame wiring
   // -------------------------------------------------------------------------
   //
-  // `gameplayModule` is `GameModule<..., ChunkStore | EntityManager |
-  // InventoryService | PlayerService>`. Until mx-gameplay shipped complete
-  // in-memory implementations of all four, this file's own header recorded the
-  // wall correctly: the only implementations in the organisation were
-  // `test/support/*-double.ts`, none exported, and composing them would be
-  // 「偽物のモジュールを4つ作って合成すれば、検証されるのは偽物である」.
+  // mx-gameplay's public API now exports the generated world constructor and
+  // the service implementations required by `gameplayModule`. The `world`
+  // handle above is the source of truth for those services in this host.
   //
-  // WHAT CHANGED IS NOT THAT RULE. Those four are now real services on
-  // mx-gameplay's PUBLIC API — every member implemented, no `dieMessage`, and
-  // mc-compose is allowed to import mx-gameplay. Nothing here reaches past it.
+  // The host still calls the public `gameplayStages` factory directly. It must
+  // share the current-dimension ChunkStore and the host-owned frame/request
+  // state with input, interaction and multiplayer authority; constructing a
+  // second module-owned frame state would make those queues unreachable.
   //
   const playerApi = world.player
   readAudioListener = () => Effect.runSync(playerApi.pose).feetPosition
@@ -2575,6 +2538,12 @@ const bootGame = async (
     Effect.runSync(playerApi.pose).yawRadians,
   )
   const inputApi = Context.get(inputContext, InputService)
+  // Pointer lock must be requested from the user-activation handler, while
+  // the request itself must go through the service that tracks its state.
+  canvas.addEventListener('click', (event) => {
+    if (event.isTrusted) audio.unlock()
+    void Effect.runPromise(inputApi.requestPointerLock)
+  })
   const applyBindings = (bindings: PlayerSettingsV1['bindings']): void => {
     for (const action of PLAYER_BINDING_ACTIONS) {
       Effect.runSync(inputApi.rebind(action, `PlayerSettingsTemporary:${action}`))
@@ -2760,21 +2729,6 @@ const bootGame = async (
   }
   let breaksRequested = 0
   let placementsRequested = 0
-  let nativeUseQueued = false
-  let nativeAttackQueued = 0
-  const queueNativeUse = (event: MouseEvent): void => {
-    const bounds = canvas.getBoundingClientRect()
-    const isOverCanvas = event.clientX >= bounds.left
-      && event.clientX <= bounds.right
-      && event.clientY >= bounds.top
-      && event.clientY <= bounds.bottom
-    if (!isOverCanvas && document.pointerLockElement !== canvas) return
-    if (event.button === 0) nativeAttackQueued += 1
-    if (event.button === 2) {
-      nativeUseQueued = true
-    }
-  }
-  window.addEventListener('mousedown', queueNativeUse, true)
   let nextItemUseRequestId = 0
   const pendingFurnaceAdvances = new Map<string, string>()
   const deferredFurnaceAdvanceSecs = new Map<string, number>()
@@ -2782,16 +2736,12 @@ const bootGame = async (
   let nextBlockPlacementRequestId = 0
   let nextMeleeAttackRequestId = 0
 
-  // THE FRAME STATE IS BUILT HERE, not inside `gameplayModule`, and that is the
-  // whole reason breaking works. `gameplayStages` takes the state as an
-  // argument — `makeGameplayStages` builds a private one — and `pendingBreaks`
-  // is an INBOX the host fills. mx-gameplay's own header says so: "Input
-  // belongs to mc-render and reaches the rules as a request to act on a
-  // position."
-  //
-  // A host that used `gameplayModule` directly would get stages that drain an
-  // inbox nobody can reach, which is the 「callable but unreachable」 state that
-  // repository has had to correct more than once.
+  // The frame state is built here deliberately, rather than by
+  // `makeGameplayStages`. The host must share its request queues with input,
+  // interaction and multiplayer authority. `gameplayModule` remains useful
+  // for a host whose service layer and frame state can be acquired privately;
+  // this host needs explicit state injection so no request queue is duplicated
+  // or hidden from the handlers that fill it.
   const portalDimensions = ['overworld', 'nether', 'end'] as const satisfies ReadonlyArray<Dimension>
   const syncPortalCandidatesFor = (dimension: Dimension): Effect.Effect<void> =>
     setPortalCandidates(
@@ -3189,7 +3139,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: 'PlayerVitalsCommand',
       commandId,
       player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
       action,
     }))
@@ -3207,7 +3157,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: tag,
       commandId,
       player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
       portal,
     }))
@@ -3225,7 +3175,7 @@ type MultiplayerInventorySelection = Readonly<{
     const header = {
       commandId,
       player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
     }
     Effect.runSync(multiplayer.host.enqueueOutbound(
@@ -3245,7 +3195,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: 'ToggleLeverCommand',
       commandId,
       player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
       lever,
     }))
@@ -3263,7 +3213,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: 'PlayerInventoryCommand',
       commandId,
       player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
       action,
     }))
@@ -3288,7 +3238,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: 'VillagerTradeCommand',
       commandId,
       player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
       villagerId,
       offerId,
@@ -3335,7 +3285,7 @@ type MultiplayerInventorySelection = Readonly<{
         ...command,
         commandId,
         player: multiplayer.query.player,
-        world: WorldId.make(Effect.runSync(playerApi.dimension)),
+        world: WorldId(Effect.runSync(playerApi.dimension)),
         expectedRevision: multiplayerRevision,
       } as NetworkMessage))
       return
@@ -3345,7 +3295,7 @@ type MultiplayerInventorySelection = Readonly<{
       ...command,
       commandId: commandIdFor('entity', nextEntityCommand),
       player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
     } as NetworkMessage))
   }
@@ -3383,7 +3333,7 @@ type MultiplayerInventorySelection = Readonly<{
       ...command,
       commandId,
       player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       expectedRevision: multiplayerRevision,
     } as NetworkMessage))
     return true
@@ -3406,7 +3356,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: 'PlayerDamageCommand' as const,
       commandId,
       player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      world: String(WorldId(Effect.runSync(playerApi.dimension))),
       expectedRevision: multiplayerRevision,
       amount: next.amount,
       minimumHealthPoints: next.minimumHealthPoints,
@@ -3442,7 +3392,7 @@ type MultiplayerInventorySelection = Readonly<{
     playerDamageResyncPending = true
     Effect.runSync(multiplayer.host.enqueueOutbound({
       _tag: 'AuthoritativeResyncRequest',
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       lastKnownRevision: multiplayerRevision,
     }))
   }
@@ -3474,7 +3424,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: 'CraftingCommand',
       commandId,
       player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      world: String(WorldId(Effect.runSync(playerApi.dimension))),
       expectedRevision: multiplayerRevision,
       grid: {
         ...dimensions,
@@ -3504,7 +3454,7 @@ type MultiplayerInventorySelection = Readonly<{
       pendingCrafting = null
       Effect.runSync(multiplayer.host.enqueueOutbound({
         _tag: 'AuthoritativeResyncRequest',
-        world: WorldId.make(Effect.runSync(playerApi.dimension)),
+        world: WorldId(Effect.runSync(playerApi.dimension)),
         lastKnownRevision: multiplayerRevision,
       }))
       return
@@ -3537,7 +3487,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: 'BrewingCommand',
       commandId,
       player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      world: String(WorldId(Effect.runSync(playerApi.dimension))),
       expectedRevision: multiplayerRevision,
       at: activeBrewingStandAt,
       action,
@@ -3550,7 +3500,7 @@ type MultiplayerInventorySelection = Readonly<{
     if (multiplayer === undefined) return
     Effect.runSync(multiplayer.host.enqueueOutbound({
       _tag: 'AuthoritativeResyncRequest',
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       lastKnownRevision: multiplayerRevision,
     }))
   }
@@ -3572,12 +3522,13 @@ type MultiplayerInventorySelection = Readonly<{
 
   const drainBrewingInbound = (): void => {
     if (multiplayer === undefined) return
-    const currentWorld = String(WorldId.make(Effect.runSync(playerApi.dimension)))
+    const currentWorld = String(WorldId(Effect.runSync(playerApi.dimension)))
     for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.brewingInbound))) {
       if (message._tag === 'BrewingCommandResult') {
         applyBrewingResult(message)
         continue
       }
+      if (message._tag !== 'BrewingStandDelta' && message._tag !== 'PlayerStatusEffectsDelta') continue
       if (message.world !== currentWorld || message.revision < multiplayerRevision) continue
       multiplayerRevision = Math.max(multiplayerRevision, message.revision)
       if (message._tag === 'BrewingStandDelta') {
@@ -3587,6 +3538,7 @@ type MultiplayerInventorySelection = Readonly<{
         }
         continue
       }
+      if (message._tag !== 'PlayerStatusEffectsDelta') continue
       if (message.player === String(multiplayer.query.player)) {
         Effect.runSync(restoreStatusEffects(gameplayState, message.state))
       }
@@ -3602,7 +3554,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: 'AnvilCommand',
       commandId,
       player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      world: String(WorldId(Effect.runSync(playerApi.dimension))),
       expectedRevision: multiplayerRevision,
       slot: selectedHotbarIndex,
       name: anvilName.trim(),
@@ -3620,7 +3572,7 @@ type MultiplayerInventorySelection = Readonly<{
       _tag: 'EnchantingCommand',
       commandId,
       player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
+      world: String(WorldId(Effect.runSync(playerApi.dimension))),
       expectedRevision: multiplayerRevision,
       slot: selectedHotbarIndex,
       offer,
@@ -3633,7 +3585,7 @@ type MultiplayerInventorySelection = Readonly<{
     if (multiplayer === undefined) return
     Effect.runSync(multiplayer.host.enqueueOutbound({
       _tag: 'AuthoritativeResyncRequest',
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+      world: WorldId(Effect.runSync(playerApi.dimension)),
       lastKnownRevision: multiplayerRevision,
     }))
   }
@@ -3650,12 +3602,13 @@ type MultiplayerInventorySelection = Readonly<{
 
   const drainAnvilInbound = (): void => {
     if (multiplayer === undefined) return
-    const currentWorld = String(WorldId.make(Effect.runSync(playerApi.dimension)))
+    const currentWorld = String(WorldId(Effect.runSync(playerApi.dimension)))
     for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.anvilInbound))) {
       if (message._tag === 'AnvilCommandResult') {
         applyAnvilResult(message)
         continue
       }
+      if (message._tag !== 'PlayerAnvilNamesDelta') continue
       if (
         message.world !== currentWorld
         || message.revision < multiplayerRevision
@@ -3680,12 +3633,13 @@ type MultiplayerInventorySelection = Readonly<{
 
   const drainEnchantingInbound = (): void => {
     if (multiplayer === undefined) return
-    const currentWorld = String(WorldId.make(Effect.runSync(playerApi.dimension)))
+    const currentWorld = String(WorldId(Effect.runSync(playerApi.dimension)))
     for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.enchantingInbound))) {
       if (message._tag === 'EnchantingCommandResult') {
         applyEnchantingResult(message)
         continue
       }
+      if (message._tag !== 'PlayerEnchantmentsDelta') continue
       if (
         message.world !== currentWorld
         || message.revision < multiplayerRevision
@@ -3803,7 +3757,11 @@ type MultiplayerInventorySelection = Readonly<{
         slots: state.slots.map((stack) => {
           return stack == null
             ? null
-            : { item: stack.item as ItemStack['item'], count: stack.count, durability: null }
+            : {
+                item: stack.item as ItemStack['item'],
+                count: stack.count,
+                durability: stack.durability ?? null,
+              }
         }),
       })),
     }))
@@ -3814,7 +3772,17 @@ type MultiplayerInventorySelection = Readonly<{
     applyNetworkContainers([
       ...snapshot.containers
         .filter((container) => container.id !== state.containerId)
-        .map((container) => ({ containerId: container.id, kind: container.kind, slots: container.slots })),
+        .map((container) => ({
+          containerId: container.id,
+          kind: container.kind,
+          slots: container.slots.map((stack) => stack === null
+            ? null
+            : {
+                item: String(stack.item),
+                count: stack.count,
+                ...(stack.durability === null ? {} : { durability: stack.durability }),
+              }),
+        })),
       state,
     ])
   }
@@ -4143,7 +4111,7 @@ type MultiplayerInventorySelection = Readonly<{
         if (message.player !== multiplayer.query.player) {
           multiplayer.players.set(message.player, {
             name: message.name,
-            world: WorldId.make(currentChunkContext.dimension),
+            world: WorldId(currentChunkContext.dimension),
             at: message.at,
             facing: { yawRadians: 0, pitchRadians: 0 },
           })
@@ -4151,7 +4119,7 @@ type MultiplayerInventorySelection = Readonly<{
         break
       case 'PlayerMove': {
         if (message.player === multiplayer.query.player) {
-          const world = message.world ?? WorldId.make(Effect.runSync(playerApi.dimension))
+          const world = message.world ?? WorldId(Effect.runSync(playerApi.dimension))
           const dimension = dimensionFromWorld(world)
           if (dimension !== undefined) {
             Effect.runSync(playerApi.restore({
@@ -4169,7 +4137,7 @@ type MultiplayerInventorySelection = Readonly<{
         const previous = multiplayer.players.get(message.player)
         multiplayer.players.set(message.player, {
           name: previous?.name ?? PlayerName.make(String(message.player)),
-          world: message.world ?? previous?.world ?? WorldId.make(currentChunkContext.dimension),
+          world: message.world ?? previous?.world ?? WorldId(currentChunkContext.dimension),
           at: message.at,
           facing: message.facing,
         })
@@ -4179,12 +4147,12 @@ type MultiplayerInventorySelection = Readonly<{
         multiplayer.players.delete(message.player)
         break
       case 'BlockPlace':
-        applyNetworkBlock(message.world ?? WorldId.make(currentChunkContext.dimension), message.at, message.block)
+        applyNetworkBlock(message.world ?? WorldId(currentChunkContext.dimension), message.at, message.block)
         multiplayerRevision += 1
         break
       case 'BlockBreak':
         {
-          const world = message.world ?? WorldId.make(currentChunkContext.dimension)
+          const world = message.world ?? WorldId(currentChunkContext.dimension)
           applyNetworkBlock(world, message.at, null)
           const dimension = dimensionFromWorld(world)
           if (dimension !== undefined) {
@@ -4238,39 +4206,43 @@ type MultiplayerInventorySelection = Readonly<{
   const registeredSim = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mc-sim',
-      layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed(simStages(simState, time, playerApi, crops)),
+      module: {
+        layers: EMPTY_MODULE_LAYER,
+        frameStages: Effect.succeed(simStages(simState, time, playerApi, crops)),
+      },
     }),
   )
 
   const registeredGameplay = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mx-gameplay',
-      layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed(
-        gameplayStages(
-          gameplayState,
-          currentChunkStore,
-          world.entities,
-          world.inventory,
-          world.player,
-          time,
-          vehicleService,
-          {
-            isActiveDimension: (dimension) => dimension === currentChunkContext.dimension,
-            isPoweredRailAt: (dimension, position) => poweredRails.has(leverKeyOf({ dimension, position })),
-            controlsForVehicle: (vehicle) => String(vehicle.id) === mountedVehicleId ? vehicleControls : { throttle: 0, steering: 0 },
-            onVehicleExit: (vehicle) => {
-              if (String(vehicle.id) === mountedVehicleId) mountedVehicleId = undefined
+      module: {
+        layers: EMPTY_MODULE_LAYER,
+        frameStages: Effect.succeed(
+          gameplayStages(
+            gameplayState,
+            currentChunkStore,
+            world.entities,
+            world.inventory,
+            world.player,
+            time,
+            vehicleService,
+            {
+              isActiveDimension: (dimension) => dimension === currentChunkContext.dimension,
+              isPoweredRailAt: (dimension, position) => poweredRails.has(leverKeyOf({ dimension, position })),
+              controlsForVehicle: (vehicle) => String(vehicle.id) === mountedVehicleId ? vehicleControls : { throttle: 0, steering: 0 },
+              onVehicleExit: (vehicle) => {
+                if (String(vehicle.id) === mountedVehicleId) mountedVehicleId = undefined
+              },
             },
-          },
-          { mobSimulation: multiplayer === undefined },
+            { mobSimulation: multiplayer === undefined },
+          ),
         ),
-      ),
+      },
     }),
   )
 
-  const modules: ReadonlyArray<GameModule> = [
+  const modules: ReadonlyArray<RegisteredGameModule> = [
     registeredRender,
     registeredUi,
     registeredRedstone,
@@ -5896,6 +5868,82 @@ type MultiplayerInventorySelection = Readonly<{
     completeInventoryAction()
   }
 
+  const moveCraftingCell = (
+    action: InventoryAction,
+    source: number,
+    target: number,
+  ): void => {
+    if (pendingCrafting !== null) {
+      rejectInventoryAction(action, 'Crafting update is pending')
+      return
+    }
+    const draft = inventoryInteraction.state()
+    if (draft.inventoryCarried !== undefined || draft.carried !== undefined) {
+      rejectInventoryAction(action, 'Place the carried stack first')
+      return
+    }
+    if (!Number.isInteger(source) || !Number.isInteger(target)
+      || source < 0 || target < 0
+      || source >= draft.grid.cells.length || target >= draft.grid.cells.length) {
+      rejectInventoryAction(action, 'Invalid crafting slot')
+      return
+    }
+    if (draft.grid.cells[source] === undefined) {
+      rejectInventoryAction(action, 'Source slot is empty')
+      return
+    }
+    if (source === target) {
+      rejectInventoryAction(action, 'Source and destination are the same slot')
+      return
+    }
+    inventoryInteraction.moveCraftingCell(source, target)
+    Effect.runSync(inventoryInteraction.preview())
+    completeInventoryAction()
+  }
+
+  const moveCraftingCellToInventory = (
+    action: InventoryAction,
+    source: number,
+    destination: number,
+  ): void => {
+    if (pendingCrafting !== null) {
+      rejectInventoryAction(action, 'Crafting update is pending')
+      return
+    }
+    const draft = inventoryInteraction.state()
+    const sourceStack = draft.grid.cells[source]
+    if (draft.inventoryCarried !== undefined || draft.carried !== undefined) {
+      rejectInventoryAction(action, 'Place the carried stack first')
+      return
+    }
+    if (sourceStack === undefined) {
+      rejectInventoryAction(action, 'Source slot is empty')
+      return
+    }
+    const inventory = Effect.runSync(world.inventory.snapshot)
+    const destinationStack = inventory.slots[destination]
+    if (destinationStack !== undefined
+      && destinationStack.item === sourceStack.item
+      && destinationStack.count >= maxStackCountForItem(destinationStack.item)) {
+      rejectInventoryAction(action, 'Destination slot is full')
+      return
+    }
+    Effect.runSync(inventoryInteraction.moveCraftingCellToInventory(source, destination))
+    const sourceAfter = inventoryInteraction.state().grid.cells[source]
+    const sourceWasUnchanged = sourceAfter !== undefined
+      && sourceAfter.item === sourceStack.item
+      && sourceAfter.count === sourceStack.count
+    if (sourceWasUnchanged) {
+      rejectInventoryAction(action, 'Inventory update was rejected')
+      return
+    }
+    if (destinationStack !== undefined && destinationStack.item !== sourceStack.item) {
+      deleteItemMetadata(String(destination))
+    }
+    Effect.runSync(inventoryInteraction.preview())
+    completeInventoryAction()
+  }
+
   const dispatchInventoryAction = (action: InventoryAction): void => {
     if (action.kind === 'drag') {
       if (action.source.kind === 'slot' && action.target.kind === 'equipment-slot') {
@@ -5910,21 +5958,29 @@ type MultiplayerInventorySelection = Readonly<{
         else rejectInventoryAction(action, 'Equipment cannot move to crafting slots')
         return
       }
-        if (action.source.kind === 'slot' && action.target.kind === 'slot') {
-          const sourceSlot = inventorySlotOf(action.source)
-          const targetSlot = inventorySlotOf(action.target)
-          if (sourceSlot !== undefined && action.target.region === 'crafting-grid') {
-            draftCraftingFromInventory(action, sourceSlot, action.target.index)
-            return
-          }
-          if (sourceSlot === undefined || targetSlot === undefined) {
-            rejectInventoryAction(action, 'Crafting slots cannot move inventory items')
-          } else {
-            moveInventoryItem(action, sourceSlot, targetSlot)
-          }
+      if (action.source.kind === 'slot' && action.target.kind === 'slot') {
+        const sourceSlot = inventorySlotOf(action.source)
+        const targetSlot = inventorySlotOf(action.target)
+        if (action.source.region === 'crafting-grid' && action.target.region === 'crafting-grid') {
+          moveCraftingCell(action, action.source.index, action.target.index)
           return
         }
-      rejectInventoryAction(action, 'Drag between these slots is not supported')
+        if (action.source.region === 'crafting-grid' && targetSlot !== undefined) {
+          moveCraftingCellToInventory(action, action.source.index, targetSlot)
+          return
+        }
+        if (sourceSlot !== undefined && action.target.region === 'crafting-grid') {
+          draftCraftingFromInventory(action, sourceSlot, action.target.index)
+          return
+        }
+        if (sourceSlot === undefined || targetSlot === undefined) {
+          rejectInventoryAction(action, 'Crafting slots cannot move inventory items')
+        } else {
+          moveInventoryItem(action, sourceSlot, targetSlot)
+        }
+        return
+      }
+      rejectInventoryAction(action, 'Invalid inventory drag target')
       return
     }
     if (action.target.kind === 'equipment-slot') {
@@ -6464,66 +6520,33 @@ type MultiplayerInventorySelection = Readonly<{
   // 5. QA surface
   // -------------------------------------------------------------------------
 
-  const entityRenderProjection = (): ReadonlyArray<RenderEntity> => [
-    ...Effect.runSync(world.entities.snapshot).entities.map((entity) => ({
-      id: entity.id,
-      kind: entity.kind,
-      feetPosition: entity.feetPosition,
-      category: entity.kind === 'dropped_item' ? 'item' : 'hostile',
-    } satisfies RenderEntity)),
-    ...[...multiplayerEntities.values()].map((entity) => ({
-      id: `authoritative:${String(entity.entityId)}`,
-      kind: entity._tag === 'living'
-        ? entity.entityType
-        : entity._tag === 'vehicle'
-          ? entity.vehicleType
-          : entity._tag === 'arrow'
-            ? 'arrow'
-            : entity._tag === 'primed-tnt'
-              ? 'primed_tnt'
-            : 'dropped_item',
-      feetPosition: entity.at,
-      category: entity._tag === 'item-drop' || entity._tag === 'arrow' ? 'item' as const : 'hostile' as const,
-    } satisfies RenderEntity)),
-    ...projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
-    ...eyeOfEnderRenderDescriptors(eyeOfEnderRuntimeState, currentChunkContext.dimension),
-    ...witherRenderDescriptors(witherRuntimeState, currentChunkContext.dimension),
-    ...[...(multiplayer?.players.entries() ?? [])]
-      .filter(([, player]) => player.world === currentChunkContext.dimension)
-      .map(([playerId, player]) => ({
-        id: `multiplayer:${String(playerId)}`,
-        kind: 'remote_player',
-        feetPosition: player.at,
-      } satisfies RenderEntity)),
-    ...[...villagerResidents.values()]
-      .filter((villager) => villager.dimension === currentChunkContext.dimension)
-      .filter((villager) => currentChunkContext.streamLoaded.has(chunkKeyOf({
-        cx: Math.floor(villager.feetPosition.x / 16),
-        cz: Math.floor(villager.feetPosition.z / 16),
-      })))
-      .map((villager) => ({
-        id: villager.id,
-        kind: 'villager',
-        feetPosition: villager.feetPosition,
-      } satisfies RenderEntity)),
-    ...(currentChunkContext.dimension === 'end'
-      && endDragonSnapshot().phase !== 'dead'
-      ? [{
-          id: 'ender-dragon',
-          kind: 'ender_dragon',
-          category: 'hostile' as const,
-          feetPosition: endDragonPosition(),
-        } satisfies RenderEntity]
-      : []),
-    ...vehicleList()
-      .filter((vehicle) => vehicle.dimension === currentChunkContext.dimension)
-      .map((vehicle) => ({
-        id: String(vehicle.id),
-        kind: vehicle.type,
-        feetPosition: vehicle.position,
-        facingRadians: vehicle.yawRadians,
-      } satisfies RenderEntity)),
-  ]
+  const entityRenderProjection = () => projectRenderEntities({
+    localEntities: Effect.runSync(world.entities.snapshot).entities,
+    authoritativeEntities: [...multiplayerEntities.values()],
+    runtimeEntities: [
+      ...projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
+      ...eyeOfEnderRenderDescriptors(eyeOfEnderRuntimeState, currentChunkContext.dimension),
+      ...witherRenderDescriptors(witherRuntimeState, currentChunkContext.dimension),
+    ],
+    remotePlayers: [...(multiplayer?.players.entries() ?? [])].map(([playerId, player]) => ({
+      id: String(playerId),
+      world: player.world,
+      at: player.at,
+    })),
+    villagers: [...villagerResidents.values()],
+    dimension: currentChunkContext.dimension,
+    isVillagerChunkStreamed: (position) => currentChunkContext.streamLoaded.has(chunkKeyOf({
+      cx: Math.floor(position.x / 16),
+      cz: Math.floor(position.z / 16),
+    })),
+    endDragon: currentChunkContext.dimension === 'end'
+      ? {
+          phase: endDragonSnapshot().phase,
+          position: endDragonPosition(),
+        }
+      : undefined,
+    vehicles: vehicleList(),
+  })
 
   const nearestVillagerForTrade = (
     position: SessionPosition,
@@ -7746,7 +7769,7 @@ type MultiplayerInventorySelection = Readonly<{
           Effect.runSync(multiplayer.host.enqueueOutbound({
             _tag: 'BlockPlace',
             player: multiplayer.query.player,
-            world: WorldId.make(Effect.runSync(playerApi.dimension)),
+            world: WorldId(Effect.runSync(playerApi.dimension)),
             at: QA_IGNITION_CELL,
             block: 'stone',
           }))
@@ -7757,7 +7780,7 @@ type MultiplayerInventorySelection = Readonly<{
           Effect.runSync(multiplayer.host.enqueueOutbound({
             _tag: 'BlockBreak',
             player: multiplayer.query.player,
-            world: WorldId.make(Effect.runSync(playerApi.dimension)),
+            world: WorldId(Effect.runSync(playerApi.dimension)),
             at: QA_IGNITION_CELL,
           }))
           return gameplaySnapshot()
@@ -8110,7 +8133,6 @@ type MultiplayerInventorySelection = Readonly<{
     weatherAudio.dispose()
     for (const timeout of pendingThunder.values()) window.clearTimeout(timeout)
     pendingThunder.clear()
-    window.removeEventListener('mousedown', queueNativeUse, true)
     Effect.runSync(worldRenderer.dispose)
     atlasTexture.dispose()
     audio.close()
@@ -8141,7 +8163,8 @@ type MultiplayerInventorySelection = Readonly<{
   const runFrame = game.runFrameWith(BrowserClockLayer)
 
   // Time is read through the Port, not from `performance`. `apps/web/clock.ts`
-  // is the only file allowed the raw reading and `pnpm check:deps` enforces it.
+  // owns the browser boundary; the dependency graph keeps this host on the
+  // injected clock contract and lint rejects forbidden low-level imports.
   const readNow = (): MonotonicTimeSecs => Effect.runSync(browserClock.monotonicSecs)
 
   let previousSecs: MonotonicTimeSecs | undefined
@@ -8153,6 +8176,7 @@ type MultiplayerInventorySelection = Readonly<{
   const tick = (): void => {
     const nowSecs = readNow()
     const frameInput = Effect.runSync(inputApi.snapshot)
+    let frameDelegatedToRender = false
     try {
       const consumedTouchLook = consumeTouchLook(touchLookState)
       touchLookState = consumedTouchLook.state
@@ -8169,7 +8193,7 @@ type MultiplayerInventorySelection = Readonly<{
       }
       const raw = previousSecs === undefined ? FIRST_FRAME_SECS : nowSecs - previousSecs
       previousSecs = nowSecs
-      const deltaSecs = clampDelta(raw)
+      const { interaction: interactionDeltaSecs, simulation: deltaSecs } = frameDeltas(raw)
       if (multiplayer === undefined) {
         for (const [key, expiresAt] of observerPulses) {
           if (expiresAt <= simulationElapsedSecs) {
@@ -8245,22 +8269,18 @@ type MultiplayerInventorySelection = Readonly<{
         steering: held('moveRight') - held('moveLeft'),
       }
 
-      const queuedNativeAttack = nativeAttackQueued > 0
-      if (queuedNativeAttack) resetPrimaryAttackGesture()
       const attackTriggered =
         !dead && !inventoryOpen && !tradeOpen && !brewingOpen
-        && (Effect.runSync(inputApi.wasActionJustTriggered('attack')) || queuedNativeAttack)
+        && Effect.runSync(inputApi.wasActionJustTriggered('attack'))
       if (attackTriggered && !isCreativeMode) {
         if (multiplayer === undefined) survivalHunger.submit({ _tag: 'attack', count: 1 })
         else sendVitalsCommand({ _tag: 'activity', activity: 'attack', amount: 1 })
       }
-      const attackHeld = held('attack') > 0 || queuedNativeAttack
-      if (queuedNativeAttack) nativeAttackQueued -= 1
+      const attackHeld = held('attack') > 0
       if (!attackHeld) resetPrimaryAttackGesture()
       const canUse = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
       const useTriggered = canUse
-        && (Effect.runSync(inputApi.wasActionJustTriggered('use')) || nativeUseQueued)
-      if (useTriggered) nativeUseQueued = false
+        && Effect.runSync(inputApi.wasActionJustTriggered('use'))
       const useHeld = held('use') > 0
       const lookDelta = {
         x: walk.pointerDelta.x + consumedTouchLook.delta.x,
@@ -8313,7 +8333,7 @@ type MultiplayerInventorySelection = Readonly<{
           z: -cosYaw * movementForward - sinYaw * movementStrafe,
         },
         verticalInput: held('jump') - held('sneak'),
-        deltaSecs,
+        deltaSecs: interactionDeltaSecs,
       })
       swimmingState = swimmingTick.state
       presentSwimmingState()
@@ -8364,7 +8384,7 @@ type MultiplayerInventorySelection = Readonly<{
 
       if (multiplayer !== undefined && !multiplayerHandshakeComplete && multiplayer.transport.state() === 'open') {
         const pose = Effect.runSync(playerApi.pose)
-        const worldId = WorldId.make(Effect.runSync(playerApi.dimension))
+        const worldId = WorldId(Effect.runSync(playerApi.dimension))
         Effect.runSync(multiplayer.host.transitionConnection({
           _tag: 'HandshakeSucceeded',
           player: multiplayer.query.player,
@@ -8422,6 +8442,7 @@ type MultiplayerInventorySelection = Readonly<{
       drainAnvilInbound()
       drainEnchantingInbound()
       drainPlayerDamageInbound()
+      frameDelegatedToRender = true
       const outcome = Effect.runSyncExit(runFrame(deltaSecs))
       if (swimmingState.active && mountedVehicle === undefined) {
         Effect.runSync(Ref.set(simState.velocity, swimmingState.velocity))
@@ -8573,7 +8594,7 @@ type MultiplayerInventorySelection = Readonly<{
       if (multiplayer !== undefined) {
         if (multiplayerHandshakeComplete && nowSecs - lastPlayerMoveSentAt >= 0.1) {
           const pose = Effect.runSync(playerApi.pose)
-          const world = WorldId.make(Effect.runSync(playerApi.dimension))
+          const world = WorldId(Effect.runSync(playerApi.dimension))
           const facing = { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians }
           const changed = lastPlayerMoveSent === undefined
             || lastPlayerMoveSent.world !== world
@@ -9013,7 +9034,7 @@ type MultiplayerInventorySelection = Readonly<{
           (count, slot) => count + (slot?.item === 'arrow' ? slot.count : 0),
           0,
         ),
-        deltaSecs,
+        deltaSecs: interactionDeltaSecs,
       })
       const previousBowUseState = bowUseState
       bowUseState = bowAdvance.state
@@ -9305,7 +9326,7 @@ type MultiplayerInventorySelection = Readonly<{
                 Effect.runSync(multiplayer.host.enqueueOutbound({
                   _tag: 'BlockBreak',
                   player: multiplayer.query.player,
-                  world: WorldId.make(dimension),
+                  world: WorldId(dimension),
                   at: target.position,
                 }))
               } else if (target.blockId === POTATO_CROP_BLOCK_ID) {
@@ -9827,7 +9848,7 @@ type MultiplayerInventorySelection = Readonly<{
                     Effect.runSync(multiplayer.host.enqueueOutbound({
                       _tag: 'BlockPlace',
                       player: multiplayer.query.player,
-                      world: WorldId.make(Effect.runSync(playerApi.dimension)),
+                      world: WorldId(Effect.runSync(playerApi.dimension)),
                       at: target.value.adjacentPosition,
                       block: heldItem,
                     }))
@@ -10382,7 +10403,9 @@ type MultiplayerInventorySelection = Readonly<{
       // that the loop is running, and docs/e2e-triage.md #4 is exactly that claim.
       document.body.setAttribute('data-frames', String(framesTotal))
     } finally {
-      Effect.runSync(inputApi.endFrame(frameInput))
+      if (!frameDelegatedToRender) {
+        Effect.runSync(inputApi.endFrame(frameInput))
+      }
     }
   }
 

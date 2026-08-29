@@ -53,31 +53,22 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       enabled: false,
-      include: ['src/index.ts', 'src/domain/**/*.ts'],
+      include: [
+        'src/index.ts',
+        'src/domain/**/*.ts',
+        'apps/web/render-entity-projection.ts',
+      ],
       exclude: ['**/*.d.ts', '**/*.config.ts', '**/*.test.ts', '**/*.spec.ts'],
       all: true,
       reporter: ['text', 'json', 'html', 'lcov'],
       reportsDirectory: './coverage',
-      // Org-wide 99% gate (TEST_STANDARD.md §3), enabled immediately and without
-      // a staged rollout, per the organisation's decision to apply it to all 16
-      // repositories on rollout day regardless of where each repository's
-      // coverage actually stands (TEST_STANDARD.md §3 / §4).
-      //
-      // This repository's real baseline, measured via `pnpm test:coverage`
-      // when this gate was turned on: statements 96.13%, branches 88.39%,
-      // functions 100%, lines 96.13%. Three of the four metrics are BELOW the
-      // 99% threshold, so this gate goes red the moment it is enabled. That is
-      // an accepted, known result (TEST_STANDARD.md §4 lists mc-compose by
-      // name as a repository whose CI is expected to go red on rollout) and
-      // not a reason to defer or to lower the threshold — closing the gap is
-      // tracked as follow-up work, most of it in src/domain/qa-api.ts (90.38%
-      // stmts) and src/domain/modding.ts (93.24% stmts), both short a handful
-      // of error-path branches.
+      // Keep this gate strict. Pure application projections are included here
+      // when they can be tested without booting a browser or server.
       thresholds: { branches: 99, functions: 99, lines: 99, statements: 99 },
     },
   },
   esbuild: {
-    target: 'node22',
+    target: 'node24',
     format: 'esm',
     platform: 'node',
   },

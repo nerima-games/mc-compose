@@ -12,7 +12,10 @@ import {
   blockPosition,
   CHUNK_HEIGHT,
   chunkCoordOfBlock,
+  endArrivalDescriptor,
+  generateEndChunkAt,
   generateChunkAt,
+  generateNetherChunkAt,
   getBlockAt,
   localCoordOfBlock,
   type Chunk,
@@ -39,36 +42,13 @@ import {
   makeMultiplayerServerCore,
   type MultiplayerServerCore,
   type MultiplayerServerState,
+  type RealmTransferArrival,
 } from './core'
+import { DEFAULT_BLOCKS } from './default-blocks'
 import { loadLegacyPlayerClaims } from './legacy-player-claims'
 import { createReconnectAuth } from './reconnect-auth'
 import { makeMultiplayerRedstoneRuntime } from './redstone-runtime'
 import { isAllowedWebSocketOrigin, resolveTransportSecurity } from './transport-security'
-
-const DEFAULT_BLOCKS = [
-  'bedrock',
-  'chest',
-  'coal_ore',
-  'cobblestone',
-  'dirt',
-  'dispenser',
-  'door',
-  'dropper',
-  'grass_block',
-  'gravel',
-  'iron_ore',
-  'hopper',
-  'lever',
-  'oak_leaves',
-  'oak_log',
-  'oak_planks',
-  'piston',
-  'redstone_lamp',
-  'redstone_torch',
-  'redstone_wire',
-  'sand',
-  'stone',
-] as const
 
 const dimensionForWorld = (worldId: string): Dimension =>
   worldId === 'nether' || worldId === 'end' ? worldId : 'overworld'
@@ -399,7 +379,10 @@ export const createLatestStatePersistence = <State>(
   }
 }
 
-export const makeGeneratedBlockAt = (seed: number): ((position: BlockPos) => string | null) => {
+export const makeGeneratedBlockAt = (
+  seed: number,
+  generateChunkForAt: typeof generateChunkAt = generateChunkAt,
+): ((position: BlockPos) => string | null) => {
   const chunks = new Map<string, Chunk>()
   return (at) => {
     if (!Number.isInteger(at.x) || !Number.isInteger(at.y) || !Number.isInteger(at.z) || at.y < 0 || at.y >= CHUNK_HEIGHT) return null
@@ -408,13 +391,36 @@ export const makeGeneratedBlockAt = (seed: number): ((position: BlockPos) => str
     const key = `${String(coordinate.cx)},${String(coordinate.cz)}`
     let chunk = chunks.get(key)
     if (chunk === undefined) {
-      chunk = generateChunkAt(seed, coordinate.cx, coordinate.cz)
+      chunk = generateChunkForAt(seed, coordinate.cx, coordinate.cz)
       chunks.set(key, chunk)
     }
     const local = localCoordOfBlock(position)
     const block = blockTypeOfId(getBlockAt(chunk, local.lx, local.ly, local.lz))
     return block === undefined || block === 'air' ? null : block
   }
+}
+
+export const blockTypeFromWorldgenId = (id: number): string => {
+  const block = blockTypeOfId(id)
+  if (block === undefined) throw new Error(`mc-worldgen returned unknown block id: ${String(id)}`)
+  return block
+}
+
+export const makeEndArrivalMutations = (spawnAt: BlockPos): ReadonlyArray<Readonly<{
+  readonly at: BlockPos
+  readonly block: string | null
+}>> => {
+  const descriptor = endArrivalDescriptor(blockPosition(spawnAt.x, spawnAt.y - 1, spawnAt.z))
+  return [
+    ...descriptor.platform.map(({ at, block }) => ({
+      at: { x: at.x, y: at.y, z: at.z },
+      block: blockTypeFromWorldgenId(block),
+    })),
+    ...descriptor.clear.map((at) => ({
+      at: { x: at.x, y: at.y, z: at.z },
+      block: null,
+    })),
+  ]
 }
 
 const findSpawnAt = (generatedBlockAt: (position: BlockPos) => string | null): BlockPos => {
@@ -481,18 +487,14 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
         writeServerState(netherStateFile, 'nether', options.seed, state),
       )
   const generatedBlockAt = makeGeneratedBlockAt(options.seed)
+  const netherGeneratedBlockAt = makeGeneratedBlockAt(options.seed, generateNetherChunkAt)
+  const endGeneratedBlockAt = makeGeneratedBlockAt(options.seed, generateEndChunkAt)
   const overworldSpawnAt = findSpawnAt(generatedBlockAt)
-  const netherSpawnAt = findSpawnAt(generatedBlockAt)
-  const endSpawnAt: BlockPos = { x: 0, y: 64, z: 0 }
+  const netherSpawnAt = findSpawnAt(netherGeneratedBlockAt)
+  const endSpawnAt = findSpawnAt(endGeneratedBlockAt)
   const overworldNetherPortalAt: BlockPos = { x: overworldSpawnAt.x - 1, y: overworldSpawnAt.y, z: overworldSpawnAt.z }
   const netherPortalAt: BlockPos = { x: netherSpawnAt.x + 1, y: netherSpawnAt.y, z: netherSpawnAt.z }
-  const endStaticBlocks = [
-    ...Array.from({ length: 49 }, (_, index) => ({
-      at: { x: (index % 7) - 3, y: 63, z: Math.floor(index / 7) - 3 },
-      block: 'end_stone',
-    })),
-    { at: { x: 1, y: 64, z: 0 }, block: 'end_portal' },
-  ]
+  const endArrivalMutations = makeEndArrivalMutations(endSpawnAt)
   const activeRealms = new Map<string, MultiplayerServerCore>()
   let overworldCore: MultiplayerServerCore
   let netherCore: MultiplayerServerCore
@@ -503,6 +505,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     destination: MultiplayerServerCore,
     destinationAt: BlockPos,
     command: Readonly<{ commandId: CommandId; world: WorldId }>,
+    arrivalBlocks?: RealmTransferArrival['blocks'],
   ): void => {
     const transfer = source.detachPlayer(clientId)
     if (transfer === undefined) return
@@ -511,6 +514,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       fromWorld: command.world,
       at: destinationAt,
       facing: transfer.facing,
+      ...(arrivalBlocks === undefined ? {} : { blocks: arrivalBlocks }),
     })) return
     activeRealms.set(clientId, destination)
   }
@@ -528,7 +532,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     ...(persistence === undefined ? {} : { onStateChanged: persistence.request }),
     ...(options.maxMoveDistance === undefined ? {} : { maxMoveDistance: options.maxMoveDistance }),
     passableBlocks: new Set(['water', 'end_portal', 'nether_portal']),
-    onEndPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, endCore, endSpawnAt, command),
+    onEndPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, endCore, endSpawnAt, command, endArrivalMutations),
     onNetherPortalUse: (clientId, command) => transferPlayer(clientId, overworldCore, netherCore, netherSpawnAt, command),
   })
   netherCore = makeMultiplayerServerCore({
@@ -536,7 +540,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     dimension: 'nether',
     seed: options.seed,
     allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
-    generatedBlockAt,
+    generatedBlockAt: netherGeneratedBlockAt,
     spawnAt: netherSpawnAt,
     staticBlocks: [{ at: netherPortalAt, block: 'nether_portal' }],
     ...(netherInitialState === undefined ? {} : { initialState: netherInitialState }),
@@ -550,9 +554,8 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     dimension: 'end',
     seed: options.seed,
     allowedBlocks: options.allowedBlocks ?? new Set(DEFAULT_BLOCKS),
-    generatedBlockAt: () => null,
+    generatedBlockAt: endGeneratedBlockAt,
     spawnAt: endSpawnAt,
-    staticBlocks: endStaticBlocks,
     ...(endInitialState === undefined ? {} : { initialState: endInitialState }),
     ...(endPersistence === undefined ? {} : { onStateChanged: endPersistence.request }),
     ...(options.maxMoveDistance === undefined ? {} : { maxMoveDistance: options.maxMoveDistance }),

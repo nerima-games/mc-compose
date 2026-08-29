@@ -1,5 +1,5 @@
 import { TransportError, type WireText } from '@nerima-games/mx-multiplayer'
-import { Effect, Either, Fiber, Queue } from 'effect'
+import { Effect, Either, Queue } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -80,26 +80,25 @@ const makeAuthenticatedTransport = (
   )
 
 describe('browser websocket transport', () => {
-  it('waits for open before sending a frame', async () => {
+  it('fails fast before open and sends after the socket opens', async () => {
     const socket = new SocketDouble()
     const transport = await makeTransport(socket)
-    const sending = Effect.runPromise(transport.send('hello' as WireText))
-
-    await Promise.resolve()
+    const beforeOpen = Effect.runSync(Effect.either(transport.send('hello' as WireText)))
+    expect(Either.isLeft(beforeOpen)).toBe(true)
+    if (Either.isLeft(beforeOpen)) expect(beforeOpen.left).toMatchObject({ reason: 'not-connected' })
     expect(socket.sent).toEqual([])
 
     socket.emit('open', undefined)
-    await sending
+    await Effect.runPromise(transport.send('hello' as WireText))
     expect(socket.sent).toEqual(['hello'])
     expect(transport.state()).toBe('open')
   })
 
-  it('does not resume an interrupted send when the socket later opens', async () => {
+  it('does not buffer frames while the socket is connecting', async () => {
     const socket = new SocketDouble()
     const transport = await makeTransport(socket)
-    const sending = Effect.runFork(transport.send('cancelled' as WireText))
-
-    await Effect.runPromise(Fiber.interrupt(sending))
+    const rejected = Effect.runSync(Effect.either(transport.send('cancelled' as WireText)))
+    expect(Either.isLeft(rejected)).toBe(true)
     socket.emit('open', undefined)
     await Effect.runPromise(transport.send('live' as WireText))
 
@@ -115,10 +114,12 @@ describe('browser websocket transport', () => {
       loadToken: () => 'old-token',
       saveToken: (token) => saved.push(token),
     })
-    const sending = Effect.runPromise(transport.send('normal-frame' as WireText))
+    const beforeOpen = Effect.runSync(Effect.either(transport.send('normal-frame' as WireText)))
+    expect(Either.isLeft(beforeOpen)).toBe(true)
 
     socket.emit('open', undefined)
     await Promise.resolve()
+    expect(transport.state()).toBe('connecting')
     expect(socket.sent).toEqual([
       JSON.stringify({ _tag: 'PlayerResume', player: 'alice', token: 'old-token' }),
     ])
@@ -126,7 +127,8 @@ describe('browser websocket transport', () => {
     socket.emit('message', {
       data: JSON.stringify({ _tag: 'PlayerResumeAccepted', player: 'alice', token: 'new-token' }),
     })
-    await sending
+    expect(transport.state()).toBe('open')
+    await Effect.runPromise(transport.send('normal-frame' as WireText))
 
     expect(socket.sent).toEqual([
       JSON.stringify({ _tag: 'PlayerResume', player: 'alice', token: 'old-token' }),
@@ -150,9 +152,10 @@ describe('browser websocket transport', () => {
 
     const plainSocket = new SocketDouble()
     const plain = await makeTransport(plainSocket)
-    const sending = Effect.runPromise(plain.send('plain' as WireText))
+    const beforeOpen = Effect.runSync(Effect.either(plain.send('plain' as WireText)))
+    expect(Either.isLeft(beforeOpen)).toBe(true)
     plainSocket.emit('open', undefined)
-    await sending
+    await Effect.runPromise(plain.send('plain' as WireText))
     expect(plainSocket.sent).toEqual(['plain'])
   })
 
@@ -231,7 +234,8 @@ describe('browser websocket transport', () => {
         cleared = true
       },
     })
-    const sending = Effect.runPromise(Effect.either(transport.send('blocked' as WireText)))
+    const blocked = Effect.runSync(Effect.either(transport.send('blocked' as WireText)))
+    expect(Either.isLeft(blocked)).toBe(true)
 
     socket.emit('open', undefined)
     socket.emit('message', {
@@ -242,7 +246,6 @@ describe('browser websocket transport', () => {
       }),
     })
 
-    expect(Either.isLeft(await sending)).toBe(true)
     expect(cleared).toBe(false)
     expect(transport.state()).toBe('closed')
   })
@@ -259,12 +262,9 @@ describe('browser websocket transport', () => {
         loadToken: () => undefined,
         saveToken: (token) => saved.push(token),
       })
-      const sending = Effect.runPromise(Effect.either(transport.send('blocked' as WireText)))
       socket.emit('open', undefined)
       socket.emit('message', { data: JSON.stringify(response) })
 
-      const result = await sending
-      expect(Either.isLeft(result)).toBe(true)
       expect(saved).toEqual([])
       expect(transport.state()).toBe('closed')
       expect(socket.sent).toEqual([JSON.stringify({ _tag: 'PlayerResume', player: 'alice' })])
@@ -291,7 +291,7 @@ describe('browser websocket transport', () => {
     expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.inbound)))).toEqual([])
   })
 
-  it('fails sends waiting for authentication on close, error, or resume setup failure', async () => {
+  it('fails sends while connecting and after transport failure', async () => {
     for (const failure of ['close', 'error', 'load-token'] as const) {
       const socket = new SocketDouble()
       const transport = await makeAuthenticatedTransport(socket, {
@@ -302,13 +302,15 @@ describe('browser websocket transport', () => {
         },
         saveToken: () => undefined,
       })
-      const sending = Effect.runPromise(Effect.either(transport.send('blocked' as WireText)))
-
       socket.emit('open', undefined)
+      if (failure !== 'load-token') {
+        const blocked = Effect.runSync(Effect.either(transport.send('blocked' as WireText)))
+        expect(Either.isLeft(blocked)).toBe(true)
+      }
       if (failure === 'close') socket.emit('close', { code: 1006, reason: 'peer vanished' })
       if (failure === 'error') socket.emit('error', new Error('network'))
 
-      const result = await sending
+      const result = Effect.runSync(Effect.either(transport.send('later' as WireText)))
       expect(Either.isLeft(result)).toBe(true)
       expect(transport.state()).toBe('closed')
       expect(socket.listenerCount()).toBe(0)
@@ -398,18 +400,17 @@ describe('browser websocket transport', () => {
     )
   })
 
-  it('fails a pending and subsequent send when the peer closes', async () => {
+  it('fails sends after the peer closes', async () => {
     const socket = new SocketDouble()
     const transport = await makeTransport(socket)
-    const pending = Effect.runPromise(Effect.either(transport.send('pending' as WireText)))
+    socket.emit('open', undefined)
+    await Effect.runPromise(transport.send('before-close' as WireText))
 
     socket.emit('close', { code: 1006, reason: 'peer vanished' })
-    const first = await pending
-    const second = await Effect.runPromise(Effect.either(transport.send('later' as WireText)))
+    const result = Effect.runSync(Effect.either(transport.send('later' as WireText)))
 
-    expect(Either.isLeft(first)).toBe(true)
-    expect(Either.isLeft(second)).toBe(true)
-    if (Either.isLeft(first)) expect(first.left).toMatchObject({ reason: 'closed' })
+    expect(Either.isLeft(result)).toBe(true)
+    if (Either.isLeft(result)) expect(result.left).toMatchObject({ reason: 'not-connected' })
     expect(transport.state()).toBe('closed')
     expect(socket.listenerCount()).toBe(0)
   })
@@ -417,14 +418,13 @@ describe('browser websocket transport', () => {
   it('turns socket error and send exceptions into TransportError', async () => {
     const erroredSocket = new SocketDouble()
     const errored = await makeTransport(erroredSocket)
-    const pending = Effect.runPromise(Effect.either(errored.send('pending' as WireText)))
     erroredSocket.emit('error', new Error('network'))
 
-    const errorResult = await pending
+    const errorResult = Effect.runSync(Effect.either(errored.send('later' as WireText)))
     expect(Either.isLeft(errorResult)).toBe(true)
     if (Either.isLeft(errorResult)) {
       expect(errorResult.left).toBeInstanceOf(TransportError)
-      expect(errorResult.left.reason).toBe('send-failed')
+      expect(errorResult.left.reason).toBe('not-connected')
     }
 
     const throwingSocket = new SocketDouble()
@@ -457,10 +457,11 @@ describe('browser websocket transport', () => {
     expect(throwing.state()).toBe('closed')
   })
 
-  it('disposes idempotently, closes the socket, shuts down inbound, and removes listeners', async () => {
+  it('disposes idempotently, closes the socket, keeps inbound drainable, and removes listeners', async () => {
     const socket = new SocketDouble()
     const transport = await makeTransport(socket)
     socket.emit('open', undefined)
+    socket.emit('message', { data: '{"_tag":"PlayerDamage","amount":1}' })
 
     await Effect.runPromise(transport.close)
     await Effect.runPromise(transport.close)
@@ -468,9 +469,11 @@ describe('browser websocket transport', () => {
     expect(socket.closes).toEqual([[1000, 'transport disposed']])
     expect(socket.listenerCount()).toBe(0)
     expect(transport.state()).toBe('closed')
-    expect(await Effect.runPromise(Queue.isShutdown(transport.inbound))).toBe(true)
-    expect(await Effect.runPromise(Queue.isShutdown(transport.playerDamageInbound))).toBe(true)
-    expect(await Effect.runPromise(Queue.isShutdown(transport.craftingInbound))).toBe(true)
+    expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.inbound)))).toEqual([
+      '{"_tag":"PlayerDamage","amount":1}',
+    ])
+    expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.playerDamageInbound)))).toEqual([])
+    expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.craftingInbound)))).toEqual([])
   })
 
   it('reports construction and invalid capacity failures as typed errors', async () => {

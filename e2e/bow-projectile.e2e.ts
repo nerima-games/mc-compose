@@ -67,18 +67,9 @@ const grantPointerLock = async (page: Page): Promise<void> => {
   })
 }
 
-// BLOCKED: apps/web/bow-use.ts accumulates bow-draw `chargeSecs` from each
-// frame's `deltaSecs`, and apps/web/main.ts:531-536 clamps that delta to
-// MAX_FRAME_SECS = 0.05s regardless of real elapsed wall-clock time (a
-// backgrounded-tab safety clamp). Under sustained slow frames — CPU-throttled
-// or contended CI runners — the accumulated charge undercounts true hold
-// duration and can stay below mx-gameplay's BOW_MIN_CHARGE_SECS = 0.2s even
-// though the button was genuinely held long enough, so the shot is silently
-// discarded. Reproduced deterministically (3/3) under 4x CDP CPU throttling
-// locally; a 20s poll timeout does not help, since the release event has
-// already committed its (insufficient) chargeSecs. Not a test-timing bug —
-// needs a wall-clock-vs-simulation-time design decision in mx-gameplay's
-// draw-bow.ts, tracked separately.
+// BROWSER VERIFICATION PENDING: the local loop now supplies wall-clock input
+// time separately from the clamped simulation delta. Keep this regression
+// disabled until it passes in a real browser under slow-frame conditions.
 test.fixme('charges, fires, and embeds an arrow while settling inventory wear', async ({ page }) => {
   const consoleErrors: Array<string> = []
   const pageErrors: Array<string> = []

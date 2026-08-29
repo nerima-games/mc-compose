@@ -1,7 +1,7 @@
 /**
  * docs/e2e-triage.md §3.1 — the four smoke tests that stay in mc-compose.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * CURRENT BROWSER GATE.
  *
  * The reference implementation's `e2e/smoke/` is 7 tests / 104 LOC. Three were
  * DEMOTEd to mx-ui and have been written there (#2, #5, #6). These are the

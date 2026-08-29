@@ -164,33 +164,17 @@ try/catch も、stage 単位の時間計測も、条件付きスキップも、�
 
 「気をつける」では 20,737 LOC は止まらない。以下は自動で落ちる。
 
-### 3.1 依存ホワイトリスト(最重要)
+### 3.1 現行の依存境界
 
-mc-compose が import してよいのは **4 つの体験モジュール + mc-render + mc-kernel だけ**である。
+現在のホストは、公開パッケージのサービス・ステージ・地形生成器を直接利用する。
+そのため実際の direct import は `package.json` の `dependencies` に明示し、
+`mc-kernel` の語彙、`mc-sim` の状態サービス、`mc-worldgen` の地形生成、
+`mc-render` の描画契約、および `mx-*` の公開 API を composition/runtime wiring から参照する。
 
-```
-mc-compose -> mx-gameplay / mx-redstone / mx-ui / mx-multiplayer   ... OK
-mc-compose -> mc-render                                            ... OK（stage 配線。architecture.md §5）
-mc-compose -> mc-sim                                               ... transitive-import 違反
-mc-compose -> mc-worldgen / mc-physics / mc-save / mc-audio / mc-noise ... 同上
-mc-compose -> mc-meshing                                           ... 同上（mc-render の背後）
-```
-
-**mc-render のエッジは規範を弱めない。** それが許可するのは mc-render **だけ**であり、
-背後の mc-meshing と mc-sim は推移的に到達可能になるぶん `transitive-import` 違反になる。
-メッセージが変わるだけで、ハードエラーであることは変わらない。
-そして compose がやるのは「mc-render の `GameModule` を受け取り、Layer を merge し、
-`StageRegistration` をリゾルバに渡す」の 3 つで、mx-gameplay に対してやっているのとまったく同じである。
-
-`pnpm install` すると `node_modules` にはこれら全部が物理的に置かれる。
-**それでも import は禁止**であり、`pnpm check:deps` が非ゼロ終了する。
-
-**これが規範の機械化された半分である。** mc-sim を直接必要とするルールは、
-体験モジュールに属するルールである。
-ゲートは「mx-* を飛び越えてここに書く」をレビューの意見ではなくビルドの失敗にする。
-
-回帰テスト: `test/check-dependency-whitelist.test.ts` の
-`rejects reaching past the experience modules to mc-sim, and names the path` ほか。
+低レベル実装の `mc-noise` / `mc-meshing` / `mc-physics` は、公開サービスの内部依存として
+利用されるが、compose からの直接 import は `.oxlintrc.json` の `no-restricted-imports` で禁止する。
+現行の機械的ゲートは `pnpm lint` である。以前の `pnpm check:deps` と
+`test/check-dependency-whitelist.test.ts` は現行ツリーに存在しないため、現在の規範として参照しない。
 
 ### 3.2 公開 API の名前検査
 

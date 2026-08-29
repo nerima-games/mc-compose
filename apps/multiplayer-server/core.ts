@@ -18,14 +18,23 @@ import {
   type PlayerId,
   type PlayerSnapshot,
   type WireText,
-  type WorldId,
   type WorldSnapshot,
   type ContainerKind,
   type HungerActor,
   type HungerCommand,
   type HungerEvent,
 } from '@nerima-games/mx-multiplayer'
-import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, propertyOfBlockId, StackCount } from '@nerima-games/mc-kernel'
+import {
+  blockIdOf,
+  blockTypeOfId,
+  isBlockType,
+  isItemType,
+  maxStackCountOfItem,
+  propertyOfBlockId,
+  StackCount,
+  DeltaTimeSecs,
+  type WorldId,
+} from '@nerima-games/mc-kernel'
 import { pistonPositionAt, validatePistonPlan, type PistonCellRead, type PistonMovementPlan } from '@nerima-games/mx-redstone'
 import { END_PORTAL_BLOCK, END_PORTAL_FRAME_OFFSETS, endPortalCenterForStronghold, nearestStrongholdSite, type Dimension } from '@nerima-games/mc-worldgen'
 import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, raycastArrowBlock, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
@@ -130,7 +139,6 @@ import {
   type EnchantedItem,
 } from '@nerima-games/mx-gameplay'
 import { Either, Option } from 'effect'
-import { DeltaTimeSecs } from '../../src/domain/kernel-vocabulary'
 import {
   SleepAuthority,
   decodeSleepWireMessage,
@@ -825,12 +833,19 @@ export interface RealmTransferArrival {
   readonly fromWorld: WorldId
   readonly at: BlockPos
   readonly facing: Orientation
+  readonly blocks?: ReadonlyArray<Readonly<{
+    readonly at: BlockPos
+    readonly block: string | null
+  }>>
 }
 
 export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): MultiplayerServerCore => {
   const worldId = options.worldId as WorldId
   const dimension = options.dimension ?? 'overworld'
   const bounds = options.bounds ?? DEFAULT_BOUNDS
+  const endPortalOrigin: BlockPos = options.spawnAt === undefined
+    ? { x: 0, y: 64, z: 0 }
+    : { x: options.spawnAt.x, y: options.spawnAt.y - 1, z: options.spawnAt.z }
   const clients = new Map<ClientId, ConnectedClient>()
   const players = new Map<PlayerId, MutablePlayer>()
   const playerPositions = new Map<PlayerId, Readonly<{ at: BlockPos; facing: Orientation }>>(
@@ -3306,7 +3321,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           const drop: AuthoritativeEntityState = {
             _tag: 'item-drop',
             entityId: `ender-dragon:egg:${String(enderDragonRevision + 1)}` as AuthoritativeEntityState['entityId'],
-            at: { x: 0, y: 65, z: 0 },
+            at: { ...endPortalOrigin, y: endPortalOrigin.y + 1 },
             stack: { item: event.item, count: event.count },
           }
           entities.set(drop.entityId, drop)
@@ -3316,7 +3331,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (event._tag === 'ExitPortalMaterializationRequested') {
           for (let x = -1; x <= 1; x += 1) {
             for (let z = -1; z <= 1; z += 1) {
-              const at = { x, y: 64, z }
+              const at = { x: endPortalOrigin.x + x, y: endPortalOrigin.y, z: endPortalOrigin.z + z }
               blocks.set(positionKey(at), { at, block: END_EXIT_PORTAL_BLOCK })
             }
           }
@@ -3657,6 +3672,15 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const acceptRealmTransfer = (clientId: ClientId, transfer: RealmTransferPlayer, arrival: RealmTransferArrival): boolean => {
     const client = clients.get(clientId)
     if (client === undefined || client.playerId !== null || playerClients.has(transfer.player)) return false
+    let arrivalBlocksChanged = false
+    for (const mutation of arrival.blocks ?? []) {
+      const key = positionKey(mutation.at)
+      const current = blocks.get(key)
+      if (current?.block === mutation.block) continue
+      blocks.set(key, { at: { ...mutation.at }, block: mutation.block })
+      arrivalBlocksChanged = true
+    }
+    if (arrivalBlocksChanged) revision += 1
     const player: MutablePlayer = {
       player: transfer.player,
       name: transfer.name,

@@ -11,12 +11,11 @@
   reopen it — it puts the canvas where a canvas is already allowed.
 
   WHAT IT IS NOT: the game. It draws a HAND-AUTHORED fixture, not generated
-  terrain, and the difference is the whole point of being careful here. Real
-  terrain needs `mc-worldgen` and `mc-meshing`, and `check-dependency-whitelist.ts`
-  rule 3 forbids this repository from importing either — the declared graph puts
-  that edge on mc-render, not on compose. A fixture proves the RENDER PATH
-  draws; it does not prove a world reaches it, and this page claims only the
-  former.
+  terrain, and the difference is the whole point of being careful here. The
+  live host owns the generated-world path; this standalone preview deliberately
+  keeps its renderer fixture independent of world generation. A fixture proves
+  the RENDER PATH draws; it does not prove a world reaches it, and this page
+  claims only the former.
 -->
 <html lang="en">
   <head>

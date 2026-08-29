@@ -11,8 +11,8 @@
 
 ## DN-0: 合成層へのロジック堆積 — このリポジトリの存在理由
 
-**回帰テスト名**:
-- `rejects reaching past the experience modules to mc-sim, and names the path`(`test/check-dependency-whitelist.test.ts`)
+**回帰検証**:
+- 低レベル依存への直接 import を `.oxlintrc.json` の `no-restricted-imports` と `pnpm lint` で拒否する
 - `exports nothing that sounds like a game rule, an entity or a world`(`test/public-api.test.ts`)
 
 **実装**: 両方とも実装済み
@@ -56,8 +56,10 @@ plan.md §1 の出発点そのものである:
 「ここに置くのが一番簡単だから」の積み重ねである。
 だから対処は「気をつける」ではない:
 
-1. **依存ホワイトリストが物理的に禁じる。** mc-compose が import してよいのは 4 つの mx-* と kernel だけ。
-   mc-sim を直接必要とするコードは書けない。書こうとすると `pnpm check:deps` が落ちる
+1. **依存境界を manifest と lint で物理的に守る。** 公開 API を直接利用する
+   `mc-kernel` / `mc-sim` / `mc-worldgen` / `mc-render` と `mx-*` は
+   `package.json` の direct dependency に宣言する。低レベルの `mc-noise` / `mc-meshing` /
+   `mc-physics` は `.oxlintrc.json` の `no-restricted-imports` と `pnpm lint` で直接 import を禁じる
 2. **`runFrame` に何も足さない。** try/catch も計測も条件分岐も無い
 3. **公開 API の名前検査**(弱いが、追加のその場所に規範を置く)
 
@@ -295,7 +297,8 @@ qa-api-village 49 / qa-api-env 33 / qa-api-settings 19。
 1. **QA コマンドは所有モジュールが名前空間ごと提供し、compose はマージするだけ。**
    compose はコマンドを**書かない**。mc-sim のインベントリを読む QA コマンドが要るなら、
    mx-gameplay(または mc-sim)が公開し、compose がその名前空間の下に出す。
-   ここで書こうとすると体験モジュールを飛び越えることになり、`pnpm check:deps` が落とす
+   ここで書くと QA の所有境界を飛び越えるため、公開された所有モジュールの API を使う。
+   現行の低レベル import 境界は `pnpm lint` が検査する
 2. **名前衝突はすべて致命的。** last-one-wins の shadowing は、
    E2E が別モジュールを検証して**成功する**という結果を生む。
    E2E が最終ゲート(plan.md §3.15)である以上、黙って間違うゲートはゲートが無いより悪い
@@ -432,11 +435,11 @@ E2E の本数が増え続けるなら、それは compose にロジックが溜�
 3 つとも kernel 公開時にそのファイルを削除すると明言している。**その瞬間に落ちる時限爆弾だった。**
 
 **本実装での対処**: `run` は `Effect<void, never, FrameServices>` を返す。
-`FrameServices` は `domain/kernel-vocabulary.ts` で `ClockPort` として宣言してある —
-mx-* が `never` に留めているのに対しこのリポジトリが Tag を再掲するのは、
+`FrameServices` は公開 `@nerima-games/mc-kernel` の `ClockPort` を直接参照する —
+mx-* が `never` に留めているのに対しこのリポジトリが公開契約を提供するのは、
 **compose は stage の著者ではなく提供者**であり、名前を書けないものは discharge できないからである。
-Tag は文字列キーで解決されるので、`'@nerima-games/mc-kernel/ClockPort'` から作ったミラーは
-実行時に kernel のサービスそのものである。`test/kernel-mirror.test.ts` が形を固定している。
+Tag は文字列キーで解決される。`test/kernel-mirror.test.ts` は、公開 Tag のキー、
+サービスの全フィールド、`FrameServices` の型一致を依存境界で固定している。
 
 discharge は `ComposedGame.runFrameWith(services: Layer<FrameServices>)` である。
 この経路に `any` は 1 つも無いので、`Effect.provide` は要求を**消去ではなく除去**する。
@@ -616,9 +619,9 @@ mod がそのフェーズになれる**ことを意味する。
 | 自動保存の `Schedule.spaced`(plan.md §3.8) | mc-sim 側。compose は stage 順序だけ |
 | フレーム予算 / adaptive quality | 参照実装は `frame-adaptive-quality.ts` を持つ。**compose には置かない** |
 | **`sim:physics` を誰が登録するのか** | **解決。DN-14。** mc-sim が登録した(`stages/registration.ts:167`)。4 本のエッジはすべて繋がり、フレームは動かなかった |
-| **mc-sim の `GameModule` を誰がホストに渡すのか** | **未決。** mc-compose は mc-sim を import できない(rule 3、`transitive-import`)。`InventoryService` の構築者問題(下)と同じ形で、stage を登録することと import 可能であることは別の性質である |
-| **`InventoryService` のインスタンスを誰が構築するのか** | **未決。[e2e-triage.md](./e2e-triage.md) §4.3。** mx-gameplay が書き mx-ui が読むので 1 インスタンスでなければならないが、mx-gameplay は登録時に acquire する必要があり(`RRegister`)、それを discharge するホストは mc-compose で、**mc-compose は mc-sim を import できない**(rule 3)。mc-render の `InputService` が成立するのは、それが mc-render 自身の `ROut` にありホワイトリストに入っているからで、この論法は mc-sim には効かない |
-| **`BlockId`(数値)から `ItemId`(文字列)への解決を誰が持つか** | **未決。[e2e-triage.md](./e2e-triage.md) §4.2。** mc-kernel は `BlockId` と `BlockType` と `resolveDropItem` を持つが、`ItemId` / `ItemType` を 1 つも定義していない。mc-sim の `ItemId = string` は自ら PROVISIONAL と書いている |
+| **mc-sim の `GameModule` を誰がホストに渡すのか** | **現行構成で解決。** `mc-sim` は公開サービスと stage 契約を提供し、ホストは公開された stage factory と生成 world のサービスを直接配線する。`gameplayModule` をそのまま登録しないのは、現行 dimension の store/state/queue とネットワーク権威をホストが共有する必要があるためである |
+| **`InventoryService` のインスタンスを誰が構築するのか** | **公開契約として解決。** `mc-sim` が `InventoryService` の構築 API を公開し、生成 world と gameplay stage に共有サービスを渡す。残る browser 上の 2 クライアント相互作用は、公開境界の実ブラウザ最終ゲートで検証する |
+| **`BlockId`(数値)から `ItemId`(文字列)への解決を誰が持つか** | **公開語彙として解決。** `mc-kernel` が `ItemId` / `ItemType` と item registry を公開し、block/item 間の語彙を一つの kernel 契約で扱う。残る E2E の採掘から inventory までの接続確認は browser gate の対象である |
 | **ネットワーク同期のフェーズ位置** | **解決。DN-15。** `network:inbound`(input と physics の間)/ `network:outbound`(time-weather と camera-mirror の間)を骨格に追加。§4.2 の**拡張**であり転記ではない([architecture.md](./architecture.md) §4.5) |
 | E2E の (b) 側(振る舞いの相互作用) | publish 待ち。[testing.md](./testing.md) §3.4 |
 | E2E ハーネス(Playwright、SwiftShader、ポインタロック不可) | plan.md §3.10 の知見を流用。未着手 |
