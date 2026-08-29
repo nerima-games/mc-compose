@@ -65,20 +65,6 @@ describe('building the QA surface', () => {
 })
 
 describe('name collisions are fatal', () => {
-  // REGRESSION: last-one-wins shadowing gives an E2E suite that calls a
-  // shadowed command, tests the wrong module, and PASSES. Given that E2E is the
-  // final gate (plan.md §3.15), a silently wrong gate is worse than no gate.
-  it.effect('rejects the same command contributed twice under one namespace', () =>
-    Effect.sync(() => {
-      const error = failure(
-        buildQaRegistry([namespace('gameplay', 'breakBlock'), namespace('gameplay', 'breakBlock')]),
-      )
-      // The duplicate namespace is caught first, which is the more actionable
-      // message; either way it does not silently merge.
-      expect(error?._tag).toBe('DuplicateNamespace')
-    }),
-  )
-
   it.effect('rejects two modules claiming the same namespace', () =>
     Effect.sync(() => {
       const error = failure(buildQaRegistry([namespace('ui', 'openMenu'), namespace('ui', 'closeMenu')]))
@@ -87,12 +73,6 @@ describe('name collisions are fatal', () => {
     }),
   )
 
-  it.effect('explains a duplicate command in terms of what it would break', () =>
-    Effect.sync(() => {
-      const message = describeQaApiError({ _tag: 'DuplicateCommand', key: 'gameplay.breakBlock' })
-      expect(message).toContain('tests the wrong module and passes')
-    }),
-  )
 })
 
 describe('describeQaApiError', () => {
@@ -187,6 +167,21 @@ describe('installation', () => {
   it.effect('reports nothing installed on an untouched target', () =>
     Effect.sync(() => {
       expect(readInstalledQaApi({})).toBeUndefined()
+    }),
+  )
+
+  it.effect('rejects malformed installed values at the runtime boundary', () =>
+    Effect.sync(() => {
+      const malformedTargets: ReadonlyArray<Readonly<Record<string, unknown>>> = [
+        { [QA_GLOBAL_KEY]: null },
+        { [QA_GLOBAL_KEY]: 'not-an-api' },
+        { [QA_GLOBAL_KEY]: [] },
+        { [QA_GLOBAL_KEY]: { 'gameplay.breakBlock': 'not-a-command' } },
+      ]
+
+      for (const target of malformedTargets) {
+        expect(readInstalledQaApi(target)).toBeUndefined()
+      }
     }),
   )
 

@@ -142,11 +142,10 @@ test.describe('smoke — the composed frame in a real browser', () => {
    * What this still does NOT assert
    * ---------------------------------------------------------------------------
    *
-   * That anything is VISIBLE. The page is a flat sky colour: no chunk geometry
-   * reaches it, because `mc-worldgen` and `mc-meshing` are not among the three
-   * siblings `vite.config.ts` can resolve, for the reason §4.3 of the triage
-   * gives. This says the frame loop has somewhere to draw TO; #4 says the loop
-   * runs. A pixel assertion belongs here when a world reaches this page.
+   * That the whole generated world is pixel-perfect. The generated world now
+   * reaches the page through the pinned mc-worldgen and mc-render path; the
+   * smoke assertion only proves that the renderer owns a live canvas. World
+   * geometry and fixture pixels belong to the dedicated browser E2E paths.
    */
   test('#1 WebGL2 canvas is present and active', async ({ page }) => {
     await startGameSession(page)
@@ -254,6 +253,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'redstone:effects',
       'gameplay:time-weather',
       'render:camera-mirror',
+      'compose:chunk-sync',
       'render:chunk-sync',
       'render:post-fx',
       'render:draw',

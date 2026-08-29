@@ -19,7 +19,7 @@ export type AdvanceBowUseInput = {
   readonly selectedItem: string | null
   readonly selectedSlotIndex: number
   readonly arrowCount: number
-  readonly deltaSecs: number
+  readonly elapsedSecs: number
 }
 
 export type AdvanceBowUseResult = {
@@ -30,8 +30,8 @@ export type AdvanceBowUseResult = {
 
 export const IDLE_BOW_USE: BowUseState = { _tag: 'Idle' }
 
-const elapsedCharge = (deltaSecs: number): number =>
-  Number.isFinite(deltaSecs) ? Math.max(0, deltaSecs) : 0
+const elapsedCharge = (elapsedSecs: number): number =>
+  Number.isFinite(elapsedSecs) ? Math.max(0, elapsedSecs) : 0
 
 export const advanceBowUse = (input: AdvanceBowUseInput): AdvanceBowUseResult => {
   if (input.cancelled) {
@@ -60,7 +60,7 @@ export const advanceBowUse = (input: AdvanceBowUseInput): AdvanceBowUseResult =>
       state: {
         _tag: 'Drawing',
         bowSlotIndex: input.selectedSlotIndex,
-        chargeSecs: elapsedCharge(input.deltaSecs),
+        chargeSecs: elapsedCharge(input.elapsedSecs),
       },
       release: null,
       capturedUse: true,
@@ -71,7 +71,7 @@ export const advanceBowUse = (input: AdvanceBowUseInput): AdvanceBowUseResult =>
     return {
       state: {
         ...input.state,
-        chargeSecs: input.state.chargeSecs + elapsedCharge(input.deltaSecs),
+        chargeSecs: input.state.chargeSecs + elapsedCharge(input.elapsedSecs),
       },
       release: null,
       capturedUse: true,

@@ -5,12 +5,17 @@ export interface TransportSecurityInput {
   readonly allowedOrigins?: string
 }
 
-export interface TransportSecurity {
-  readonly secure: boolean
-  readonly tlsCert?: string
-  readonly tlsKey?: string
-  readonly allowedOrigins: ReadonlySet<string>
-}
+export type TransportSecurity =
+  | {
+      readonly secure: false
+      readonly allowedOrigins: ReadonlySet<string>
+    }
+  | {
+      readonly secure: true
+      readonly tlsCert: string
+      readonly tlsKey: string
+      readonly allowedOrigins: ReadonlySet<string>
+    }
 
 export const isLoopbackHost = (host: string): boolean => {
   const normalized = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host

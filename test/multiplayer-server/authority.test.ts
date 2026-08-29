@@ -153,6 +153,7 @@ const makeFixture = (
     allowedBlocks: new Set(['stone', 'sand', 'gravel', 'chest', 'furnace', 'tnt']),
     initialState: state,
     difficulty,
+    spawnAt: joinAt,
     ...serverOptions,
     onStateChanged: (state) => {
       timeline.push('persist')
@@ -493,6 +494,13 @@ describe('multiplayer server authoritative state', () => {
     expect(fixture.server.connect('socket-b', () => undefined)).toBe(true)
     expect(fixture.server.receive('socket-b', frame({
       _tag: 'PlayerJoin', player: playerId('bob'), name: playerName('Bob'), at: { x: 0, y: 64, z: -3.2 },
+    })).accepted).toBe(true)
+    expect(fixture.server.receive('socket-b', frame({
+      _tag: 'PlayerMove',
+      player: playerId('bob'),
+      world: worldId('world-1'),
+      at: { x: 0, y: 64, z: -3.2 },
+      facing: { yawRadians: 0, pitchRadians: 0 },
     })).accepted).toBe(true)
     fixture.sent.length = 0
     fixture.persisted.length = 0
@@ -1624,38 +1632,42 @@ describe('multiplayer server authoritative state', () => {
   it('rejects player damage targeting another identity', () => {
     const fixture = makeFixture()
     fixture.sent.length = 0
-
-    expect(fixture.receiveDamage({
+    const command: PlayerDamageCommand = {
       _tag: 'PlayerDamageCommand',
       commandId: 'damage-spoof',
       player: 'bob',
       world: 'world-1',
       expectedRevision: 4,
       amount: 1,
-    })).toEqual({ accepted: false, reason: 'identity-spoof' })
+    }
+
+    expect(fixture.receiveDamage(command)).toEqual({ accepted: false, reason: 'identity-spoof' })
     expect(decodePlayerDamageWireMessage(fixture.sent[0]!)).toMatchObject({
       _tag: 'PlayerDamageCommandResult',
       accepted: false,
       revision: 4,
       reason: 'unauthorized-player',
     })
+    expect(fixture.receiveDamage(command)).toEqual({ accepted: false, reason: 'identity-spoof' })
     expect(fixture.persisted).toEqual([])
   })
 
   it.each([
-    ['wrong world', { world: 'world-2' }, 'wrong-world'],
-    ['stale revision', { expectedRevision: 3 }, 'stale-revision'],
-  ] as const)('rejects player damage with %s', (_case, override, resultReason) => {
+    ['wrong world', { world: 'world-2' }, 'wrong-world', 'wrong-world'],
+    ['stale revision', { expectedRevision: 3 }, 'stale-revision', 'invalid-command'],
+  ] as const)('rejects player damage with %s', (_case, override, resultReason, expectedReceiveReason) => {
     const fixture = makeFixture()
     fixture.sent.length = 0
-    const result = fixture.receiveDamage({
+    const command: PlayerDamageCommand = {
       _tag: 'PlayerDamageCommand', commandId: `damage-${resultReason}`, player: 'alice',
       world: 'world-1', expectedRevision: 4, amount: 1, ...override,
-    })
+    }
+    const result = fixture.receiveDamage(command)
     expect(result.accepted).toBe(false)
     expect(decodePlayerDamageWireMessage(fixture.sent[0]!)).toMatchObject({
       _tag: 'PlayerDamageCommandResult', accepted: false, revision: 4, reason: resultReason,
     })
+    expect(fixture.receiveDamage(command)).toEqual({ accepted: false, reason: expectedReceiveReason })
     expect(fixture.persisted).toEqual([])
   })
 
@@ -1747,6 +1759,10 @@ describe('multiplayer server authoritative state', () => {
     const state = initialState()
     const fixture = makeFixture({
       ...state,
+      vitals: [{
+        player: playerId('alice'),
+        state: { health: 3, hunger: 2, experience: 16 },
+      }],
       inventories: [{
         player: playerId('alice'),
         state: {

@@ -96,6 +96,7 @@ const openTargetedChest = async (page: Page): Promise<void> => {
 const mineCurrentTarget = async (page: Page): Promise<void> => {
   const canvas = page.locator('#game-canvas')
   const requestedBefore = Number(await canvas.getAttribute('data-breaks-requested'))
+  const completedBefore = Number(await canvas.getAttribute('data-breaks-completed'))
   await canvas.hover()
   await grantPointerLock(page)
   await page.mouse.down({ button: 'left' })
@@ -108,6 +109,11 @@ const mineCurrentTarget = async (page: Page): Promise<void> => {
   } finally {
     await page.mouse.up({ button: 'left' })
   }
+  await expect(canvas).toHaveAttribute(
+    'data-breaks-completed',
+    String(completedBefore + 1),
+    { timeout: 15_000 },
+  )
 }
 
 const waitForGame = async (page: Page): Promise<void> => {

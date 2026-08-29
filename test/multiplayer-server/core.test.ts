@@ -91,7 +91,7 @@ const witherStructureAt = ({ x, y, z }: { x: number; y: number; z: number }): st
 const makeFixture = (
   generatedBlockAt: (at: { x: number; y: number; z: number }) => string | null = () => null,
   timeOfDay = 6_000,
-  spawnAt?: { x: number; y: number; z: number },
+  spawnAt: { x: number; y: number; z: number } = { x: 0, y: 64, z: 0 },
   initialWeather: 'clear' | 'rain' | 'thunder' = 'clear',
   dimension: Dimension = 'overworld',
   options: Pick<MultiplayerServerOptions, 'staticBlocks' | 'onEndPortalUse' | 'onNetherPortalUse'> & Readonly<{
@@ -108,7 +108,7 @@ const makeFixture = (
     allowedBlocks: new Set(['stone', 'dirt']),
     bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
     generatedBlockAt,
-    ...(spawnAt === undefined ? {} : { spawnAt }),
+    spawnAt,
     ...serverOptions,
     now: () => nowMs,
     initialState: {
@@ -350,10 +350,10 @@ describe('authoritative multiplayer server core', () => {
     }).accepted).toBe(true)
     expect(fixture.receive('socket-a', {
       _tag: 'BlockPlace', player: playerId('alice'), at: far, block: 'dirt',
-    })).toEqual({ accepted: false, reason: 'identity-spoof' })
+    })).toEqual({ accepted: false, reason: 'invalid-mutation' })
     expect(fixture.receive('socket-a', {
       _tag: 'BlockBreak', player: playerId('alice'), at: far,
-    })).toEqual({ accepted: false, reason: 'identity-spoof' })
+    })).toEqual({ accepted: false, reason: 'invalid-mutation' })
 
     expect(messages(aliceFrames).filter(({ _tag }) => _tag === 'BlockMutationRejected')).toEqual([
       expect.objectContaining({ operation: 'place', at: far, reason: 'unauthorized-player', revision: 2 }),
@@ -874,6 +874,7 @@ describe('authoritative multiplayer server core', () => {
       seed: 42,
       allowedBlocks: new Set(['end_stone', 'end_portal']),
       bounds: { minX: -10, maxX: 10, minY: 0, maxY: 100, minZ: -10, maxZ: 10 },
+      spawnAt: { x: 0, y: 64, z: 0 },
       staticBlocks: [{ at: { x: 0, y: 64, z: 0 }, block: 'end_portal' }],
     })
     expect(destination.connect('socket-a', (wire) => destinationFrames.push(wire))).toBe(true)

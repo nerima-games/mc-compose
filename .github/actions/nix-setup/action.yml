@@ -13,7 +13,7 @@ description: >-
 # projects/cachix/caches.tf and projects/github/repos_nerima_games.tf) across
 # all 16 repos rather than nerima-lisp's one-cache-per-repo convention,
 # because every repo's devShell is nixpkgs-only
-# (nodejs_24/corepack_24/typescript-language-server/oxlint, no
+# (nodejs_24/corepack_24/typescript-language-server, no
 # repository-specific build output).
 
 # NOTE: `actions/checkout` intentionally lives in the caller, not here: a

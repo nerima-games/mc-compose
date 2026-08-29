@@ -82,9 +82,9 @@ const QUAD: MeshQuad = {
  * `MirroredCameraState.position` is kernel's branded `Position` and
  * `sourceCapturedAtSecs` is its branded `MonotonicTimeSecs`. mc-render
  * deliberately does NOT re-export kernel's vocabulary — `index.ts` says so and
- * says why: consumers take it from `@nerima-games/mc-kernel`, which this
- * repository may import under rule 4 but which is not published, so it is not
- * among the siblings `vite.config.ts` resolves.
+ * says why: consumers take it from the published `@nerima-games/mc-kernel`
+ * package. Local sibling resolution remains an optional Vite overlay, not the
+ * package boundary.
  *
  * The alternative to the cast would be reconstructing the chunk material and
  * its attribute binding by hand in this file, which would test a

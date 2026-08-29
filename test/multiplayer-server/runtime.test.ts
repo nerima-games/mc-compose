@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { decodeFrame, encodeFrame, type NetworkMessage, type PlayerId, type PlayerName } from '@nerima-games/mx-multiplayer'
+import { decodeFrame, encodeFrame, type NetworkMessage, PlayerId, type PlayerName, WorldId } from '@nerima-games/mx-multiplayer'
 import { Either } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
@@ -14,6 +14,7 @@ import {
   startMultiplayerServer,
   type MultiplayerRuntime,
 } from '../../apps/multiplayer-server/main'
+import { CRAFTING_MAX_WIRE_LENGTH } from '../../apps/multiplayer-shared/crafting-network'
 import { WITHER_MAX_WIRE_LENGTH } from '../../apps/multiplayer-shared/wither-network'
 
 const runtimes: Array<MultiplayerRuntime> = []
@@ -34,7 +35,7 @@ const nextMessage = (socket: WebSocket): Promise<NetworkMessage> => new Promise(
     reject(error)
   }
   const handleMessage = (data: WebSocket.RawData): void => {
-    const decoded = decodeFrame(data.toString() as never)
+    const decoded = decodeFrame(data.toString())
     if (Either.isLeft(decoded)) return
     socket.off('message', handleMessage)
     socket.off('error', handleError)
@@ -50,7 +51,7 @@ const nextMessageWithTag = <Tag extends NetworkMessage['_tag']>(socket: WebSocke
     reject(error)
   }
   const handleMessage = (data: WebSocket.RawData): void => {
-    const decoded = decodeFrame(data.toString() as never)
+    const decoded = decodeFrame(data.toString())
     if (Either.isLeft(decoded) || decoded.right._tag !== tag) return
     socket.off('message', handleMessage)
     socket.off('error', handleError)
@@ -66,7 +67,7 @@ const nextAuthoritativeSnapshot = (socket: WebSocket): Promise<Extract<NetworkMe
     reject(error)
   }
   const handleMessage = (data: WebSocket.RawData): void => {
-    const decoded = decodeFrame(data.toString() as never)
+    const decoded = decodeFrame(data.toString())
     if (Either.isLeft(decoded) || decoded.right._tag !== 'AuthoritativeSnapshot') return
     socket.off('message', handleMessage)
     socket.off('error', handleError)
@@ -158,6 +159,118 @@ describe('multiplayer WebSocket runtime', () => {
     await expect(closeCode).resolves.toBe(1009)
   })
 
+  it.each([
+    { name: 'malformed frames', frame: '{not-json' },
+    { name: 'binary frames', frame: Buffer.from('{not-json') },
+    { name: 'oversized specialized frames', frame: `${' '.repeat(CRAFTING_MAX_WIRE_LENGTH)}{"_tag":"CraftingCommand"}` },
+    {
+      name: 'identity-spoofed frames',
+      frame: encode({
+        _tag: 'PlayerMove',
+        player: 'other-player' as PlayerId,
+        at: { x: 0, y: 64, z: 0 },
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      }),
+    },
+  ])('closes an active socket for $name', async ({ frame }) => {
+    const runtime = await startMultiplayerServer({
+      host: '127.0.0.1',
+      port: 0,
+      worldId: 'runtime-world',
+      seed: 73,
+      installSignalHandlers: false,
+    })
+    runtimes.push(runtime)
+
+    const socket = await connect(runtime)
+    await authenticate(socket, 'runtime-player')
+    const snapshotPromise = nextMessage(socket)
+    socket.send(encode({
+      _tag: 'PlayerJoin',
+      player: 'runtime-player' as PlayerId,
+      name: 'Runtime Player' as PlayerName,
+      at: { x: 2, y: 64, z: 3 },
+    }))
+    await snapshotPromise
+
+    const pong = nextMessageWithTag(socket, 'Pong')
+    socket.send(encode({ _tag: 'Ping', nonce: 17 }))
+    await expect(pong).resolves.toEqual({ _tag: 'Pong', nonce: 17 })
+
+    const closeCode = waitForClose(socket)
+    socket.send(frame)
+
+    await expect(closeCode).resolves.toBe(1008)
+  })
+
+  it('closes an active socket after PlayerLeave', async () => {
+    const runtime = await startMultiplayerServer({
+      host: '127.0.0.1',
+      port: 0,
+      worldId: 'runtime-world',
+      seed: 73,
+      installSignalHandlers: false,
+    })
+    runtimes.push(runtime)
+
+    const socket = await connect(runtime)
+    await authenticate(socket, 'runtime-player')
+    const snapshotPromise = nextMessage(socket)
+    socket.send(encode({
+      _tag: 'PlayerJoin',
+      player: 'runtime-player' as PlayerId,
+      name: 'Runtime Player' as PlayerName,
+      at: { x: 2, y: 64, z: 3 },
+    }))
+    await snapshotPromise
+
+    const closeCode = waitForClose(socket)
+    socket.send(encode({ _tag: 'PlayerLeave', player: 'runtime-player' as PlayerId }))
+
+    await expect(closeCode).resolves.toBe(1000)
+  })
+
+  it('keeps an active socket open after an application-level movement rejection', async () => {
+    const runtime = await startMultiplayerServer({
+      host: '127.0.0.1',
+      port: 0,
+      worldId: 'runtime-world',
+      seed: 73,
+      installSignalHandlers: false,
+    })
+    runtimes.push(runtime)
+
+    const socket = await connect(runtime)
+    await authenticate(socket, 'runtime-player')
+    const snapshotPromise = nextMessage(socket)
+    socket.send(encode({
+      _tag: 'PlayerJoin',
+      player: 'runtime-player' as PlayerId,
+      name: 'Runtime Player' as PlayerName,
+      at: { x: 2, y: 64, z: 3 },
+    }))
+    const snapshot = await snapshotPromise
+    const spawnAt = snapshot._tag === 'WorldSnapshot' ? snapshot.players[0]?.at : undefined
+    expect(spawnAt).toBeDefined()
+    if (spawnAt === undefined) throw new Error('authoritative spawn was not present in the snapshot')
+
+    const correction = nextMessageWithTag(socket, 'PlayerMove')
+    socket.send(encode({
+      _tag: 'PlayerMove',
+      player: 'runtime-player' as PlayerId,
+      at: { x: 100, y: 200, z: 0 },
+      facing: { yawRadians: 0, pitchRadians: 0 },
+    }))
+    await expect(correction).resolves.toMatchObject({ _tag: 'PlayerMove', at: spawnAt })
+
+    const pong = nextMessageWithTag(socket, 'Pong')
+    socket.send(encode({ _tag: 'Ping', nonce: 17 }))
+    await expect(pong).resolves.toEqual({ _tag: 'Pong', nonce: 17 })
+    expect(socket.readyState).toBe(WebSocket.OPEN)
+
+    socket.close()
+  })
+
   it('serves health and returns an authoritative snapshot after join', async () => {
     const runtime = await startMultiplayerServer({
       host: '127.0.0.1',
@@ -199,6 +312,7 @@ describe('multiplayer WebSocket runtime', () => {
   it('uses generated terrain, rejects invalid movement, and restores overrides after restart', async () => {
     const seed = 73
     const worldId = 'persistent-world'
+    const authoritativeWorld = WorldId.make(worldId)
     const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-server-')), 'state.json')
     const generatedBlockAt = makeGeneratedBlockAt(seed)
     const playerAt = { x: 0, y: 200, z: 0 }
@@ -258,8 +372,34 @@ describe('multiplayer WebSocket runtime', () => {
     await expect(acceptedMove).resolves.toMatchObject({ _tag: 'PlayerMove', at: fractionalAt })
 
     const acceptedBreak = nextMessageWithTag(sameProcess, 'BlockBreak')
-    sameProcess.send(encode({ _tag: 'BlockBreak', player: 'persistent-player' as PlayerId, world: worldId as never, at: block }))
+    sameProcess.send(encode({ _tag: 'BlockBreak', player: 'persistent-player' as PlayerId, world: authoritativeWorld, at: block }))
     await expect(acceptedBreak).resolves.toMatchObject({ _tag: 'BlockBreak', at: block })
+
+    const rejectedBreak = nextMessageWithTag(sameProcess, 'BlockMutationRejected')
+    sameProcess.send(encode({ _tag: 'BlockBreak', player: 'persistent-player' as PlayerId, world: authoritativeWorld, at: block }))
+    await expect(rejectedBreak).resolves.toMatchObject({
+      _tag: 'BlockMutationRejected', player: 'persistent-player', world: worldId,
+      at: block, operation: 'break', reason: 'missing-block',
+    })
+    const wrongWorldRejected = nextMessageWithTag(sameProcess, 'BlockMutationRejected')
+    sameProcess.send(encode({
+      _tag: 'BlockBreak', player: 'persistent-player' as PlayerId, world: WorldId.make('other-world'), at: block,
+    }))
+    await expect(wrongWorldRejected).resolves.toMatchObject({
+      _tag: 'BlockMutationRejected', player: 'persistent-player', operation: 'break', reason: 'unauthorized-player',
+    })
+    const outOfReachRejected = nextMessageWithTag(sameProcess, 'BlockMutationRejected')
+    sameProcess.send(encode({
+      _tag: 'BlockBreak', player: 'persistent-player' as PlayerId,
+      world: authoritativeWorld, at: { x: spawnAt.x + 100, y: spawnAt.y - 1, z: spawnAt.z },
+    }))
+    await expect(outOfReachRejected).resolves.toMatchObject({
+      _tag: 'BlockMutationRejected', player: 'persistent-player', operation: 'break', reason: 'unauthorized-player',
+    })
+    const pong = nextMessageWithTag(sameProcess, 'Pong')
+    sameProcess.send(encode({ _tag: 'Ping', nonce: 18 }))
+    await expect(pong).resolves.toEqual({ _tag: 'Pong', nonce: 18 })
+    expect(sameProcess.readyState).toBe(WebSocket.OPEN)
     await first.close()
 
     const second = await startMultiplayerServer({
@@ -543,6 +683,33 @@ describe('multiplayer WebSocket runtime', () => {
       }],
     })
     socket.close()
+  })
+
+  it.each([
+    { name: 'revision', state: { revision: Number.MAX_SAFE_INTEGER + 1 } },
+    { name: 'wither snapshot', state: { wither: {} } },
+    { name: 'wither revision', state: { witherRevision: -1 } },
+  ])('refuses persisted authority state with invalid $name', async ({ state: invalidState }) => {
+    const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-server-')), 'state.json')
+    await writeFile(stateFile, JSON.stringify({
+      format: 1,
+      worldId: 'invalid-authority-boundary-world',
+      seed: 73,
+      state: {
+        revision: 0,
+        blocks: [],
+        ...invalidState,
+      },
+    }), 'utf8')
+
+    await expect(startMultiplayerServer({
+      host: '127.0.0.1',
+      port: 0,
+      worldId: 'invalid-authority-boundary-world',
+      seed: 73,
+      stateFile,
+      installSignalHandlers: false,
+    })).rejects.toThrow(/does not match world/)
   })
 
   it('refuses persisted authority state with invalid nested values', async () => {

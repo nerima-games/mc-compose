@@ -17,13 +17,14 @@
  * Nothing on this page authored a vertex.
  *
  * DOES NOT PROVE: that a world reaches the renderer AT RUNTIME. The fixture is
- * loaded as DATA, by `fetch`, because `check-dependency-whitelist.ts` rule 3
- * forbids this repository from importing mc-worldgen or mc-meshing — the
- * declared graph puts that edge on mc-render, and mc-render cannot take it
- * until those two are published. So this is exactly what docs/testing.md asks
- * mc-render's preview to be — 「固定チャンクを読み込んで」, LOAD A FIXED CHUNK —
- * and it is not a running world. Calling it "the game renders" would be the
- * green-lamp-with-nothing-behind-it that docs/testing.md §3.4 rejects by name.
+ * loaded as DATA, by `fetch`, because this preview intentionally keeps the
+ * generated-world path out of its fixture-only entry point. The direct-import
+ * boundary is enforced by `.oxlintrc.json` and `pnpm lint`; the browser game
+ * path is verified separately through the published package graph. So this is
+ * exactly what docs/testing.md asks mc-render's preview to be — 「固定チャンクを
+ * 読み込んで」, LOAD A FIXED CHUNK — and it is not a running world. Calling it
+ * "the game renders" would be the green-lamp-with-nothing-behind-it that
+ * docs/testing.md §3.4 rejects by name.
  *
  * ---------------------------------------------------------------------------
  * WHY THE ATLAS IS GENERATED RATHER THAN LOADED
@@ -110,9 +111,10 @@ const PREVIEW_CAMERA = cameraFrom(START_POSE)
  * A quad as the fixture stores it: mc-meshing's `Quad`, plus its resolved tile.
  *
  * The TILE IS BAKED IN because resolving it needs `blockId -> name`, and the
- * names are mc-kernel's closed union — which this repository can import under
- * rule 4 but which is not published and so is not among the siblings
- * `vite.config.ts` resolves. `domain/block-texture-map.ts`'s `BlockNameLookup`
+ * names are mc-kernel's closed union. The published kernel package is
+ * available to the project, while this fixture still stores the resolved tile
+ * as data rather than importing the world-generation path. `domain/
+ * block-texture-map.ts`'s `BlockNameLookup`
  * header is the same argument from mc-render's side: the vocabulary is carried
  * whole or not carried, and this page needs a number, not a union.
  */
