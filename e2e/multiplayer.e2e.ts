@@ -496,7 +496,7 @@ test.fixme('fires a bow through the authoritative multiplayer server', async ({ 
   let alice: Awaited<ReturnType<typeof openPlayer>> | undefined
 
   try {
-    alice = await openPlayer(
+    const connectedAlice = await openPlayer(
       browser,
       'Authoritative Multiplayer Bow E2E',
       player,
@@ -505,27 +505,28 @@ test.fixme('fires a bow through the authoritative multiplayer server', async ({ 
       LEGACY_SECRETS[player],
       createSurvivalWorld,
     )
-    const canvas = alice.page.locator('#game-canvas')
-    await expect.poll(() => canvasRevision(alice.page)).toBe(4)
-    await expect.poll(async () => itemCount(await snapshot(alice.page), 'bow')).toBe(1)
-    await expect.poll(async () => itemCount(await snapshot(alice.page), 'arrow')).toBe(2)
-    const before = await snapshot(alice.page)
+    alice = connectedAlice
+    const canvas = connectedAlice.page.locator('#game-canvas')
+    await expect.poll(() => canvasRevision(connectedAlice.page)).toBe(4)
+    await expect.poll(async () => itemCount(await snapshot(connectedAlice.page), 'bow')).toBe(1)
+    await expect.poll(async () => itemCount(await snapshot(connectedAlice.page), 'arrow')).toBe(2)
+    const before = await snapshot(connectedAlice.page)
     expect(before.renderedEntities).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: 'arrow' })]),
     )
-    const revisionBeforeDraw = await canvasRevision(alice.page)
+    const revisionBeforeDraw = await canvasRevision(connectedAlice.page)
 
     await canvas.hover()
-    await grantPointerLock(alice.page)
-    await alice.page.mouse.down({ button: 'right' })
-    await alice.page.waitForTimeout(350)
-    expect(await canvasRevision(alice.page)).toBe(revisionBeforeDraw)
-    expect(itemCount(await snapshot(alice.page), 'arrow')).toBe(2)
-    await alice.page.mouse.up({ button: 'right' })
+    await grantPointerLock(connectedAlice.page)
+    await connectedAlice.page.mouse.down({ button: 'right' })
+    await connectedAlice.page.waitForTimeout(350)
+    expect(await canvasRevision(connectedAlice.page)).toBe(revisionBeforeDraw)
+    expect(itemCount(await snapshot(connectedAlice.page), 'arrow')).toBe(2)
+    await connectedAlice.page.mouse.up({ button: 'right' })
 
-    await expect.poll(() => canvasRevision(alice.page)).toBeGreaterThan(revisionBeforeDraw)
-    await expect.poll(async () => itemCount(await snapshot(alice.page), 'arrow')).toBe(1)
-    await expect.poll(async () => (await snapshot(alice.page)).renderedEntities).toEqual(
+    await expect.poll(() => canvasRevision(connectedAlice.page)).toBeGreaterThan(revisionBeforeDraw)
+    await expect.poll(async () => itemCount(await snapshot(connectedAlice.page), 'arrow')).toBe(1)
+    await expect.poll(async () => (await snapshot(connectedAlice.page)).renderedEntities).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: 'arrow' })]),
     )
   } finally {

@@ -5,10 +5,10 @@ import {
   StageId,
   startBrowserSession,
   type BrowserRuntimeModule,
-  type GameModule,
+  type RegisteredGameModule,
 } from '../src/index'
 
-const gameModule = (name: string, stageId = name): GameModule => ({
+const gameModule = (name: string, stageId = name): RegisteredGameModule => ({
   name,
   layers: EMPTY_MODULE_LAYER,
   frameStages: [{ id: StageId(stageId), run: () => Effect.void }],

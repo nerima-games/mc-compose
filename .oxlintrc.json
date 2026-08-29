@@ -79,7 +79,7 @@
 
     // Style
     //
-    // The Nix-provided oxlint (nixpkgs, ~1.73 as of this PR) rejects the
+    // The Nix-provided oxlint version is pinned by flake.lock and rejects the
     // config outright — a hard parse error, not a silent skip — for any rule
     // name it does not recognise. Verified empirically: loading this file
     // unmodified against that version fails with "Rule '<name>' not found in
@@ -89,22 +89,25 @@
     // eol-last, func-call-spacing, indent, key-spacing, keyword-spacing,
     // linebreak-style, lines-between-class-members, no-mixed-spaces-and-tabs,
     // no-new-object, no-tabs, no-trailing-spaces, no-whitespace-before-property,
-    // object-curly-spacing, one-var, operator-linebreak, padded-blocks,
+    // object-curly-spacing, operator-linebreak, padded-blocks,
     // quote-props, semi-spacing, space-before-blocks, space-infix-ops,
-    // space-unary-ops, spaced-comment). Those existed under oxlint 0.12.0 (the
-    // version this repository pinned before this PR) but oxc has since
+    // space-unary-ops, spaced-comment). Those existed under the old oxlint 0.12.0
+    // pin but oxc has since
     // dropped pure-formatting rules from the linter in favour of a separate
     // formatter; they are not renamed, they are gone. There is deliberately no
     // replacement here (no prettier, no biome, no .editorconfig — see the file
     // header) and no formatter added by this PR; only the two Style rules the
-    // real oxlint binary still recognises survive.
+    // real oxlint binary still recognises survive. Current oxlint also exposes
+    // `one-var` through the aggregate Style category; it is formatting-only, so
+    // keep that rule disabled explicitly below.
+    "one-var": "off",
     "no-array-method-this-argument": "warn",
     "no-bitwise": "warn",
     // StageId (Brand.refined) and Context.Tag are effect-ts factory functions, not
     // constructors — `new StageId(...)` / `new Context.Tag(...)` would throw at runtime.
     // The rule's own message names this exact escape hatch ("add it to the exceptions list
     // if it should not be called with new"). Verified empirically against the real Nix
-    // oxlint 1.73.0 binary: `capIsNewExceptions` matches by the called identifier's own
+    // pinned Nix oxlint binary: `capIsNewExceptions` matches by the called identifier's own
     // name, so a member-expression call like `Context.Tag(...)` is matched by `Tag`, not
     // `Context.Tag`.
     "new-cap": ["warn", { "capIsNewExceptions": ["StageId", "Tag"] }],
@@ -113,7 +116,7 @@
     "default-case": "warn",
     "default-case-last": "warn",
     "no-empty-character-class": "warn",
-    // Was declared for intent only and was inert under the oxlint 0.12.0 this repository
+    // Was declared for intent only and was inert under the old oxlint 0.12.0 this repository
     // used to pin (listed by `oxlint --rules` but unimplemented; verified empirically: a
     // file reading the bare global `name` produced 0 diagnostics). As of this PR, oxlint is
     // Nix-provided (flake.nix) instead, and the real binary DOES implement this rule —
@@ -144,11 +147,11 @@
     // STATUS as of the Nix-provided-oxlint PR (2026-08): this file is named
     // `.oxlintrc.json` (the only filename oxlint auto-discovers — fixed in an earlier PR,
     // replacing the previous `oxlint.json` which was never picked up), and oxlint itself is
-    // now supplied by the Nix devShell (flake.nix) instead of the `^0.12.0` package.json pin
+    // now supplied by the Nix devShell (flake.nix) instead of the old `^0.12.0` package.json pin
     // this repository used to carry. 0.12.0's `-c/--config` was "(experimental)" and did not
     // auto-discover any filename without it, and even loaded explicitly this rule did not
     // appear in `oxlint --rules` and never fired — it was simply unimplemented. The
-    // Nix-provided oxlint (nixpkgs, ~1.73 as of this PR) fixes both problems at once: this
+    // Nix-provided oxlint fixes both problems at once: this
     // file is auto-discovered with no `-c` flag needed, and `no-restricted-imports` is a real,
     // implemented rule. Verified empirically: a file importing
     // `@nerima-games/mc-playground-kit` now genuinely produces

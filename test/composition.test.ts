@@ -6,21 +6,21 @@ import { Context, Effect, Either, Layer, Option, Ref } from 'effect'
 import {
   collectStages,
   composeGame,
-  DeltaTimeSecs,
   EMPTY_MODULE_LAYER,
   mergeModuleLayers,
   registerModule,
   type ComposedGame,
-  type GameModule,
-  type StageRegistration,
+  type RegisteredGameModule,
 } from '../src/domain/composition'
 import {
+  DeltaTimeSecs,
   EpochMillis,
   FixedClockLayer,
   monotonicSecs,
   MonotonicTimeSecs,
   type FrameServices,
-} from '../src/domain/kernel-vocabulary'
+  type StageRegistration,
+} from '@nerima-games/mc-kernel'
 import { StageId, type StageOrderError, type StagePhase } from '../src/domain/stage-order'
 import { STAGE_HUD_SYNC, STAGE_INPUT, STAGE_RENDER, STANDARD_STAGE_SKELETON } from '../src/domain/stage-skeleton'
 
@@ -48,13 +48,13 @@ const recording = (
   run: () => Ref.update(log, (previous) => [...previous, name]),
 })
 
-const moduleOf = (name: string, frameStages: ReadonlyArray<StageRegistration>): GameModule => ({
+const moduleOf = (name: string, frameStages: ReadonlyArray<StageRegistration>): RegisteredGameModule => ({
   name,
   layers: EMPTY_MODULE_LAYER,
   frameStages,
 })
 
-const composed = <const Modules extends ReadonlyArray<GameModule<never, unknown>>>(
+const composed = <const Modules extends ReadonlyArray<RegisteredGameModule<never, unknown>>>(
   modules: Modules,
   skeleton: ReadonlyArray<StagePhase> = [],
 ) => Either.getOrThrow(composeGame(modules, { skeleton }))
@@ -280,8 +280,10 @@ describe('registerModule — the bridge to kernel’s GameModule', () => {
       const state = yield* makeUiFrameState
       const ui = yield* registerModule({
         name: '@nerima-games/mx-ui',
-        layers: EMPTY_MODULE_LAYER,
-        frameStages: Effect.succeed(uiStages(state)),
+        module: {
+          layers: EMPTY_MODULE_LAYER,
+          frameStages: Effect.succeed(uiStages(state)),
+        },
       })
       const game = composed([ui], STANDARD_STAGE_SKELETON)
 
@@ -311,19 +313,21 @@ describe('registerModule — the bridge to kernel’s GameModule', () => {
 
       const registered = registerModule({
         name: 'mc-render',
-        layers: EMPTY_MODULE_LAYER,
-        frameStages: Effect.gen(function* () {
-          // Acquiring a service AT REGISTRATION TIME — impossible when
-          // `frameStages` was a value, which is what forced every such service
-          // into FrameServices.
-          const bindings = yield* Bindings
-          return [
-            {
-              id: id('render:input'),
-              run: () => Ref.update(seen, (previous) => [...previous, bindings.jump]),
-            },
-          ]
-        }),
+        module: {
+          layers: EMPTY_MODULE_LAYER,
+          frameStages: Effect.gen(function* () {
+            // Acquiring a service AT REGISTRATION TIME — impossible when
+            // `frameStages` was a value, which is what forced every such service
+            // into FrameServices.
+            const bindings = yield* Bindings
+            return [
+              {
+                id: id('render:input'),
+                run: () => Ref.update(seen, (previous) => [...previous, bindings.jump]),
+              },
+            ]
+          }),
+        },
       })
 
       const module = yield* Effect.provideService(registered, Bindings, { jump: 'Space' })
@@ -339,8 +343,10 @@ describe('registerModule — the bridge to kernel’s GameModule', () => {
     Effect.gen(function* () {
       const module = yield* registerModule({
         name: 'mx-gameplay',
-        layers: EMPTY_MODULE_LAYER,
-        frameStages: Effect.succeed([]),
+        module: {
+          layers: EMPTY_MODULE_LAYER,
+          frameStages: Effect.succeed([]),
+        },
       })
 
       expect(module.name).toBe('mx-gameplay')
@@ -358,12 +364,12 @@ describe('Layer merge', () => {
     name: 'alpha',
     layers: Layer.succeed(Alpha, { value: 'a' }),
     frameStages: [],
-  } satisfies GameModule<Alpha>
+  } satisfies RegisteredGameModule<Alpha>
   const betaModule = {
     name: 'beta',
     layers: Layer.succeed(Beta, { value: 2 }),
     frameStages: [],
-  } satisfies GameModule<Beta>
+  } satisfies RegisteredGameModule<Beta>
 
   it.effect('makes every module service available from the merged Layer', () =>
     Effect.gen(function* () {
@@ -442,12 +448,12 @@ describe('ModuleLayer — what it now checks, and what it still cannot', () => {
 
       // @ts-expect-error RIn is `never` on ModuleLayer: an unmet requirement
       // cannot be smuggled into a composed game any more.
-      const smuggled: GameModule = { name: 'bad', layers: needsSomething, frameStages: [] }
+      const smuggled: RegisteredGameModule = { name: 'bad', layers: needsSomething, frameStages: [] }
       expect(smuggled.name).toBe('bad')
 
       // Satisfying it first is all that is asked, and then it composes.
       const satisfied = Layer.provide(needsSomething, Layer.succeed(Missing, { value: 7 }))
-      const good: GameModule = { name: 'good', layers: satisfied, frameStages: [] }
+      const good: RegisteredGameModule = { name: 'good', layers: satisfied, frameStages: [] }
       expect(good.name).toBe('good')
     }),
   )

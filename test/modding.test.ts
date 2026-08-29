@@ -2,12 +2,16 @@ import { describe, expect, it } from '@effect/vitest'
 import { Effect, Either, Option, Ref } from 'effect'
 import {
   composeGame,
-  DeltaTimeSecs,
   EMPTY_MODULE_LAYER,
-  type GameModule,
-  type StageRegistration,
+  type RegisteredGameModule,
 } from '../src/domain/composition'
-import { EpochMillis, FixedClockLayer, MonotonicTimeSecs } from '../src/domain/kernel-vocabulary'
+import {
+  DeltaTimeSecs,
+  EpochMillis,
+  FixedClockLayer,
+  MonotonicTimeSecs,
+  type StageRegistration,
+} from '@nerima-games/mc-kernel'
 import {
   acceptMod,
   acceptMods,
@@ -27,7 +31,7 @@ import {
   STANDARD_STAGE_SKELETON,
 } from '../src/domain/stage-skeleton'
 
-const modModule = (frameStages: ReadonlyArray<StageRegistration>): GameModule => ({
+const modModule = (frameStages: ReadonlyArray<StageRegistration>): RegisteredGameModule => ({
   name: 'a mod',
   layers: EMPTY_MODULE_LAYER,
   frameStages,

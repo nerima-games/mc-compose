@@ -1,11 +1,11 @@
 /**
  * The modding entry point.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * CURRENT MODDING ENTRY POINT.
  *
  * plan.md §3.15 lists "Modding入口" among this repository's responsibilities,
  * and §7 assigns it here. It belongs here for one reason: a mod is, structurally,
- * another `GameModule` — Layers plus frame stages — and merging GameModules is
+ * another registered module — Layers plus frame stages — and merging modules is
  * what this repository does. A mod loader anywhere else would need its own
  * composition machinery.
  *
@@ -13,7 +13,7 @@
  * A mod gets no privileges the built-in modules do not have
  * ---------------------------------------------------------------------------
  *
- * `acceptMod` returns a plain `GameModule`. It is then merged by `composeGame`
+ * `acceptMod` returns a registered module. It is then merged by `composeGame`
  * exactly like mx-gameplay's. There is no mod-specific hook, no priority, no
  * pre/post pass. Anything a mod can do, a first-party module can do, and vice
  * versa — which is what keeps the mod API from becoming a second, weaker copy
@@ -29,9 +29,10 @@
  * silently BE the physics stage. Reserving the core namespaces makes both
  * impossible to express.
  */
-import type { GameModule, StageRegistration } from './composition'
 import { Either } from 'effect'
+import type { RegisteredGameModule } from './composition'
 import { StageId } from './stage-order'
+import type { StageRegistration } from '@nerima-games/mc-kernel'
 
 /**
  * The mod contract version.
@@ -73,7 +74,7 @@ export type ModManifest = {
   /** Must equal `MODDING_API_VERSION`. */
   readonly apiVersion: number
   /** The mod's Layers and stages. Structurally identical to a first-party module. */
-  readonly module: GameModule
+  readonly module: RegisteredGameModule
 }
 
 export type ModdingError =
@@ -118,7 +119,9 @@ const violatesNamespace = (modId: string, registration: StageRegistration): bool
  * dropped edge as dangling. Rejecting it here would make mods depend on the
  * build's module set.
  */
-export const acceptMod = (manifest: ModManifest): Either.Either<GameModule, ModdingError> => {
+export const acceptMod = (
+  manifest: ModManifest,
+): Either.Either<RegisteredGameModule, ModdingError> => {
   if (!MOD_ID_PATTERN.test(manifest.id)) {
     return Either.left({ _tag: 'InvalidModId', id: manifest.id })
   }
@@ -150,7 +153,7 @@ export const acceptMod = (manifest: ModManifest): Either.Either<GameModule, Modd
 const acceptUnseenMod = (
   manifest: ModManifest,
   seen: Set<string>,
-): Either.Either<GameModule, ModdingError> => {
+): Either.Either<RegisteredGameModule, ModdingError> => {
   if (seen.has(manifest.id)) {
     return Either.left({ _tag: 'DuplicateModId', id: manifest.id })
   }
@@ -161,9 +164,9 @@ const acceptUnseenMod = (
 /** Validate a set of mods, rejecting duplicate ids. Order is preserved. */
 export const acceptMods = (
   manifests: ReadonlyArray<ModManifest>,
-): Either.Either<ReadonlyArray<GameModule>, ModdingError> => {
+): Either.Either<ReadonlyArray<RegisteredGameModule>, ModdingError> => {
   const seen = new Set<string>()
-  const accepted: Array<GameModule> = []
+  const accepted: Array<RegisteredGameModule> = []
 
   for (const manifest of manifests) {
     const result = acceptUnseenMod(manifest, seen)

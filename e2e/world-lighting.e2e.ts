@@ -12,16 +12,10 @@ type LightingSnapshot = {
   readonly weatherBrightness: number
 }
 
-// BLOCKED: @nerima-games/mc-render@0.2.14 (the published, pinned version) does
-// not export `ChunkSyncPort` (TS2305 under tsconfig.preview.json) and its
-// `renderModule` only accepts 5 parameters, so apps/web/main.ts:2520's 6th
-// `chunkSync` argument is silently dropped by JS and no dirty chunk ever
-// reaches `syncWorld`'s `colorForChunk`, which is what this test measures via
-// `resolvedChunks`. mc-render's carrier branch (fix-ci-green-9/-10 worktrees)
-// already implements `ChunkSyncPort`, but it is not yet published. Unblocks
-// once mc-render ships a release with `ChunkSyncPort` and mc-compose bumps its
-// dependency. Not a test-timing bug: polling `resolvedChunks` directly (rather
-// than the `framesDrawn` proxy this test used before) still times out at 0.
+// Browser acceptance is still pending. The host uses the published five-argument
+// render API and registers its world synchronisation as a frame stage after chunk
+// synchronisation and before drawing. Keep this test marked until a live browser
+// verifies that generated lighting reaches the renderer's QA snapshot.
 test.fixme('generated world lighting reaches rendered chunk vertex colors', async ({ page }) => {
   await startGameSession(page, 'world-lighting')
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')

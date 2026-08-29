@@ -1,7 +1,7 @@
 /**
  * @nerima-games/mc-compose — the composition repository.
  *
- * PRE-AUDIT FIRST CUT (叩き台). See README.md 現状.
+ * CURRENT COMPOSITION BOUNDARY. See README.md for the public surface.
  *
  * ---------------------------------------------------------------------------
  * PRIME DIRECTIVE

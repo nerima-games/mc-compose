@@ -3,7 +3,7 @@ import {
   type TransportService,
   type WireText,
 } from '@nerima-games/mx-multiplayer'
-import { Deferred, Effect, Queue } from 'effect'
+import { Effect, Queue } from 'effect'
 import {
   decodePlayerDamageWireMessage,
   encodePlayerDamageCommand,
@@ -132,12 +132,6 @@ const decodePlayerResumeAccepted = (frame: string): PlayerResumeAccepted | undef
 
 const defaultSocketFactory = (url: string): BrowserWebSocketLike => new WebSocket(url)
 
-const closeDetail = (event: WebSocketCloseEvent): string => {
-  const code = event.code === undefined ? 'unknown' : String(event.code)
-  const reason = event.reason === undefined || event.reason.length === 0 ? 'no reason' : event.reason
-  return `websocket closed (${code}: ${reason})`
-}
-
 export const makeBrowserWebSocketTransport = (
   options: BrowserWebSocketTransportOptions,
 ): Effect.Effect<BrowserWebSocketTransport, TransportError> =>
@@ -163,7 +157,6 @@ export const makeBrowserWebSocketTransport = (
     const brewingInbound = yield* Queue.unbounded<BrewingWireMessage>()
     const anvilInbound = yield* Queue.unbounded<AnvilWireMessage>()
     const enchantingInbound = yield* Queue.unbounded<EnchantingWireMessage>()
-    const opened = yield* Deferred.make<void, TransportError>()
     const socket = yield* Effect.try({
       try: () => (options.socketFactory ?? defaultSocketFactory)(options.url),
       catch: (cause) =>
@@ -188,27 +181,16 @@ export const makeBrowserWebSocketTransport = (
       socket.removeEventListener('error', handleError)
     }
 
-    const terminate = (error: TransportError, shutdownInbound: boolean): void => {
+    const terminate = (): void => {
       if (currentState === 'closed') return
       currentState = 'closed'
-      Effect.runSync(Deferred.fail(opened, error))
       detachListeners()
-      if (shutdownInbound) Effect.runSync(Queue.shutdown(inbound))
-      if (shutdownInbound) Effect.runSync(Queue.shutdown(sleepInbound))
-      if (shutdownInbound) Effect.runSync(Queue.shutdown(witherInbound))
-      if (shutdownInbound) Effect.runSync(Queue.shutdown(enderDragonInbound))
-      if (shutdownInbound) Effect.runSync(Queue.shutdown(playerDamageInbound))
-      if (shutdownInbound) Effect.runSync(Queue.shutdown(craftingInbound))
-      if (shutdownInbound) Effect.runSync(Queue.shutdown(brewingInbound))
-      if (shutdownInbound) Effect.runSync(Queue.shutdown(anvilInbound))
-      if (shutdownInbound) Effect.runSync(Queue.shutdown(enchantingInbound))
     }
 
     function handleOpen(): void {
       if (currentState !== 'connecting') return
-      currentState = 'open'
       if (options.reconnectAuth === undefined) {
-        Effect.runSync(Deferred.succeed(opened, undefined))
+        currentState = 'open'
         return
       }
       try {
@@ -224,19 +206,13 @@ export const makeBrowserWebSocketTransport = (
             registrationToken,
           }),
         )
-      } catch (cause) {
-        terminate(
-          new TransportError({
-            reason: 'send-failed',
-            detail: `websocket resume authentication failed: ${String(cause)}`,
-          }),
-          false,
-        )
+      } catch {
+        terminate()
       }
     }
 
     function handleMessage(event: WebSocketMessageEvent): void {
-      if (currentState !== 'open' || typeof event.data !== 'string') return
+      if (currentState === 'closed' || typeof event.data !== 'string') return
       if (options.reconnectAuth !== undefined) {
         let parsed: unknown
         try {
@@ -251,33 +227,22 @@ export const makeBrowserWebSocketTransport = (
           if (!awaitingResume) return
           const accepted = decodePlayerResumeAccepted(event.data)
           if (accepted === undefined || accepted.player !== options.reconnectAuth.playerId) {
-            terminate(
-              new TransportError({
-                reason: 'not-connected',
-                detail: 'invalid websocket resume authentication response',
-              }),
-              false,
-            )
+            terminate()
             return
           }
           try {
             options.reconnectAuth.saveToken(accepted.token)
             if (sentRegistrationToken) options.reconnectAuth.clearRegistrationToken?.()
-          } catch (cause) {
-            terminate(
-              new TransportError({
-                reason: 'not-connected',
-                detail: `failed to persist websocket resume token: ${String(cause)}`,
-              }),
-              false,
-            )
+          } catch {
+            terminate()
             return
           }
           awaitingResume = false
-          Effect.runSync(Deferred.succeed(opened, undefined))
+          currentState = 'open'
           return
         }
       }
+      if (currentState !== 'open') return
       const sleepMessage = decodeSleepWireMessage(event.data)
       if (sleepMessage !== undefined) {
         Queue.unsafeOffer(sleepInbound, sleepMessage)
@@ -321,18 +286,12 @@ export const makeBrowserWebSocketTransport = (
       Queue.unsafeOffer(inbound, event.data)
     }
 
-    function handleClose(event: WebSocketCloseEvent): void {
-      terminate(
-        new TransportError({ reason: 'closed', detail: closeDetail(event) }),
-        false,
-      )
+    function handleClose(): void {
+      terminate()
     }
 
     function handleError(): void {
-      terminate(
-        new TransportError({ reason: 'send-failed', detail: 'websocket emitted an error event' }),
-        false,
-      )
+      terminate()
     }
 
     socket.addEventListener('open', handleOpen)
@@ -341,50 +300,36 @@ export const makeBrowserWebSocketTransport = (
     socket.addEventListener('error', handleError)
 
     const send = (frame: WireText): Effect.Effect<void, TransportError> =>
-      Deferred.await(opened).pipe(
-        Effect.flatMap(() =>
-          Effect.suspend(() => {
-            if (currentState !== 'open' || socket.readyState !== 1) {
-              return Effect.fail(
-                new TransportError({
-                  reason: 'not-connected',
-                  detail: 'send attempted while websocket was not open',
-                }),
-              )
-            }
-            return Effect.try({
-              try: () => socket.send(frame),
-              catch: (cause) => {
-                const error = new TransportError({
-                  reason: 'send-failed',
-                  detail: `websocket send failed: ${String(cause)}`,
-                })
-                terminate(error, false)
-                return error
-              },
+      Effect.suspend(() => {
+        if (currentState !== 'open' || socket.readyState !== 1) {
+          return Effect.fail(
+            new TransportError({
+              reason: 'not-connected',
+              detail: 'send attempted while websocket was not open',
+            }),
+          )
+        }
+        return Effect.try({
+          try: () => socket.send(frame),
+          catch: (cause) => {
+            const error = new TransportError({
+              reason: 'send-failed',
+              detail: `websocket send failed: ${String(cause)}`,
             })
-          }),
-        ),
-      )
+            terminate()
+            return error
+          },
+        })
+      })
 
     const close = Effect.sync(() => {
       if (disposed) return
       disposed = true
       const shouldCloseSocket = socket.readyState === 0 || socket.readyState === 1
-      terminate(
-        new TransportError({ reason: 'closed', detail: 'websocket transport disposed locally' }),
-        false,
-      )
-      detachListeners()
-      Effect.runSync(Queue.shutdown(inbound))
-      Effect.runSync(Queue.shutdown(sleepInbound))
-      Effect.runSync(Queue.shutdown(witherInbound))
-      Effect.runSync(Queue.shutdown(enderDragonInbound))
-      Effect.runSync(Queue.shutdown(playerDamageInbound))
-      Effect.runSync(Queue.shutdown(craftingInbound))
-      Effect.runSync(Queue.shutdown(brewingInbound))
-      Effect.runSync(Queue.shutdown(anvilInbound))
-      Effect.runSync(Queue.shutdown(enchantingInbound))
+      // Frame stages drain these queues synchronously. Keeping them open after
+      // transport termination prevents a concurrent Queue.takeAll from
+      // defecting while the page lifecycle callback disposes the transport.
+      terminate()
       if (shouldCloseSocket) socket.close(1000, 'transport disposed')
     })
 

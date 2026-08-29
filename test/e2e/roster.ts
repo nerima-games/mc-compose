@@ -6,11 +6,10 @@
  * Why a transcription and not an import
  * ---------------------------------------------------------------------------
  *
- * plan.md §6 Step 3 publishes bottom-up and NOTHING IS PUBLISHED YET.
- * `package.json` of this repository declares exactly one dependency (`effect`),
- * `node_modules` contains no `@nerima-games/*` at all, and every sibling
- * declares only `effect` too. So mc-compose cannot `import { gameplayModule }
- * from '@nerima-games/mx-gameplay'`, and no amount of wanting changes that.
+ * The sibling packages are published and declared dependencies now, but this
+ * file remains a transcription rather than an import on purpose. It tests the
+ * roster resolver's ids and `after` edges; importing `gameplayModule` here
+ * would test service construction and host layers instead of this contract.
  *
  * The two dishonest answers are:
  *
@@ -22,11 +21,11 @@
  *     E2E, which is exactly what docs/porting.md §3 says not to do.
  *
  * The honest answer is that the ids and the `after` edges are NOT behaviour.
- * They are declarations, they are readable from the siblings' source today, and
- * whether they compose into plan.md §4.2's frame is a question no single
- * repository can answer — mx-gameplay cannot see mc-render's stages, and
- * mc-render is forbidden from knowing where in the frame it runs. That question
- * is exactly what mc-compose exists to answer, so it is what this file feeds.
+ * They are declarations, and whether they compose into plan.md §4.2's frame
+ * is a question no single experience package can answer — mx-gameplay cannot
+ * see mc-render's stages, and mc-render is forbidden from knowing where in the
+ * frame it runs. That question is exactly what mc-compose exists to answer,
+ * so it is what this file feeds.
  *
  * ---------------------------------------------------------------------------
  * What keeps a transcription from going stale
@@ -66,8 +65,8 @@
  */
 
 import { Effect, Ref } from 'effect'
-import { EMPTY_MODULE_LAYER, type GameModule, type StageRegistration } from '../../src/domain/composition'
-import { monotonicSecs } from '../../src/domain/kernel-vocabulary'
+import { EMPTY_MODULE_LAYER, type RegisteredGameModule } from '../../src/domain/composition'
+import { monotonicSecs, type StageRegistration } from '@nerima-games/mc-kernel'
 import { StageId } from '../../src/domain/stage-order'
 
 /** One `StageRegistration` as some repository actually writes it down. */
@@ -96,30 +95,24 @@ export type RosterModule = {
  * care. mc-sim is listed fifth and registers the frame's SECOND stage.
  *
  * ---------------------------------------------------------------------------
- * "Registers a stage" is not the same list as "mc-compose may import"
+ * "Registers a stage" is not the same list as "the host's service layer"
  * ---------------------------------------------------------------------------
  *
- * This array used to say it was the repositories mc-compose is allowed to
- * import (docs/responsibility.md §3.1: the four experience modules plus
- * mc-render). That is no longer the same set and the difference is worth
- * stating rather than quietly widening: MC-COMPOSE MAY NOT IMPORT MC-SIM. It
- * reaches it only transitively, so `pnpm check:deps` rejects the import as a
- * `transitive-import` violation (`scripts/check-dependency-whitelist.ts` rule
- * 3), and that is deliberate — a rule that needs mc-sim directly is a rule that
- * belongs in an experience module.
+ * This array is not a dependency allowlist. The host can import the published
+ * packages it declares, while the lint boundary still rejects the packages
+ * deliberately kept below the composition layer. A roster entry records what
+ * a sibling registers, even when that sibling is not the host's direct wiring
+ * choice.
  *
- * That is not a problem for this manifest, because the manifest is a
- * TRANSCRIPTION of what each repository registers, not a list of imports: it is
- * read from the siblings' source by eye and by `pnpm check:roster`, and no line
- * of this repository imports any of them (nothing is published anyway — see the
- * file header).
+ * That is not a problem for this manifest, because it is a TRANSCRIPTION of
+ * what each repository registers, not a list of imports: it is read from the
+ * siblings' source by eye and by `pnpm check:roster`, and the resolver tests do
+ * not need to construct those modules.
  *
- * It is a real question for a host, and an open one: somebody has to hand
- * mc-sim's `GameModule` to `composeGame`, and it cannot be mc-compose. That is
- * the same unresolved question docs/e2e-triage.md §4.3 asks about who builds
- * `InventoryService`, and mc-sim's `stages/registration.ts` records its own half
- * of it. Registering a stage and being importable are simply different
- * properties, and the frame only needs the first.
+ * The browser host supplies the service layers and registers the public stage
+ * implementations explicitly. Registering a stage and being part of this
+ * manifest are simply different properties, and the resolver only needs the
+ * first.
  */
 export const ROSTER: ReadonlyArray<RosterModule> = [
   {
@@ -252,8 +245,7 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // gives three reasons it declares none — an `after: [render:input]`
         // would be a claim about the global order §2.3-3 reserves to
         // mc-compose, mc-render depends on mc-sim so the reverse edge would
-        // invert the graph while evading `pnpm check:deps` (an `after` is a
-        // string), and a headless build with no input stage is still a correct
+        // invert the graph, and a headless build with no input stage is still a correct
         // simulation.
         //
         // THIS IS THE STAGE THE OTHER FOUR REPOSITORIES WERE ALL WAITING FOR.
@@ -338,8 +330,8 @@ export const ROSTER_REGISTERS_NOTHING: ReadonlyArray<{
   {
     name: 'mc-playground-kit',
     why:
-      'Dev-only, banned from `dependencies` by rule 6 of `scripts/check-dependency-whitelist.ts`, and it ' +
-      'consumes stages rather than registering any. It used to register `input:sample`; mc-render\'s ' +
+      'A runtime/bootstrap dependency that consumes stages rather than registering any. It used to register ' +
+      '`input:sample`; mc-render\'s ' +
       '`stages/stage-ids.ts` header records why that was the shipped build having no input stage at all.',
   },
 ]
@@ -447,7 +439,7 @@ export const ROSTER_STAGE_IDS: ReadonlyArray<string> = ROSTER.flatMap((module) =
 // ---------------------------------------------------------------------------
 
 /**
- * The manifest as composable `GameModule`s.
+ * The manifest as composable registered modules.
  *
  * ---------------------------------------------------------------------------
  * READ THIS BEFORE TRUSTING A GREEN RUN
@@ -479,7 +471,7 @@ export const ROSTER_STAGE_IDS: ReadonlyArray<string> = ROSTER.flatMap((module) =
 export const rosterModules = (
   log: Ref.Ref<ReadonlyArray<string>>,
   only: ReadonlyArray<RosterModule> = ROSTER,
-): ReadonlyArray<GameModule> =>
+): ReadonlyArray<RegisteredGameModule> =>
   only.map((module) => ({
     name: module.name,
     layers: EMPTY_MODULE_LAYER,

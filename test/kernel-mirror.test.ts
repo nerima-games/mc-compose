@@ -1,28 +1,26 @@
 /**
- * The kernel mirror is pinned against kernel's documented shape.
+ * The host's use of mc-kernel is pinned against kernel's documented shape.
  *
- * `domain/kernel-vocabulary.ts` promises that deleting it and repointing every
- * import at the published `@nerima-games/mc-kernel` will typecheck. Nothing
- * would otherwise enforce that promise, and the roster has already broken it
- * twice: mc-sim's copy once carried a one-field `ClockService` where kernel's
- * carries two, and mc-physics refined `DeltaTimeSecs` to the frame-loop clamp
- * `[0.001, 0.05]` where kernel refines it to "finite and non-negative".
+ * Keeping these assertions at the dependency boundary makes an upgrade
+ * explicit. The roster has already broken this contract twice: mc-sim's copy
+ * once carried a one-field `ClockService` where kernel's carries two, and
+ * mc-physics refined `DeltaTimeSecs` to the frame-loop clamp `[0.001, 0.05]`
+ * where kernel refines it to "finite and non-negative".
  *
  * Neither divergence is visible to `tsc`. A brand is keyed by its STRING
- * (`Brand.Brand<'DeltaTimeSecs'>`), so a mirror and kernel's original are one
- * type however differently they validate; a `Context.Tag` is keyed by its
- * string too, so two mirrors of a Port are one service at runtime. Both are
- * failures a type checker is structurally unable to catch, which is why they
- * are asserted here.
+ * (`Brand.Brand<'DeltaTimeSecs'>`), so an independently declared shape and
+ * kernel's original are one type however differently they validate; a
+ * `Context.Tag` is keyed by its string too, so independently declared Ports
+ * can become one service at runtime. Both are failures a type checker is
+ * structurally unable to catch, which is why they are asserted here.
  *
- * mc-compose's mirror is the one that carries the Clock Port WHOLE, because
- * this repository is the stage PROVIDER: it has to discharge `FrameServices`,
- * and it cannot discharge what it cannot name.
+ * mc-compose is the stage PROVIDER: it has to discharge `FrameServices`, and
+ * it cannot discharge what it cannot name.
  */
 import { describe, expect, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
-import { DeltaTimeSecs, type FrameServices } from '../src/domain/composition'
 import {
+  DeltaTimeSecs,
   ClockPort,
   EpochMillis,
   FixedClockLayer,
@@ -31,14 +29,15 @@ import {
   MonotonicTimeSecs,
   wallClockEpochMillis,
   type ClockService,
-} from '../src/domain/kernel-vocabulary'
+  type FrameServices,
+} from '@nerima-games/mc-kernel'
 
 const FIXED_AT = {
   monotonicSecs: MonotonicTimeSecs(1_234.5),
   wallClockEpochMillis: EpochMillis(1_700_000_000_000),
 }
 
-describe('the mirrored brands are kernel’s brands', () => {
+describe('the host uses kernel’s branded contracts', () => {
   // REGRESSION: kernel (mc-kernel/domain/quantities.ts) refines DeltaTimeSecs
   // to "finite and non-negative" and says a ZERO delta is legal, because a
   // frame may be scheduled twice inside one clock tick. The [0.001, 0.05] clamp
@@ -73,10 +72,10 @@ describe('the mirrored brands are kernel’s brands', () => {
   )
 })
 
-describe('the mirrored Clock Port is kernel’s', () => {
+describe('the independent Clock Port shape matches kernel’s', () => {
   // REGRESSION — the exact failure mc-sim's mirror once had. Effect resolves a
-  // Tag by its TEXTUAL KEY, so a Layer built against a one-field mirror
-  // satisfies kernel's two-field tag and the missing field reads `undefined` in
+  // Tag by its TEXTUAL KEY, so a Layer built against an independent one-field
+  // shape satisfies kernel's two-field tag and the missing field reads `undefined` in
   // a repository that never saw this file. tsc cannot see it; this can.
   it.effect('carries kernel’s tag string, so it IS kernel’s service at runtime', () =>
     Effect.sync(() => {
@@ -93,14 +92,14 @@ describe('the mirrored Clock Port is kernel’s', () => {
       }
 
       const asKernel: KernelClockService = fixedClock(FIXED_AT)
-      const asMirror: ClockService = {
+      const asIndependentShape: ClockService = {
         monotonicSecs: Effect.succeed(MonotonicTimeSecs(0)),
         wallClockEpochMillis: Effect.succeed(EpochMillis(0)),
       }
 
       const fields = ['monotonicSecs', 'wallClockEpochMillis']
       expect(Object.keys(asKernel).sort()).toStrictEqual(fields)
-      expect(Object.keys(asMirror).sort()).toStrictEqual(fields)
+      expect(Object.keys(asIndependentShape).sort()).toStrictEqual(fields)
 
       expect(yield* monotonicSecs.pipe(Effect.provide(FixedClockLayer(FIXED_AT)))).toBe(1_234.5)
       expect(yield* wallClockEpochMillis.pipe(Effect.provide(FixedClockLayer(FIXED_AT)))).toBe(
@@ -114,7 +113,7 @@ describe('FrameServices matches kernel’s settled answer', () => {
   // REGRESSION: kernel froze `FrameServices = ClockPort` after the vertical
   // slice spike. This repository is the one that has to SUPPLY it, so a mirror
   // that drifted narrow would silently stop discharging part of the frame's
-  // requirement — and a mirror that drifted wide would demand something no host
+  // requirement — and an independently declared contract that drifted wide would demand something no host
   // has. `Exclude` in both directions is what makes this an equality.
   it.effect('is exactly ClockPort — no wider, no narrower', () =>
     Effect.sync(() => {

@@ -17,13 +17,13 @@ plan.md §3.15 検証:
 | Modding 入口 | 名前空間予約・一級モジュール性 | `test/modding.test.ts`(16 tests) |
 | 公開 API + 規範 | バレルのピン留め + ゲームルール名の検査 + **フェーズ所属のピン留め** | `test/public-api.test.ts`(7 tests) |
 | kernel ミラーの忠実性 | 公開時に差し替えられること | `test/kernel-mirror.test.ts`(7 tests) |
-| 依存境界 | ホワイトリスト・推移閉包・`Date.now()` 禁止 | `test/check-dependency-whitelist.test.ts`(46 tests) |
-| 公開 API ロック | スナップショット生成・差分描画 | `test/api-lock.test.ts`(26 tests) |
-| **ロスター実在性ゲート** | 転記が兄弟リポジトリの実ソースと一致するか | `test/check-roster-manifest.test.ts`(19 tests) |
+| 依存境界 | 公開パッケージの直接依存・低レイヤー import 禁止・時刻注入 | `package.json` + `.oxlintrc.json`、`pnpm lint` |
+| 公開 API 契約 | 公開 barrel、stage skeleton、kernel 型の直接利用 | `test/public-api.test.ts`、`test/kernel-mirror.test.ts` |
+| **ロスター実在性ゲート** | 転記が兄弟リポジトリの実ソースと一致するか | `test/check-roster-manifest.test.ts`、`pnpm check:roster` |
 | **モジュール間相互作用 — フレーム側** | **E2E** | `test/e2e/roster-frame-order.test.ts`(18 tests)。§3 |
 | **モジュール間相互作用 — 振る舞い側** | **E2E** | `e2e/`。採掘・inventoryとbrowser lifecycleを公開package境界で検証。§3.4 |
 
-現在 **319 tests / 22 files**、`pnpm test` で約 2 秒。
+テストの選択数・実行時間・カバレッジ率は、固定値ではなく各実行時の runner 出力を正とする。
 
 ## 2. 主 API は `@effect/vitest` の `it.effect`
 
@@ -113,17 +113,19 @@ plan.md §3.15 の主張には**半分が 2 つある**。それを混ぜない�
 | 半分 | 内容 | 現状 |
 | --- | --- | --- |
 | **(a) フレーム** | 16 本の stage が 1 本の全順序になる。どの id が、どのフェーズに入り、どの順で走るか | **検証済み**。`test/e2e/roster-frame-order.test.ts` |
-| **(b) 振る舞い** | 「採掘したらインベントリに入る」 | **未検証。今日は検証できない** |
+| **(b) 振る舞い** | 「採掘したらインベントリに入る」 | **実装済み。実ブラウザ実行を環境ごとに確認する** |
 
-**(b) が今日できない理由は「まだ書いていない」ではない。**
+**(b) は公開パッケージの実装を直接ホストへ配線している。**
 
-- plan.md §6 Step 3 の publish は bottom-up で、**1 つも公開されていない**。
-  mc-compose の `package.json#dependencies` は `effect` のみ、
-  `node_modules` に `@nerima-games/*` は 1 つも無い(兄弟リポジトリも全部同じ)。
-- したがって `import { gameplayModule } from '@nerima-games/mx-gameplay'` は書けない。
-- そして偽物のモジュールを 4 つ作って合成すれば、**検証されるのは偽物**である。
-  `test/composition.test.ts` が合成アルゴリズムの検証のために意図的にそれをやっており、
-  同じことを E2E と名乗ってもう一度やるのは、後ろに何も無い緑のランプにしかならない。
+- `package.json#dependencies` に公開済みの `mc-kernel`、`mc-sim`、`mc-worldgen`、
+  `mc-render`、`mx-gameplay`、`mx-ui` などを宣言している。
+- `apps/web/main.ts` はそれらの public export を直接 import し、ホスト所有の dimension、
+  store、queue、network authority を stage factory へ渡す。
+- `test/e2e/roster-frame-order.test.ts` は stage の宣言と合成だけを検証し、
+  実装の振る舞いは `e2e/*.e2e.ts` の Playwright ゲートで検証する。
+
+このため、Vitest の純粋な composition テストをブラウザ振る舞いの代用にはしない。
+ブラウザゲートを実行できない環境では、型検査・ビルド・テストが通ってもその事実を未検証として報告する。
 
 **(a) が今日できる理由**は、id と `after` が**振る舞いではなく宣言**だからである。
 兄弟リポジトリの `stages/stage-ids.ts` と `stages/registration.ts` から読み出せて、
@@ -131,14 +133,12 @@ plan.md §3.15 の主張には**半分が 2 つある**。それを混ぜない�
 mx-gameplay は mc-render の stage を見られないし、mc-render は自分がフレームのどこで走るかを
 知ることを禁じられている(plan.md §2.3-3)。それがまさに compose の問いである。
 
-したがって現在の E2E の主語は `test/e2e/roster.ts` —
-**兄弟リポジトリが実際に登録している 16 本の id と 13 本の `after` エッジを、
-`file:line` 付きで転記したもの**である。
+したがってフレーム E2E の主語は `test/e2e/roster.ts` —
+**兄弟リポジトリが実際に登録している stage の id と `after` エッジを、
+`file:line` 付きで転記したもの**である。振る舞い E2E の主語は `e2e/*.e2e.ts` と公開 runtime である。
 
-`run` の中身は本物ではない。id をログに追記するだけで、
-`render:camera-mirror` だけが `ClockPort` を読む(本物の mc-render も
-`FrameServices` を読むのはこの 1 本だけだからである)。
-**stage が「何をするか」は 1 行も検証していない。**
+`test/e2e/roster-frame-order.test.ts` の `run` は順序検証用の最小 fixture であり、
+stage の実装を代替しない。stage が「何をするか」は `e2e/*.e2e.ts` と各 package の unit test が検証する。
 
 ### 3.5 転記が腐らないようにする仕掛け
 
@@ -199,18 +199,19 @@ CI で走れないゲートを CI が走らせるゲートに入れると、`pnp
 **本物の公開済み mc-render / mx-ui / mx-redstone などを import する。** 偽物を作らず、
 consumerと同じ `node_modules` 境界を通す。
 
-`@nerima-games/mc-playground-kit` はdevDependencyとしてのみ使い、
+`@nerima-games/mc-playground-kit` はブラウザ実行時の dependency として使い、
 `makeBrowserPreview` がcanvas・RAF・AbortSignal・cleanupを一世代として所有する。
 Playwrightは起動後のframe増加をQAで観測し、`lifecycle.stop` 後にframeが固定され、
 QA surfaceが解放されるところまでを最終ゲートとする。
 
-公開packageだけを直接依存・devDependencyに宣言するため、単独checkoutの
-`pnpm install --frozen-lockfile` とconsumer相当の解決を同時に検証できる。
-`workspace:*`、兄弟source alias、未公開packageへの参照はこのゲートに持ち込まない。
+実行時依存は公開パッケージを `package.json#dependencies` に明示し、開発専用ツールだけを
+`devDependencies` に置くため、単独 checkout の `pnpm install --frozen-lockfile` と
+consumer 相当の解決を同時に検証できる。`workspace:*` や兄弟 source alias で公開契約を
+迂回せず、未解決のローカルパッケージを完成扱いにしない。
 
 ### 3.5.2 `three` はホストが渡す —— それがなぜ prime directive 違反でないか
 
-**2026-07-28。`three` と `@types/three` が mc-compose の `devDependencies` に入った。**
+`three` と `@types/three` は mc-compose の `devDependencies` に置く。
 `dependencies` ではない。使うのは `apps/web/main.ts` だけで、それは
 `isToolingOrTestPath` が tooling と分類する場所であり、`package.json` の `files` にも
 入っていない —— `vite` がここにあるのと同じ理由である。
@@ -244,14 +245,9 @@ WebGL2 コンテキストを作るのは mc-render の `new WebGLRenderer({ canv
 `canvas.width` が CSS サイズと一致すること(= `renderer.setSize` が呼ばれた)——
 を問うており、ホストから描画器の生成を外すミューテーションで赤くなることを確認してある。
 
-**画面に何があるかは正直に記録しておく: スカイブルー 1 色である。**
-ジオメトリは 1 つも届かない —— mc-worldgen も mc-meshing も
-`vite.config.ts` が解決する 3 兄弟に入っておらず、
-入れられない理由は §3.4 / e2e-triage §4.3 の壁と同じ(`gameplayModule` の登録には
-`ChunkStore` が要り、組織内の実装はテストダブルだけ)。
-だから #1 は**「コンテキストがある」であって「絵がある」ではない**。
-その 2 つが区別できるようになったこと自体がこの変更の到達点で、
-それ以前は「コンテキストが無い」と「中身が無い」が同じに見えていた。
+画面のピクセル内容は別の契約として扱う。現在の browser host は公開 `mc-worldgen`、
+`mc-render`、`mx-gameplay`、`mx-ui` などを直接解決するが、コンテキスト生成だけを確認するテストは
+ワールドの見た目を証明しない。ピクセル回帰を追加するまでは、render の存在確認と画面内容の確認を混同しない。
 
 **ピクセルを問うテストはまだ 1 本も無い。** ワールドが届くようになった時点で
 e2e-triage に行を足すこと。
@@ -282,33 +278,22 @@ it.effect('has no edge from InGame straight to Title', ...)
 
 | テスト | 何を守るか |
 | --- | --- |
-| `rejects reaching past the experience modules to mc-sim, and names the path` | prime directive の機械化された半分 |
-| `cannot reach mc-render or mc-meshing at all` | グラフの穴をピン留め([architecture.md](./architecture.md) §5) |
-| `exports nothing that sounds like a game rule, an entity or a world` | 弱いが、追加のその場所に規範を置く |
-| `pins the standard stage skeleton (plan.md §4.2)` | 順序表の**並び**の変更を必ず明示的な編集にする |
-| `pins how each phase claims a stage, which is what makes the table load-bearing` | 順序表の**所属規則**を落とすと、並びを保ったまま表が効かなくなる([design-notes.md](./design-notes.md) DN-4.1) |
-| `claims every stage id the roster actually registers` | 表がロスターの**実 id**を取りこぼしていないこと。取りこぼした stage は辞書順に流れる |
-| `passes the delta through untouched` | 物理定数が合成層に来ない |
-| `records no edge between any two experience modules` | plan.md §2.3-1 |
-| `never names mc-playground-kit as a runtime edge` | plan.md §2.3-2 |
-| `produces exactly the §4.2 order from the ids the roster really registers` | 順序表が**実在するロスター**に対して §4.2 を出すこと(DN-14) |
-| `binds every cross-repository edge, and they all point at mc-sim` | リポジトリ間エッジ 5 本がすべて `sim:physics` を名指しし、すべて繋がっていること(DN-14) |
-| `binding mc-sim's four edges did not move any other stage` | 宙に浮いていた 4 本が繋がってもフレームが動かないという、事前に固定してあった予測の答え合わせ(DN-14) |
-| `without it, the frame breaks in exactly the ways no module may repair` | 骨格を外したとき残る破れが、体験モジュール境界をまたぐ = どのモジュールも `after` で言えないものだけであること |
-| `fails loudly the day a silent repository registers a stage` | `ROSTER_REGISTERS_NOTHING` の前提が変わったことをマニフェスト側で検出する。**mc-sim と mx-multiplayer で実際に発火した** |
-| `without the two network phases, both multiplayer stages run after the HUD` | 骨格に `multiplayer:` を拾うフェーズが無いと index 14/15 に落ちるという実測 = 2 フェーズを足した理由(DN-15) |
-| `has no position at all as a single `multiplayer:` namespace phase` | 単一の名前空間フェーズは physics より前だと**循環**、後だと 1 フレーム遅れ。置ける位置が無い(DN-15) |
-| `fails, by name, if any registered stage matches no phase and would run last` | フェーズに落ちない stage は保留ではなく最後尾で走る。**この失敗モードがこの一連の作業を生んだ** |
-| `reserves the canonical id of every phase in the standard skeleton` | 順序表と `RESERVED_STAGE_PREFIXES` は互いを見られない 2 つの表であり、フェーズを 1 つ足すと予約から漏れる |
+| `test/public-api.test.ts` | 公開 barrel と標準 stage skeleton の契約 |
+| `test/stage-order.test.ts` | フェーズ所属、順序、循環、未所属 stage の検出 |
+| `test/e2e/roster-frame-order.test.ts` | 実ロスターの id と `after` edge を合成したフレーム順 |
+| `test/check-roster-manifest.test.ts` | ロスター検査器が実ソースとの差分を報告すること |
+| `test/composition.test.ts` | Layer 合成と frame service の受け渡し |
+| `test/kernel-mirror.test.ts` | `mc-kernel` の公開型・語彙を composition 境界から直接使えること |
+| `pnpm lint` | 低レイヤー import、時刻取得、未使用コードなどの静的規約 |
 
 **これらが落ちたときは、実装ではなく設計判断が変わったということである。**
 直すのではなく、まず「どのリポジトリがこれを所有するのか」を問い直す。
 
 ## 6. カバレッジ
 
-計測は常に動いている(`pnpm test:coverage`)が、**閾値は未設定**。
-参照実装は 99% を強制しているが、スケルトンに閾値を課しても意味がない。
-99% ゲートは完成条件到達時に `vitest.config.ts` と CI の両方で有効化する。
+`pnpm test:coverage` は `vitest.config.ts` の 99%（branches/functions/lines/statements）閾値を通す。
+対象は composition/runtime の純粋なソース集合であり、テスト自身・設定・型宣言は除外する。
+ブラウザの Playwright coverage はこの閾値に含めず、別ゲートとして扱う。
 
 ## 7. まだ書いていないテスト
 

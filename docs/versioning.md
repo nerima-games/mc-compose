@@ -2,42 +2,30 @@
 
 ## 1. 現在地
 
-- **package version**: `0.1.0`
-- **公開状態**: **未公開。** ビルド / publish パイプラインはまだ存在しない
-- **`package.json#exports`**: TypeScript ソースを直接指している(`./index.ts`)
+- **package version**: `package.json#version` を唯一の値とする
+- **実行時依存**: `package.json#dependencies` に公開済みの `mc-*` / `mx-*` 契約を直接宣言し、lockfile で固定している
+- **`package.json#exports`**: TypeScript ソース(`./src/index.ts`)を指している。リポジトリの主用途はブラウザ／サーバーの composition runtime である
+- **公開自動化**: CI は型・lint・テスト・ブラウザ検証を行うが、npm publish workflow はまだ定義していない
 
-## 2. なぜ公開しないのか(plan.md §6 Step 0 / Step 3)
+## 2. 依存先を直接宣言する理由
 
-plan.md §6 Step 0 item 2:
-> 開発中は `workspace:*` 解決でモノレポ同等の DX。
-> **npm 公開・バージョン bump 運用は界面安定(4 週間 API ロック無変更)まで開始しない**
+現在の composition layer は、依存元が公開している API を直接利用する。実行時の主な依存は
+`mc-kernel`、`mc-sim`、`mc-worldgen`、`mc-render`、`mx-gameplay`、`mx-ui`、
+`mx-multiplayer` などであり、アプリ側に同等の型・サービスを複製しない。
 
-plan.md §8 のリスク表:
-> 新規構築初期は全界面が高 churn → npm 公開を遅らせ dev-meta workspace で開発。bump 連鎖を構造的に回避
+各依存は `package.json` の明示的なバージョンと `pnpm-lock.yaml` で再現可能にする。
+ローカル開発時の同一パッケージ解決は `pnpm-workspace.yaml#overrides` に限定し、
+`workspace:*` の互換 shim やアプリ内ミラーは追加しない。
 
-16 リポジトリが相互に依存する状態で早期に publish を始めると、
-mc-kernel の 1 行変更が 15 リポジトリの bump 連鎖を引き起こす。
-それを構造的に避けるため、開発中は `@nerima-games/mc-dev-meta` が
-15 リポジトリを 1 つの pnpm workspace に束ね、`workspace:*` で解決する。
+旧来の `check:deps`／whitelist 方針はこの直接依存モデルに置き換えた。低レベル実装への
+誤った依存は `.oxlintrc.json` と `pnpm lint` で検出し、公開パッケージの境界は
+`test/public-api.test.ts` と実際の typecheck で検証する。
 
-## 3. `dependencies` に依存先が 1 つも無い理由
+## 3. 過去の workspace 方針
 
-mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multiplayer / mc-render である。
-にもかかわらず `package.json` には `effect` しか無い。
-
-理由は **ボトムアップの publish-then-pin** である:
-
-1. 依存順(kernel → noise/meshing/physics/save/audio → worldgen → sim → render → kit →
-   gameplay/redstone → ui → multiplayer → **compose**)に完成させる
-2. 完成した層から publish する
-3. 下流はそこで初めて**公開済みバージョンを pin** する
-
-**mc-compose はこの順序の最後尾である。** つまり他の 15 リポジトリすべてが
-少なくとも 1 回は publish されるまで、ここに書ける `dependencies` は存在しない。
-
-**ポリシー側(`scripts/check-dependency-whitelist.ts` の `REPOSITORY_POLICY`)には
-5 つとも既に宣言してある**ので、契約は最初から機械可読な形で存在する。
-`package.json` があとから追いつく。
+初期計画では、依存先が未公開だった期間に `mc-dev-meta` と `workspace:*` で複数
+リポジトリを束ねる案を採用していた。このリポジトリの現行構成はその前提から移行済みであり、
+現在の判断基準は公開パッケージの API、manifest、lockfile、実行時の検証である。
 
 ## 4. 0.x の間の約束
 
@@ -58,7 +46,7 @@ mc-compose の実行時依存は mx-gameplay / mx-redstone / mx-ui / mx-multipla
 ([RELEASE_STANDARD.md §4.2](../../.github/RELEASE_STANDARD.md#42-新しい昇格ポリシー人間による裁量判断))。
 以下は昇格を検討する際に maintainer が見る観点であり、自動判定される条件の列挙ではない。
 
-1. **4 つの体験モジュールと mc-render を実際に合成し、動くゲームが起動する**
+1. **公開された `mc-*` / `mx-*` の実行時サービスと `mc-render` を実際に合成し、動くゲームが起動する**
 2. **E2E が最終ゲートとして動いている**([testing.md](./testing.md) §3)。
    参照実装の 70 本のうち、モジュール間相互作用を検証するものが移植済み
 3. **本体 LOC が 2,000 を超えていない**([porting.md](./porting.md) §2)。

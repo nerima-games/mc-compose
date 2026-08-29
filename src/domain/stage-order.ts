@@ -1,7 +1,7 @@
 /**
  * THE STAGE TOTAL ORDER RESOLVER — the core algorithm of this repository.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * CURRENT STAGE ORDER CONTRACT.
  *
  * ---------------------------------------------------------------------------
  * plan.md §2.3-3: "stage 実行順序表は compose が唯一所有"
@@ -48,7 +48,8 @@
  * resolver only knows ids and edges; it has never heard of a block, a player or
  * a chunk, and it must stay that way.
  */
-import { Brand, Either } from 'effect'
+import { Either } from 'effect'
+import { StageId } from '@nerima-games/mc-kernel'
 
 /**
  * Named constants for the numeric literals below, so the values that ARE
@@ -67,21 +68,8 @@ const COMPARE_LESS = -1
 const COMPARE_EQUAL = 0
 const COMPARE_GREATER = 1
 
-/**
- * Identifies a frame stage. Mirrors `@nerima-games/mc-kernel`'s `StageId`
- * exactly, and is declared locally only because nothing in the roster is
- * published yet (see docs/versioning.md §3). When kernel ships, this becomes a
- * re-export and the local definition is deleted.
- *
- * Convention: `<owning-repo-suffix>:<stage>` — e.g. `gameplay:fluids`,
- * `render:draw`. Not enforced.
- */
-export type StageId = string & Brand.Brand<'StageId'>
-
-export const StageId = Brand.refined<StageId>(
-  (value) => value.trim().length > EMPTY_LENGTH,
-  (value) => Brand.error(`StageId must be a non-blank string, received ${JSON.stringify(value)}`),
-)
+/** Identifies a frame stage using the shared kernel identifier contract. */
+export { StageId }
 
 /**
  * What a module declares. Deliberately NOT the full `StageRegistration` —
@@ -356,7 +344,7 @@ const walk = (start: StageId, state: CycleSearchState): ReadonlyArray<StageId> |
 const findCycle = (
   nodes: ReadonlyArray<StageId>,
   edges: ReadonlyMap<StageId, ReadonlySet<StageId>>,
-): ReadonlyArray<StageId> => {
+): ReadonlyArray<StageId> | null => {
   const state: CycleSearchState = {
     done: new Set<StageId>(),
     edges,
@@ -365,17 +353,10 @@ const findCycle = (
     remaining: new Set(nodes),
   }
 
-  for (const node of nodes) {
-    const cycle = walk(node, state)
-    if (typeof cycle !== 'undefined') {
-      return cycle
-    }
-  }
-
-  // Unreachable: this function is only called when Kahn's algorithm left nodes
-  // Unplaced, which happens exactly when a cycle exists. Returning the whole
-  // Remainder rather than throwing keeps the failure a value.
-  return nodes
+  return nodes.reduce<ReadonlyArray<StageId> | null>(
+    (cycle, node) => cycle ?? walk(node, state) ?? null,
+    null,
+  )
 }
 
 /** --- 1. Registrations must be unique ------------------------------------- */
@@ -569,7 +550,9 @@ const findStageCycle = (
 ): ReadonlyArray<StageId> => {
   const placed = new Set(order)
   const stuck = [...ordering.registered].filter((id) => !placed.has(id)).sort(ordering.compare)
-  return findCycle(stuck, graph.successors)
+  // Kahn's algorithm leaves a cycle in `stuck` whenever this function is called.
+  // A cycle is guaranteed; the DFS reports it as optional for arbitrary graphs.
+  return findCycle(stuck, graph.successors)!
 }
 
 /**

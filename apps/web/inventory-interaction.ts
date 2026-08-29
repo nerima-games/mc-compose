@@ -106,8 +106,16 @@ export type InventoryInteractionController<Item, Recipe, Count extends number = 
   readonly interactCraftingCell: (
     cellIndex: number,
   ) => InventoryInteractionState<Item, Recipe, Count>
+  readonly moveCraftingCell: (
+    sourceIndex: number,
+    targetIndex: number,
+  ) => InventoryInteractionState<Item, Recipe, Count>
   readonly interactCraftingCellFromInventory: (
     cellIndex: number,
+  ) => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
+  readonly moveCraftingCellToInventory: (
+    sourceIndex: number,
+    inventoryIndex: number,
   ) => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
   readonly preview: () => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
   readonly craftOnce: () => Effect.Effect<InventoryInteractionState<Item, Recipe, Count>>
@@ -337,6 +345,30 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     })
   }
 
+  const moveCraftingCell = (
+    sourceIndex: number,
+    targetIndex: number,
+  ): InventoryInteractionState<Item, Recipe, Count> => {
+    if (crafting || current.carried !== undefined || current.inventoryCarried !== undefined) {
+      return state()
+    }
+    if (
+      !Number.isInteger(sourceIndex)
+      || !Number.isInteger(targetIndex)
+      || sourceIndex < 0
+      || targetIndex < 0
+      || sourceIndex >= current.grid.cells.length
+      || targetIndex >= current.grid.cells.length
+      || sourceIndex === targetIndex
+      || current.grid.cells[sourceIndex] === undefined
+    ) return state()
+
+    interactCraftingCell(sourceIndex)
+    interactCraftingCell(targetIndex)
+    if (current.carried !== undefined) interactCraftingCell(sourceIndex)
+    return state()
+  }
+
   const interactCraftingCellFromInventory = (
     cellIndex: number,
   ): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => Effect.suspend(() => {
@@ -354,6 +386,56 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
       current = { ...current, carried: oneItem(inventoryCarried) }
       options.onInventoryChanged?.()
       return interactCraftingCell(cellIndex)
+    })
+  })
+
+  const moveCraftingCellToInventory = (
+    sourceIndex: number,
+    inventoryIndex: number,
+  ): Effect.Effect<InventoryInteractionState<Item, Recipe, Count>> => Effect.suspend(() => {
+    if (crafting || current.carried !== undefined || current.inventoryCarried !== undefined) {
+      return Effect.succeed(state())
+    }
+    if (!Number.isInteger(sourceIndex) || sourceIndex < 0 || sourceIndex >= current.grid.cells.length) {
+      return Effect.succeed(state())
+    }
+    const source = current.grid.cells[sourceIndex]
+    if (source === undefined) return Effect.succeed(state())
+
+    return Effect.flatMap(service.snapshot, (inventory) => {
+      if (crafting || current.carried !== undefined || current.inventoryCarried !== undefined) {
+        return Effect.succeed(state())
+      }
+      const slotBefore = inventory.slots[inventoryIndex]
+      if (options.canInventoryClick?.({
+        slotIndex: inventoryIndex,
+        slotBefore,
+        carriedBefore: undefined,
+      }) === false) return Effect.succeed(state())
+
+      return Effect.map(service.click({
+        _tag: 'LeftClick',
+        slotIndex: inventoryIndex,
+        carried: source,
+      }), (result) => {
+        if (
+          result._tag !== 'Placed'
+          && result._tag !== 'Merged'
+          && result._tag !== 'Swapped'
+        ) return state()
+
+        current = {
+          ...current,
+          grid: {
+            ...current.grid,
+            cells: current.grid.cells.map((cell, index) => index === sourceIndex ? result.carried : cell),
+          },
+          preview: undefined,
+          status: undefined,
+        }
+        options.onInventoryChanged?.()
+        return state()
+      })
     })
   })
 
@@ -463,7 +545,9 @@ export const createInventoryInteraction = <Item, Recipe, Count extends number = 
     pickupInventoryItem,
     clickInventoryItem,
     interactCraftingCell,
+    moveCraftingCell,
     interactCraftingCellFromInventory,
+    moveCraftingCellToInventory,
     preview,
     craftOnce,
     confirmCraftOnce,

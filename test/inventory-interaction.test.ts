@@ -674,6 +674,124 @@ describe('inventory interaction', () => {
     })
   })
 
+  it('moves crafting cells directly and swaps an occupied destination', () => {
+    const initial: Inventory = {
+      slots: [
+        itemStack('oak_log', 4),
+        itemStack('stone', 2),
+        ...emptyInventory().slots.slice(2),
+      ],
+    }
+    const service = Effect.runSync(makeInventoryService(initial))
+    const interaction = createInventoryInteraction(service)
+
+    Effect.runSync(interaction.pickupInventoryItem(0))
+    interaction.interactCraftingCell(0)
+    Effect.runSync(interaction.pickupInventoryItem(1))
+    interaction.interactCraftingCell(1)
+
+    const moved = interaction.moveCraftingCell(0, 1)
+
+    expect(moved.grid.cells).toEqual([
+      { item: 'stone', count: 1 },
+      { item: 'oak_log', count: 1 },
+      undefined,
+      undefined,
+    ])
+    expect(interaction.moveCraftingCell(0, 0)).toEqual(moved)
+    expect(interaction.moveCraftingCell(3, 0)).toEqual(moved)
+  })
+
+  it('moves a crafting cell into an empty inventory slot', () => {
+    let changed = 0
+    const initial: Inventory = {
+      slots: [itemStack('oak_log', 4), ...emptyInventory().slots.slice(1)],
+    }
+    const service = Effect.runSync(makeInventoryService(initial))
+    const interaction = createInventoryInteraction(service, {
+      onInventoryChanged: () => { changed += 1 },
+    })
+
+    Effect.runSync(interaction.pickupInventoryItem(0))
+    interaction.interactCraftingCell(0)
+    const moved = Effect.runSync(interaction.moveCraftingCellToInventory(0, 1))
+
+    expect(moved.grid.cells[0]).toBeUndefined()
+    expect(Effect.runSync(service.snapshot).slots[0]).toEqual(itemStack('oak_log', 4))
+    expect(Effect.runSync(service.snapshot).slots[1]).toEqual(itemStack('oak_log', 1))
+    expect(changed).toBe(1)
+  })
+
+  it('merges and swaps crafting cells into canonical inventory', () => {
+    const mergeInitial: Inventory = {
+      slots: [
+        itemStack('oak_log', 4),
+        itemStack('oak_log', 63),
+        ...emptyInventory().slots.slice(2),
+      ],
+    }
+    const mergeService = Effect.runSync(makeInventoryService(mergeInitial))
+    const mergeInteraction = createInventoryInteraction(mergeService)
+    Effect.runSync(mergeInteraction.pickupInventoryItem(0))
+    mergeInteraction.interactCraftingCell(0)
+
+    const merged = Effect.runSync(mergeInteraction.moveCraftingCellToInventory(0, 1))
+
+    expect(merged.grid.cells[0]).toBeUndefined()
+    expect(Effect.runSync(mergeService.snapshot).slots[1]).toEqual(itemStack('oak_log', 64))
+
+    const swapInitial: Inventory = {
+      slots: [
+        itemStack('oak_log', 4),
+        itemStack('stone', 2),
+        ...emptyInventory().slots.slice(2),
+      ],
+    }
+    const swapService = Effect.runSync(makeInventoryService(swapInitial))
+    const swapInteraction = createInventoryInteraction(swapService)
+    Effect.runSync(swapInteraction.pickupInventoryItem(0))
+    swapInteraction.interactCraftingCell(0)
+
+    const swapped = Effect.runSync(swapInteraction.moveCraftingCellToInventory(0, 1))
+
+    expect(swapped.grid.cells[0]).toEqual(itemStack('stone', 2))
+    expect(Effect.runSync(swapService.snapshot).slots[1]).toEqual(itemStack('oak_log', 1))
+  })
+
+  it('rejects crafting-to-inventory moves during carried or preflight states', () => {
+    const carriedFixture = makeService()
+    const carriedInteraction = createInventoryInteraction(carriedFixture.service)
+    Effect.runSync(carriedInteraction.pickupInventoryItem(0))
+    const carriedBefore = carriedInteraction.state()
+    expect(Effect.runSync(carriedInteraction.moveCraftingCellToInventory(0, 1)))
+      .toEqual(carriedBefore)
+
+    const draftFixture = makeService()
+    const draftInteraction = createInventoryInteraction(draftFixture.service)
+    placeLog(draftInteraction, 0)
+    const draftBefore = draftInteraction.state()
+    expect(Effect.runSync(draftInteraction.moveCraftingCellToInventory(3, 1)))
+      .toEqual(draftBefore)
+
+    const rejectedFixture = makeService()
+    const rejectedInteraction = createInventoryInteraction(rejectedFixture.service, {
+      canInventoryClick: () => false,
+    })
+    placeLog(rejectedInteraction, 0)
+    const rejectedBefore = rejectedInteraction.state()
+    expect(Effect.runSync(rejectedInteraction.moveCraftingCellToInventory(0, 1)))
+      .toEqual(rejectedBefore)
+
+    const failedFixture = makeService({
+      clickResult: { _tag: 'NoChange', carried: undefined },
+    })
+    const failedInteraction = createInventoryInteraction(failedFixture.service)
+    placeLog(failedInteraction, 0)
+    const failedBefore = failedInteraction.state()
+    expect(Effect.runSync(failedInteraction.moveCraftingCellToInventory(0, -1)))
+      .toEqual(failedBefore)
+  })
+
   it('picks up an occupied cell and swaps it with a carried item', () => {
     const fixture = makeService({
       inventory: {
