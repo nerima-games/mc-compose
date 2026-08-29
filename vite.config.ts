@@ -16,11 +16,25 @@ export default defineConfig({
     target: 'es2024',
     outDir: 'dist',
     sourcemap: true,
-    rollupOptions: {
+    rolldownOptions: {
       input: {
         main: resolve(import.meta.dirname, 'index.html'),
         renderPreview: resolve(import.meta.dirname, 'apps/render-preview/index.html'),
         shaderProbe: resolve(import.meta.dirname, 'apps/shader-probe/index.html'),
+      },
+      output: {
+        // Keep the verified Three.js boundary only; a generic vendor group
+        // caused an ESM interop failure in the browser startup bundle.
+        codeSplitting: {
+          groups: [
+            {
+              name: 'three',
+              test: /node_modules[\\/]three[\\/]/,
+              priority: 3,
+              minSize: 128 * 1024,
+            },
+          ],
+        },
       },
     },
   },

@@ -94,7 +94,7 @@ const useTargetedBlock = async (page: Page): Promise<void> => {
 const createCreativeWorld = async (page: Page, name: string): Promise<string> => {
   await page.goto('/')
   await page.locator('[data-menu-entry="new-world"]').click()
-  await page.locator('[data-mx-ui="menu-world-name"]').fill(name)
+  await page.locator('input[data-mx-ui="menu-world-name"]').fill(name)
   await page.locator('[data-mx-ui="menu-game-mode"]').click()
   await expect(page.locator('[data-mx-ui="menu-game-mode"]')).toHaveAttribute(
     'aria-label',
@@ -109,7 +109,7 @@ const createCreativeWorld = async (page: Page, name: string): Promise<string> =>
 const createSurvivalWorld = async (page: Page, name: string): Promise<string> => {
   await page.goto('/')
   await page.locator('[data-menu-entry="new-world"]').click()
-  await page.locator('[data-mx-ui="menu-world-name"]').fill(name)
+  await page.locator('input[data-mx-ui="menu-world-name"]').fill(name)
   await expect(page.locator('[data-mx-ui="menu-game-mode"]')).toHaveAttribute(
     'aria-label',
     'Game mode: Survival',
@@ -153,57 +153,79 @@ const encode = (message: NetworkMessage): string => {
   return result.right
 }
 
-const receiveMessage = (socket: WebSocket): Promise<WireMessage> =>
-  new Promise((resolve, reject) => {
-    const cleanup = (): void => {
-      socket.off('error', onError)
-      socket.off('close', onClose)
-      socket.off('message', onMessage)
-    }
-    const fail = (error: Error): void => {
-      cleanup()
-      reject(error)
-    }
-    const onError = (error: Error): void => fail(error)
-    const onClose = (code: number, reason: Buffer): void =>
-      fail(new Error(`socket closed before receiving a message (${String(code)}): ${reason.toString()}`))
-    const onMessage = (data: Buffer): void => {
-      try {
-        const frame = JSON.parse(data.toString()) as WireMessage & { readonly message?: WireMessage }
-        cleanup()
-        resolve(frame.message ?? frame)
-      } catch (error) {
-        fail(error instanceof Error ? error : new Error(String(error)))
-      }
-    }
-    socket.once('error', onError)
-    socket.once('close', onClose)
-    socket.once('message', onMessage)
-  })
+type WireMessageReader = {
+  readonly next: () => Promise<WireMessage>
+  readonly close: () => void
+}
 
-const receiveMessageBefore = (socket: WebSocket, timeoutMs: number): Promise<WireMessage> =>
-  new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error(`timed out after ${String(timeoutMs)}ms`))
-    }, timeoutMs)
-    void receiveMessage(socket).then(
-      (message) => {
-        clearTimeout(timeout)
-        resolve(message)
-      },
-      (error: unknown) => {
-        clearTimeout(timeout)
-        reject(error)
-      },
-    )
-  })
+const createWireMessageReader = (socket: WebSocket): WireMessageReader => {
+  const messages: WireMessage[] = []
+  const waiters: Array<{
+    readonly resolve: (message: WireMessage) => void
+    readonly reject: (error: Error) => void
+  }> = []
+  let failure: Error | undefined
 
-const receiveMessageWithTag = async (socket: WebSocket, tag: string): Promise<WireMessage> => {
+  const cleanup = (): void => {
+    socket.off('error', onError)
+    socket.off('close', onClose)
+    socket.off('message', onMessage)
+  }
+
+  const fail = (error: Error): void => {
+    if (failure !== undefined) return
+    failure = error
+    cleanup()
+    while (waiters.length > 0) waiters.shift()?.reject(error)
+  }
+
+  const onError = (error: Error): void => fail(error)
+  const onClose = (code: number, reason: Buffer): void =>
+    fail(new Error(`socket closed before receiving a message (${String(code)}): ${reason.toString()}`))
+  const onMessage = (data: Buffer): void => {
+    try {
+      const frame = JSON.parse(data.toString()) as WireMessage & { readonly message?: WireMessage }
+      const message = frame.message ?? frame
+      const waiter = waiters.shift()
+      if (waiter === undefined) messages.push(message)
+      else waiter.resolve(message)
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error(String(error)))
+    }
+  }
+
+  const next = (): Promise<WireMessage> => {
+    const message = messages.shift()
+    if (message !== undefined) return Promise.resolve(message)
+    if (failure !== undefined) return Promise.reject(failure)
+    return new Promise((resolve, reject) => waiters.push({ resolve, reject }))
+  }
+
+  socket.on('error', onError)
+  socket.on('close', onClose)
+  socket.on('message', onMessage)
+  return {
+    next,
+    close: cleanup,
+  }
+}
+
+const receiveMessageBefore = (reader: WireMessageReader, timeoutMs: number): Promise<WireMessage> => {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<WireMessage>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(`timed out after ${String(timeoutMs)}ms`)), timeoutMs)
+  })
+  return Promise.race([reader.next(), timeoutPromise]).finally(() => {
+    if (timeout !== undefined) clearTimeout(timeout)
+  })
+}
+
+const receiveMessageWithTag = async (reader: WireMessageReader, tag: string): Promise<WireMessage> => {
   const deadline = Date.now() + 5_000
   const observedTags: string[] = []
   try {
     while (Date.now() < deadline) {
-      const message = await receiveMessageBefore(socket, deadline - Date.now())
+      const message = await receiveMessageBefore(reader, deadline - Date.now())
       if (message._tag === tag) return message
       observedTags.push(message._tag)
     }
@@ -221,16 +243,18 @@ const expectOutOfBoundsPlacementRejection = async (
   serverUrl = E2E_MULTIPLAYER_URL,
 ): Promise<void> => {
   const socket = new WebSocket(serverUrl)
+  let reader: WireMessageReader | undefined
   try {
     await new Promise<void>((resolve, reject) => {
       socket.once('open', resolve)
       socket.once('error', reject)
     })
+    reader = createWireMessageReader(socket)
     socket.send(JSON.stringify({
       _tag: 'PlayerResume',
       player: 'invalid-mutation-e2e',
     }))
-    expect(await receiveMessage(socket)).toMatchObject({ _tag: 'PlayerResumeAccepted' })
+    expect(await reader.next()).toMatchObject({ _tag: 'PlayerResumeAccepted' })
 
     socket.send(encode({
       _tag: 'PlayerJoin',
@@ -238,7 +262,7 @@ const expectOutOfBoundsPlacementRejection = async (
       name: 'Invalid Mutation Probe',
       at: { x: 0, y: 64, z: 0 },
     } as NetworkMessage))
-    expect(await receiveMessage(socket)).toMatchObject({ _tag: 'WorldSnapshot', revision })
+    expect(await reader.next()).toMatchObject({ _tag: 'WorldSnapshot', revision })
 
     socket.send(encode({
       _tag: 'BlockPlace',
@@ -246,13 +270,14 @@ const expectOutOfBoundsPlacementRejection = async (
       at: { x: 30_000_001, y: 64, z: 0 },
       block: 'stone',
     } as NetworkMessage))
-    expect(await receiveMessageWithTag(socket, 'BlockMutationRejected')).toMatchObject({
+    expect(await receiveMessageWithTag(reader, 'BlockMutationRejected')).toMatchObject({
       _tag: 'BlockMutationRejected',
       operation: 'place',
       reason: 'out-of-bounds',
       revision,
     })
   } finally {
+    reader?.close()
     socket.close()
   }
 }
@@ -343,8 +368,9 @@ const openPlayer = async (
   serverUrl = E2E_MULTIPLAYER_URL,
   registrationToken?: string,
   createWorld: (page: Page, name: string) => Promise<string> = createCreativeWorld,
+  existingContext?: BrowserContext,
 ): Promise<{ readonly context: BrowserContext; readonly page: Page; readonly url: string }> => {
-  const context = await browser.newContext()
+  const context = existingContext ?? await browser.newContext()
   const page = await context.newPage()
   const sessionUrl = await createWorld(page, worldName)
   if (createWorld !== createSurvivalWorld) {
@@ -398,7 +424,7 @@ test('does not explode or mutate a Nether bed in multiplayer', async ({ page }) 
       blocks: [],
       inventories: [{
         player,
-        state: { slots: [{ item: 'stone', count: 2 }], selectedSlot: 0 },
+        state: { slots: [{ item: 'stone', count: 2 }, ...emptySlots().slice(1)], selectedSlot: 0 },
       }],
       playerPositions: [{
         player,
@@ -447,16 +473,7 @@ test('does not explode or mutate a Nether bed in multiplayer', async ({ page }) 
   }
 })
 
-// BLOCKED: connectPage's second client intermittently observes
-// body[data-mc-compose-boot] go "starting" -> "failed" instead of "running".
-// Same AsyncFiberException defect as multiplayer-survival-authority.e2e.ts —
-// see that file's comment for the full root-cause citation (CI trace console
-// log: "boot failed: a frame stage defected {_tag: Die, defect:
-// AsyncFiberException: Fiber #242 cannot be resolved synchronously...}" from
-// apps/web/main.ts:8445-8450). Needs a focused debugging session in
-// mx-multiplayer's registration.ts or apps/web/multiplayer-websocket.ts,
-// tracked separately.
-test.fixme('fires a bow through the authoritative multiplayer server', async ({ browser }) => {
+test('fires a bow through the authoritative multiplayer server', async ({ browser }) => {
   const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
   const stateFile = join(stateDirectory, 'state.json')
   const claimsFile = join(stateDirectory, 'claims.json')
@@ -496,7 +513,7 @@ test.fixme('fires a bow through the authoritative multiplayer server', async ({ 
   let alice: Awaited<ReturnType<typeof openPlayer>> | undefined
 
   try {
-    alice = await openPlayer(
+    const playerSession = await openPlayer(
       browser,
       'Authoritative Multiplayer Bow E2E',
       player,
@@ -505,27 +522,28 @@ test.fixme('fires a bow through the authoritative multiplayer server', async ({ 
       LEGACY_SECRETS[player],
       createSurvivalWorld,
     )
-    const canvas = alice.page.locator('#game-canvas')
-    await expect.poll(() => canvasRevision(alice.page)).toBe(4)
-    await expect.poll(async () => itemCount(await snapshot(alice.page), 'bow')).toBe(1)
-    await expect.poll(async () => itemCount(await snapshot(alice.page), 'arrow')).toBe(2)
-    const before = await snapshot(alice.page)
+    alice = playerSession
+    const canvas = playerSession.page.locator('#game-canvas')
+    await expect.poll(() => canvasRevision(playerSession.page)).toBe(4)
+    await expect.poll(async () => itemCount(await snapshot(playerSession.page), 'bow')).toBe(1)
+    await expect.poll(async () => itemCount(await snapshot(playerSession.page), 'arrow')).toBe(2)
+    const before = await snapshot(playerSession.page)
     expect(before.renderedEntities).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: 'arrow' })]),
     )
-    const revisionBeforeDraw = await canvasRevision(alice.page)
+    const revisionBeforeDraw = await canvasRevision(playerSession.page)
 
     await canvas.hover()
-    await grantPointerLock(alice.page)
-    await alice.page.mouse.down({ button: 'right' })
-    await alice.page.waitForTimeout(350)
-    expect(await canvasRevision(alice.page)).toBe(revisionBeforeDraw)
-    expect(itemCount(await snapshot(alice.page), 'arrow')).toBe(2)
-    await alice.page.mouse.up({ button: 'right' })
+    await grantPointerLock(playerSession.page)
+    await playerSession.page.mouse.down({ button: 'right' })
+    await playerSession.page.waitForTimeout(350)
+    expect(await canvasRevision(playerSession.page)).toBe(revisionBeforeDraw)
+    expect(itemCount(await snapshot(playerSession.page), 'arrow')).toBe(2)
+    await playerSession.page.mouse.up({ button: 'right' })
 
-    await expect.poll(() => canvasRevision(alice.page)).toBeGreaterThan(revisionBeforeDraw)
-    await expect.poll(async () => itemCount(await snapshot(alice.page), 'arrow')).toBe(1)
-    await expect.poll(async () => (await snapshot(alice.page)).renderedEntities).toEqual(
+    await expect.poll(() => canvasRevision(playerSession.page)).toBeGreaterThan(revisionBeforeDraw)
+    await expect.poll(async () => itemCount(await snapshot(playerSession.page), 'arrow')).toBe(1)
+    await expect.poll(async () => (await snapshot(playerSession.page)).renderedEntities).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: 'arrow' })]),
     )
   } finally {
@@ -535,14 +553,7 @@ test.fixme('fires a bow through the authoritative multiplayer server', async ({ 
   }
 })
 
-// BLOCKED: independently reproduced the identical AsyncFiberException
-// defect (see "fires a bow through the authoritative multiplayer server"
-// above) on 2026-08-09 CI run 31296612429 — this spec's second connecting
-// client hit the exact same boot-failed signature, confirming the defect
-// is nondeterministic across ANY multiplayer spec with a second client,
-// not confined to the specs originally marked fixme. Tracked separately
-// in mx-multiplayer.
-test.fixme('synchronizes two Creative browser sessions through the authoritative server', async ({ browser }) => {
+test('synchronizes two Creative browser sessions through the authoritative server', async ({ browser }) => {
   const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
   const stateFile = join(stateDirectory, 'state.json')
   const claimsFile = join(stateDirectory, 'claims.json')
@@ -567,7 +578,17 @@ test.fixme('synchronizes two Creative browser sessions through the authoritative
   })}\n`, 'utf8')
   await writeFile(claimsFile, `${JSON.stringify(claimsFor(LEGACY_SECRETS))}\n`, 'utf8')
   const server = await startServer(stateFile, claimsFile)
-  const alice = await openPlayer(browser, 'Alice Multiplayer E2E', 'alice-e2e', 'Alice', server.url, LEGACY_SECRETS['alice-e2e'])
+  const playerContext = await browser.newContext()
+  const alice = await openPlayer(
+    browser,
+    'Alice Multiplayer E2E',
+    'alice-e2e',
+    'Alice',
+    server.url,
+    LEGACY_SECRETS['alice-e2e'],
+    createCreativeWorld,
+    playerContext,
+  )
   await alice.page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
@@ -575,7 +596,16 @@ test.fixme('synchronizes two Creative browser sessions through the authoritative
     })
     document.dispatchEvent(new Event('visibilitychange'))
   })
-  const bob = await openPlayer(browser, 'Bob Multiplayer E2E', 'bob-e2e', 'Bob', server.url, LEGACY_SECRETS['bob-e2e'])
+  const bob = await openPlayer(
+    browser,
+    'Bob Multiplayer E2E',
+    'bob-e2e',
+    'Bob',
+    server.url,
+    LEGACY_SECRETS['bob-e2e'],
+    createCreativeWorld,
+    playerContext,
+  )
 
   try {
     const aliceCanvas = alice.page.locator('#game-canvas')
@@ -655,7 +685,7 @@ test.fixme('synchronizes two Creative browser sessions through the authoritative
     await expect.poll(() => canvasRevision(reconnectedBob)).toBe(revisionAfterBreak)
     await expect.poll(async () => (await snapshot(reconnectedBob)).ignitionTarget.block).toBe(0)
   } finally {
-    await Promise.all([alice.context.close(), bob.context.close()])
+    await playerContext.close()
     await stopServer(server.process)
     await rm(stateDirectory, { recursive: true, force: true })
   }

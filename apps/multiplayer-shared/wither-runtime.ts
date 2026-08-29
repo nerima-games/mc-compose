@@ -55,6 +55,14 @@ export type WitherRuntimeSnapshot = Readonly<{
   skulls: ReadonlyArray<RuntimeWitherSkull>
 }>
 
+export type WitherRenderDescriptor = Readonly<{
+  id: string
+  kind: 'wither' | 'wither_skull'
+  category: 'hostile'
+  feetPosition: Readonly<{ x: number; y: number; z: number }>
+  facingRadians?: number
+}>
+
 export type WitherExplosion = Readonly<{
   position: Readonly<{ x: number; y: number; z: number }>
   power: number
@@ -370,12 +378,12 @@ export const restoreWitherRuntime = (
 export const witherRenderDescriptors = (
   runtime: WitherRuntimeState,
   dimension: string,
-) => [
+): ReadonlyArray<WitherRenderDescriptor> => [
   ...runtime.withers
     .filter((wither) => wither.dimension === dimension)
     .map((wither) => ({
       id: wither.id,
-      kind: 'wither',
+      kind: 'wither' as const,
       category: 'hostile' as const,
       feetPosition: wither.state.feetPosition,
     })),
@@ -383,7 +391,7 @@ export const witherRenderDescriptors = (
     .filter((skull) => skull.dimension === dimension)
     .map((skull) => ({
       id: skull.id,
-      kind: 'wither_skull',
+      kind: 'wither_skull' as const,
       category: 'hostile' as const,
       feetPosition: skull.position,
       facingRadians: Math.atan2(-skull.descriptor.direction.x, -skull.descriptor.direction.z),

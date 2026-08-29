@@ -3,7 +3,7 @@ import {
   type TransportService,
   type WireText,
 } from '@nerima-games/mx-multiplayer'
-import { Deferred, Effect, Queue } from 'effect'
+import { Effect, Queue } from 'effect'
 import {
   decodePlayerDamageWireMessage,
   encodePlayerDamageCommand,
@@ -78,6 +78,7 @@ export interface BrowserWebSocketTransport extends TransportService {
   readonly sendAnvil: (command: AnvilCommand) => Effect.Effect<void, TransportError>
   readonly sendEnchanting: (command: EnchantingCommand) => Effect.Effect<void, TransportError>
   readonly state: () => WebSocketTransportState
+  readonly isAuthenticated: () => boolean
 }
 
 export type BrowserWebSocketTransportOptions = {
@@ -163,7 +164,6 @@ export const makeBrowserWebSocketTransport = (
     const brewingInbound = yield* Queue.unbounded<BrewingWireMessage>()
     const anvilInbound = yield* Queue.unbounded<AnvilWireMessage>()
     const enchantingInbound = yield* Queue.unbounded<EnchantingWireMessage>()
-    const opened = yield* Deferred.make<void, TransportError>()
     const socket = yield* Effect.try({
       try: () => (options.socketFactory ?? defaultSocketFactory)(options.url),
       catch: (cause) =>
@@ -177,7 +177,12 @@ export const makeBrowserWebSocketTransport = (
     let listenersAttached = true
     let disposed = false
     let awaitingResume = options.reconnectAuth !== undefined
+    let authenticated = false
     let sentRegistrationToken = false
+    let terminalError = new TransportError({
+      reason: 'closed',
+      detail: 'websocket transport is closed',
+    })
 
     const detachListeners = (): void => {
       if (!listenersAttached) return
@@ -191,7 +196,8 @@ export const makeBrowserWebSocketTransport = (
     const terminate = (error: TransportError, shutdownInbound: boolean): void => {
       if (currentState === 'closed') return
       currentState = 'closed'
-      Effect.runSync(Deferred.fail(opened, error))
+      authenticated = false
+      terminalError = error
       detachListeners()
       if (shutdownInbound) Effect.runSync(Queue.shutdown(inbound))
       if (shutdownInbound) Effect.runSync(Queue.shutdown(sleepInbound))
@@ -208,7 +214,7 @@ export const makeBrowserWebSocketTransport = (
       if (currentState !== 'connecting') return
       currentState = 'open'
       if (options.reconnectAuth === undefined) {
-        Effect.runSync(Deferred.succeed(opened, undefined))
+        authenticated = true
         return
       }
       try {
@@ -274,7 +280,7 @@ export const makeBrowserWebSocketTransport = (
             return
           }
           awaitingResume = false
-          Effect.runSync(Deferred.succeed(opened, undefined))
+          authenticated = true
           return
         }
       }
@@ -341,31 +347,32 @@ export const makeBrowserWebSocketTransport = (
     socket.addEventListener('error', handleError)
 
     const send = (frame: WireText): Effect.Effect<void, TransportError> =>
-      Deferred.await(opened).pipe(
-        Effect.flatMap(() =>
-          Effect.suspend(() => {
-            if (currentState !== 'open' || socket.readyState !== 1) {
-              return Effect.fail(
-                new TransportError({
-                  reason: 'not-connected',
-                  detail: 'send attempted while websocket was not open',
-                }),
-              )
-            }
-            return Effect.try({
-              try: () => socket.send(frame),
-              catch: (cause) => {
-                const error = new TransportError({
-                  reason: 'send-failed',
-                  detail: `websocket send failed: ${String(cause)}`,
-                })
-                terminate(error, false)
-                return error
-              },
+      Effect.suspend(() => {
+        if (currentState === 'closed') {
+          return Effect.fail(terminalError)
+        }
+        if (currentState !== 'open' || socket.readyState !== 1 || awaitingResume) {
+          return Effect.fail(
+            new TransportError({
+              reason: 'not-connected',
+              detail: awaitingResume
+                ? 'send attempted before websocket resume authentication completed'
+                : 'send attempted while websocket was not open',
+            }),
+          )
+        }
+        return Effect.try({
+          try: () => socket.send(frame),
+          catch: (cause) => {
+            const error = new TransportError({
+              reason: 'send-failed',
+              detail: `websocket send failed: ${String(cause)}`,
             })
-          }),
-        ),
-      )
+            terminate(error, false)
+            return error
+          },
+        })
+      })
 
     const close = Effect.sync(() => {
       if (disposed) return
@@ -425,5 +432,6 @@ export const makeBrowserWebSocketTransport = (
       sendEnchanting,
       close,
       state: () => currentState,
+      isAuthenticated: () => authenticated,
     }
   })

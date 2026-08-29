@@ -12,6 +12,10 @@ E2E に残すべきは「モジュール間の相互作用でしか壊れない�
 どれが今できて、どれが何の publish を待っていて、どれが新アーキテクチャで意味を失ったかが
 分かっていれば、モジュールが公開されるたびに「次はこれ」が引ける。
 
+> **現在地:** §0-3 と §5 の本数・公開待ち判定は 2026-07-28 の初期調査スナップショットである。
+> 現行の package pin と browser E2E の検証結果は [testing.md](./testing.md) §3.5 と
+> [README.md](../README.md) を正とする。過去の判定語は、当時の契約を記録するために残している。
+
 ## 0. 数え方(再現可能)
 
 ```console
@@ -262,6 +266,10 @@ mc-render の `application/dom-surface.ts:172` は `addEventListener` を持ち�
 
 ### 3.1 `e2e/smoke/` — 7 本 / 104 LOC
 
+> 以下の判定と画面状態は、初期調査時点のスナップショットである。現行の generated-world
+> と fixture のブラウザ検証は [testing.md](./testing.md) §3.5 と [README.md](../README.md)
+> に分離して記録している。
+
 | # | test() | 判定 | 行き先・必要なもの |
 | --- | --- | --- | --- |
 | 1 | `WebGL2 canvas is present and active` | NEEDS-BROWSER | **mc-compose**。ブラウザエントリポイント + mc-render<br>**移植済み(2026-07-28)** → `e2e/smoke.e2e.ts`。**`fixme` を外した。** この行は長らく「mc-render は何も描かない」という計測だった —— `render:draw` が `Ref.update(state.framesDrawn, (drawn) => drawn + 1)` で、`package.json` に `three` が無く、リポジトリ全体に `getContext` が 1 つも無かった。**mc-render 側が塞がった**: `application/three-surface.ts`(構造的な THREE の面) + `application/world-renderer.ts`。WebGL2 コンテキストを作るのは `new WebGLRenderer({ canvas })` であり、それは mc-render の中にある。`apps/web/main.ts` が渡すのは `three` 名前空間と canvas だけで、**`getContext` は今も 1 つも書いていない** —— ライブラリを渡すのは配線、何を描くか決めるのはルールだからである。<br>**参照実装のアサーションは無価値だったので捨てた。これは実測である。** `canvas.getContext('webgl2') !== null` は**描画器が 1 つも無くても緑になる** —— `getContext` はアクセサではなく**コンストラクタ**で、コンテキストの無い canvas に対しては作って返すからである。つまりこのアサーションは**テスト自身が満たしている**。描画器を入れる前の `apps/web/main.ts` に対して実際に走らせて確認した(緑になった)。この行が `fixme` だった理由は正しかったが、**書かれていた本体のまま外していたら、mc-render が 1 行も動かないまま緑になっていた**。<br>そこで、**テストが自分では満たせない 2 つ**に主張を移した: (1) `getContext('2d')` が **null** —— canvas は 1 つのコンテキストしか持てず、既にあるものと非互換な型の要求は null になる。この呼び出しはテストが canvas に触る前に行うので、null は「先に誰かが取った」を意味し、その誰かは mc-render である。素の canvas なら 2d が返って落ちる。(2) `canvas.width === canvas.clientWidth` —— width 属性の無い canvas は CSS サイズと無関係に 300x150 であり、`index.html` は属性を与えていない。両者が一致するのは mc-render の中の `renderer.setSize(clientWidth, clientHeight, false)` が呼ばれたときだけである(1280 であって 300 ではない)。`isContextLost() === false` と非 null は**後書き**として残してある。<br>ミューテーション確認済み: ホストから描画器の生成を外すと (1) で赤くなる。<br>**画面はスカイブルー 1 色である。** ジオメトリは 1 つも届かない —— mc-worldgen も mc-meshing も `vite.config.ts` が解決できる 3 兄弟に入っていないため(§4.3 と同じ壁)。このテストが言うのは「コンテキストがある」であって「絵がある」ではない。**ピクセルを問う行は、ワールドが届くようになった時点で別に足すこと** |
@@ -274,7 +282,10 @@ mc-render の `application/dom-surface.ts:172` は `addEventListener` を持ち�
 
 compose に 4 本、mx-ui に 3 本。
 
-> **4 本とも動いた(2026-07-28)。** #1・#3・#4・#7 が緑で、`fixme` は 0 本になった。
+> **初期調査時点では 4 本とも動いた(2026-07-28)。** #1・#3・#4・#7 が緑で、smoke 側の `fixme` は 0 本になった。
+> これはこの節の履歴であり、現行の全ブラウザ E2E に対する判定ではない。現行の skip は
+> Playwright の実行結果と、`rg -n '^\s*test\.fixme' e2e` で再現できる一覧を正とする。
+> 個別仕様と依存 API の未接続を追跡する。
 > **判定は 1 つも変えていない** — 4 本とも NEEDS-BROWSER のままで、実際にブラウザが要った。
 > 動くようになった理由は publish ではなく、**エントリポイントが書かれたから**(#3・#4・#7)と
 > **mc-render が描くようになったから**(#1)である。
@@ -707,18 +718,23 @@ mc-render はカメラの権威になることを禁じられている(ポーズ
 | --- | --- | --- | --- |
 | 70 | `built app boots without runtime ReferenceError` | NEEDS-BROWSER | **mc-compose**。`dist` に対して走る唯一のテスト。dev サーバでは通ってビルドで落ちる種類の問題を拾う。**publish + ビルドパイプラインが要る** |
 
-## 4. 「採掘 → インベントリ反映」は今日書けるか — **書けない**
+## 4. 「採掘 → インベントリ反映」— 初期調査記録と現在地
 
 plan.md §3.15 が E2E の存在理由として名指しする 1 本(#32)を、
-今日の契約のまま繋げられるかどうかを実際に追った。**繋がらない。**
-理由は 3 つあり、**どれか 1 つを直しても残りが残る**。
+2026-07-28 の契約のまま繋げられるかどうかを実際に追った。以下の 4.1-4.3 はその時点の記録であり、
+現行の検証結果とは分けて読む。
 
-### 4.1 publish されていない
+### 4.1 (初期記録) publish されていない
 
-mc-compose の `dependencies` は `effect` のみで、`node_modules` に `@nerima-games/*` は無い。
+当時の状態: mc-compose の `dependencies` は `effect` のみで、`node_modules` に `@nerima-games/*` は無い。
 兄弟リポジトリも全部 `effect` だけである。import が書けない。
 
-### 4.2 型が繋がらない — `BlockId` は数値、`ItemId` は文字列
+### 4.2 (初期記録) 型が繋がらない — `BlockId` は数値、`ItemId` は文字列
+
+当時の source contract を記録した表である。以下の表と直後の引用は初期 package pins に
+基づく履歴であり、現行 package の型 surface を表さない。ホストは pending break の次フレームの
+ブロック状態遷移を `data-breaks-completed` として観測する。現行の残課題は exact same-frame
+の block-drop → inventory reflection 専用シナリオだけである。
 
 | 側 | 宣言 | 場所 |
 | --- | --- | --- |
@@ -739,7 +755,7 @@ mc-sim 自身が `domain/inventory.ts:25-31` でそう書いている:
 繋ぐには `BlockId -> BlockType -> (drop rule) -> ItemType` の 3 段が要り、
 **その 3 段目が存在しない**。
 
-### 4.3 サービスのインスタンスを 1 つに保てない — **構造の問題**
+### 4.3 (初期記録 / 設計検討) サービスのインスタンスを 1 つに保てない — **構造の問題**
 
 これが一番重い。仮に 4.1 と 4.2 が解けても残る。
 
@@ -759,7 +775,7 @@ mc-sim 自身が `domain/inventory.ts:25-31` でそう書いている:
   **それを discharge するのはホスト**である。
 - ホストは mc-compose のブラウザエントリポイント([porting.md](./porting.md) §2)。
   **mc-compose は mc-sim を import できない** — `transitive-import` として
-  `pnpm check:deps` が非ゼロ終了する([responsibility.md](./responsibility.md) §3.1)。
+  当時の `pnpm check:deps` が非ゼロ終了する([responsibility.md](./responsibility.md) §3.1)。
 
 つまり **「両者が共有する 1 つの `InventoryService` を、誰がどこで構築するのか」に
 今日の契約は答えを持っていない。** mc-render の `InputService` が成立するのは、
@@ -771,14 +787,21 @@ mx-ui は「読む先が要る」としか言えず、mc-sim は誰が自分を�
 **plan.md §3.15 が E2E を最終ゲートと呼ぶ理由の、これ以上ない実例である**
 — そして「緑になるテスト」より、**繋がらないと分かったことのほうが価値が高い**。
 
-### 4.4 したがって
+### 4.4 現在地
 
-#32 は **NEEDS-PUBLISH** ではなく、**設計上の未決事項を 1 つ含む**。
-publish 待ちのリストに入れる前に、
-「`InventoryService` のインスタンスを誰が構築し、どの Layer に載せるか」を決める必要がある。
-[design-notes.md](./design-notes.md) の未検証表に項目として立てた。
+現行では、`mx-gameplay` の公開 `makeGeneratedWorld` が generated `ChunkStore` と同じ
+`InventoryService` / Player / Entity / Time services を構築し、`apps/web/main.ts` が
+その `world.layer` と各 service handle を同じ composition に渡している。`mc-sim` の
+`ItemType` は `mc-kernel` の canonical vocabulary を再公開し、block drop の橋渡しも
+公開 gameplay API に含まれる。survival / persistence / chest の browser paths は検証済みで、ホスト側の次フレームの
+ブロック状態遷移は `data-breaks-completed` として観測できる。残るのは exact same-frame の
+block-drop → inventory reflection を一回だけ確認する専用
+シナリオである。[design-notes.md](./design-notes.md) の未検証表もこの現在地を正とする。
 
-## 5. 移植の順番(publish 待ちの解け方)
+## 5. 初期調査時の移植順序（履歴）
+
+以下の段階表と §5.1 の引用も 2026-07-28 時点の初期調査記録であり、現在の実行可能本数や
+公開 API の状態を示すものではない。現行のゲートは [testing.md](./testing.md) §3.5 を正とする。
 
 | 段階 | 解ける本数 | 前提 |
 | --- | ---: | --- |
@@ -797,7 +820,7 @@ DEMOTE 43 本は publish を待たない。**mx-ui へ 39 本、mc-render へ 2 
 それが [testing.md](./testing.md) §3.2 の言う「E2E の本数が増え続けるなら
 compose にロジックが溜まっている兆候」の予防そのものである。
 
-### 5.1 実測(2026-07-28)。**publish は 1 つも起きていないのに、3 本動いた**
+### 5.1 実測(2026-07-28、初期調査時)。**publish は 1 つも起きていないのに、3 本動いた**
 
 上の段階表は「今 = **0**」の次に「mc-render + mc-sim publish + ブラウザエントリポイント = 11 本」を
 置いている。**この行の 3 つの前提は独立だった。** ブラウザエントリポイントは publish を待たずに
@@ -810,7 +833,7 @@ publish 前に解けたことになる。**
 | --- | ---: |
 | compose に残る合計 | **25** |
 | うち緑(2026-07-28) | **4**(#1・#3・#4・#7) |
-| うち `fixme` で名前付き | **0** |
+| うち `fixme` で名前付き(初期調査時点) | **0** |
 | 未着手 | **21** |
 
 **判定語も降ろし先も 1 つも変えていない。** 変わったのは §5 の「前提」欄の読み方だけで、

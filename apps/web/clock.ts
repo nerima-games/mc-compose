@@ -1,13 +1,13 @@
 /**
  * The browser's implementation of mc-kernel's Clock Port.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * Current browser clock adapter.
  *
  * ---------------------------------------------------------------------------
  * This is the one file in the repository allowed to read a real clock
  * ---------------------------------------------------------------------------
  *
- * plan.md §5.1-3 bans reading a global clock and `pnpm check:deps` rule 7
+ * plan.md §5.1-3 bans reading a global clock and the lint boundary
  * enforces it across `apps`, `index.ts`, `domain`, `scripts` and `test`. The
  * gate's own message names the single legitimate exception: "If this is the
  * adapter that implements the Port, mark the line with a
@@ -30,7 +30,7 @@ import {
   EpochMillis,
   MonotonicTimeSecs,
   type ClockService,
-} from '../../src/domain/kernel-vocabulary'
+} from '@nerima-games/mc-kernel'
 
 /**
  * `performance.now()` is milliseconds since the page's time origin; the Port is
@@ -41,7 +41,7 @@ import {
 export const browserClock: ClockService = {
   // The escape-hatch marker is checked PER LINE, so it sits on the line that
   // carries the reading rather than above it. Learned the hard way: the first
-  // draft put both markers on the preceding comment line and `pnpm check:deps`
+  // draft put both markers on the preceding comment line and the lint gate
   // reported both readings, correctly.
   monotonicSecs: Effect.sync(() => MonotonicTimeSecs(performance.now() / 1000)), // mc-kernel-allow-time-source
   wallClockEpochMillis: Effect.sync(() => EpochMillis(Date.now())), // mc-kernel-allow-time-source

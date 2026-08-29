@@ -1,7 +1,7 @@
 /**
  * THE STANDARD STAGE SKELETON — plan.md §4.2.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * Current frame stage contract.
  *
  * ---------------------------------------------------------------------------
  * This table, and `domain/stage-order.ts`, are the two things this repository

@@ -8,11 +8,11 @@
  *
  * WHAT IT IS AN ASSERTION ABOUT: the render path. The quads are a fixture
  * written in `apps/render-preview/preview.ts`, not generated terrain, because
- * `check-dependency-whitelist.ts` rule 3 forbids this repository from importing
- * mc-worldgen or mc-meshing. A passing run here means geometry, the shader
- * material and the atlas sampler work end to end; it does NOT mean a world
- * reaches the page, and the day one does, this file is not the test that
- * changes.
+ * this fixture entry point intentionally stays separate from the generated-
+ * world path. `.oxlintrc.json` and `pnpm lint` enforce the direct-import
+ * boundary. A passing run here means geometry, the shader material and the
+ * atlas sampler work end to end; generated-world reachability is covered by
+ * the composed browser E2E suite, not this fixture test.
  */
 import { expect, test } from '@playwright/test'
 
