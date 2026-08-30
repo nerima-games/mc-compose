@@ -1,0 +1,54 @@
+diff --git a/src/stages/registration.ts b/src/stages/registration.ts
+index 6e6eb6983283d64ff1d9db6443bac53cc229f2fc..019def3f1d1620fd44c660fa042243296f0386ab 100644
+--- a/src/stages/registration.ts
++++ b/src/stages/registration.ts
+@@ -572,12 +572,13 @@ class FluidStateRef extends Effectable.Class<ReadonlyArray<FluidWorkItem>>
+   }
+   readonly [Readable.TypeId]: Readable.TypeId = Readable.TypeId
+   readonly get: Effect.Effect<ReadonlyArray<FluidWorkItem>>
++  readonly state: Ref.Ref<FluidRuntimeState>
++  readonly field: 'frontier' | 'updates'
+ 
+-  constructor(
+-    readonly state: Ref.Ref<FluidRuntimeState>,
+-    readonly field: 'frontier' | 'updates',
+-  ) {
++  constructor(state: Ref.Ref<FluidRuntimeState>, field: 'frontier' | 'updates') {
+     super()
++    this.state = state
++    this.field = field
+     this.get = Ref.get(state).pipe(Effect.map((current) => current[field]))
+   }
+ 
+@@ -2944,6 +2945,8 @@ const executeBlockPlacementCommand = (
+ export interface GameplayStageOptions {
+   /** Whether this frame owns local Mob simulation and spawning. */
+   readonly mobSimulation?: boolean
++  /** Whether this stage consumes dropped items into the inventory. */
++  readonly droppedItemPickup?: boolean
+ }
+ 
+ export const gameplayStages = (
+@@ -4080,13 +4083,15 @@ export const gameplayStages = (
+           }
+         }
+ 
+-        yield* pickupDroppedItems(
+-          roster,
+-          inventory,
+-          targetPosition,
+-          DROPPED_ITEM_PICKUP_RADIUS,
+-          yield* Ref.get(state.tickCount),
+-        )
++        if (options.droppedItemPickup !== false) {
++          yield* pickupDroppedItems(
++            roster,
++            inventory,
++            targetPosition,
++            DROPPED_ITEM_PICKUP_RADIUS,
++            yield* Ref.get(state.tickCount),
++          )
++        }
+ 
+         const contact = resolveHostileContacts(
+           yield* roster.entities,

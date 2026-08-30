@@ -35,10 +35,24 @@ import { defineConfig, devices } from '@playwright/test'
 // GPU", and it is the same answer the launch flags below produce.
 process.env['PLAYWRIGHT_USE_SWIFTSHADER'] = '1'
 
-export const E2E_PORT = 5181
+const readPort = (name: string, fallback: number): number => {
+  const value = process.env[name]
+  if (value === undefined) return fallback
+  const port = Number(value)
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`${name} must be an integer between 1 and 65535`)
+  }
+  return port
+}
+
+export const E2E_PORT = readPort('E2E_PORT', 5181)
 export const E2E_BASE_URL = `http://127.0.0.1:${String(E2E_PORT)}`
-export const E2E_MULTIPLAYER_PORT = 5182
+export const E2E_MULTIPLAYER_PORT = readPort('E2E_MULTIPLAYER_PORT', 5182)
 export const E2E_MULTIPLAYER_URL = `ws://127.0.0.1:${String(E2E_MULTIPLAYER_PORT)}/ws`
+
+if (E2E_PORT === E2E_MULTIPLAYER_PORT) {
+  throw new Error('E2E_PORT and E2E_MULTIPLAYER_PORT must be different')
+}
 
 export default defineConfig({
   testDir: './e2e',

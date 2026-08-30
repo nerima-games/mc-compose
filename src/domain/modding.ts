@@ -1,7 +1,7 @@
 /**
  * The modding entry point.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * Current mod entry-point contract.
  *
  * plan.md §3.15 lists "Modding入口" among this repository's responsibilities,
  * and §7 assigns it here. It belongs here for one reason: a mod is, structurally,

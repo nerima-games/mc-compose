@@ -61,7 +61,7 @@ describe('public API surface', () => {
         // browser runtime lifecycle composition
         'startBrowserSession',
         // kernel's branded delta, re-exported so a host can construct one
-        // without reaching into `domain/kernel-vocabulary.ts`
+        // without reaching into a private domain source file
         'DeltaTimeSecs',
         // session lifecycle
         'WorldId',
@@ -215,8 +215,8 @@ describe('the prime directive, as a surface check', () => {
   // REGRESSION, second layer: this list used to be written out here by hand and
   // contained `input`, `sim:physics`, `camera-mirror`, `chunk-sync`, `render`
   // and `post-fx` — six ids NOBODY REGISTERS. mc-render registers `render:input`
-  // and friends; mc-sim registers nothing. The test passed because the invented
-  // ids happen to land in the same phases as the real ones. It now reads the
+  // and friends; at that time mc-sim registered nothing. The test passed because
+  // the invented ids happened to land in the same phases as the real ones. It now reads the
   // manifest that `pnpm check:roster` verifies against the siblings' source.
   it.effect('claims every stage id the roster actually registers', () =>
     Effect.sync(() => {

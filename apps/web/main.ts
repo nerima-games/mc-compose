@@ -1,19 +1,18 @@
 /**
  * The browser entry point. THE HOST.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * Current composition host boundary.
  *
  * ---------------------------------------------------------------------------
  * What this file is, under the prime directive
  * ---------------------------------------------------------------------------
  *
- * `index.ts` says the only code added to this repository is Layer composition
- * and the stage order table. This file is neither — it is the HOST, the thing
- * `docs/porting.md` §2 names and `domain/composition.ts` keeps referring to as
- * "the host has the type to discharge it". It is not published: `package.json`
- * `files` lists `index.ts` and `domain` and does not list `apps`, and
- * `check-dependency-whitelist.ts`'s own `isToolingOrTestPath` agrees, treating
- * everything outside `index.ts` and `domain/` as tooling.
+ * `index.ts` says the only code added to the published compose core is Layer
+ * composition and the stage order table. This file is neither — it is the
+ * HOST, the thing `docs/porting.md` §2 names and `domain/composition.ts` keeps
+ * referring to as "the host has the type to discharge it". It is an application
+ * entry point, so its runtime dependencies are checked as app code rather than
+ * being part of the published core.
  *
  * So the rule this file lives under is not "no game rules" (it has none) but
  * "nothing here may be a rule some module should have owned". Concretely it
@@ -29,11 +28,10 @@
  * COMPOSED MODULES AND THE REMAINING NETWORK BOUNDARY
  * ---------------------------------------------------------------------------
  *
- * `mc-render`, `mx-ui`, `mx-redstone` and `mx-gameplay` are composed. Gameplay
- * supplies its public production services, including the generated chunk
- * store shared with the renderer. `mx-multiplayer` remains outside this host
- * until a production `TransportPort` is selected; composing a test transport
- * would only verify the fake.
+ * `mc-render`, `mx-ui`, `mx-redstone`, `mx-gameplay` and `mx-multiplayer` are
+ * composed. Gameplay supplies its public production services, including the
+ * generated chunk store shared with the renderer. The host constructs the
+ * browser WebSocket transport and supplies it to the multiplayer module.
  *
  * ---------------------------------------------------------------------------
  * THERE IS A RENDERER NOW, AND THIS FILE STILL DOES NOT DRAW
@@ -67,10 +65,12 @@
  * resolved here, for the reason under "WHY THREE MODULES AND NOT SIX".
  *
  * HALF OF THAT WAS RIGHT AND THE HALF THAT WAS WRONG IS THE INTERESTING ONE.
- * The wall it named is real: registering `gameplayModule` needs a `ChunkStore`,
- * an `EntityManager` and an `InventoryService`, and the only implementations
- * are test doubles. But DRAWING TERRAIN NEVER NEEDED `gameplayModule`. It
- * needed chunk geometry, and geometry is data.
+ * The wall was real at the initial package pins: registering `gameplayModule`
+ * needed a `ChunkStore`, an `EntityManager` and an `InventoryService`, while
+ * the only implementations visible to this host were test doubles. That is
+ * historical context now. The current public `mx-gameplay` API supplies the
+ * production services used below. DRAWING TERRAIN NEVER NEEDED
+ * `gameplayModule`; it needed chunk geometry, and geometry is data.
  *
  * The blocker was stated as a CATEGORY ("registering a module needs services")
  * over a set that included a case which registers nothing — the fourth time
@@ -96,13 +96,18 @@ import {
 } from '@nerima-games/mc-audio'
 import {
   blockIdOf,
+  blockPosition,
   blockTypeOfId,
   capabilityOfBlockId,
+  DeltaTimeSecs,
+  chunkCoord,
   MonotonicTimeSecs as KernelMonotonicTimeSecs,
   position,
   propertyOfBlockId,
   StackCount,
+  StageId,
   type CameraPoseSnapshot,
+  type MonotonicTimeSecs,
 } from '@nerima-games/mc-kernel'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
@@ -142,8 +147,6 @@ import {
 } from '@nerima-games/mc-sim'
 import {
   biomeFor,
-  blockPosition,
-  chunkCoord,
   chunkSnapshotOf,
   DEFAULT_TERRAIN_LEVELS,
   detectCompletedEndPortal,
@@ -167,15 +170,65 @@ import {
   makeChunkStoreMesher,
   makeProductionWorldRenderer,
   makeWorldRenderer,
+  RENDER_STAGE_IDS,
   renderModule,
   syncWorld,
   wrapHotbarSelection,
   type ChunkRef,
-  type ChunkSyncPort,
   type RenderEntity,
 } from '@nerima-games/mc-render'
+import { makeBudgetedDirtySource } from './chunk-sync-budget'
+import {
+  FARMLAND_BLOCK_ID,
+  KNOWN_TARGET_BLOCK,
+  NETHER_PORTAL_BLOCK_ID,
+  OBSIDIAN_BLOCK_ID,
+  POTATO_CROP_BLOCK_ID,
+  QA_CACTUS_APPROACH_POSE,
+  QA_ENVIRONMENT_CONTACT_CELLS,
+  QA_ENVIRONMENT_FLOOR_CELLS,
+  QA_ENVIRONMENT_OVERLAP_POSE,
+  QA_FALL_CENTER,
+  QA_FALL_FLOOR_Y,
+  QA_FALL_START_Y,
+  QA_FARM_CROP_BLOCK,
+  QA_FARM_POSE,
+  QA_IGNITION_CELL,
+  QA_IGNITION_FLOOR_BLOCK,
+  QA_IGNITION_HIT_BLOCK,
+  QA_IGNITION_POSE,
+  QA_IGNITION_PORTAL_LAYOUT,
+  QA_IGNITION_SUPPORT_BLOCK,
+  QA_POSE,
+  QA_PORTAL_ANCHOR,
+  QA_PORTAL_LAYOUT,
+  QA_PORTAL_POSE,
+  QA_PISTON,
+  QA_PISTON_FAR,
+  QA_PISTON_LEVER,
+  QA_PISTON_NEAR,
+  QA_REDSTONE_BRANCH_BUTTON,
+  QA_REDSTONE_BRANCH_WIRE,
+  QA_REDSTONE_BUTTON,
+  QA_REDSTONE_COMPARATOR,
+  QA_REDSTONE_DISPENSER,
+  QA_REDSTONE_DOOR,
+  QA_REDSTONE_HOPPER,
+  QA_REDSTONE_LAMP,
+  QA_REDSTONE_OBSERVER,
+  QA_REDSTONE_OBSERVER_INPUT,
+  QA_REDSTONE_OBSERVER_LAMP,
+  QA_REDSTONE_RAIL,
+  QA_REDSTONE_REPEATER,
+  REDSTONE_PLACEMENT_ITEMS,
+} from './qa-fixtures'
 import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
-import { applyAnvilOperation, spendExperienceLevels } from '../multiplayer-shared/anvil-repair'
+import {
+  applyAnvilOperation,
+  enchantedItemFromAnvilOutput,
+  planAnvilOperation,
+  spendExperienceLevels,
+} from '../multiplayer-shared/anvil-repair'
 import { excludeReservedPlacementConsumptions } from './placement-consumption'
 import {
   advancePlayerSwimmingRuntime,
@@ -361,6 +414,9 @@ import {
   IDLE_BOW_USE,
   type BowUseState,
 } from './bow-use'
+import { isDroppedItemPickupEligible } from './dropped-item-pickup'
+import { droppedItemMetadataFromBehaviour } from './dropped-item-metadata'
+import { createItemMetadataStore } from './item-metadata-store'
 import {
   decodeProjectedEnchantedItem,
   projectEnchantedItem,
@@ -414,8 +470,10 @@ import {
   EMPTY_MODULE_LAYER,
   registerModule,
   type GameModule,
+  type StageRegistration,
 } from '../../src/domain/composition'
-import { DeltaTimeSecs, type MonotonicTimeSecs } from '../../src/domain/kernel-vocabulary'
+
+const COMPOSE_CHUNK_SYNC_STAGE = StageId('compose:chunk-sync')
 
 type WithoutAuthority<T> = T extends unknown
   ? Omit<T, 'commandId' | 'player' | 'world' | 'expectedRevision'>
@@ -440,6 +498,18 @@ import {
   makePlacementAudioLatch,
 } from './audio-runtime'
 import { createInventoryInteraction } from './inventory-interaction'
+import {
+  EMPTY_BLOCK_BREAK_COUNTERS,
+  observeBlockBreakCompletion,
+  recordBlockBreakRequest,
+  type BlockBreakCounters,
+} from './mining-completion'
+import {
+  consumeNativeInput,
+  EMPTY_NATIVE_INPUT_QUEUE,
+  enqueueNativeMouseButton,
+  type NativeInputQueueState,
+} from './native-input-queue'
 import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
 import { createDroppedItemLifetimeTracker } from './dropped-item-lifetime'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
@@ -496,7 +566,6 @@ import {
   saveSession,
   EMPTY_ENTITY_ROSTER,
   normalizePersistedEntityRosters,
-  persistedItemDropMetadata,
   persistedItemDropLifetime,
   SESSION_FORMAT_VERSION,
   snapshotResidentChunks,
@@ -521,7 +590,7 @@ import {
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
  *
- * `domain/kernel-vocabulary.ts` is explicit that this is not part of the
+ * `@nerima-games/mc-kernel` contract is explicit that this is not part of the
  * `DeltaTimeSecs` brand and is not applied by mc-compose: "It is a simulation
  * invariant belonging to whoever produces the delta". The host produces it, so
  * the host clamps it — and without the clamp a backgrounded tab returns for its
@@ -540,126 +609,20 @@ const clampDelta = (raw: number): DeltaTimeSecs =>
 /**
  * How fast the player walks, jumps and turns.
  *
- * THESE ARE HOST CONSTANTS AND SHOULD NOT BE. Walk speed and jump impulse are
- * player TUNING, which mc-sim owns — `mc-render/docs/responsibility.md` puts the
- * same class of value there for step height, and `domain/composition.ts` would
- * rather this file held none of them. They are here because mc-sim is not
- * composed and a player with no speed does not move at all.
- *
- * They are the first thing to delete when mc-sim publishes, and they are
- * grouped and labelled so that deletion is one block rather than a search.
+ * These are host-side browser tuning values. mc-sim owns the simulation
+ * contract and accepts this physics configuration; keeping the values here
+ * makes this product composition's tuning explicit.
  */
 const WALK_SPEED_M_PER_S = 4.3
 const JUMP_SPEED_M_PER_S = 8.4
 const LOOK_SENSITIVITY = 0.0022
 const WORLD_SEED = 20260728
-const FARMLAND_BLOCK_ID = 49
-const POTATO_CROP_BLOCK_ID = 72
 const DATABASE_NAME = 'nerima-games-minecraft'
 const MISSING_SESSION_ERROR = 'The requested saved world could not be found.'
 
 class RequestedSessionNotFoundError extends Error {}
 const AUTOSAVE_INTERVAL_MS = 5_000
 const SAVE_DEBOUNCE_MS = 500
-const KNOWN_TARGET_BLOCK = { x: 8, y: 63, z: 8 } as const
-const QA_FARM_CROP_BLOCK = { x: 8, y: 64, z: 8 } as const
-const QA_IGNITION_HIT_BLOCK = { x: 8, y: 66, z: 8 } as const
-const QA_IGNITION_CELL = { x: 8, y: 66, z: 9 } as const
-const QA_IGNITION_SUPPORT_BLOCK = { x: 8, y: 65, z: 9 } as const
-const QA_IGNITION_FLOOR_BLOCK = { x: 8, y: 64, z: 10 } as const
-const QA_PISTON = { x: 8, y: 66, z: 8 } as const
-const QA_PISTON_LEVER = { x: 8, y: 66, z: 9 } as const
-const QA_PISTON_NEAR = { x: 8, y: 66, z: 7 } as const
-const QA_PISTON_FAR = { x: 8, y: 66, z: 6 } as const
-const QA_REDSTONE_BUTTON = { x: 8, y: 66, z: 9 } as const
-const QA_REDSTONE_REPEATER = { x: 8, y: 66, z: 8 } as const
-const QA_REDSTONE_LAMP = { x: 8, y: 66, z: 7 } as const
-const QA_REDSTONE_BRANCH_BUTTON = { x: 12, y: 66, z: 9 } as const
-const QA_REDSTONE_BRANCH_WIRE = { x: 12, y: 66, z: 8 } as const
-const QA_REDSTONE_DOOR = { x: 11, y: 66, z: 8 } as const
-const QA_REDSTONE_RAIL = { x: 13, y: 66, z: 8 } as const
-const QA_REDSTONE_DISPENSER = { x: 12, y: 67, z: 8 } as const
-const QA_REDSTONE_HOPPER = { x: 12, y: 65, z: 8 } as const
-const QA_REDSTONE_OBSERVER = { x: 16, y: 66, z: 8 } as const
-const QA_REDSTONE_OBSERVER_INPUT = { x: 16, y: 66, z: 9 } as const
-const QA_REDSTONE_OBSERVER_LAMP = { x: 16, y: 66, z: 7 } as const
-const QA_REDSTONE_COMPARATOR = { x: 20, y: 66, z: 8 } as const
-const QA_ENVIRONMENT_OVERLAP_POSE = {
-  feetPosition: { x: 24.95, y: 65, z: 8.5 },
-  yawRadians: 0,
-  pitchRadians: 0,
-} as const
-const QA_CACTUS_APPROACH_POSE = {
-  feetPosition: { x: 24.2, y: 65, z: 8.5 },
-  yawRadians: 0,
-  pitchRadians: 0,
-} as const
-const QA_ENVIRONMENT_CONTACT_CELLS = [
-  { x: 24, y: 65, z: 8 },
-  { x: 25, y: 65, z: 8 },
-] as const
-const QA_ENVIRONMENT_FLOOR_CELLS = Array.from({ length: 4 }, (_, offset) => ({
-  x: 23 + offset,
-  y: 64,
-  z: 8,
-}))
-const QA_FALL_CENTER = { x: 28, z: 8 } as const
-const QA_FALL_FLOOR_Y = 64
-const QA_FALL_START_Y = {
-  safe: 67.5,
-  damaging: 72,
-  lethal: 88,
-} as const
-const OBSIDIAN_BLOCK_ID = 40
-const NETHER_PORTAL_BLOCK_ID = 118
-const QA_PORTAL_ANCHOR = { x: 120, y: 65, z: 8 } as const
-const QA_PORTAL_POSE = {
-  feetPosition: { x: 120.5, y: 65, z: 8.5 },
-  yawRadians: 0,
-  pitchRadians: 0,
-} as const
-const QA_PORTAL_LAYOUT = {
-  frame: [
-    ...Array.from({ length: 4 }, (_, offset) => ({ x: 119 + offset, y: 64, z: 8 })),
-    ...Array.from({ length: 4 }, (_, offset) => ({ x: 119 + offset, y: 68, z: 8 })),
-    ...Array.from({ length: 3 }, (_, offset) => ({ x: 119, y: 65 + offset, z: 8 })),
-    ...Array.from({ length: 3 }, (_, offset) => ({ x: 122, y: 65 + offset, z: 8 })),
-  ],
-  interior: Array.from({ length: 6 }, (_, index) => ({
-    x: 120 + (index % 2),
-    y: 65 + Math.floor(index / 2),
-    z: 8,
-  })),
-} as const
-const QA_IGNITION_PORTAL_LAYOUT = {
-  frame: [
-    ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 65, z: 9 })),
-    ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 69, z: 9 })),
-    ...Array.from({ length: 3 }, (_, offset) => ({ x: 7, y: 66 + offset, z: 9 })),
-    ...Array.from({ length: 3 }, (_, offset) => ({ x: 10, y: 66 + offset, z: 9 })),
-  ],
-  interior: Array.from({ length: 6 }, (_, index) => ({
-    x: 8 + (index % 2),
-    y: 66 + Math.floor(index / 2),
-    z: 9,
-  })),
-} as const
-const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
-  'redstone_dust',
-  'redstone_torch',
-  'lever',
-  'stone_button',
-  'repeater',
-  'redstone_lamp',
-  'observer',
-  'comparator',
-  'dispenser',
-  'dropper',
-  'hopper',
-  'piston',
-  'powered_rail',
-  'door',
-])
 
 const EQUIPMENT_ONLY_ITEM_TYPES = [
   'iron_helmet',
@@ -692,17 +655,12 @@ type GameplayItemType = Parameters<typeof isPlaceableItem>[0]
 type GameplayHoeItemType = Parameters<typeof requestTargetedSoilTill>[4]
 type GameplayIgnitionItemType = Parameters<typeof requestTargetedItemUse>[4]
 
-// mx-ui 0.2.10 and mx-gameplay 0.1.35 expose adjacent mc-sim item unions.
-// Their shared runtime item identifiers remain compatible at this host boundary.
-const gameplayModuleItem = (item: ItemStack['item']): GameplayItemType =>
-  item as GameplayItemType
-
 const isGameplayHoeItem = (item: ItemStack['item']): item is GameplayHoeItemType =>
-  isHoeItem(gameplayModuleItem(item))
+  isHoeItem(item)
 
 const isGameplayIgnitionItem = (
   item: ItemStack['item'],
-): item is GameplayIgnitionItemType => isIgnitionItem(gameplayModuleItem(item))
+): item is GameplayIgnitionItemType => isIgnitionItem(item)
 
 const EQUIPMENT_ONLY_ITEM_NAMES: ReadonlySet<string> = new Set(EQUIPMENT_ONLY_ITEM_TYPES)
 
@@ -715,7 +673,7 @@ const isLegacyGameplayItemType = (item: ItemStack['item']): item is LegacyGamepl
 const isPlaceableGameplayItem = (item: ItemStack['item']): item is PlaceableItemType =>
   isGameplayUseItemType(item) &&
   isLegacyGameplayItemType(item) &&
-  isPlaceableItem(gameplayModuleItem(item))
+  isPlaceableItem(item)
 
 type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest' | 'anvil' | 'enchanting'
 
@@ -760,22 +718,6 @@ const drainSettingsWrites = async (queue: SettingsWriteQueue): Promise<void> => 
   await queue.tail
   if (queue.failure !== undefined) throw queue.failure.error
 }
-
-const QA_POSE = {
-  feetPosition: { x: 8.5, y: 64.5, z: 8.5 },
-  yawRadians: 0,
-  pitchRadians: -Math.PI / 2 + 0.01,
-} as const
-const QA_FARM_POSE = {
-  feetPosition: { x: 8.5, y: 65.5, z: 8.5 },
-  yawRadians: 0,
-  pitchRadians: -Math.PI / 2 + 0.01,
-} as const
-const QA_IGNITION_POSE = {
-  feetPosition: { x: 8.5, y: 65, z: 10.5 },
-  yawRadians: 0,
-  pitchRadians: 0,
-} as const
 
 const requireElement = (id: string): HTMLElement => {
   const element = document.getElementById(id)
@@ -1106,54 +1048,21 @@ const bootGame = async (
   let nextVillagerTradeRequestId = 0
   let inventoryMode: InventoryMode = 'player'
   let enchantmentSeed = WORLD_SEED
-  const customNames = new Map<string, string>()
-  const enchantedItems = new Map<string, EnchantedItem>()
-  type DroppedItemMetadata = {
-    readonly customName?: string
-    readonly enchantedItem?: EnchantedItem
-  }
-  const droppedItemMetadata = new Map<string, DroppedItemMetadata>()
+  const {
+    customNames,
+    enchantedItems,
+    droppedItemMetadata,
+    droppedItemMetadataKey,
+    equipmentMetadataKey,
+    containerMetadataKey,
+    containerMetadataLocation,
+    sameItemMetadata,
+    copyItemMetadata,
+    deleteItemMetadata,
+    deleteContainerMetadata,
+    moveItemMetadata,
+  } = createItemMetadataStore()
   const droppedItemLifetime = createDroppedItemLifetimeTracker()
-  const droppedItemMetadataKey = (dimension: SessionState['dimension'], entityId: string): string =>
-    `${dimension}:${entityId}`
-  const equipmentMetadataKey = (slot: EquipmentSlotId): string => `equipment:${slot}`
-  const containerMetadataKey = (containerId: string, slot: number): string =>
-    `container:${containerId}:${String(slot)}`
-  const containerMetadataLocation = (
-    key: string,
-  ): { readonly containerId: string; readonly slot: number } | undefined => {
-    if (!key.startsWith('container:')) return undefined
-    const separator = key.lastIndexOf(':')
-    const slot = Number(key.slice(separator + 1))
-    if (separator <= 'container:'.length || !Number.isInteger(slot) || slot < 0) return undefined
-    return { containerId: key.slice('container:'.length, separator), slot }
-  }
-  const sameItemMetadata = (left: string, right: string): boolean =>
-    customNames.get(left) === customNames.get(right)
-    && JSON.stringify(enchantedItems.get(left) ?? null)
-      === JSON.stringify(enchantedItems.get(right) ?? null)
-  const copyItemMetadata = (source: string, target: string): void => {
-    const enchantedItem = enchantedItems.get(source)
-    const customName = customNames.get(source)
-    if (enchantedItem === undefined) enchantedItems.delete(target)
-    else enchantedItems.set(target, enchantedItem)
-    if (customName === undefined) customNames.delete(target)
-    else customNames.set(target, customName)
-  }
-  const deleteItemMetadata = (key: string): void => {
-    enchantedItems.delete(key)
-    customNames.delete(key)
-  }
-  const deleteContainerMetadata = (containerId: string): void => {
-    const prefix = `container:${containerId}:`
-    for (const key of [...customNames.keys(), ...enchantedItems.keys()]) {
-      if (key.startsWith(prefix)) deleteItemMetadata(key)
-    }
-  }
-  const moveItemMetadata = (source: string, target: string): void => {
-    copyItemMetadata(source, target)
-    deleteItemMetadata(source)
-  }
   let respawnLocation: SleepLocation | null = null
   let sleepRuntimeState = initialSleepRuntimeState()
   let anvilName = ''
@@ -1581,19 +1490,10 @@ const bootGame = async (
     )
     for (const entity of canonicalRoster.entities) {
       if (!isDroppedItemBehaviour(entity.behaviour)) continue
-      const metadata = persistedItemDropMetadata(entity.behaviour)
-      droppedItemMetadata.set(droppedItemMetadataKey(dimension, entity.id), {
-        ...(metadata.customName === undefined ? {} : { customName: metadata.customName }),
-        ...(metadata.enchantments === undefined
-          ? {}
-          : {
-              enchantedItem: {
-                item: entity.behaviour.item,
-                durability: entity.behaviour.durability,
-                enchantments: metadata.enchantments,
-              },
-            }),
-      })
+      droppedItemMetadata.set(
+        droppedItemMetadataKey(dimension, entity.id),
+        droppedItemMetadataFromBehaviour(entity.behaviour),
+      )
     }
   }
   const rosterWithDroppedItemLifetimes = (
@@ -1765,11 +1665,13 @@ const bootGame = async (
   type ChunkColorFor = NonNullable<
     NonNullable<Parameters<typeof syncWorld>[3]>['colorForChunk']
   >
+  const MAX_CHUNK_UPDATES_PER_FRAME = 4
   type DimensionChunkContext = {
     readonly dimension: Dimension
     readonly chunkStore: typeof world.chunkStore
     readonly worldgenChunkStore: typeof world.worldgenChunkStore
     readonly dirtyChunks: Parameters<typeof syncWorld>[1]
+    readonly queueLoadedChunk: (chunk: { cx: number; cz: number }) => void
     readonly meshChunkFromStore: Parameters<typeof syncWorld>[2]
     readonly colorForChunk: ChunkColorFor
     readonly lightingSnapshot: () => RenderLightingSnapshot
@@ -1782,11 +1684,16 @@ const bootGame = async (
     const lighting = trackChunkLightColor((chunk, quads) =>
       makeChunkStoreLightColor(dimensionWorld.worldgenChunkStore, chunk, quads),
     )
+    const dirtyChunks = makeBudgetedDirtySource(
+      Effect.runSync(dimensionWorld.worldgenChunkStore.subscribeDirty),
+      MAX_CHUNK_UPDATES_PER_FRAME,
+    )
     return {
       dimension,
       chunkStore: dimensionWorld.chunkStore,
       worldgenChunkStore: dimensionWorld.worldgenChunkStore,
-      dirtyChunks: Effect.runSync(dimensionWorld.worldgenChunkStore.subscribeDirty),
+      dirtyChunks,
+      queueLoadedChunk: (chunk) => dirtyChunks.enqueue({ changed: [chunk], removed: [] }),
       meshChunkFromStore: makeChunkStoreMesher(dimensionWorld.worldgenChunkStore),
       colorForChunk: lighting.colorForChunk,
       lightingSnapshot: lighting.snapshot,
@@ -1797,12 +1704,14 @@ const bootGame = async (
   const initialChunkContext = makeDimensionChunkContext(initialDimension, world)
   dimensionContexts.set(initialDimension, initialChunkContext)
   let currentChunkContext = initialChunkContext
-  const chunkSync: ChunkSyncPort = {
-    update: Effect.suspend(() =>
+  const chunkSyncStage: StageRegistration = {
+    id: COMPOSE_CHUNK_SYNC_STAGE,
+    after: [RENDER_STAGE_IDS.cameraMirror],
+    run: () => Effect.asVoid(Effect.suspend(() =>
       syncWorld(worldRenderer, currentChunkContext.dirtyChunks, currentChunkContext.meshChunkFromStore, {
         colorForChunk: currentChunkContext.colorForChunk,
       }),
-    ),
+    )),
   }
   const leverKeyOf = (lever: Pick<PersistedLeverState, 'dimension' | 'position'>): string =>
     JSON.stringify([lever.dimension, lever.position.x, lever.position.y, lever.position.z])
@@ -2051,6 +1960,7 @@ const bootGame = async (
 
       for (const chunk of changed) {
         yield* context.chunkStore.load(chunk)
+        context.queueLoadedChunk(chunk)
         context.streamLoaded.add(chunkKeyOf(chunk))
         if (context.dimension === 'overworld') {
           let trades = yield* snapshotVillagerTrades(gameplayState)
@@ -2406,19 +2316,19 @@ const bootGame = async (
           ...(metadata.customName === undefined &&
           metadata.enchantedItem === undefined
             ? {}
-            : { eligibleFromFrame: Number.MAX_SAFE_INTEGER }),
+            : { eligibleFromFrame: framesTotal + 1 }),
         },
       ]),
     )
     const entity = spawned[0]
     if (entity !== undefined) {
       const itemMetadataKey = droppedItemMetadataKey(dimension, String(entity.id))
-      if (metadata.customName !== undefined) {
-        customNames.set(itemMetadataKey, metadata.customName)
-      }
-      if (metadata.enchantedItem !== undefined) {
-        enchantedItems.set(itemMetadataKey, metadata.enchantedItem)
-      }
+      droppedItemMetadata.set(itemMetadataKey, {
+        ...(metadata.customName === undefined ? {} : { customName: metadata.customName }),
+        ...(metadata.enchantedItem === undefined
+          ? {}
+          : { enchantedItem: metadata.enchantedItem }),
+      })
     }
 
     const updated = Effect.runSync(world.inventory.containerSnapshot(containerId))
@@ -2482,22 +2392,16 @@ const bootGame = async (
     streamAround(currentChunkContext, spawnPose.feetPosition.x, spawnPose.feetPosition.z),
   )
 
-  // `renderModule()` is called for its `frameStages` only; its `layers` field
-  // is replaced by the browser adapter. The module's own header sanctions
-  // exactly this: "Pass it where `InputServiceLayer()` would go — `renderModule`'s
-  // `layers` is the same tag."
-  //
-  // The third argument is the `DrawPort` that `render:draw` calls. Its default
-  // is `NO_DRAW_TARGET`, which is what every Node consumer gets and what this
-  // page got until the renderer existed.
+  // `renderModule()` supplies the render stages and receives the concrete draw
+  // port. Chunk synchronization is a separate composition stage so it follows
+  // the camera mirror and runs once per frame against the active dimension.
   /**
    * The starting pose, derived from the generated surface height.
    *
    * The TYPE IS DERIVED FROM THE FUNCTION rather than named, because
-   * `CameraPoseSnapshot` lives in mc-render's kernel-vocabulary MIRROR and
-   * `index.ts` deliberately keeps that out of the barrel — consumers take
-   * kernel's vocabulary from `@nerima-games/mc-kernel`, which is not published.
-   * `Parameters<typeof renderModule>[3]` follows the signature instead, so a
+   * `CameraPoseSnapshot` is a shared kernel vocabulary type. The render
+   * function remains the source of truth here, so `Parameters<typeof
+   * renderModule>[3]` follows its signature and a
    * change to it fails here rather than drifting.
    *
    * The values are constructed with mc-kernel's branded constructors. The
@@ -2517,7 +2421,7 @@ const bootGame = async (
     capturedAtSecs: KernelMonotonicTimeSecs(0),
   }
 
-  const render = renderModule(undefined, undefined, worldRenderer, initialPose, undefined, chunkSync)
+  const render = renderModule(undefined, undefined, worldRenderer, initialPose)
 
   const registeredRender = await Effect.runPromise(
     Effect.provide(
@@ -2528,6 +2432,14 @@ const bootGame = async (
       }),
       inputContext,
     ),
+  )
+
+  const registeredChunkSync = await Effect.runPromise(
+    registerModule({
+      name: '@nerima-games/mc-render/world-sync',
+      layers: EMPTY_MODULE_LAYER,
+      frameStages: Effect.succeed([chunkSyncStage]),
+    }),
   )
 
   // `EMPTY_MODULE_LAYER` and not `uiModule.layers`, even though the two are the
@@ -2758,23 +2670,19 @@ const bootGame = async (
     redstoneDirty = true
     return true
   }
-  let breaksRequested = 0
+  let blockBreakCounters: BlockBreakCounters = EMPTY_BLOCK_BREAK_COUNTERS
   let placementsRequested = 0
-  let nativeUseQueued = false
-  let nativeAttackQueued = 0
-  const queueNativeUse = (event: MouseEvent): void => {
+  let nativeInputQueue: NativeInputQueueState = EMPTY_NATIVE_INPUT_QUEUE
+  const handleNativeMouseDown = (event: MouseEvent): void => {
     const bounds = canvas.getBoundingClientRect()
     const isOverCanvas = event.clientX >= bounds.left
       && event.clientX <= bounds.right
       && event.clientY >= bounds.top
       && event.clientY <= bounds.bottom
     if (!isOverCanvas && document.pointerLockElement !== canvas) return
-    if (event.button === 0) nativeAttackQueued += 1
-    if (event.button === 2) {
-      nativeUseQueued = true
-    }
+    nativeInputQueue = enqueueNativeMouseButton(nativeInputQueue, event.button)
   }
-  window.addEventListener('mousedown', queueNativeUse, true)
+  window.addEventListener('mousedown', handleNativeMouseDown, true)
   let nextItemUseRequestId = 0
   const pendingFurnaceAdvances = new Map<string, string>()
   const deferredFurnaceAdvanceSecs = new Map<string, number>()
@@ -3034,6 +2942,9 @@ const bootGame = async (
   const multiplayerInboundStage = multiplayer?.host.stages.find(
     (stage) => stage.id === 'multiplayer:inbound',
   )
+  const multiplayerOutboundStage = multiplayer?.host.stages.find(
+    (stage) => stage.id === 'multiplayer:outbound',
+  )
   // The server deduplicates commands across reconnects, so a fresh page must not reuse its counters.
   const multiplayerCommandSessionId = crypto.randomUUID()
   const commandIdFor = (scope: string, sequence: number): CommandId =>
@@ -3124,6 +3035,34 @@ type MultiplayerInventorySelection = Readonly<{
     readonly at: { readonly x: number; readonly y: number; readonly z: number }
     readonly facing: { readonly yawRadians: number; readonly pitchRadians: number }
   } | undefined
+
+  const enqueueMultiplayerPlayerMove = (nowSecs: number): void => {
+    if (
+      multiplayer === undefined
+      || !multiplayerHandshakeComplete
+      || nowSecs - lastPlayerMoveSentAt < 0.1
+    ) return
+    const pose = Effect.runSync(playerApi.pose)
+    const world = WorldId.make(Effect.runSync(playerApi.dimension))
+    const facing = { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians }
+    const changed = lastPlayerMoveSent === undefined
+      || lastPlayerMoveSent.world !== world
+      || lastPlayerMoveSent.at.x !== pose.feetPosition.x
+      || lastPlayerMoveSent.at.y !== pose.feetPosition.y
+      || lastPlayerMoveSent.at.z !== pose.feetPosition.z
+      || lastPlayerMoveSent.facing.yawRadians !== facing.yawRadians
+      || lastPlayerMoveSent.facing.pitchRadians !== facing.pitchRadians
+    if (!changed && nowSecs - lastPlayerMoveSentAt < 1) return
+    Effect.runSync(multiplayer.host.enqueueOutbound({
+      _tag: 'PlayerMove',
+      player: multiplayer.query.player,
+      world,
+      at: pose.feetPosition,
+      facing,
+    }))
+    lastPlayerMoveSent = { world, at: pose.feetPosition, facing }
+    lastPlayerMoveSentAt = nowSecs
+  }
 
   const drainMultiplayerInbound = (): void => {
     if (multiplayer === undefined) return
@@ -3578,6 +3517,7 @@ type MultiplayerInventorySelection = Readonly<{
         applyBrewingResult(message)
         continue
       }
+      if (message._tag !== 'BrewingStandDelta' && message._tag !== 'PlayerStatusEffectsDelta') continue
       if (message.world !== currentWorld || message.revision < multiplayerRevision) continue
       multiplayerRevision = Math.max(multiplayerRevision, message.revision)
       if (message._tag === 'BrewingStandDelta') {
@@ -3656,6 +3596,7 @@ type MultiplayerInventorySelection = Readonly<{
         applyAnvilResult(message)
         continue
       }
+      if (message._tag !== 'PlayerAnvilNamesDelta') continue
       if (
         message.world !== currentWorld
         || message.revision < multiplayerRevision
@@ -3686,6 +3627,7 @@ type MultiplayerInventorySelection = Readonly<{
         applyEnchantingResult(message)
         continue
       }
+      if (message._tag !== 'PlayerEnchantmentsDelta') continue
       if (
         message.world !== currentWorld
         || message.revision < multiplayerRevision
@@ -3803,7 +3745,11 @@ type MultiplayerInventorySelection = Readonly<{
         slots: state.slots.map((stack) => {
           return stack == null
             ? null
-            : { item: stack.item as ItemStack['item'], count: stack.count, durability: null }
+            : {
+                item: stack.item as ItemStack['item'],
+                count: stack.count,
+                durability: stack.durability ?? null,
+              }
         }),
       })),
     }))
@@ -3811,12 +3757,20 @@ type MultiplayerInventorySelection = Readonly<{
 
   const applyNetworkContainer = (state: NetworkContainerState): void => {
     const snapshot = Effect.runSync(world.inventory.containerStorageSnapshot)
-    applyNetworkContainers([
-      ...snapshot.containers
-        .filter((container) => container.id !== state.containerId)
-        .map((container) => ({ containerId: container.id, kind: container.kind, slots: container.slots })),
-      state,
-    ])
+    const existingStates: Array<NetworkContainerState> = snapshot.containers
+      .filter((container) => container.id !== state.containerId)
+      .map((container) => ({
+        containerId: container.id,
+        kind: container.kind,
+        slots: container.slots.map((stack) => stack === null
+          ? null
+          : {
+              item: stack.item,
+              count: stack.count,
+              ...(stack.durability === null ? {} : { durability: stack.durability }),
+            }),
+      }))
+    applyNetworkContainers([...existingStates, state])
   }
 
   const applyNetworkFurnace = (state: NetworkFurnaceState): void => {
@@ -4264,7 +4218,10 @@ type MultiplayerInventorySelection = Readonly<{
               if (String(vehicle.id) === mountedVehicleId) mountedVehicleId = undefined
             },
           },
-          { mobSimulation: multiplayer === undefined },
+          {
+            mobSimulation: multiplayer === undefined,
+            droppedItemPickup: false,
+          },
         ),
       ),
     }),
@@ -4272,6 +4229,7 @@ type MultiplayerInventorySelection = Readonly<{
 
   const modules: ReadonlyArray<GameModule> = [
     registeredRender,
+    registeredChunkSync,
     registeredUi,
     registeredRedstone,
     registeredSim,
@@ -4724,9 +4682,7 @@ type MultiplayerInventorySelection = Readonly<{
   const inventoryMeleeDamage = (slotIndex: number): number => {
     const storage = Effect.runSync(world.inventory.storageSnapshot)
     const selectedItem = storage.inventory.slots[slotIndex]?.item ?? null
-    const baseDamage = meleeDamageForItem(
-      selectedItem === null ? null : gameplayModuleItem(selectedItem),
-    )
+    const baseDamage = meleeDamageForItem(selectedItem)
     const enchantedItem = projectEnchantedItem(
       storage.inventory.slots[slotIndex],
       storage.inventoryDurability[slotIndex],
@@ -5098,7 +5054,7 @@ type MultiplayerInventorySelection = Readonly<{
         world.entities,
         drops.map(({ customName: _customName, enchantments: _enchantments, ...drop }) => ({
           ...drop,
-          eligibleFromFrame: Number.MAX_SAFE_INTEGER,
+          eligibleFromFrame: framesTotal + 1,
         })),
       ))
       const dimension = Effect.runSync(world.player.dimension)
@@ -5242,30 +5198,58 @@ type MultiplayerInventorySelection = Readonly<{
       ? undefined
       : { itemId: selectedStack.item, count: selectedStack.count }
     if (inventoryMode === 'anvil') {
-      const selectedDurability = storage.inventoryDurability[selectedHotbarIndex]
-      const hasAnvilChange = anvilName.trim() !== (customNames.get(selectedSlotKey) ?? '')
-        || (selectedDurability !== null && selectedDurability !== undefined
-          && selectedDurability.current < selectedDurability.max)
-      const anvilResult = applyAnvilOperation(storage, selectedHotbarIndex, hasAnvilChange)
-      const hasIron = anvilResult !== undefined
-      const level = Effect.runSync(world.vitals.view).experienceLevel
+      const selectedDurability = storage.inventoryDurability[selectedHotbarIndex] ?? null
+      const currentName = customNames.get(selectedSlotKey) ?? null
+      const enchantedItem = enchantedItems.get(selectedSlotKey)
+      const needsRepair = selectedDurability !== null && selectedDurability.current < selectedDurability.max
+      const iron = needsRepair
+        ? storage.inventory.slots.find((candidate, index) =>
+            index !== selectedHotbarIndex && candidate?.item === 'iron_ingot' && candidate.count > 0,
+          )
+        : undefined
+      const anvilPlan = selectedStack == null
+        ? undefined
+        : planAnvilOperation({
+            item: selectedStack.item,
+            durability: selectedDurability,
+            name: anvilName,
+            currentName,
+            ...(enchantedItem === undefined ? {} : { enchantedItem }),
+            ...(iron === undefined ? {} : { material: { item: iron.item, count: iron.count } }),
+          })
+      const levelCost = anvilPlan?.ok === true ? anvilPlan.levelCost : 0
+      const materialCost = anvilPlan?.ok === true ? anvilPlan.materialCost : 0
+      const hasEnoughExperience = anvilPlan?.ok === true
+        && spendExperienceLevels(
+          Effect.runSync(world.vitals.snapshot).totalExperience,
+          anvilPlan.levelCost,
+        ) !== undefined
+      const rejectionReason = selectedStack == null
+        ? 'Select an item in the hotbar'
+        : anvilPlan === undefined
+          ? 'Anvil operation is invalid'
+          : !anvilPlan.ok
+            ? anvilPlan.reason === 'incompatible-input' && needsRepair && iron === undefined
+              ? 'Requires one iron ingot'
+              : anvilPlan.reason === 'nothing-to-do'
+                ? 'Change the name or repair a damaged item'
+                : anvilPlan.reason === 'too-expensive'
+                  ? 'Anvil operation is too expensive'
+                  : 'Anvil operation is invalid'
+            : !hasEnoughExperience
+              ? `Requires level ${levelCost}`
+              : undefined
       anvilView.render(anvilViewModel({
         primaryInput: selectedSlot,
-        secondaryInput: hasIron ? { itemId: 'iron_ingot', count: 1 } : undefined,
-        output: selectedStack != null && hasIron && hasAnvilChange && level >= 1
+        secondaryInput: anvilPlan?.ok === true && materialCost > 0 && iron !== undefined
+          ? { itemId: iron.item, count: materialCost }
+          : undefined,
+        output: anvilPlan?.ok === true && hasEnoughExperience
           ? selectedSlot
           : undefined,
         name: anvilName,
-        levelCost: 1,
-        rejectionReason: selectedStack == null
-          ? 'Select an item in the hotbar'
-          : !hasIron
-            ? 'Requires one iron ingot'
-            : !hasAnvilChange
-              ? 'Change the name or repair a damaged item'
-            : level < 1
-              ? 'Requires level 1'
-              : undefined,
+        levelCost,
+        rejectionReason,
       }), { focusedTarget: 'name', status: anvilStatus })
       return
     }
@@ -5714,15 +5698,9 @@ type MultiplayerInventorySelection = Readonly<{
       if (multiplayer === undefined) Effect.runSync(inventoryInteraction.craftOnce())
       else requestCrafting()
     } else if (target.region === 'crafting-grid') {
-      const action = actionTarget === null ? null : { kind: 'click' as const, target: actionTarget }
-      if (multiplayer !== undefined && multiplayerInventorySelection !== null && action !== null) {
-        const selection = multiplayerInventorySelection
-        draftCraftingFromInventory(action, selection.source, target.index)
-      } else {
-        if (pendingCrafting !== null) return
-        Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
-        Effect.runSync(inventoryInteraction.preview())
-      }
+      if (pendingCrafting !== null) return
+      Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
+      Effect.runSync(inventoryInteraction.preview())
     } else if (target.region === 'hotbar') {
       Effect.runSync(inventoryInteraction.clickInventoryItem(target.index, button))
     } else if (target.region === 'main') {
@@ -5872,30 +5850,6 @@ type MultiplayerInventorySelection = Readonly<{
     return true
   }
 
-  const draftCraftingFromInventory = (
-    action: InventoryAction,
-    source: number,
-    cell: number,
-  ): void => {
-    if (pendingCrafting !== null) {
-      rejectInventoryAction(action, 'Crafting update is pending')
-      return
-    }
-    if (inventoryInteraction.state().inventoryCarried !== undefined) {
-      rejectInventoryAction(action, 'Place the carried stack first')
-      return
-    }
-    if (Effect.runSync(world.inventory.snapshot).slots[source] === undefined) {
-      rejectInventoryAction(action, 'Source slot is empty')
-      return
-    }
-    multiplayerInventorySelection = null
-    Effect.runSync(inventoryInteraction.clickInventoryItem(source, 'left'))
-    Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(cell))
-    Effect.runSync(inventoryInteraction.preview())
-    completeInventoryAction()
-  }
-
   const dispatchInventoryAction = (action: InventoryAction): void => {
     if (action.kind === 'drag') {
       if (action.source.kind === 'slot' && action.target.kind === 'equipment-slot') {
@@ -5914,7 +5868,18 @@ type MultiplayerInventorySelection = Readonly<{
           const sourceSlot = inventorySlotOf(action.source)
           const targetSlot = inventorySlotOf(action.target)
           if (sourceSlot !== undefined && action.target.region === 'crafting-grid') {
-            draftCraftingFromInventory(action, sourceSlot, action.target.index)
+            if (multiplayer !== undefined) {
+              rejectInventoryAction(action, 'Crafting drag is unavailable in multiplayer')
+            } else if (pendingCrafting !== null) {
+              rejectInventoryAction(action, 'Crafting update is pending')
+            } else if (inventoryInteraction.state().inventoryCarried !== undefined) {
+              rejectInventoryAction(action, 'Place the carried stack first')
+            } else {
+              Effect.runSync(inventoryInteraction.clickInventoryItem(sourceSlot, 'left'))
+              Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(action.target.index))
+              Effect.runSync(inventoryInteraction.preview())
+              completeInventoryAction()
+            }
             return
           }
           if (sourceSlot === undefined || targetSlot === undefined) {
@@ -5980,31 +5945,42 @@ type MultiplayerInventorySelection = Readonly<{
     const selected = storage.inventory.slots[selectedHotbarIndex]
     const vitals = Effect.runSync(world.vitals.snapshot)
     const normalizedName = anvilName.trim()
-    const durability = storage.inventoryDurability[selectedHotbarIndex]
-    const hasChange = normalizedName !== (customNames.get(String(selectedHotbarIndex)) ?? '')
-      || (durability !== null && durability !== undefined && durability.current < durability.max)
-    const anvilResult = applyAnvilOperation(storage, selectedHotbarIndex, hasChange)
-    const remainingExperience = spendExperienceLevels(vitals.totalExperience, 1)
-    if (selected === undefined || anvilResult === undefined || remainingExperience === undefined) {
+    const itemKey = String(selectedHotbarIndex)
+    const currentName = customNames.get(itemKey) ?? null
+    const existingEnchantment = enchantedItems.get(itemKey)
+    const anvilResult = selected == null
+      ? undefined
+      : applyAnvilOperation(storage, selectedHotbarIndex, {
+          name: normalizedName,
+          currentName,
+          ...(existingEnchantment === undefined ? {} : { enchantedItem: existingEnchantment }),
+        })
+    const remainingExperience = anvilResult === undefined
+      ? undefined
+      : spendExperienceLevels(vitals.totalExperience, anvilResult.levelCost)
+    if (selected == null || anvilResult === undefined || remainingExperience === undefined) {
       anvilStatus = 'Repair or rename requirements are not met'
       renderPlayerUi()
       return
     }
-    Effect.runSync(world.inventory.restoreStorage(anvilResult))
+    const outputName = anvilResult.output.customName === null
+      ? null
+      : String(anvilResult.output.customName)
+    const outputEnchantment = enchantedItemFromAnvilOutput(anvilResult.output)
+    if (anvilResult.output.enchantments.length > 0 && outputEnchantment === undefined) {
+      anvilStatus = 'Anvil operation is invalid'
+      renderPlayerUi()
+      return
+    }
+    Effect.runSync(world.inventory.restoreStorage(anvilResult.storage))
     Effect.runSync(world.vitals.restore(
       addVitalsExperience(vitals, remainingExperience - vitals.totalExperience),
     ))
-    const itemKey = String(selectedHotbarIndex)
-    const enchantedItem = enchantedItems.get(itemKey)
-    if (enchantedItem !== undefined) {
-      enchantedItems.set(itemKey, {
-        ...enchantedItem,
-        durability: anvilResult.inventoryDurability[selectedHotbarIndex] ?? null,
-      })
-    }
-    if (normalizedName.length > 0) customNames.set(itemKey, normalizedName)
-    else customNames.delete(itemKey)
-    anvilStatus = normalizedName.length > 0 ? `Renamed to ${normalizedName}` : 'Item repaired'
+    if (outputEnchantment === undefined) enchantedItems.delete(itemKey)
+    else enchantedItems.set(itemKey, outputEnchantment)
+    if (outputName === null) customNames.delete(itemKey)
+    else customNames.set(itemKey, outputName)
+    anvilStatus = outputName === null ? 'Item repaired' : `Renamed to ${outputName}`
     document.body.setAttribute('data-anvil-result', anvilStatus)
     markSessionDirty()
     renderPlayerUi()
@@ -6524,6 +6500,10 @@ type MultiplayerInventorySelection = Readonly<{
         facingRadians: vehicle.yawRadians,
       } satisfies RenderEntity)),
   ]
+
+  const syncRenderedEntities = (): void => {
+    Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
+  }
 
   const nearestVillagerForTrade = (
     position: SessionPosition,
@@ -7083,6 +7063,15 @@ type MultiplayerInventorySelection = Readonly<{
       ),
     )
     Effect.runSync(world.inventory.reset)
+    // The player spawns at QA_IGNITION_POSE, which sibling QA_IGNITION_POSE
+    // fixtures (e.g. seedZombiePursuitEncounter) pin to solid ground with
+    // QA_IGNITION_FLOOR_BLOCK — this fixture omitted it, so the player fell
+    // through unset Nether terrain onto whatever natural surface was below,
+    // shifting eye height enough to move the bed outside
+    // targetedRightClickRoute's raycast before the QA click landed.
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('bed')))
     Effect.runSync(currentChunkStore.setBlock({
@@ -8110,7 +8099,7 @@ type MultiplayerInventorySelection = Readonly<{
     weatherAudio.dispose()
     for (const timeout of pendingThunder.values()) window.clearTimeout(timeout)
     pendingThunder.clear()
-    window.removeEventListener('mousedown', queueNativeUse, true)
+    window.removeEventListener('mousedown', handleNativeMouseDown, true)
     Effect.runSync(worldRenderer.dispose)
     atlasTexture.dispose()
     audio.close()
@@ -8141,7 +8130,7 @@ type MultiplayerInventorySelection = Readonly<{
   const runFrame = game.runFrameWith(BrowserClockLayer)
 
   // Time is read through the Port, not from `performance`. `apps/web/clock.ts`
-  // is the only file allowed the raw reading and `pnpm check:deps` enforces it.
+  // is the only file allowed the raw reading and the lint boundary enforces it.
   const readNow = (): MonotonicTimeSecs => Effect.runSync(browserClock.monotonicSecs)
 
   let previousSecs: MonotonicTimeSecs | undefined
@@ -8245,7 +8234,7 @@ type MultiplayerInventorySelection = Readonly<{
         steering: held('moveRight') - held('moveLeft'),
       }
 
-      const queuedNativeAttack = nativeAttackQueued > 0
+      const queuedNativeAttack = nativeInputQueue.attack > 0
       if (queuedNativeAttack) resetPrimaryAttackGesture()
       const attackTriggered =
         !dead && !inventoryOpen && !tradeOpen && !brewingOpen
@@ -8255,12 +8244,17 @@ type MultiplayerInventorySelection = Readonly<{
         else sendVitalsCommand({ _tag: 'activity', activity: 'attack', amount: 1 })
       }
       const attackHeld = held('attack') > 0 || queuedNativeAttack
-      if (queuedNativeAttack) nativeAttackQueued -= 1
+      if (queuedNativeAttack) {
+        nativeInputQueue = consumeNativeInput(nativeInputQueue, 'attack').state
+      }
       if (!attackHeld) resetPrimaryAttackGesture()
       const canUse = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
+      const nativeUse = canUse
+        ? consumeNativeInput(nativeInputQueue, 'use')
+        : { triggered: false, state: nativeInputQueue }
+      nativeInputQueue = nativeUse.state
       const useTriggered = canUse
-        && (Effect.runSync(inputApi.wasActionJustTriggered('use')) || nativeUseQueued)
-      if (useTriggered) nativeUseQueued = false
+        && (Effect.runSync(inputApi.wasActionJustTriggered('use')) || nativeUse.triggered)
       const useHeld = held('use') > 0
       const lookDelta = {
         x: walk.pointerDelta.x + consumedTouchLook.delta.x,
@@ -8362,7 +8356,12 @@ type MultiplayerInventorySelection = Readonly<{
         }
       }
 
-      if (multiplayer !== undefined && !multiplayerHandshakeComplete && multiplayer.transport.state() === 'open') {
+      if (
+        multiplayer !== undefined &&
+        !multiplayerHandshakeComplete &&
+        multiplayer.transport.state() === 'open' &&
+        multiplayer.transport.isAuthenticated()
+      ) {
         const pose = Effect.runSync(playerApi.pose)
         const worldId = WorldId.make(Effect.runSync(playerApi.dimension))
         Effect.runSync(multiplayer.host.transitionConnection({
@@ -8485,8 +8484,10 @@ type MultiplayerInventorySelection = Readonly<{
       } else for (const entity of Effect.runSync(world.entities.entities)) {
         if (deadAfterFrame) break
         if (!isDroppedItemBehaviour(entity.behaviour)) continue
+        if (!isDroppedItemPickupEligible(framesTotal, entity.behaviour.eligibleFromFrame)) continue
         const metadataKey = droppedItemMetadataKey(playerDimension, String(entity.id))
-        const metadata = droppedItemMetadata.get(metadataKey) ?? {}
+        const metadata = droppedItemMetadata.get(metadataKey)
+          ?? droppedItemMetadataFromBehaviour(entity.behaviour)
         const dx = entity.feetPosition.x - playerPosition.x
         const dy = entity.feetPosition.y - playerPosition.y
         const dz = entity.feetPosition.z - playerPosition.z
@@ -8571,29 +8572,7 @@ type MultiplayerInventorySelection = Readonly<{
       if (villagerTradeResults.length > 0) renderTradeUi()
 
       if (multiplayer !== undefined) {
-        if (multiplayerHandshakeComplete && nowSecs - lastPlayerMoveSentAt >= 0.1) {
-          const pose = Effect.runSync(playerApi.pose)
-          const world = WorldId.make(Effect.runSync(playerApi.dimension))
-          const facing = { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians }
-          const changed = lastPlayerMoveSent === undefined
-            || lastPlayerMoveSent.world !== world
-            || lastPlayerMoveSent.at.x !== pose.feetPosition.x
-            || lastPlayerMoveSent.at.y !== pose.feetPosition.y
-            || lastPlayerMoveSent.at.z !== pose.feetPosition.z
-            || lastPlayerMoveSent.facing.yawRadians !== facing.yawRadians
-            || lastPlayerMoveSent.facing.pitchRadians !== facing.pitchRadians
-          if (changed || nowSecs - lastPlayerMoveSentAt >= 1) {
-            Effect.runSync(multiplayer.host.enqueueOutbound({
-              _tag: 'PlayerMove',
-              player: multiplayer.query.player,
-              world,
-              at: pose.feetPosition,
-              facing,
-            }))
-            lastPlayerMoveSent = { world, at: pose.feetPosition, facing }
-            lastPlayerMoveSentAt = nowSecs
-          }
-        }
+        enqueueMultiplayerPlayerMove(nowSecs)
       }
 
       // Portal travel has already updated the player. Make its destination world
@@ -8604,7 +8583,14 @@ type MultiplayerInventorySelection = Readonly<{
         const context = dimensionContexts.get(pending.dimension)
         if (context === undefined) continue
         const reading = Effect.runSync(context.chunkStore.getBlock(pending.position))
-        if (reading._tag !== 'Block' || reading.block === pending.blockId) continue
+        const nextBlockBreakCounters = observeBlockBreakCompletion(
+          blockBreakCounters,
+          pending.blockId,
+          reading._tag === 'Block' ? reading.block : undefined,
+        )
+        if (nextBlockBreakCounters === blockBreakCounters) continue
+        blockBreakCounters = nextBlockBreakCounters
+        canvas.setAttribute('data-breaks-completed', String(blockBreakCounters.completed))
         if (
           pending.blockId === blockIdOf('chest') ||
           pending.blockId === blockIdOf('shulker_box') ||
@@ -8637,7 +8623,7 @@ type MultiplayerInventorySelection = Readonly<{
                   ...(slotMetadata[index]?.customName === undefined
                       && slotMetadata[index]?.enchantedItem === undefined
                     ? {}
-                    : { eligibleFromFrame: Number.MAX_SAFE_INTEGER }),
+                    : { eligibleFromFrame: framesTotal + 1 }),
                 })),
               ))
               dropped.forEach((entity, index) => {
@@ -9013,7 +8999,7 @@ type MultiplayerInventorySelection = Readonly<{
           (count, slot) => count + (slot?.item === 'arrow' ? slot.count : 0),
           0,
         ),
-        deltaSecs,
+        elapsedSecs: raw,
       })
       const previousBowUseState = bowUseState
       bowUseState = bowAdvance.state
@@ -9358,8 +9344,16 @@ type MultiplayerInventorySelection = Readonly<{
                   })
                 }
               }
-              breaksRequested += 1
-              canvas.setAttribute('data-breaks-requested', String(breaksRequested))
+              blockBreakCounters = recordBlockBreakRequest(blockBreakCounters)
+              canvas.setAttribute('data-breaks-requested', String(blockBreakCounters.requested))
+              if (target.blockId === POTATO_CROP_BLOCK_ID && multiplayer === undefined) {
+                blockBreakCounters = observeBlockBreakCompletion(
+                  blockBreakCounters,
+                  target.blockId,
+                  0,
+                )
+                canvas.setAttribute('data-breaks-completed', String(blockBreakCounters.completed))
+              }
               primaryAttackGestureConsumed = true
               if (multiplayer === undefined) {
                 redstoneDirty = true
@@ -10357,7 +10351,7 @@ type MultiplayerInventorySelection = Readonly<{
         events: pendingEndAudioEvents.splice(0),
       })
 
-      Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
+      syncRenderedEntities()
       if (brewingOpen) renderBrewingUi()
       renderPlayerUi()
       renderCrosshair(nowSecs)
@@ -10391,7 +10385,11 @@ type MultiplayerInventorySelection = Readonly<{
     canvas,
     startRuntime: (surface) => Effect.sync(() => {
       const hiddenNetworkPump = window.setInterval(() => {
-        if (document.visibilityState !== 'hidden' || multiplayerInboundStage === undefined) return
+        if (
+          document.visibilityState !== 'hidden'
+          || multiplayerInboundStage === undefined
+          || multiplayerOutboundStage === undefined
+        ) return
         Effect.runSync(multiplayerInboundStage.run(DeltaTimeSecs(0)))
         drainMultiplayerInbound()
         drainCraftingInbound()
@@ -10399,6 +10397,9 @@ type MultiplayerInventorySelection = Readonly<{
         drainAnvilInbound()
         drainEnchantingInbound()
         drainPlayerDamageInbound()
+        syncRenderedEntities()
+        enqueueMultiplayerPlayerMove(performance.now() / 1_000)
+        Effect.runSync(multiplayerOutboundStage.run(DeltaTimeSecs(0)))
       }, 100)
       surface.onCleanup(() => {
         window.clearInterval(hiddenNetworkPump)

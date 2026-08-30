@@ -181,15 +181,7 @@ test('restores a dynamic entity with stable identity and state', async ({ page }
   expect(faults.consoleErrors).toEqual([])
 })
 
-// BLOCKED: interaction-never-registers cluster (see
-// brewing-effects.e2e.ts for the fuller citation) — the QA API call
-// `page.evaluate` throws "Error: no dropped item found", i.e. the death drop
-// this test depends on never spawns, rather than spawning late. Not tested
-// under CPU throttling due to time budget. Root cause undetermined — possible
-// CI-environment flakiness or a real input-delivery/combat-timing bug — needs
-// reproduction on an actual CI runner or heavier throttling before further
-// diagnosis. Tracked separately.
-test.fixme('retains death-drop custom name and enchantments through reload and pickup', async ({ page }) => {
+test('retains death-drop custom name and enchantments through reload and pickup', async ({ page }) => {
   const faults = watchForFaults(page)
   await deleteSessionDatabase(page)
 
@@ -219,7 +211,8 @@ test.fixme('retains death-drop custom name and enchantments through reload and p
   await page.reload()
   await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')
   await expect.poll(async () => (await snapshot(page)).dead).toBe(true)
-  expect((await snapshot(page)).entities.filter(({ kind }) => kind === 'dropped_item')).toHaveLength(1)
+  const reloaded = await snapshot(page)
+  expect(reloaded.entities.filter(({ kind }) => kind === 'dropped_item')).toHaveLength(1)
 
   await callQa(page, 'gameplay.respawn')
   await callQa(page, 'gameplay.targetNearestDroppedItem')

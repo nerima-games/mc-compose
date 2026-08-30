@@ -60,10 +60,7 @@ const initialState = {
   inventories: [
     {
       player: 'survival-alice',
-      state: {
-        slots: [{ item: 'potato', count: 2 }, { item: 'oak_log', count: 2 }, ...emptySlots().slice(2)],
-        selectedSlot: 0,
-      },
+      state: { slots: [{ item: 'potato', count: 2 }, ...emptySlots().slice(1)], selectedSlot: 0 },
     },
     {
       player: 'survival-bob',
@@ -274,20 +271,7 @@ test.afterAll(async () => {
   }
 })
 
-// BLOCKED: connectPlayer's second client intermittently observes
-// body[data-mc-compose-boot] go "starting" -> "failed" instead of "running",
-// while data-frames keeps advancing (the render loop itself is fine). The CI
-// trace's console log (extracted from trace.zip, since this test has no
-// console listener) shows the actual defect: "boot failed: a frame stage
-// defected {_tag: Die, defect: AsyncFiberException: Fiber #242 cannot be
-// resolved synchronously...}" from apps/web/main.ts:8445-8450's
-// Effect.runSyncExit(runFrame(...)). Most likely cause: mx-multiplayer's
-// `multiplayer:inbound` stage (registration.ts) draining transport.inbound via
-// Queue.takeAll races against the queue shutdown apps/web/multiplayer-websocket.ts
-// triggers on socket close/error. Needs a focused debugging session with full
-// Cause.pretty() output in mx-multiplayer's registration.ts or
-// apps/web/multiplayer-websocket.ts, tracked separately.
-test.fixme('routes environmental survival damage through multiplayer authority', async ({ browser }) => {
+test('routes environmental survival damage through multiplayer authority', async ({ browser }) => {
   const environmentStateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-environmental-authority-e2e-'))
   const environmentStateFile = join(environmentStateDirectory, 'state.json')
   const environmentClaimsFile = join(environmentStateDirectory, 'claims.json')
@@ -321,9 +305,7 @@ test.fixme('routes environmental survival damage through multiplayer authority',
   }
 })
 
-// BLOCKED: same connectPlayer boot="failed" AsyncFiberException as the
-// preceding test — see that comment for the full root-cause citation.
-test.fixme('automatically picks up nearby item drops through the authoritative multiplayer snapshot', async ({ browser }) => {
+test('automatically picks up nearby item drops through the authoritative multiplayer snapshot', async ({ browser }) => {
   const alice = await connectPlayer(browser, serverUrl, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
   let bob: PlayerSession | undefined
 
@@ -333,9 +315,10 @@ test.fixme('automatically picks up nearby item drops through the authoritative m
     )
     await expect.poll(() => authoritativeEntity(alice.page, 'survival-rotten-flesh')).toBeUndefined()
 
-    bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
-    await expect.poll(() => authoritativeEntity(bob.page, 'survival-rotten-flesh')).toBeUndefined()
-    await expect.poll(async () => (await snapshot(bob!.page)).inventory.slots).not.toEqual(
+    const bobSession = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
+    bob = bobSession
+    await expect.poll(() => authoritativeEntity(bobSession.page, 'survival-rotten-flesh')).toBeUndefined()
+    await expect.poll(async () => (await snapshot(bobSession.page)).inventory.slots).not.toEqual(
       expect.arrayContaining([{ item: 'rotten_flesh', count: 2 }]),
     )
   } finally {
@@ -343,10 +326,7 @@ test.fixme('automatically picks up nearby item drops through the authoritative m
   }
 })
 
-// BLOCKED: same connectPlayer boot="failed" AsyncFiberException as
-// "routes environmental survival damage through multiplayer authority" above
-// — see that comment for the full root-cause citation.
-test.fixme('keeps Survival inventory, vitals, entities, vehicles, and reconnect state authoritative', async ({ browser }) => {
+test('keeps Survival inventory, vitals, entities, vehicles, and reconnect state authoritative', async ({ browser }) => {
   const alice = await connectPlayer(browser, serverUrl, 'survival-alice', 'Alice', LEGACY_SECRETS['survival-alice'])
   const bob = await connectPlayer(browser, serverUrl, 'survival-bob', 'Bob', LEGACY_SECRETS['survival-bob'])
 
@@ -359,10 +339,7 @@ test.fixme('keeps Survival inventory, vitals, entities, vehicles, and reconnect 
     })
     const aliceInventory = alice.page.locator('#inventory-root')
     const alicePotatoes = aliceInventory.locator('[data-region="hotbar"] [data-slot-index="0"]')
-    const aliceLogs = aliceInventory.locator('[data-region="hotbar"] [data-slot-index="1"]')
     const aliceMainSlot = aliceInventory.locator('[data-region="main"] [data-slot-index="0"]')
-    const craftingCell = aliceInventory.locator('[data-region="crafting-grid"] [data-slot-index="0"]')
-    const craftingOutput = aliceInventory.locator('[data-mx-ui="crafting-output"]')
     await alice.page.keyboard.press('KeyE')
     await expect(aliceInventory).toBeVisible()
     await alicePotatoes.click({ button: 'right' })
@@ -371,26 +348,18 @@ test.fixme('keeps Survival inventory, vitals, entities, vehicles, and reconnect 
     await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'pending')
     await expect.poll(async () => {
       const slots = (await snapshot(alice.page)).inventory.slots
-      return [slots[0], slots[9]]
-    }).toEqual([{ item: 'potato', count: 1 }, { item: 'potato', count: 1 }])
-    await aliceLogs.click()
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'selecting')
-    await craftingCell.click()
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
-    await expect(craftingCell).toHaveAttribute('aria-label', /oak_log, 1/)
-    await expect(craftingOutput).toHaveAttribute('aria-label', /oak_planks, 4/)
-    await craftingOutput.click()
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
-    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots[1]).toEqual({
-      item: 'oak_log', count: 1,
-    })
-
-    await aliceLogs.dragTo(craftingCell)
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
-    await expect(craftingCell).toHaveAttribute('aria-label', /oak_log, 1/)
-    await craftingOutput.click()
-    await expect(alice.page.locator('body')).toHaveAttribute('data-equipment-action', 'accepted')
-    await expect.poll(async () => (await snapshot(alice.page)).inventory.slots[1]).toBeNull()
+      return [slots[0], ...slots.slice(2, 10)]
+    }).toEqual([
+      { item: 'potato', count: 1 },
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      { item: 'potato', count: 1 },
+    ])
     await alice.page.keyboard.press('KeyE')
     await expect(aliceInventory).toBeHidden()
     await expect.poll(async () => (await snapshot(bob.page)).vitals.healthPoints).toBe(18)

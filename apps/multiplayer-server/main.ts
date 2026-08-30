@@ -6,15 +6,17 @@ import { dirname } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 
-import { blockTypeOfId } from '@nerima-games/mc-kernel'
-import { CHEST_CONTAINER_CAPACITY } from '@nerima-games/mc-sim'
 import {
   blockPosition,
-  CHUNK_HEIGHT,
+  blockTypeOfId,
   chunkCoordOfBlock,
+  localCoordOfBlock,
+} from '@nerima-games/mc-kernel'
+import { CHEST_CONTAINER_CAPACITY } from '@nerima-games/mc-sim'
+import {
+  CHUNK_HEIGHT,
   generateChunkAt,
   getBlockAt,
-  localCoordOfBlock,
   type Chunk,
   type Dimension,
 } from '@nerima-games/mc-worldgen'
@@ -33,6 +35,7 @@ import {
 import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
 
+import { isValidWitherRuntimeSnapshot } from '../multiplayer-shared/wither-runtime'
 import { WITHER_MAX_WIRE_LENGTH } from '../multiplayer-shared/wither-network'
 import {
   isWeatherClockState,
@@ -103,6 +106,9 @@ type PlayerResume = Readonly<{
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isNonNegativeSafeInteger = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 
 const decodePlayerResume = (frame: string): PlayerResume | undefined => {
   let value: unknown
@@ -212,7 +218,7 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
   const state = value
   const revision = state['revision']
   const blocksValue = state['blocks']
-  if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0 || !Array.isArray(blocksValue)) return undefined
+  if (!isNonNegativeSafeInteger(revision) || !Array.isArray(blocksValue)) return undefined
   const blocks = blocksValue.flatMap((entry: unknown) => {
     if (!isRecord(entry) || !isBlockPos(entry['at']) || (entry['block'] !== null && typeof entry['block'] !== 'string')) return []
     return [{ at: entry['at'], block: entry['block'] }]
@@ -257,6 +263,18 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
   const weatherClock = state['weatherClock']
   if (weatherClock !== undefined && !isWeatherClockState(weatherClock)) return undefined
 
+  const witherValue = state['wither']
+  if (witherValue !== undefined && !isValidWitherRuntimeSnapshot(witherValue)) return undefined
+  const wither = witherValue
+
+  const witherRevisionValue = state['witherRevision']
+  const witherRevision = witherRevisionValue === undefined
+    ? undefined
+    : isNonNegativeSafeInteger(witherRevisionValue)
+      ? witherRevisionValue
+      : null
+  if (witherRevision === null) return undefined
+
   const decoded = Schema.decodeUnknownEither(AuthoritativeSnapshot)({
     _tag: 'AuthoritativeSnapshot',
     world: worldId,
@@ -295,8 +313,8 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     entities: snapshot.entities ?? [],
     eyeOfEnderRecoveries,
     playerPositions,
-    ...(state['wither'] === undefined ? {} : { wither: state['wither'] as NonNullable<MultiplayerServerState['wither']> }),
-    ...(Number.isInteger(state['witherRevision']) ? { witherRevision: state['witherRevision'] as number } : {}),
+    ...(wither === undefined ? {} : { wither }),
+    ...(witherRevision === undefined ? {} : { witherRevision }),
   }
 }
 
@@ -445,9 +463,10 @@ const listen = (server: HttpServer, port: number, host: string): Promise<number>
 
 export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions): Promise<MultiplayerRuntime> => {
   const transportSecurity = resolveTransportSecurity(options)
-  const initialState = options.stateFile === undefined
+  const stateFile = options.stateFile
+  const initialState = stateFile === undefined
     ? undefined
-    : await loadServerState(options.stateFile, options.worldId, options.seed)
+    : await loadServerState(stateFile, options.worldId, options.seed)
   const legacyPlayers = new Set([
     ...(initialState?.inventories.map(({ player }) => player) ?? []),
     ...(initialState?.vitals.map(({ player }) => player) ?? []),
@@ -456,13 +475,13 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   const legacyPlayerClaims = options.legacyPlayerClaimsFile === undefined
     ? undefined
     : await loadLegacyPlayerClaims(options.legacyPlayerClaimsFile)
-  const reconnectAuth = await createReconnectAuth(options.stateFile)
-  const persistence = options.stateFile === undefined
+  const reconnectAuth = await createReconnectAuth(stateFile)
+  const persistence = stateFile === undefined
     ? undefined
     : createLatestStatePersistence((state: MultiplayerServerState) =>
-        writeServerState(options.stateFile as string, options.worldId, options.seed, state),
+        writeServerState(stateFile, options.worldId, options.seed, state),
       )
-  const endStateFile = options.stateFile === undefined ? undefined : `${options.stateFile}.end`
+  const endStateFile = stateFile === undefined ? undefined : `${stateFile}.end`
   const endInitialState = endStateFile === undefined
     ? undefined
     : await loadServerState(endStateFile, 'end', options.seed)
@@ -471,7 +490,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     : createLatestStatePersistence((state: MultiplayerServerState) =>
         writeServerState(endStateFile, 'end', options.seed, state),
       )
-  const netherStateFile = options.stateFile === undefined ? undefined : `${options.stateFile}.nether`
+  const netherStateFile = stateFile === undefined ? undefined : `${stateFile}.nether`
   const netherInitialState = netherStateFile === undefined
     ? undefined
     : await loadServerState(netherStateFile, 'nether', options.seed)
@@ -575,14 +594,16 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
   }
   const server: HttpServer = transportSecurity.secure
     ? createHttpsServer({
-        cert: await readFile(transportSecurity.tlsCert as string),
-        key: await readFile(transportSecurity.tlsKey as string),
+        cert: await readFile(transportSecurity.tlsCert),
+        key: await readFile(transportSecurity.tlsKey),
       }, requestHandler)
     : createServer(requestHandler)
   // The largest protocol frame is the Wither payload; reject larger frames before decoding or queuing commands.
   const sockets = new WebSocketServer({ noServer: true, maxPayload: WITHER_MAX_WIRE_LENGTH })
   const activePlayers = new Map<string, string>()
   const reservedPlayers = new Set<string>()
+  const MAX_PENDING_MULTIPLAYER_FRAMES = 64
+  const MAX_PENDING_MULTIPLAYER_BYTES = 8 * 1024 * 1024
 
   server.on('upgrade', (request, socket, head) => {
     if (!isAllowedWebSocketOrigin(request.headers.origin, transportSecurity)) {
@@ -604,6 +625,8 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     let authenticatedPlayer: PlayerId | undefined
     let activePlayer: PlayerId | undefined
     let _messageQueue = Promise.resolve()
+    let pendingFrameCount = 0
+    let pendingFrameBytes = 0
     const disconnect = (): void => {
       if (disconnected) return
       disconnected = true
@@ -618,6 +641,9 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     }
     const rejectHandshake = (): void => {
       if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'reconnect authentication failed')
+    }
+    const rejectProtocolFrame = (): void => {
+      if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'invalid multiplayer frame')
     }
     const authenticate = async (resume: PlayerResume): Promise<void> => {
       const player = resume.player
@@ -660,13 +686,44 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     netherCore.connect(clientId, send)
     endCore.connect(clientId, send)
     socket.on('message', (data, isBinary) => {
-      if (isBinary) return
-      const frame = data.toString() as WireText
+      if (isBinary) {
+        rejectProtocolFrame()
+        return
+      }
+      const frame = data.toString()
+      const frameBytes = Buffer.byteLength(frame, 'utf8')
+      if (pendingFrameCount >= MAX_PENDING_MULTIPLAYER_FRAMES
+        || pendingFrameBytes + frameBytes > MAX_PENDING_MULTIPLAYER_BYTES) {
+        disconnect()
+        rejectProtocolFrame()
+        return
+      }
+      pendingFrameCount += 1
+      pendingFrameBytes += frameBytes
       _messageQueue = _messageQueue.then(async () => {
         if (disconnected) return
         if (activePlayer !== undefined) {
           const realm = activeRealms.get(clientId)
-          if (realm !== undefined) realm.receive(clientId, frame)
+          if (realm === undefined) {
+            if (socket.readyState === WebSocket.OPEN) socket.close(1011, 'multiplayer realm unavailable')
+            return
+          }
+          const result = realm.receive(clientId, frame)
+          if (result.accepted && result.message._tag === 'PlayerLeave') {
+            disconnect()
+            if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'player left')
+            return
+          }
+          if (
+            !result.accepted
+            && (
+              result.reason === 'unknown-client'
+              || result.reason === 'malformed-frame'
+              || result.reason === 'join-required'
+              || result.reason === 'duplicate-player'
+              || result.reason === 'identity-spoof'
+            )
+          ) rejectProtocolFrame()
           return
         }
         if (authenticatedPlayer === undefined) {
@@ -698,7 +755,10 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
         activePlayers.set(activePlayer, clientId)
         activeRealms.set(clientId, overworldCore)
         reservedPlayers.delete(activePlayer)
-      }).catch(() => rejectHandshake())
+      }).catch(() => rejectHandshake()).finally(() => {
+        pendingFrameCount -= 1
+        pendingFrameBytes -= frameBytes
+      })
     })
     socket.once('close', disconnect)
     socket.once('error', disconnect)

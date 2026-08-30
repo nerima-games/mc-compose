@@ -1,2 +1,17 @@
 packages:
   - '.'
+overrides:
+  effect: 3.22.1
+  '@nerima-games/mc-kernel': 0.4.0
+  '@nerima-games/mc-render': 0.2.14
+  '@nerima-games/mc-sim': 0.1.42
+  '@nerima-games/mc-worldgen': 0.1.14
+  '@nerima-games/mx-gameplay': 0.3.1
+minimumReleaseAgeExclude:
+  - '@nerima-games/mc-kernel@0.4.0'
+allowBuilds:
+  esbuild: true
+patchedDependencies:
+  '@nerima-games/mc-sim@0.1.42': patches/@nerima-games__mc-sim@0.1.42.patch
+  '@nerima-games/mx-gameplay@0.3.1': patches/@nerima-games__mx-gameplay@0.3.1.patch
+  '@types/three@0.185.4': patches/@types__three@0.185.4.patch

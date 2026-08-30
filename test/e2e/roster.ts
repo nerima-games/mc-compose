@@ -6,11 +6,10 @@
  * Why a transcription and not an import
  * ---------------------------------------------------------------------------
  *
- * plan.md §6 Step 3 publishes bottom-up and NOTHING IS PUBLISHED YET.
- * `package.json` of this repository declares exactly one dependency (`effect`),
- * `node_modules` contains no `@nerima-games/*` at all, and every sibling
- * declares only `effect` too. So mc-compose cannot `import { gameplayModule }
- * from '@nerima-games/mx-gameplay'`, and no amount of wanting changes that.
+ * The roster is now backed by the published sibling package contracts pinned in
+ * `package.json` and `pnpm-lock.yaml`. The array still records stage ownership
+ * separately from the imports used by the composition layer, so it remains a
+ * useful audit artifact rather than a second module implementation.
  *
  * The two dishonest answers are:
  *
@@ -18,15 +17,15 @@
  *     invention. `test/composition.test.ts` already composes invented modules,
  *     on purpose, to test the ALGORITHM; doing it again and calling it E2E
  *     would be a green light with nothing behind it.
- *   - wait for the publish. Then this repository is the one built last, with no
- *     E2E, which is exactly what docs/porting.md §3 says not to do.
+ *   - let runtime package imports replace the manifest. Published packages
+ *     expose the modules, but not the sibling source file:line provenance that
+ *     this audit is intended to preserve.
  *
- * The honest answer is that the ids and the `after` edges are NOT behaviour.
- * They are declarations, they are readable from the siblings' source today, and
- * whether they compose into plan.md §4.2's frame is a question no single
- * repository can answer — mx-gameplay cannot see mc-render's stages, and
- * mc-render is forbidden from knowing where in the frame it runs. That question
- * is exactly what mc-compose exists to answer, so it is what this file feeds.
+ * The ids and the `after` edges are NOT behaviour. They are declarations read
+ * from the sibling contracts, and this test manifest checks that the resolver
+ * composes them deterministically. The browser/server hosts hand published
+ * GameModules to `composeGame`; this file remains an independent stage-order
+ * audit and does not replace those runtime modules.
  *
  * ---------------------------------------------------------------------------
  * What keeps a transcription from going stale
@@ -67,7 +66,7 @@
 
 import { Effect, Ref } from 'effect'
 import { EMPTY_MODULE_LAYER, type GameModule, type StageRegistration } from '../../src/domain/composition'
-import { monotonicSecs } from '../../src/domain/kernel-vocabulary'
+import { monotonicSecs } from '@nerima-games/mc-kernel'
 import { StageId } from '../../src/domain/stage-order'
 
 /** One `StageRegistration` as some repository actually writes it down. */
@@ -99,27 +98,17 @@ export type RosterModule = {
  * "Registers a stage" is not the same list as "mc-compose may import"
  * ---------------------------------------------------------------------------
  *
- * This array used to say it was the repositories mc-compose is allowed to
- * import (docs/responsibility.md §3.1: the four experience modules plus
- * mc-render). That is no longer the same set and the difference is worth
- * stating rather than quietly widening: MC-COMPOSE MAY NOT IMPORT MC-SIM. It
- * reaches it only transitively, so `pnpm check:deps` rejects the import as a
- * `transitive-import` violation (`scripts/check-dependency-whitelist.ts` rule
- * 3), and that is deliberate — a rule that needs mc-sim directly is a rule that
- * belongs in an experience module.
+ * This array records every module that registers stages, not every runtime
+ * package in the host. The composition layer may not import mc-sim directly:
+ * `.oxlintrc.json` rejects that transitive boundary and `pnpm lint` is the
+ * enforcing gate. A rule that needs mc-sim directly belongs in an experience
+ * module.
  *
  * That is not a problem for this manifest, because the manifest is a
  * TRANSCRIPTION of what each repository registers, not a list of imports: it is
- * read from the siblings' source by eye and by `pnpm check:roster`, and no line
- * of this repository imports any of them (nothing is published anyway — see the
- * file header).
- *
- * It is a real question for a host, and an open one: somebody has to hand
- * mc-sim's `GameModule` to `composeGame`, and it cannot be mc-compose. That is
- * the same unresolved question docs/e2e-triage.md §4.3 asks about who builds
- * `InventoryService`, and mc-sim's `stages/registration.ts` records its own half
- * of it. Registering a stage and being importable are simply different
- * properties, and the frame only needs the first.
+ * read from the sibling source by eye and by `pnpm check:roster`. Registering a
+ * stage and being importable are different properties, and the frame resolver
+ * only needs the former here.
  */
 export const ROSTER: ReadonlyArray<RosterModule> = [
   {
@@ -252,7 +241,7 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // gives three reasons it declares none — an `after: [render:input]`
         // would be a claim about the global order §2.3-3 reserves to
         // mc-compose, mc-render depends on mc-sim so the reverse edge would
-        // invert the graph while evading `pnpm check:deps` (an `after` is a
+        // invert the graph while evading the dependency boundary (an `after` is a
         // string), and a headless build with no input stage is still a correct
         // simulation.
         //
@@ -338,9 +327,8 @@ export const ROSTER_REGISTERS_NOTHING: ReadonlyArray<{
   {
     name: 'mc-playground-kit',
     why:
-      'Dev-only, banned from `dependencies` by rule 6 of `scripts/check-dependency-whitelist.ts`, and it ' +
-      'consumes stages rather than registering any. It used to register `input:sample`; mc-render\'s ' +
-      '`stages/stage-ids.ts` header records why that was the shipped build having no input stage at all.',
+      'Browser bootstrap dependency; it consumes stages rather than registering any. Runtime input and ' +
+      'render stage ownership remains in mc-render, while this package owns canvas, RAF and teardown wiring.',
   },
 ]
 
@@ -353,7 +341,7 @@ export const ROSTER_REGISTERS_NOTHING: ReadonlyArray<{
  * corrected to what is on disk, which is the whole point: a backbone that
  * orders ids nobody registers orders nothing.
  *
- * EVERY PHASE IS NOW POPULATED. `simulation:physics` used to have no line —
+ * EVERY PHASE IS NOW POPULATED. `sim:physics` used to have no line —
  * mc-sim registered nothing — and it was the only empty one. It is filled, and
  * the two network phases arrived with a module already registering both, so
  * there is no phase in the table that nothing fills. The e2e suite asserts that

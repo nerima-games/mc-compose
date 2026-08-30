@@ -12,7 +12,7 @@
 ## DN-0: 合成層へのロジック堆積 — このリポジトリの存在理由
 
 **回帰テスト名**:
-- `rejects reaching past the experience modules to mc-sim, and names the path`(`test/check-dependency-whitelist.test.ts`)
+- `rejects reaching past the experience modules to mc-sim, and names the path`(lint boundary)
 - `exports nothing that sounds like a game rule, an entity or a world`(`test/public-api.test.ts`)
 
 **実装**: 両方とも実装済み
@@ -56,8 +56,9 @@ plan.md §1 の出発点そのものである:
 「ここに置くのが一番簡単だから」の積み重ねである。
 だから対処は「気をつける」ではない:
 
-1. **依存ホワイトリストが物理的に禁じる。** mc-compose が import してよいのは 4 つの mx-* と kernel だけ。
-   mc-sim を直接必要とするコードは書けない。書こうとすると `pnpm check:deps` が落ちる
+1. **依存境界が物理的に禁じる。** mc-compose の合成層が直接 import してよいのは 4 つの mx-*、
+   mc-render、kernel などの明示された公開 API だけである。mc-sim を直接必要とするコードは
+   書けず、`.oxlintrc.json` の `no-restricted-imports` を通じて `pnpm lint` が落とす
 2. **`runFrame` に何も足さない。** try/catch も計測も条件分岐も無い
 3. **公開 API の名前検査**(弱いが、追加のその場所に規範を置く)
 
@@ -295,7 +296,7 @@ qa-api-village 49 / qa-api-env 33 / qa-api-settings 19。
 1. **QA コマンドは所有モジュールが名前空間ごと提供し、compose はマージするだけ。**
    compose はコマンドを**書かない**。mc-sim のインベントリを読む QA コマンドが要るなら、
    mx-gameplay(または mc-sim)が公開し、compose がその名前空間の下に出す。
-   ここで書こうとすると体験モジュールを飛び越えることになり、`pnpm check:deps` が落とす
+   ここで書こうとすると体験モジュールを飛び越えることになり、`pnpm lint` が落とす
 2. **名前衝突はすべて致命的。** last-one-wins の shadowing は、
    E2E が別モジュールを検証して**成功する**という結果を生む。
    E2E が最終ゲート(plan.md §3.15)である以上、黙って間違うゲートはゲートが無いより悪い
@@ -342,9 +343,10 @@ mod 専用フックも優先度も pre/post パスも無い。
 ## DN-8: E2E は最終ゲートであり、それ以外の何かにしない
 
 **回帰テスト名**: `produces exactly the §4.2 order from the ids the roster really registers` ほか
-**実装**: `test/e2e/roster-frame-order.test.ts`(**フレーム側のみ**実装済み。
-振る舞い側は publish 待ちで、その理由は [testing.md](./testing.md) §3.4。
-70 本 1 本ずつの判定は [e2e-triage.md](./e2e-triage.md))
+**実装**: `test/e2e/roster-frame-order.test.ts` はフレーム側を固定し、現行の
+browser composition gate は [testing.md](./testing.md) §3.5 にまとめている。
+採掘から同じ frame で inventory drop が一回だけ反映される専用シナリオは残課題であり、
+70 本 1 本ずつの初期判定は [e2e-triage.md](./e2e-triage.md) に履歴として残している。
 
 **根拠**: 参照実装の E2E は `e2e/` にある。plan.md は「64 本」と書いているが、実測は異なる。
 
@@ -432,11 +434,12 @@ E2E の本数が増え続けるなら、それは compose にロジックが溜�
 3 つとも kernel 公開時にそのファイルを削除すると明言している。**その瞬間に落ちる時限爆弾だった。**
 
 **本実装での対処**: `run` は `Effect<void, never, FrameServices>` を返す。
-`FrameServices` は `domain/kernel-vocabulary.ts` で `ClockPort` として宣言してある —
-mx-* が `never` に留めているのに対しこのリポジトリが Tag を再掲するのは、
-**compose は stage の著者ではなく提供者**であり、名前を書けないものは discharge できないからである。
-Tag は文字列キーで解決されるので、`'@nerima-games/mc-kernel/ClockPort'` から作ったミラーは
-実行時に kernel のサービスそのものである。`test/kernel-mirror.test.ts` が形を固定している。
+`FrameServices` と `ClockPort` は `@nerima-games/mc-kernel` から直接 import する —
+compose 側で kernel の型・Tag を再宣言しない。`compose` は stage の著者ではなく提供者なので、
+公開 kernel のサービス契約をそのまま使うことで、名前と実行時 Tag のずれをなくす。
+`test/kernel-integration.test.ts` が branded time、ClockPort、FrameServices、固定時計 Layer の
+公開契約を直接検証する。compose の `StageRegistration` は、kernel の generic な登録 API ではなく、
+登録後に stage を順序付けて実行するこのリポジトリ固有の境界として残している。
 
 discharge は `ComposedGame.runFrameWith(services: Layer<FrameServices>)` である。
 この経路に `any` は 1 つも無いので、`Effect.provide` は要求を**消去ではなく除去**する。
@@ -616,9 +619,9 @@ mod がそのフェーズになれる**ことを意味する。
 | 自動保存の `Schedule.spaced`(plan.md §3.8) | mc-sim 側。compose は stage 順序だけ |
 | フレーム予算 / adaptive quality | 参照実装は `frame-adaptive-quality.ts` を持つ。**compose には置かない** |
 | **`sim:physics` を誰が登録するのか** | **解決。DN-14。** mc-sim が登録した(`stages/registration.ts:167`)。4 本のエッジはすべて繋がり、フレームは動かなかった |
-| **mc-sim の `GameModule` を誰がホストに渡すのか** | **未決。** mc-compose は mc-sim を import できない(rule 3、`transitive-import`)。`InventoryService` の構築者問題(下)と同じ形で、stage を登録することと import 可能であることは別の性質である |
-| **`InventoryService` のインスタンスを誰が構築するのか** | **未決。[e2e-triage.md](./e2e-triage.md) §4.3。** mx-gameplay が書き mx-ui が読むので 1 インスタンスでなければならないが、mx-gameplay は登録時に acquire する必要があり(`RRegister`)、それを discharge するホストは mc-compose で、**mc-compose は mc-sim を import できない**(rule 3)。mc-render の `InputService` が成立するのは、それが mc-render 自身の `ROut` にありホワイトリストに入っているからで、この論法は mc-sim には効かない |
-| **`BlockId`(数値)から `ItemId`(文字列)への解決を誰が持つか** | **未決。[e2e-triage.md](./e2e-triage.md) §4.2。** mc-kernel は `BlockId` と `BlockType` と `resolveDropItem` を持つが、`ItemId` / `ItemType` を 1 つも定義していない。mc-sim の `ItemId = string` は自ら PROVISIONAL と書いている |
+| **mc-sim の `GameModule` を誰がホストに渡すのか** | **解決。** `apps/web/main.ts` が公開 `mc-sim` API の `registerModule` を呼び、解決済み stage を composition に登録する |
+| **`InventoryService` のインスタンスを誰が構築するのか** | **解決。** `mx-gameplay` の公開 `makeGeneratedWorld` が generated `ChunkStore` と同じ `InventoryService` / Player / Entity / Time services を構築し、host はその `world.layer` を共有する |
+| **`BlockId`(数値)から canonical `ItemType` への解決を誰が持つか** | **解決。** `mc-sim` の `ItemType` は `mc-kernel` から再公開され、`mx-gameplay` の block vocabulary が drop をその型へ橋渡しする |
 | **ネットワーク同期のフェーズ位置** | **解決。DN-15。** `network:inbound`(input と physics の間)/ `network:outbound`(time-weather と camera-mirror の間)を骨格に追加。§4.2 の**拡張**であり転記ではない([architecture.md](./architecture.md) §4.5) |
-| E2E の (b) 側(振る舞いの相互作用) | publish 待ち。[testing.md](./testing.md) §3.4 |
-| E2E ハーネス(Playwright、SwiftShader、ポインタロック不可) | plan.md §3.10 の知見を流用。未着手 |
+| E2E の (b) 側(振る舞いの相互作用) | 現行 browser composition gate は実装済み。[testing.md](./testing.md) §3.5。ホストは次フレームのブロック状態遷移を `data-breaks-completed` として観測する。依存 API が返す同一フレームの drop → inventory reflection と、その一回性を検証する専用シナリオは残課題 |
+| E2E ハーネス(Playwright、SwiftShader、ポインタロック不可) | 実装済み。[playwright.config.ts](../playwright.config.ts) と `pnpm e2e:browser` |
