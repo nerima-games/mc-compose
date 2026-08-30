@@ -215,7 +215,19 @@ test('retains death-drop custom name and enchantments through reload and pickup'
   expect(reloaded.entities.filter(({ kind }) => kind === 'dropped_item')).toHaveLength(1)
 
   await callQa(page, 'gameplay.respawn')
-  await callQa(page, 'gameplay.targetNearestDroppedItem')
+  // Death never moved the player (the damage loop above is stationary), so
+  // this world's default respawn point is the same position the item
+  // dropped at — within the hand-rolled pickup loop's 1.5-unit radius
+  // (`apps/web/main.ts`'s per-frame pickup, restored to being the only
+  // picker-upper now that `droppedItemPickup: false` is honored again).
+  // Respawning already stands the player on the drop, so it is usually
+  // picked up before this line runs; `targetNearestDroppedItem` would throw
+  // "no dropped item found" in that case. Only walk to it if it is still
+  // there — this keeps the explicit-walk path exercised for a respawn that
+  // is NOT already on top of the drop, without assuming either outcome.
+  if ((await snapshot(page)).entities.some(({ kind }) => kind === 'dropped_item')) {
+    await callQa(page, 'gameplay.targetNearestDroppedItem')
+  }
   await expect.poll(async () => {
     const current = await snapshot(page)
     return current.inventory.slots.findIndex((slot) => slot?.item === 'diamond_pickaxe')

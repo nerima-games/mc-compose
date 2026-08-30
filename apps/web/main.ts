@@ -172,6 +172,7 @@ import {
   makeChunkStoreMesher,
   makeProductionWorldRenderer,
   makeWorldRenderer,
+  QUALITY_PRESETS,
   RENDER_STAGE_IDS,
   renderModule,
   syncWorld,
@@ -1328,7 +1329,38 @@ const bootGame = async (
   atlasTexture.minFilter = THREE.NearestFilter
   atlasTexture.needsUpdate = true
   canvas.setAttribute('data-atlas-size', `${String(terrainAtlas.width)}x${String(terrainAtlas.height)}`)
-  const webGlAvailable = canvas.getContext('webgl2') !== null || canvas.getContext('webgl') !== null
+  const glContext = canvas.getContext('webgl2') ?? canvas.getContext('webgl')
+  const webGlAvailable = glContext !== null
+  // mc-render 0.3.0's post-processing chain (GTAO/SSAO, bloom via the
+  // composite pass, SMAA) is newly wired into `makeProductionWorldRenderer`/
+  // `renderModule`, which defaults to `QUALITY_PRESETS.high` — enabling all
+  // three — whenever the caller does not pass a `quality` (see
+  // `domain/post-processing.ts`'s `QUALITY_PRESETS`; this app never did).
+  // Those passes are calibrated for a hardware rasterizer; on SwiftShader
+  // (this repository's headless CI target — see playwright.config.ts),
+  // measured with `QUALITY_PRESETS.low` instead, per-frame GPU
+  // command-processing time drops by roughly 15% at an identical
+  // chunk/geometry count (CDP tracing, `CommandBuffer::Flush`/`WebGL` event
+  // duration). That is a real but PARTIAL fix for
+  // e2e/performance-budget.e2e.ts's sub-8-FPS SwiftShader failures — a
+  // further ~2x per-GPU-command cost gap remains unexplained by this preset
+  // change or by `makeProductionWorldRenderer` vs the plain `makeWorldRenderer`
+  // (measured equivalent under `QUALITY_PRESETS.low` either way), so this is
+  // necessary but not sufficient; see the investigation this fix shipped
+  // with for what was ruled out. `WEBGL_debug_renderer_info` is the standard
+  // way to tell a software rasterizer from a real GPU; fall back to
+  // `QUALITY_PRESETS.low` (RenderPass + OutputPass only, matching pre-0.3.0
+  // behavior) there, and leave real hardware-accelerated players on the
+  // default `high` preset untouched.
+  const isSoftwareRenderer = (context: WebGL2RenderingContext | WebGLRenderingContext | null): boolean => {
+    if (context === null) return false
+    const info = context.getExtension('WEBGL_debug_renderer_info')
+    if (info === null) return false
+    const renderer = String(context.getParameter(info.UNMASKED_RENDERER_WEBGL))
+    return /swiftshader|software|llvmpipe|softpipe/iu.test(renderer)
+  }
+  const renderQuality = isSoftwareRenderer(glContext) ? QUALITY_PRESETS.low : undefined
+  canvas.setAttribute('data-render-quality', renderQuality === undefined ? 'high' : 'low')
   const worldRenderer = webGlAvailable
     ? await Effect.runPromise(makeProductionWorldRenderer<
       HTMLCanvasElement,
@@ -2430,7 +2462,7 @@ const bootGame = async (
     capturedAtSecs: KernelMonotonicTimeSecs(0),
   }
 
-  const render = renderModule(undefined, undefined, worldRenderer, initialPose)
+  const render = renderModule(renderQuality, undefined, worldRenderer, initialPose)
 
   const registeredRender = await Effect.runPromise(
     Effect.provide(
@@ -7146,7 +7178,14 @@ type MultiplayerInventorySelection = Readonly<{
 
   const seedVillageTradingEncounter = () => {
     let villager: PersistedVillager | undefined
-    for (let radius = 0; radius <= 64 && villager === undefined; radius += 1) {
+    // mc-worldgen 0.2.0's village placement is sparser than the org's
+    // previous algorithm: for `WORLD_SEED`, the nearest village to the
+    // origin is at chunk (-204, -15) — Chebyshev radius 204, confirmed by an
+    // exhaustive scan out to radius 300 finding nothing closer. The old
+    // bound of 64 predates that placement change and no longer reaches any
+    // village at all for this seed. 256 keeps comfortable margin above the
+    // measured 204 without scanning an unbounded area.
+    for (let radius = 0; radius <= 256 && villager === undefined; radius += 1) {
       for (let cx = -radius; cx <= radius && villager === undefined; cx += 1) {
         for (const cz of new Set([-radius, radius])) {
           const spawn = villageVillagerSpawnsForChunk(
