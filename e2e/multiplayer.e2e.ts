@@ -282,7 +282,17 @@ const expectOutOfBoundsPlacementRejection = async (
   }
 }
 
-const connectPage = async (page: Page, url: string, registrationToken?: string): Promise<void> => {
+// `bootTimeout` defaults to Playwright's own default (undefined => no
+// `{ timeout }` override) for every existing caller. Two full game clients
+// booting concurrently in one browser context — only the two-Creative-
+// sessions test does this — measurably outlasts the bare 5s default on a
+// real CI runner; see that test's own `bootTimeout` argument to `openPlayer`.
+const connectPage = async (
+  page: Page,
+  url: string,
+  registrationToken?: string,
+  bootTimeout?: number,
+): Promise<void> => {
   if (registrationToken !== undefined) {
     const parsed = new URL(url)
     const serverUrl = parsed.searchParams.get('multiplayer')
@@ -297,7 +307,11 @@ const connectPage = async (page: Page, url: string, registrationToken?: string):
   }
   await page.goto(url)
   const canvas = page.locator('#game-canvas')
-  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await expect(page.locator('body')).toHaveAttribute(
+    'data-mc-compose-boot',
+    'running',
+    bootTimeout === undefined ? undefined : { timeout: bootTimeout },
+  )
   await expect(canvas).toHaveAttribute('data-multiplayer-connection', 'connected')
 }
 
@@ -369,6 +383,7 @@ const openPlayer = async (
   registrationToken?: string,
   createWorld: (page: Page, name: string) => Promise<string> = createCreativeWorld,
   existingContext?: BrowserContext,
+  bootTimeout?: number,
 ): Promise<{ readonly context: BrowserContext; readonly page: Page; readonly url: string }> => {
   const context = existingContext ?? await browser.newContext()
   const page = await context.newPage()
@@ -380,7 +395,7 @@ const openPlayer = async (
     await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
   }
   const url = multiplayerUrl(sessionUrl, player, name, serverUrl)
-  await connectPage(page, url, registrationToken)
+  await connectPage(page, url, registrationToken, bootTimeout)
   return { context, page, url }
 }
 
@@ -626,6 +641,11 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     })
     document.dispatchEvent(new Event('visibilitychange'))
   })
+  // Bob boots a second full game client into the same browser context while
+  // Alice's is already running — the only scenario in this file with two
+  // concurrent clients — which measurably outlasts the bare 5s boot-wait
+  // default on a real CI runner (confirmed flaky there: same commit's CI run
+  // failed on this wait once, passed on the automatic retry).
   const bob = await openPlayer(
     browser,
     'Bob Multiplayer E2E',
@@ -635,6 +655,7 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     LEGACY_SECRETS['bob-e2e'],
     createCreativeWorld,
     playerContext,
+    20_000,
   )
   try {
     const aliceCanvas = alice.page.locator('#game-canvas')

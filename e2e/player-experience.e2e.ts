@@ -185,7 +185,15 @@ test.describe('player inventory experience', () => {
     })
 
     test('progresses from wood through diamond and mines obsidian', async ({ page }) => {
-    test.setTimeout(90_000)
+    // 90s used to be tight even before the furnace wait below: traced via
+    // this test's own CI trace.zip, the wood/stone/iron/mining progression
+    // ahead of smelting already consumes ~50.5s on a real SwiftShader CI
+    // runner, leaving under 40s of the furnace step's own 50s allowance
+    // before the outer timeout fired first — the furnace output was still
+    // climbing (0 -> 1 -> 2 ingots observed), not stalled. 140s covers the
+    // pre-smelt phase, the full 50s furnace allowance, and the remaining
+    // steps after smelting with margin.
+    test.setTimeout(140_000)
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
     await callQa(page, 'gameplay.seedWoodenPickaxeProgression')

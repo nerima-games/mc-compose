@@ -116,10 +116,18 @@ jobs:
       - name: Browser e2e
         run: nix develop --command pnpm e2e:browser
 
-      - name: Upload Playwright report
+      # playwright.config.ts configures the `list` and `json` reporters, not
+      # `html` — there is no `playwright-report/` directory for this step to
+      # ever find. `test-results/` is what actually gets written (the JSON
+      # report, plus each failed test's trace.zip/error-context.md/
+      # screenshot); browser-regression.yml uploads the same path for the
+      # same suite and its artifacts are the ones that make a CI-only
+      # failure debuggable without a local repro.
+      - name: Upload e2e-browser results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: playwright-report
-          path: playwright-report/
+          name: e2e-browser-results
+          path: test-results/
+          if-no-files-found: ignore
           retention-days: 7

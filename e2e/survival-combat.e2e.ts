@@ -458,6 +458,17 @@ test('preserves Nether death drops and unrelated drops across respawn', async ({
   for (let hit = 0; hit < 5; hit += 1) {
     await callQa<unknown>(page, 'gameplay.damage')
   }
+  // The death-drop entity is created on a later frame tick than the QA
+  // damage calls that kill the player, same as the unrelated drop polled for
+  // above — a bare snapshot() taken immediately after the loop can read
+  // before that tick has run, especially at CI's lower frame rate. Poll for
+  // it, mirroring the pattern above, before reading the settled snapshot.
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return current.entities.filter(
+      (entity) => entity.kind === 'dropped_item' && entity.id !== unrelatedDropId,
+    ).length
+  }).toBe(1)
   const death = await snapshot(page)
   expect(death.dimension).toBe('nether')
   expect(death.dead).toBe(true)
