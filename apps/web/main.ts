@@ -1965,15 +1965,28 @@ const bootGame = async (
   //
   // A fixed radius bounds memory while still exercising both add and removal.
   //
-  // Software-rasterizer-conditional: mc-worldgen 0.2.0's deepslate layer (see
-  // the investigation the render-quality fallback above shipped with) roughly
-  // quadruples the mesh index count per chunk versus the pre-0.2.0 terrain
-  // this budget was set against, because the same exposed rock surface is now
-  // split across two block types (stone/deepslate) instead of one, which
-  // defeats greedy meshing's same-blockId merge — not because SwiftShader
-  // renders more chunks. Measured: radius 2 here is ~153k indices/frame;
-  // radius 1 is ~71k, a 2.17x cut (not a full return to the pre-0.2.0 ~39k —
-  // see the investigation for what that residual gap is). Real
+  // Software-rasterizer-conditional, using the same `softwareRenderer` signal
+  // as the render-quality fallback above.
+  //
+  // mc-worldgen 0.2.0 added a deepslate layer at depth, absent from the
+  // pre-0.2.0 terrain this budget was originally calibrated against. Verified
+  // by isolating mc-worldgen alone (pnpm-workspace.yaml override, everything
+  // else held at the current pins): the same 25-chunk sample has nearly
+  // identical exposed-face and air-pocket counts either version, but 0.2.0
+  // splits the underground surface across two solid block ids (stone +
+  // deepslate) plus more ore variety — 20 distinct block ids in the sample
+  // versus 11 pre-0.2.0 — instead of one. Greedy meshing only merges runs of
+  // the SAME block id, so the same exposed surface now meshes into roughly
+  // 4x the indices at an unchanged face count — this is a merge-key
+  // diversity problem, not a "SwiftShader draws more chunks" problem.
+  //
+  // Measured (real SwiftShader, unthrottled, this 25-chunk scene):
+  //   radius 2: 153,426 indices/frame (25 chunks)
+  //   radius 1:  70,842 indices/frame (9 chunks) — a 2.17x cut, not a full
+  //     return to the pre-0.2.0 terrain's ~38,826 at radius 2; a residual
+  //     gap remains and is not explained by this fix.
+  // The software-rasterizer perf floor is 8 FPS
+  // (e2e/performance-budget.e2e.ts's MINIMUM_AVERAGE_FPS). Real
   // hardware-accelerated players keep radius 2.
   const STREAM_RADIUS_CHUNKS = softwareRenderer ? 1 : 2
   canvas.setAttribute('data-stream-radius', String(STREAM_RADIUS_CHUNKS))
