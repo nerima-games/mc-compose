@@ -14,7 +14,7 @@ export type DroppedItemLifetimeTracker = {
 }
 
 export const createDroppedItemLifetimeTracker = (
-  lifetimeSecs = DROPPED_ITEM_LIFETIME_SECS,
+  lifetimeSecs: number = DROPPED_ITEM_LIFETIME_SECS,
 ): DroppedItemLifetimeTracker => {
   const elapsedByDimension = new Map<string, Map<string, number>>()
 

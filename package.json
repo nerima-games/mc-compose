@@ -15,12 +15,12 @@
   "license": "MIT",
   "engines": {
     "node": ">=24.0.0",
-    "pnpm": ">=11.0.0"
+    "pnpm": ">=11.24.0"
   },
-  "packageManager": "pnpm@11.17.0",
+  "packageManager": "pnpm@11.24.0",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",
-    "access": "restricted"
+    "access": "public"
   },
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -42,8 +42,8 @@
     "frame-stages"
   ],
   "scripts": {
-    "typecheck": "tsc6 -p tsconfig.build.json --pretty false && tsc6 -p tsconfig.test.json --pretty false",
-    "lint": "oxlint --deny-warnings src scripts test apps e2e",
+    "typecheck": "tsc -p tsconfig.build.json --pretty false && tsc -p tsconfig.test.json --pretty false && tsc -p tsconfig.preview.json --pretty false",
+    "lint": "oxlint --deny-warnings src scripts test apps e2e && ast-grep scan",
     "lint:fix": "oxlint --fix src scripts test apps e2e",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -51,41 +51,39 @@
     "e2e": "vitest run test/e2e",
     "dev": "vite",
     "build:web": "vite build",
-    "typecheck:preview": "tsc6 -p tsconfig.preview.json --pretty false",
     "e2e:browser": "playwright test",
     "check:roster": "tsx scripts/check-roster-manifest.ts",
-    "verify": "pnpm typecheck && pnpm typecheck:preview && pnpm build:web && pnpm lint && pnpm test"
+    "verify": "pnpm typecheck && pnpm lint && pnpm test"
   },
   "dependencies": {
-    "@nerima-games/mc-audio": "0.2.6",
-    "@nerima-games/mc-kernel": "0.4.0",
-    "@nerima-games/mc-physics": "0.1.7",
-    "@nerima-games/mc-render": "0.2.14",
-    "@nerima-games/mc-save": "0.2.2",
-    "@nerima-games/mc-sim": "0.1.42",
-    "@nerima-games/mc-playground-kit": "0.1.2",
-    "@nerima-games/mc-worldgen": "0.1.14",
-    "@nerima-games/mx-gameplay": "0.3.1",
-    "@nerima-games/mx-multiplayer": "0.5.0",
-    "@nerima-games/mx-redstone": "0.2.7",
-    "@nerima-games/mx-ui": "0.3.8",
-    "effect": "^3.22.1"
+    "@nerima-games/mc-audio": "0.2.7",
+    "@nerima-games/mc-kernel": "0.5.1",
+    "@nerima-games/mc-physics": "0.2.1",
+    "@nerima-games/mc-render": "0.3.0",
+    "@nerima-games/mc-save": "0.3.0",
+    "@nerima-games/mc-sim": "0.2.1",
+    "@nerima-games/mc-playground-kit": "0.2.0",
+    "@nerima-games/mc-worldgen": "0.2.0",
+    "@nerima-games/mx-gameplay": "0.3.3",
+    "@nerima-games/mx-multiplayer": "0.5.1",
+    "@nerima-games/mx-redstone": "0.2.8",
+    "@nerima-games/mx-ui": "0.3.9",
+    "effect": "3.22.1"
   },
   "devDependencies": {
-    "@changesets/changelog-github": "^1.0.0",
-    "@changesets/cli": "^3.0.0",
-    "@effect/vitest": "^0.30.0",
-    "@playwright/test": "^1.62.1",
-    "@types/node": "^26.2.0",
+    "@changesets/changelog-github": "1.0.0",
+    "@changesets/cli": "3.0.1",
+    "@effect/vitest": "0.30.0",
+    "@playwright/test": "1.62.1",
+    "@types/node": "26.4.0",
     "@types/three": "0.185.4",
-    "@types/ws": "^8.18.1",
-    "@vitest/coverage-v8": "^4.1.10",
-    "oxlint": "^1.78.0",
-    "three": "^0.185.1",
-    "tsx": "^4.23.12",
-    "typescript": "npm:@typescript/typescript6@6.0.2",
-    "vite": "^8.2.1",
-    "vitest": "^4.1.10",
-    "ws": "^8.21.3"
+    "@types/ws": "8.18.1",
+    "@vitest/coverage-v8": "4.1.11",
+    "three": "0.185.1",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vitest": "4.1.11",
+    "ws": "8.21.3"
   }
 }

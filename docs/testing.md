@@ -74,6 +74,14 @@ per-test の判定は [e2e-triage.md](./e2e-triage.md) にある。
 - **ヘッドレスではポインタロックが使えない** — 視点操作は QA API 経由で行う
 - QA API のキーは `__NERIMA_GAMES_QA__`(参照実装の `__TS_MINECRAFT_QA__` ではない)。
   古い名前に固定された E2E が古いビルドに対して黙って通るのを防ぐため
+- ブラウザ本体は Nix ではなく `npx playwright install --with-deps chromium` で取得する。
+  固定した nixpkgs revision の `playwright-driver.browsers` は 1.61.1 で、
+  `@playwright/test` の pin(1.62.1)が要求する chromium revision を一致させて
+  提供できない — 提供できるふりをして `browserType.launch: Executable doesn't exist`
+  を実行時まで隠す方が実害が大きいため、`flake.nix` はこのパッケージを一切持たない
+  (mx-ui と同じ構成)。ローカルでは `nix develop` に入った後に一度実行すればよく、
+  `e2e-browser` CI job も `pnpm e2e:browser` の前に同じコマンドを踏む
+  ([ci.yaml](../.github/workflows/ci.yaml))。
 
 農業のブラウザ回帰は `e2e/farming.e2e.ts` が担当する。QA API は初期状態の設定と
 収穫要求の発火だけに使い、成熟は通常のフレーム tick、食事と再植付けは実際の

@@ -118,34 +118,34 @@ oxlint が `no-restricted-syntax` 相当を実装するまで存在しない(`.o
 ### セットアップ
 
 ```console
-$ direnv allow          # flake.nix の devShell で Node.js 24 + corepack が入る
+$ direnv allow          # flake.nix の devShell で Node.js 24 + corepack、oxlint、ast-grep が入る
 $ pnpm install
 ```
 
-Nix を使わない場合は Node.js 24 以上と pnpm 11.17.0(`corepack` 推奨)を用意する。
-`oxlint` は package.json の devDependency なので、`pnpm install` 後はそのまま `pnpm lint`
-を実行できる。
+Nix を使わない場合は Node.js 24 以上と pnpm 11.24.0(`corepack` 推奨)を用意する。
+`oxlint` と `ast-grep` は package.json の devDependency ではなく Nix の `pkgs.oxlint` /
+`pkgs.ast-grep`(flake.nix)から来るので、Nix を使わない場合は別途インストールが要る
+(`pnpm lint` はこの両方を呼ぶ)。
 
 > **注意**: ツールチェーンは `devenv.nix` から `flake.nix` + `flake.lock` に移行済みである。
-> `flake.lock` はコミットされているので、`nix develop`（`.envrc` は `use flake`）は
+> `flake.lock` はコミットされているので、`nix develop`(`.envrc` は `use flake`)は
 > 誰の手元でも同じ nixpkgs に解決される。`devenv.nix` / `devenv.lock` はもう存在しない。
 
 ### コマンド
 
 | コマンド | 内容 |
 | --- | --- |
-| `pnpm typecheck` | `tsconfig.build.json` と `tsconfig.test.json` の両方を型検査 |
-| `pnpm lint` | oxlint(このリポジトリ唯一の lint 設定。package.json の devDependency)。**`--deny-warnings` 付きで走る**ため `warn` のルールもビルドを落とす設計で、`.oxlintrc.json` は `-c` なしで自動的に読み込まれる。 |
-| `pnpm lint:fix` | oxlint の自動修正 |
+| `pnpm typecheck` | `tsconfig.build.json` / `tsconfig.test.json` / `tsconfig.preview.json` の 3 つを型検査(`apps/` と `e2e/` を含む公開パッケージ境界も検査する) |
+| `pnpm lint` | `oxlint --deny-warnings`(Nix 提供)+ `ast-grep scan`(`.ast-grep/rules/*`)。**`--deny-warnings` 付きで走る**ため oxlint の `warn` ルールもビルドを落とす設計で、`.oxlintrc.json` は `-c` なしで自動的に読み込まれる。`no-type-assertion` は Wave 0 時点で pre-existing hit があるため `warning` に据え置いている(W3 で `error` に上げる) |
+| `pnpm lint:fix` | oxlint の自動修正(`ast-grep` 分は対象外) |
 | `pnpm test` | vitest(`@effect/vitest` の `it.effect` が主 API) |
 | `pnpm test:watch` | vitest watch |
-| `pnpm test:coverage` | カバレッジ計測 + statements / branches / functions / lines の 100% ゲート。`verify` には含まれない CI 別ゲート |
+| `pnpm test:coverage` | `src/**` のカバレッジ計測 + statements / branches / functions / lines の 100% ゲート(`apps/` は対象外)。`verify` には含まれない CI 別ゲート |
 | `pnpm e2e` | E2E だけを走らせる(`vitest run test/e2e`)。純粋なので `pnpm test` も `pnpm verify` も既に拾っている |
 | `pnpm check:roster` | `test/e2e/roster.ts` の転記が兄弟リポジトリの実ソースと一致するかを照合。**`verify` に入っていない** — 兄弟のチェックアウトが要り、CI には無いため([docs/testing.md](./docs/testing.md) §3.5) |
-| `pnpm typecheck:preview` | 公開済みパッケージ境界で `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) |
-| `pnpm e2e:browser` | Chromium で全 Playwright E2E を実行 |
+| `pnpm e2e:browser` | Chromium で全 Playwright E2E を実行。CI では `ci.yaml` の別 job(`Verify` とは並列) |
 | `pnpm changeset` | ユーザー向け変更に `.changeset/*.md` を追加する(RELEASE_STANDARD.md §1) |
-| `pnpm verify` | `typecheck && typecheck:preview && build:web && lint && test`。CI の Verify と同じ内容 |
+| `pnpm verify` | `typecheck && lint && test`。CI の Verify と同じ内容。`build:web` と coverage は CI の別ステップ |
 
 ## 現状
 

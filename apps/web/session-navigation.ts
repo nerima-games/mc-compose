@@ -34,7 +34,7 @@ export const readSessionId = (search: string): string | undefined => {
   return value
 }
 
-export const sessionIdFromSearch = readSessionId
+export const sessionIdFromSearch: typeof readSessionId = readSessionId
 
 export const readSessionRoute = (search: string): SessionRoute | undefined => {
   const parameters = new URLSearchParams(search)

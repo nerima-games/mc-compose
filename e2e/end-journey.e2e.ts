@@ -206,7 +206,12 @@ test('completes and persists a survival End journey without progression-state se
       && rendered.feetPosition.z === position.z
       && (position.x !== thrownEye?.position.x || position.z !== thrownEye.position.z)
   }).toBe(true)
-  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length, { timeout: 5_000 }).toBe(0)
+  // CI's SwiftShader runner ticks the simulation slower in wall-clock time
+  // than a real GPU does, so the eye's flight — real motion, confirmed by the
+  // poll just above — needs more real seconds to finish landing. This test
+  // already carries a 600s budget (see `test.setTimeout` above), so the
+  // extra 15s costs nothing there.
+  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length, { timeout: 20_000 }).toBe(0)
   await expect.poll(async () => (
     (await snapshot(page)).entities.some((entity) => (
       entity.kind === 'dropped_item' && entity.item === 'eye_of_ender'
@@ -226,7 +231,10 @@ test('completes and persists a survival End journey without progression-state se
   await expect.poll(async () => itemCount(await snapshot(page), 'eye_of_ender'))
     .toBe(EYES_REQUIRED - 1)
   await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length).toBe(1)
-  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length, { timeout: 5_000 }).toBe(0)
+  // Same frame-rate-scaled flight-completion wait as the poll above at the
+  // first eye launch — CI's software renderer stretches the flight well past
+  // the 5 s default.
+  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length, { timeout: 20_000 }).toBe(0)
   expect((await snapshot(page)).entities.some((entity) => (
     entity.kind === 'dropped_item' && entity.item === 'eye_of_ender'
   ))).toBe(false)

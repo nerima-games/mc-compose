@@ -1,3 +1,6 @@
+type Cell = { readonly x: number; readonly y: number; readonly z: number }
+type Pose = { readonly feetPosition: Cell; readonly yawRadians: number; readonly pitchRadians: number }
+
 export const FARMLAND_BLOCK_ID = 49
 export const POTATO_CROP_BLOCK_ID = 72
 export const OBSIDIAN_BLOCK_ID = 40
@@ -41,7 +44,7 @@ export const QA_ENVIRONMENT_CONTACT_CELLS = [
   { x: 24, y: 65, z: 8 },
   { x: 25, y: 65, z: 8 },
 ] as const
-export const QA_ENVIRONMENT_FLOOR_CELLS = Array.from({ length: 4 }, (_, offset) => ({
+export const QA_ENVIRONMENT_FLOOR_CELLS: ReadonlyArray<Cell> = Array.from({ length: 4 }, (_, offset) => ({
   x: 23 + offset,
   y: 64,
   z: 8,
@@ -60,7 +63,7 @@ export const QA_PORTAL_POSE = {
   yawRadians: 0,
   pitchRadians: 0,
 } as const
-export const QA_PORTAL_LAYOUT = {
+export const QA_PORTAL_LAYOUT: { readonly frame: ReadonlyArray<Cell>; readonly interior: ReadonlyArray<Cell> } = {
   frame: [
     ...Array.from({ length: 4 }, (_, offset) => ({ x: 119 + offset, y: 64, z: 8 })),
     ...Array.from({ length: 4 }, (_, offset) => ({ x: 119 + offset, y: 68, z: 8 })),
@@ -72,8 +75,8 @@ export const QA_PORTAL_LAYOUT = {
     y: 65 + Math.floor(index / 2),
     z: 8,
   })),
-} as const
-export const QA_IGNITION_PORTAL_LAYOUT = {
+}
+export const QA_IGNITION_PORTAL_LAYOUT: { readonly frame: ReadonlyArray<Cell>; readonly interior: ReadonlyArray<Cell> } = {
   frame: [
     ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 65, z: 9 })),
     ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 69, z: 9 })),
@@ -85,7 +88,7 @@ export const QA_IGNITION_PORTAL_LAYOUT = {
     y: 66 + Math.floor(index / 2),
     z: 9,
   })),
-} as const
+}
 
 export const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'redstone_dust',
@@ -104,16 +107,16 @@ export const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'door',
 ])
 
-export const QA_POSE = {
+export const QA_POSE: Pose = {
   feetPosition: { x: 8.5, y: 64.5, z: 8.5 },
   yawRadians: 0,
   pitchRadians: -Math.PI / 2 + 0.01,
-} as const
-export const QA_FARM_POSE = {
+}
+export const QA_FARM_POSE: Pose = {
   feetPosition: { x: 8.5, y: 65.5, z: 8.5 },
   yawRadians: 0,
   pitchRadians: -Math.PI / 2 + 0.01,
-} as const
+}
 export const QA_IGNITION_POSE = {
   feetPosition: { x: 8.5, y: 65, z: 10.5 },
   yawRadians: 0,

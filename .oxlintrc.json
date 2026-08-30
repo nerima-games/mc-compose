@@ -78,13 +78,15 @@
 
     // Style
     //
-    // Pure formatting rules are intentionally not part of this gate. The npm
-    // oxlint binary exposes `one-var` through the style category even though
-    // this repository's source policy leaves declaration grouping to the
-    // author. Keep it explicit so an oxlint upgrade cannot turn the whole
-    // baseline into formatting diagnostics; correctness, suspicious, perf and
-    // restriction rules remain enabled below.
-    "one-var": "off",
+    // Pure formatting rules are intentionally not part of this gate.
+    // Wave 0 (2026-08-30) moved oxlint from an npm devDependency to the
+    // Nix-pinned `pkgs.oxlint` (1.75.0). That build does not implement
+    // `one-var` at all — unlike the npm binary this repository pinned
+    // before, which exposed it through the style category even though this
+    // repository's source policy leaves declaration grouping to the author —
+    // and a config naming an unknown rule fails to parse rather than warning
+    // once. There is nothing to turn off any more; correctness, suspicious,
+    // perf and restriction rules remain enabled below.
     "no-array-method-this-argument": "warn",
     "no-bitwise": "warn",
     // StageId (Brand.refined) and Context.Tag are effect-ts factory functions, not
@@ -111,29 +113,32 @@
     // §5) and is not coming back.
     "no-restricted-globals": ["warn", "name", "open", "close", "event"],
     // mc-compose is Tier4, the apex of the dependency graph (DEPENDENCY_POLICY.md §1): it
-    // may depend on mc-audio, mc-render, mc-save, mc-sim, mc-worldgen, mx-gameplay,
-    // mx-redstone, mx-ui and mx-multiplayer (all declared in package.json#dependencies),
-    // plus mc-kernel (universally importable, and therefore deliberately absent from both
-    // package.json's allowlist reasoning and this list — DEPENDENCY_POLICY.md §2 rule 5).
-    // As of this PR, mc-playground-kit is ALSO a real `dependencies` entry, not the usual
-    // devDependency-only exception (DEPENDENCY_POLICY.md §3): apps/web/main.ts's shipped
-    // production bootstrap (container/canvas mount, network pump, cleanup lifecycle) calls
-    // `makeBrowserPreview` unconditionally, so this repository is the one place in the org
-    // where that harness is legitimately runtime code, not test/preview-only glue. The
-    // `no-restricted-imports` pattern that used to ban it here has been removed accordingly
-    // — DEPENDENCY_POLICY.md §3 updated to record the exception.
-    // Unlike every other Tier, there is close to nothing left to forbid here; the one
-    // `patterns` entry below is the only thing that is NOT licensed even though it is
-    // reachable on disk. (The `effect` entry moved into `paths` here too — the bare
-    // object form used previously is not part of the rule's real schema, which requires
-    // `paths`/`patterns` wrapper keys; https://oxc.rs/docs/guide/usage/linter/rules/eslint/no-restricted-imports.)
+    // may depend on mc-audio, mc-physics, mc-render, mc-save, mc-sim, mc-worldgen,
+    // mc-playground-kit, mx-gameplay, mx-redstone, mx-ui and mx-multiplayer (all declared in
+    // package.json#dependencies), plus mc-kernel (universally importable). mc-playground-kit
+    // is a real `dependencies` entry, not the usual devDependency-only exception
+    // (DEPENDENCY_POLICY.md §3): apps/web/main.ts's shipped production bootstrap
+    // (container/canvas mount, network pump, cleanup lifecycle) calls `makeBrowserPreview`
+    // unconditionally, so this repository is the one place in the org where that harness is
+    // legitimately runtime code, not test/preview-only glue.
     //
-    // This file is auto-discovered by the npm-pinned oxlint binary, and
-    // `no-restricted-imports` is an active dependency-boundary rule. Keep the
-    // rule explicit here because the executable, rather than an unrelated
-    // formatter, is the source of truth for this gate.
+    // Wave 0 (2026-08-30) switched the `patterns` entry from a deny-list (naming the three
+    // packages reachable only transitively — mc-noise, mc-meshing, mc-physics) to the
+    // org-standard allow-list form: `group` starts with `@nerima-games/**` and `!`-excludes
+    // every package this Tier may import, so a new sibling repo added to the org is banned by
+    // default here rather than needing an opt-out (org policy —
+    // `regex` is not part of the rule's real schema and is no longer used). mc-physics moved
+    // from denied to allowed in this pass: it is now a genuine direct dependency (see
+    // apps/web/main.ts's `resolveOptionsFromKernel` adapter for `sim:physics`'s
+    // `blockPropertiesAt`, mc-save 0.3.0 note above), not a transitive-only reach. (The
+    // `effect` entry stays in `paths` — the bare object form used previously is not part of
+    // the rule's real schema, which requires `paths`/`patterns` wrapper keys;
+    // https://oxc.rs/docs/guide/usage/linter/rules/eslint/no-restricted-imports.)
+    //
+    // `no-restricted-imports` is an active dependency-boundary rule, kept at `error` (org
+    // policy) rather than the file's default `warn` category severity.
     "no-restricted-imports": [
-      "warn",
+      "error",
       {
         "paths": [
           {
@@ -144,8 +149,34 @@
         ],
         "patterns": [
           {
-            "regex": "^@nerima-games/(mc-noise|mc-meshing|mc-physics)(/.*)?$",
-            "message": "mc-compose reaches these only transitively through mc-worldgen/mc-sim/mc-render. Reaching through a dependency is not an import licence (DEPENDENCY_POLICY.md §2, no-transitive-closure)."
+            "group": [
+              "@nerima-games/**",
+              "!@nerima-games/mc-kernel",
+              "!@nerima-games/mc-kernel/**",
+              "!@nerima-games/mc-audio",
+              "!@nerima-games/mc-audio/**",
+              "!@nerima-games/mc-physics",
+              "!@nerima-games/mc-physics/**",
+              "!@nerima-games/mc-render",
+              "!@nerima-games/mc-render/**",
+              "!@nerima-games/mc-save",
+              "!@nerima-games/mc-save/**",
+              "!@nerima-games/mc-sim",
+              "!@nerima-games/mc-sim/**",
+              "!@nerima-games/mc-worldgen",
+              "!@nerima-games/mc-worldgen/**",
+              "!@nerima-games/mc-playground-kit",
+              "!@nerima-games/mc-playground-kit/**",
+              "!@nerima-games/mx-gameplay",
+              "!@nerima-games/mx-gameplay/**",
+              "!@nerima-games/mx-redstone",
+              "!@nerima-games/mx-redstone/**",
+              "!@nerima-games/mx-ui",
+              "!@nerima-games/mx-ui/**",
+              "!@nerima-games/mx-multiplayer",
+              "!@nerima-games/mx-multiplayer/**"
+            ],
+            "message": "mc-compose is Tier4 (DEPENDENCY_POLICY.md §1); only the listed packages may be imported."
           }
         ]
       }

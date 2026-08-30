@@ -1,7 +1,8 @@
 import {
-  launchArrow,
-  stepArrow,
-  type Arrow,
+  ARROW_PROFILE,
+  launchProjectile,
+  stepProjectile,
+  type Projectile,
   type ProjectileHit,
   type ProjectileWorld,
 } from '@nerima-games/mc-sim'
@@ -9,7 +10,7 @@ import {
 export type RuntimeProjectile = Readonly<{
   id: string
   dimension: string
-  arrow: Arrow
+  arrow: Projectile
   damage: number
   knockback: number
 }>
@@ -53,7 +54,7 @@ export const launchRuntimeProjectile = (
       dimension: input.dimension,
       damage: input.damage,
       knockback: input.knockback,
-      arrow: launchArrow({
+      arrow: launchProjectile({
         position: input.position,
         yawRadians: input.yawRadians,
         pitchRadians: input.pitchRadians,
@@ -78,7 +79,11 @@ export const advanceProjectileRuntime = (
       continue
     }
     const velocity = projectile.arrow.velocity
-    const result = stepArrow(projectile.arrow, world, deltaSecs)
+    // Argument order and shape are mc-physics 0.2.1's, not the retired
+    // arrow-specific stepArrow's: (state, dt, world, profile), and the result
+    // field is `projectile`, not `arrow`. ARROW_PROFILE reproduces the exact
+    // arrow trajectory stepArrow used to hard-code.
+    const result = stepProjectile(projectile.arrow, deltaSecs, world, ARROW_PROFILE)
     if (result.hit !== undefined) {
       impacts.push({
         projectileId: projectile.id,
@@ -88,8 +93,8 @@ export const advanceProjectileRuntime = (
         velocity,
       })
     }
-    if (result.arrow.state !== 'despawned') {
-      projectiles.push({ ...projectile, arrow: result.arrow })
+    if (result.projectile.state !== 'despawned') {
+      projectiles.push({ ...projectile, arrow: result.projectile })
     }
   }
   return { state: { ...state, projectiles }, impacts }
@@ -147,7 +152,7 @@ export const projectileRuntimeSnapshot = (
 ): ReadonlyArray<Readonly<{
   id: string
   dimension: string
-  state: Arrow['state']
+  state: Projectile['state']
   position: Readonly<{ x: number; y: number; z: number }>
   ageSeconds: number
 }>> => state.projectiles.map((projectile) => ({

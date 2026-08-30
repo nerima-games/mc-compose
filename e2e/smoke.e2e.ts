@@ -698,7 +698,15 @@ test.describe('sustained play', () => {
 
     // The loop never stopped. `boot` replaces the body attribute on a defect,
     // so a stalled loop shows here as a count that stopped rising.
-    expect(framesAtEnd).toBeGreaterThan(framesAtStart + 100)
+    //
+    // +100 predates this repository's accepted SwiftShader floor
+    // (performance-budget.e2e.ts's `MINIMUM_AVERAGE_FPS = 8`) and implicitly
+    // demanded ~18 fps over the 5.5s walk above (100 / 5.5s) — a second gate
+    // asserting a stricter floor than the one this org has already accepted.
+    // 30 is below the 8 fps floor's own 5.5s allowance (8 * 5.5 ≈ 44 frames),
+    // leaving margin, while still proving the loop advanced well past a
+    // single tick.
+    expect(framesAtEnd).toBeGreaterThan(framesAtStart + 30)
     expect(await page.locator('body').getAttribute('data-mc-compose-boot')).toBe('running')
 
     // Still standing on the world after all of it — not sunk into it, not

@@ -1,4 +1,5 @@
-import type { SoundCueId, Vec3 } from '@nerima-games/mc-audio'
+import type { SoundCueId } from '@nerima-games/mc-audio'
+import type { Position } from '@nerima-games/mc-kernel'
 
 export type FootstepSurface = 'default' | 'grass' | 'wood' | 'stone'
 
@@ -13,8 +14,8 @@ export type FootstepAdvanceInput = {
   readonly sneaking: boolean
   readonly dead: boolean
   readonly dimensionChanged: boolean
-  readonly position: Vec3
-  readonly play: (cueId: SoundCueId, options: { readonly position: Vec3; readonly gainScale: number }) => void
+  readonly position: Position
+  readonly play: (cueId: SoundCueId, options: { readonly position: Position; readonly gainScale: number }) => void
 }
 
 export const initialFootstepRuntimeState = (): FootstepRuntimeState => ({

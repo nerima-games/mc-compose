@@ -2,7 +2,7 @@
 import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
 
-export default defineConfig({
+const config: ReturnType<typeof defineConfig> = defineConfig({
   server: {
     port: 5181,
     strictPort: true,
@@ -40,3 +40,5 @@ export default defineConfig({
   },
   clearScreen: false,
 })
+
+export default config

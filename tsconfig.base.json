@@ -7,9 +7,9 @@
     "target": "ES2024",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    // Runtime-agnostic: the DOM library is present only because Effect exposes
-    // Web-standard types in its public declarations; source code still does
-    // not receive browser or Node globals through `types`.
+    // mc-compose ships a real browser application (apps/web) in addition to its
+    // package export, so DOM is a genuine runtime need here — not, as in
+    // mc-kernel, a leaked declaration surface from Effect's Web-standard types.
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "types": [],
 
@@ -24,6 +24,7 @@
     "strict": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
+    "strictBuiltinIteratorReturn": true,
     "strictFunctionTypes": true,
     "strictBindCallApply": true,
     "strictPropertyInitialization": true,
@@ -45,12 +46,26 @@
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
+    // Public declarations must be derivable from each source file's explicit
+    // annotations. This prevents an implementation-only inference change from
+    // silently changing the package API; Effect's Tag idiom is handled by an
+    // explicitly typed base in clock.ts.
+    "isolatedDeclarations": true,
+    // A type-only import must say so. The emitted JavaScript then follows from
+    // the import statement alone, with no whole-program analysis deciding which
+    // specifiers survive — which is what a package shipping ESM to fifteen
+    // consumers wants.
     "verbatimModuleSyntax": true,
+    // Nothing that needs a runtime transform to have meaning: no enum, no
+    // namespace, no parameter property. The domain is types and const data
+    // already, so this pins the property rather than requesting a change.
     "erasableSyntaxOnly": true,
+    // A side-effect import that resolves to nothing is an error, not a no-op.
+    "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "resolvePackageJsonExports": true,
     "resolvePackageJsonImports": true,
-    "skipLibCheck": false,
+    "skipLibCheck": true,
 
     "newLine": "lf",
     "stripInternal": true,

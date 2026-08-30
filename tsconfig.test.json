@@ -9,6 +9,6 @@
       "@nerima-games/mc-audio": ["../mc-audio/src/index.ts"]
     }
   },
-  "include": ["src/index.ts", "src/domain/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "coverage", "dist"]
 }

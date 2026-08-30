@@ -282,7 +282,21 @@ const expectOutOfBoundsPlacementRejection = async (
   }
 }
 
-const connectPage = async (page: Page, url: string, registrationToken?: string): Promise<void> => {
+// `bootTimeout` defaults to Playwright's own default (undefined => no
+// `{ timeout }` override) for every existing caller. Two full game clients
+// booting concurrently in one browser context — only the two-Creative-
+// sessions test does this — measurably outlasts the bare 5s default on a
+// real CI runner. That test threads `bootTimeout` through THREE call
+// sites of this same contention: both `openPlayer` joins, and Bob's own
+// reconnection after `bob.page.close()` — a plain `connectPage` call, not
+// an `openPlayer` one, but booting a full client back into a context where
+// Alice's is still live is the identical shape and needs the same budget.
+const connectPage = async (
+  page: Page,
+  url: string,
+  registrationToken?: string,
+  bootTimeout?: number,
+): Promise<void> => {
   if (registrationToken !== undefined) {
     const parsed = new URL(url)
     const serverUrl = parsed.searchParams.get('multiplayer')
@@ -297,7 +311,11 @@ const connectPage = async (page: Page, url: string, registrationToken?: string):
   }
   await page.goto(url)
   const canvas = page.locator('#game-canvas')
-  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+  await expect(page.locator('body')).toHaveAttribute(
+    'data-mc-compose-boot',
+    'running',
+    bootTimeout === undefined ? undefined : { timeout: bootTimeout },
+  )
   await expect(canvas).toHaveAttribute('data-multiplayer-connection', 'connected')
 }
 
@@ -369,6 +387,7 @@ const openPlayer = async (
   registrationToken?: string,
   createWorld: (page: Page, name: string) => Promise<string> = createCreativeWorld,
   existingContext?: BrowserContext,
+  bootTimeout?: number,
 ): Promise<{ readonly context: BrowserContext; readonly page: Page; readonly url: string }> => {
   const context = existingContext ?? await browser.newContext()
   const page = await context.newPage()
@@ -380,7 +399,7 @@ const openPlayer = async (
     await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
   }
   const url = multiplayerUrl(sessionUrl, player, name, serverUrl)
-  await connectPage(page, url, registrationToken)
+  await connectPage(page, url, registrationToken, bootTimeout)
   return { context, page, url }
 }
 
@@ -541,11 +560,26 @@ test('fires a bow through the authoritative multiplayer server', async ({ browse
     expect(itemCount(await snapshot(playerSession.page), 'arrow')).toBe(2)
     await playerSession.page.mouse.up({ button: 'right' })
 
+    // A minimally-drawn arrow lands within a block of the shooter, and the
+    // server converts a stuck arrow into an `:arrow:pickup:` item-drop the
+    // frame it lands — the in-flight `kind: 'arrow'` entity exists for less
+    // than one snapshot round-trip, so polling for it can only ever pass by
+    // luck (this assertion was red on main long before Wave 0). The drop's id
+    // is derived exclusively from the server-side arrow entity, so its arrival
+    // in the client's render list proves the same round-trip — spawn, flight
+    // simulation, impact conversion, entity delta, client render —
+    // deterministically. Rendering a long-lived transient entity needs a QA
+    // pause hook; deferred.
+    await expect.poll(async () => (await snapshot(playerSession.page)).renderedEntities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'dropped_item',
+          id: expect.stringMatching(/:arrow:pickup:/u),
+        }),
+      ]),
+    )
     await expect.poll(() => canvasRevision(playerSession.page)).toBeGreaterThan(revisionBeforeDraw)
     await expect.poll(async () => itemCount(await snapshot(playerSession.page), 'arrow')).toBe(1)
-    await expect.poll(async () => (await snapshot(playerSession.page)).renderedEntities).toEqual(
-      expect.arrayContaining([expect.objectContaining({ kind: 'arrow' })]),
-    )
   } finally {
     await alice?.context.close()
     await stopServer(server.process)
@@ -565,9 +599,24 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     state: {
       revision: 0,
       blocks: [],
+      // mc-sim 0.2.1's `restoreStorage` rejects any `slots` array whose length is
+      // not exactly 36 (`PlayerStorageValidationError: expected exactly 36
+      // slots` — see `player-storage.js`'s `hasExactKeys`/length check). The
+      // fixture below used to send just one slot; that was already invalid by
+      // this contract, but nothing on the path from this state file to
+      // `AuthoritativeSnapshot` (`apps/multiplayer-server/inventory-state.ts`'s
+      // `cloneInventory`, which is a 1:1 `.map`, not a pad-to-36) ever
+      // normalized it, and nothing rejected it either before 0.2.1's stricter
+      // validation. The first `AuthoritativeSnapshot` this fixture reaches — as
+      // soon as Bob joins — now throws inside `apps/web/main.ts`'s
+      // `applyNetworkInventory`, which crashes Alice's frame loop and freezes
+      // `data-multiplayer-player-count` at its initial value. Pad to 36 the
+      // same way the other multiplayer fixtures in this file already do
+      // (`emptySlots().slice(n)`, see lines above for the bow/nether-bed
+      // fixtures) rather than loosening the product's validation.
       inventories: [{
         player: 'alice-e2e',
-        state: { slots: [{ item: 'stone', count: 2 }], selectedSlot: 0 },
+        state: { slots: [{ item: 'stone', count: 2 }, ...emptySlots().slice(1)], selectedSlot: 0 },
       }],
       playerPositions: ['alice-e2e', 'bob-e2e'].map((player) => ({
         player,
@@ -596,6 +645,11 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     })
     document.dispatchEvent(new Event('visibilitychange'))
   })
+  // Bob boots a second full game client into the same browser context while
+  // Alice's is already running — the only scenario in this file with two
+  // concurrent clients — which measurably outlasts the bare 5s boot-wait
+  // default on a real CI runner (confirmed flaky there: same commit's CI run
+  // failed on this wait once, passed on the automatic retry).
   const bob = await openPlayer(
     browser,
     'Bob Multiplayer E2E',
@@ -605,8 +659,8 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     LEGACY_SECRETS['bob-e2e'],
     createCreativeWorld,
     playerContext,
+    20_000,
   )
-
   try {
     const aliceCanvas = alice.page.locator('#game-canvas')
     const bobCanvas = bob.page.locator('#game-canvas')
@@ -676,7 +730,10 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     await expect(aliceCanvas).toHaveAttribute('data-multiplayer-player-count', '1')
 
     const reconnectedBob = await bob.context.newPage()
-    await connectPage(reconnectedBob, bob.url)
+    // Same concurrent-client contention as Bob's initial join above (Alice's
+    // client is still fully live in this context) — confirmed flaky on CI at
+    // the bare 5s default (trace: timed out at ~5.2s, still "starting").
+    await connectPage(reconnectedBob, bob.url, undefined, 20_000)
     await expect(aliceCanvas).toHaveAttribute('data-multiplayer-player-count', '2')
     await expect(reconnectedBob.locator('#game-canvas')).toHaveAttribute(
       'data-multiplayer-player-count',

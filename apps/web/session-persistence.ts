@@ -9,27 +9,21 @@ import {
   saveTo,
   StoragePort,
   defineFormat,
-  type Migration,
-  type MigrationError,
   type SaveDecodeError,
+  type SaveFormat,
   type StorageError,
 } from '@nerima-games/mc-save'
 import {
   advanceFurnace,
-  INVENTORY_SLOT_COUNT,
-  INITIAL_TIME_STATE,
-  INITIAL_WEATHER_STATE,
   isValidTimeState,
   isValidWeatherState,
   durabilityForItem,
   maxStackCountForItem,
-  storageFromInventory,
   validateContainerStorageSnapshot,
   validatePlayerStorageSnapshot,
   validateCropSnapshot,
   type ContainerStorageSnapshot,
   type CropSnapshot,
-  type Inventory,
   type FurnaceState,
   type ItemStack,
   type PlayerStorage,
@@ -48,14 +42,11 @@ import {
 } from '@nerima-games/mc-worldgen'
 import {
   emptyVillagerTradeState,
-  emptyBrewingStandState,
-  emptyStatusEffectState,
   isValidBrewingStandState,
   isValidPlayerVitals,
   isValidStatusEffectState,
   isValidVillagerTradeState,
   decodeEnchantedItem,
-  SPAWN_PLAYER_VITALS,
   EnderDragonEncounterSnapshotSchema,
   initialEnderDragonEncounter,
   type EnderDragonEncounterSnapshot,
@@ -76,10 +67,56 @@ const WitherRuntimeSnapshotSchema = Schema.Unknown.pipe(
   }),
 ) as unknown as Schema.Schema<WitherRuntimeSnapshot>
 
-const BrewingStandStateSchema = Schema.Unknown.pipe(
-  Schema.filter((value): value is BrewingStandState => isValidBrewingStandState(value), {
-    message: () => 'Brewing stand state violates gameplay invariants',
-  }),
+// mx-gameplay's `BrewingStandState.{bottle,ingredient,brewing}` are `X |
+// undefined` (never `null` — see `node_modules/@nerima-games/mx-gameplay/dist/
+// domain/brewing.d.ts`), and mc-save 0.3.0's integrity checksum rejects a bare
+// `undefined` anywhere in the encoded payload (`integrity-canonical.ts`'s
+// `canonicalize`; see the longer `exact: true` comment further down in this
+// file for the same gap on `Schema.optionalWith` fields). Swapping
+// `undefined` for `null` on encode and back on decode is unambiguous here
+// because these three fields never use `null` for anything else.
+const restoreBrewingUndefined = (value: unknown): unknown => {
+  if (value === null || typeof value !== 'object') return value
+  const record = value as Record<string, unknown>
+  return {
+    ...record,
+    bottle: record['bottle'] === null ? undefined : record['bottle'],
+    ingredient: record['ingredient'] === null ? undefined : record['ingredient'],
+    brewing: record['brewing'] === null ? undefined : record['brewing'],
+  }
+}
+
+// Untyped rather than `(state: BrewingStandState) => unknown`: this also runs,
+// via `toStoredSessionState`, over the deliberately-malformed fixtures the
+// test suite's decode-rejection tests seed directly into `StoragePort`
+// (bypassing `saveSession`/this schema's own encode). A malformed fixture is
+// exactly a `BrewingStandState`-shaped value with an invalid VALUE at one of
+// its fields, never a differently-SHAPED value, so a defensive property read
+// here is enough — it mirrors `restoreBrewingUndefined`'s decode-side
+// looseness rather than trusting the nominal type.
+const encodeBrewingUndefined = (value: unknown): unknown => {
+  if (value === null || typeof value !== 'object') return value
+  const record = value as Record<string, unknown>
+  return {
+    ...record,
+    bottle: record['bottle'] ?? null,
+    ingredient: record['ingredient'] ?? null,
+    brewing: record['brewing'] ?? null,
+  }
+}
+
+const BrewingStandStateSchema = Schema.transform(
+  Schema.Unknown,
+  Schema.Unknown.pipe(
+    Schema.filter((value): value is BrewingStandState => isValidBrewingStandState(value), {
+      message: () => 'Brewing stand state violates gameplay invariants',
+    }),
+  ) as unknown as Schema.Schema<BrewingStandState>,
+  {
+    strict: false,
+    decode: restoreBrewingUndefined,
+    encode: encodeBrewingUndefined,
+  },
 ) as unknown as Schema.Schema<BrewingStandState>
 
 const StatusEffectStateSchema = Schema.Unknown.pipe(
@@ -142,6 +179,26 @@ export const persistedItemDropLifetime = (behaviour: unknown): PersistedItemDrop
       ? Math.max(0, elapsedSecs)
       : 0,
   }
+}
+
+// Same undefined-vs-null gap as `normalizePersistedEntityRoster`'s own
+// entity-level swap below, one object deeper: mx-gameplay's
+// `HostileMobSnapshot.behaviour: CreeperFuse | EndermanFlinch |
+// EcosystemMobState | undefined` (`mob-frame.d.ts`) names a mob this
+// repository has no fuse/flinch/ecosystem state for yet, and a zombie is
+// exactly that mob — only `OVERWORLD_ECOSYSTEM_HOSTILE_KINDS` and
+// `NETHER_HOSTILE_KINDS` are ecosystem-governed, so a zombie's nested
+// `behaviour` stays `undefined` for its whole lifetime. mc-save's integrity
+// checksum rejects that `undefined` exactly as it rejects the entity-level
+// one, but it sits a `MobBehaviour` union member two objects deep, so the
+// shallow entity-level swap never reaches it. Restrict the swap to
+// `HostileMobSnapshot`'s own nested field — other `MobBehaviour` members
+// (`CreeperFuse`, `DroppedItemBehaviour`, ...) use `null`/absence for
+// unrelated reasons and must not be touched here.
+const restoreHostileMobBehaviour = (behaviour: unknown): unknown => {
+  const record = asRecord(behaviour)
+  if (record === undefined || record['_tag'] !== 'HostileMob') return behaviour
+  return { ...record, behaviour: record['behaviour'] === null ? undefined : record['behaviour'] }
 }
 
 const normalizePersistedEntityBehaviour = (kind: string, behaviour: unknown): unknown => {
@@ -250,7 +307,17 @@ export const normalizePersistedEntityRoster = (value: unknown): PersistedEntityR
       kind,
       feetPosition: { x, y, z },
       healthPoints,
-      behaviour: normalizePersistedEntityBehaviour(kind, entity['behaviour']),
+      // mx-gameplay's `MobBehaviour` union includes `undefined` itself — "a
+      // pig keeps its `undefined`" is how an ordinary passive mob with no
+      // active behaviour is represented, not an edge case — and JSON has no
+      // way to write a literal `undefined`, so the wire form of "no
+      // behaviour" is `null`. Swap it back before `normalizePersistedEntityBehaviour`
+      // sees it; see `PersistedEntityRostersSchema`'s `encode` below for the
+      // opposite direction.
+      behaviour: normalizePersistedEntityBehaviour(
+        kind,
+        restoreHostileMobBehaviour(entity['behaviour'] === null ? undefined : entity['behaviour']),
+      ),
     })
   }
 
@@ -369,21 +436,54 @@ export type SessionState = {
 
 const FiniteNumberSchema = Schema.Number.pipe(Schema.finite())
 
-const PlayerVitalsSchema: Schema.Schema<PlayerVitals> = Schema.Struct({
-  healthPoints: FiniteNumberSchema,
-  maxHealthPoints: FiniteNumberSchema,
-  hungerPoints: FiniteNumberSchema,
-  maxHungerPoints: FiniteNumberSchema,
-  saturation: FiniteNumberSchema,
-  exhaustion: FiniteNumberSchema,
-  foodTimerSecs: FiniteNumberSchema,
-  totalExperience: FiniteNumberSchema,
-  lastDamageCause: Schema.UndefinedOr(Schema.String),
-}).pipe(
-  Schema.filter(isValidPlayerVitals, {
-    message: () => 'Player vitals violate gameplay invariants',
-  }),
-)
+// Same undefined-vs-null gap as `PlayerStorageSchema`/`BrewingStandStateSchema`/
+// `PersistedEntityRostersSchema` above, but on a REQUIRED field rather than an
+// absent one: `PlayerVitals.lastDamageCause: DamageCause | undefined` is
+// always present (there is no death cause yet, not an omitted property), so
+// `Schema.optionalWith(..., { exact: true })` — which is about KEY absence —
+// does not apply here. `Schema.UndefinedOr` lets a present `undefined` VALUE
+// through validation (that is the whole point of the field's type), which is
+// exactly what mc-save's integrity checksum then rejects. The struct/filter
+// stays untouched; only the `lastDamageCause` value is swapped at the
+// boundary, same as the other three fixes above.
+const restoreVitalsLastDamageCause = (value: unknown): unknown => {
+  if (value === null || typeof value !== 'object') return value
+  const record = value as Record<string, unknown>
+  return {
+    ...record,
+    lastDamageCause: record['lastDamageCause'] === null ? undefined : record['lastDamageCause'],
+  }
+}
+
+const encodeVitalsLastDamageCause = (value: unknown): unknown => {
+  if (value === null || typeof value !== 'object') return value
+  const record = value as Record<string, unknown>
+  return { ...record, lastDamageCause: record['lastDamageCause'] ?? null }
+}
+
+const PlayerVitalsSchema = Schema.transform(
+  Schema.Unknown,
+  Schema.Struct({
+    healthPoints: FiniteNumberSchema,
+    maxHealthPoints: FiniteNumberSchema,
+    hungerPoints: FiniteNumberSchema,
+    maxHungerPoints: FiniteNumberSchema,
+    saturation: FiniteNumberSchema,
+    exhaustion: FiniteNumberSchema,
+    foodTimerSecs: FiniteNumberSchema,
+    totalExperience: FiniteNumberSchema,
+    lastDamageCause: Schema.UndefinedOr(Schema.String),
+  }).pipe(
+    Schema.filter(isValidPlayerVitals, {
+      message: () => 'Player vitals violate gameplay invariants',
+    }),
+  ),
+  {
+    strict: false,
+    decode: restoreVitalsLastDamageCause,
+    encode: encodeVitalsLastDamageCause,
+  },
+) as unknown as Schema.Schema<PlayerVitals>
 
 const TimeStateSchema: Schema.Schema<TimeState> = Schema.Struct({
   ticks: FiniteNumberSchema,
@@ -418,6 +518,49 @@ const PersistedEntityRosterSchema = Schema.Struct({
   nextSerial: Schema.Number,
 })
 
+// Same undefined-vs-null gap as `PlayerStorageSchema`/`BrewingStandStateSchema`
+// above, one level further down: an entity's `behaviour` is `unknown` here
+// (there is no shared schema for the whole `MobBehaviour` union across every
+// mx-gameplay mob kind), so nothing upstream catches a passive mob's
+// `behaviour: undefined` — "a pig keeps its `undefined`" — before mc-save's
+// integrity checksum does. `normalizePersistedEntityRoster` already restores
+// `null` back to `undefined` on decode (see its comment); this is the
+// opposite direction.
+//
+// `encodeHostileMobBehaviour` is the same swap again, one object further in:
+// see `restoreHostileMobBehaviour`'s comment above for why a zombie's own
+// nested `behaviour` field is `undefined` for its whole lifetime and why the
+// swap is restricted to `HostileMobSnapshot`.
+const encodeHostileMobBehaviour = (behaviour: unknown): unknown => {
+  const record = asRecord(behaviour)
+  if (record === undefined || record['_tag'] !== 'HostileMob') return behaviour
+  return { ...record, behaviour: record['behaviour'] ?? null }
+}
+
+const encodePersistedEntityRosters = (rosters: unknown): unknown => {
+  if (rosters === null || typeof rosters !== 'object') return rosters
+  const encodeRoster = (roster: unknown): unknown => {
+    if (roster === null || typeof roster !== 'object') return roster
+    const record = roster as Record<string, unknown>
+    const entities = record['entities']
+    if (!Array.isArray(entities)) return roster
+    return {
+      ...record,
+      entities: entities.map((entity: unknown) => {
+        if (entity === null || typeof entity !== 'object') return entity
+        const entityRecord = entity as Record<string, unknown>
+        return { ...entityRecord, behaviour: encodeHostileMobBehaviour(entityRecord['behaviour']) ?? null }
+      }),
+    }
+  }
+  const record = rosters as Record<string, unknown>
+  return {
+    overworld: encodeRoster(record['overworld']),
+    nether: encodeRoster(record['nether']),
+    end: encodeRoster(record['end']),
+  }
+}
+
 const PersistedEntityRostersSchema = Schema.transform(
   Schema.Unknown,
   Schema.Struct({
@@ -426,16 +569,67 @@ const PersistedEntityRostersSchema = Schema.transform(
     end: PersistedEntityRosterSchema,
   }),
   {
+    strict: false,
     decode: normalizePersistedEntityRosters,
-    encode: (rosters) => rosters,
+    encode: encodePersistedEntityRosters,
   },
 )
 
-const PlayerStorageSchema = Schema.Unknown.pipe(
-  Schema.filter(
-    (value): value is PlayerStorage => validatePlayerStorageSnapshot(value)._tag === 'Valid',
-    { message: () => 'Player storage violates persistence invariants' },
-  ),
+// Same undefined-vs-null gap as `BrewingStandStateSchema` above: mc-sim's
+// `Inventory.slots: ReadonlyArray<Slot>` models an empty slot as `undefined`
+// (`Slot = ItemStack | undefined`), never `null`, so the swap is unambiguous
+// for this one field.
+const restorePlayerStorageSlots = (value: unknown): unknown => {
+  if (value === null || typeof value !== 'object') return value
+  const record = value as Record<string, unknown>
+  const inventory = record['inventory']
+  if (inventory === null || typeof inventory !== 'object') return value
+  const inventoryRecord = inventory as Record<string, unknown>
+  const slots = inventoryRecord['slots']
+  if (!Array.isArray(slots)) return value
+  return {
+    ...record,
+    inventory: {
+      ...inventoryRecord,
+      slots: slots.map((slot) => (slot === null ? undefined : slot)),
+    },
+  }
+}
+
+// Untyped for the same reason as `encodeBrewingUndefined` above: it also runs
+// over the test suite's deliberately-malformed `PlayerStorage`-shaped
+// fixtures via `toStoredSessionState`, which never differ in SHAPE from a
+// real `PlayerStorage`, only in the values a real one would reject.
+const encodePlayerStorageSlots = (value: unknown): unknown => {
+  if (value === null || typeof value !== 'object') return value
+  const record = value as Record<string, unknown>
+  const inventory = record['inventory']
+  if (inventory === null || typeof inventory !== 'object') return value
+  const inventoryRecord = inventory as Record<string, unknown>
+  const slots = inventoryRecord['slots']
+  if (!Array.isArray(slots)) return value
+  return {
+    ...record,
+    inventory: {
+      ...inventoryRecord,
+      slots: slots.map((slot: unknown) => slot ?? null),
+    },
+  }
+}
+
+const PlayerStorageSchema = Schema.transform(
+  Schema.Unknown,
+  Schema.Unknown.pipe(
+    Schema.filter(
+      (value): value is PlayerStorage => validatePlayerStorageSnapshot(value)._tag === 'Valid',
+      { message: () => 'Player storage violates persistence invariants' },
+    ),
+  ) as unknown as Schema.Schema<PlayerStorage>,
+  {
+    strict: false,
+    decode: restorePlayerStorageSlots,
+    encode: encodePlayerStorageSlots,
+  },
 ) as unknown as Schema.Schema<PlayerStorage>
 
 const ContainerStorageSchema = Schema.Unknown.pipe(
@@ -552,7 +746,17 @@ const PersistedEndStateSchema: Schema.Schema<PersistedEndState> = Schema.Struct(
   dragonEggRewarded: Schema.Boolean,
 })
 
-const PersistedVehiclesSchema = Schema.optional(
+// `exact: true` on every `Schema.optionalWith` below (in place of the plain
+// `Schema.optional` this file used before): mc-save 0.3.0's integrity
+// checksum canonicalizes the encoded payload and rejects a bare `undefined`
+// anywhere in it — it is not one of the supported value kinds (see
+// `integrity-canonical.ts`'s `canonicalize`, which throws for anything that
+// is not a string/boolean/finite-or-non-finite number/null/plain
+// object/array/Uint8Array). Plain `Schema.optional` encodes an ABSENT
+// property as an explicit `undefined` key; `exact: true` omits the key
+// instead, which is also what `exactOptionalPropertyTypes` already expects
+// of every `?:` field in `SessionState`.
+const PersistedVehiclesSchema = Schema.optionalWith(
   Schema.Unknown.pipe(
     Schema.filter((value): value is ReadonlyArray<Vehicle> => {
       if (!Array.isArray(value)) return false
@@ -566,6 +770,7 @@ const PersistedVehiclesSchema = Schema.optional(
       return validateVehicleSnapshot({ vehicles: value, nextSerial: highestSerial + 1 })._tag === 'Valid'
     }, { message: () => 'Vehicles violate simulation invariants' }),
   ) as unknown as Schema.Schema<ReadonlyArray<Vehicle>>,
+  { exact: true },
 ) as unknown as Schema.Schema<ReadonlyArray<Vehicle> | undefined>
 
 const SessionStateSchema = Schema.Struct({
@@ -596,20 +801,36 @@ const SessionStateSchema = Schema.Struct({
   brewing: BrewingStandStateSchema,
   statusEffects: StatusEffectStateSchema,
   end: PersistedEndStateSchema,
-  workstations: Schema.optional(Schema.Struct({
+  workstations: Schema.optionalWith(Schema.Struct({
     enchantmentSeed: Schema.Number,
     customNames: Schema.Record({ key: Schema.String, value: Schema.String }),
     enchantedItems: Schema.Record({ key: Schema.String, value: Schema.String }),
-    deathDropDimension: Schema.optional(DimensionSchema),
+    deathDropDimension: Schema.optionalWith(DimensionSchema, { exact: true }),
     respawn: Schema.NullOr(Schema.Struct({
       dimension: Schema.Literal('overworld'),
       position: PositionSchema,
     })),
-  })),
-  wither: Schema.optional(WitherRuntimeSnapshotSchema),
+  }), { exact: true }),
+  wither: Schema.optionalWith(WitherRuntimeSnapshotSchema, { exact: true }),
   vehicles: PersistedVehiclesSchema,
-  mountedVehicleId: Schema.optional(Schema.NullOr(Schema.String)),
+  mountedVehicleId: Schema.optionalWith(Schema.NullOr(Schema.String), { exact: true }),
 }) as unknown as Schema.Schema<SessionState>
+
+/**
+ * The on-disk shape of a `SessionState`, exactly as `SessionStateSchema`'s own
+ * encode step produces it (`storage.inventory.slots` and `brewing`'s three
+ * optional fields have `undefined` swapped for `null` — see the comments on
+ * `PlayerStorageSchema`/`BrewingStandStateSchema` above). Tests that seed a
+ * `StoragePort` directly with a hand-built envelope (bypassing `saveSession`,
+ * to exercise `loadSession`'s rejection paths in isolation) need this rather
+ * than a bare `SessionState`, since `sealSaveEnvelope`'s own integrity
+ * checksum rejects raw `undefined` exactly as `saveSession` would have.
+ */
+export const toStoredSessionState = (state: SessionState): unknown => ({
+  ...state,
+  storage: encodePlayerStorageSlots(state.storage),
+  brewing: encodeBrewingUndefined(state.brewing),
+})
 
 export type SessionChunkManifestEntry = {
   readonly dimension: Dimension
@@ -683,357 +904,17 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
     ? value as Record<string, unknown>
     : undefined
 
-const migrateSessionV1ToV2: Migration = {
-  from: 1,
-  describe: 'add player vitals to the session state',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v1 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'vitals')
-        ? state
-        : { ...state, vitals: { ...SPAWN_PLAYER_VITALS } },
-    })
-  },
-}
-
-const migrateSessionV2ToV3: Migration = {
-  from: 2,
-  describe: 'add simulation time to the session state',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v2 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'time')
-        ? state
-        : { ...state, time: { ...INITIAL_TIME_STATE } },
-    })
-  },
-}
-
-const migrateSessionV3ToV4: Migration = {
-  from: 3,
-  describe: 'add weather to the session state',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v3 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'weather')
-        ? state
-        : { ...state, weather: { ...INITIAL_WEATHER_STATE } },
-    })
-  },
-}
-
-const migrateSessionV4ToV5: Migration = {
-  from: 4,
-  describe: 'assign legacy chunks to the overworld dimension',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    if (head === undefined || !Array.isArray(head['chunks'])) {
-      return Effect.fail('Session v4 payload must contain a chunks array')
-    }
-
-    return Effect.succeed({
-      ...head,
-      chunks: head['chunks'].map((entry) => {
-        const chunk = asRecord(entry)
-        return chunk === undefined ? entry : { ...chunk, dimension: 'overworld' }
-      }),
-    })
-  },
-}
-
-const migrateSessionV5ToV6: Migration = {
-  from: 5,
-  describe: 'replace the legacy inventory with complete player storage',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    const inventory = asRecord(state?.['inventory'])
-    const legacySlots = inventory?.['slots']
-    if (
-      head === undefined
-      || state === undefined
-      || !Array.isArray(legacySlots)
-      || legacySlots.length > INVENTORY_SLOT_COUNT
-    ) {
-      return Effect.fail(
-        `Session v5 payload must contain an inventory with at most ${String(INVENTORY_SLOT_COUNT)} slots`,
-      )
-    }
-
-    const slots = Array.from(
-      { length: INVENTORY_SLOT_COUNT },
-      (_, index) => legacySlots[index],
-    )
-    const { inventory: _legacyInventory, ...currentState } = state
-    return Effect.succeed({
-      ...head,
-      state: {
-        ...currentState,
-        storage: storageFromInventory({ slots } as Inventory),
-      },
-    })
-  },
-}
-
-const migrateSessionV6ToV7: Migration = {
-  from: 6,
-  describe: 'add host-owned lever state',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v6 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'redstone')
-        ? state
-        : { ...state, redstone: { levers: [] } },
-    })
-  },
-}
-
-const migrateSessionV7ToV8: Migration = {
-  from: 7,
-  describe: 'add the world name and game mode',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const sessionId = head?.['sessionId']
-    const name = typeof sessionId === 'string' ? normalizeWorldName(sessionId) : undefined
-    if (head === undefined || typeof sessionId !== 'string' || name === undefined) {
-      return Effect.fail('Session v7 payload must contain a valid session id for its world name')
-    }
-
-    return Effect.succeed({
-      ...head,
-      metadata: { name, mode: 'survival' },
-    })
-  },
-}
-
-const migrateSessionV8ToV9: Migration = {
-  from: 8,
-  describe: 'add host-owned furnace state',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v8 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'furnaces')
-        ? state
-        : { ...state, furnaces: [] },
-    })
-  },
-}
-
-const migrateSessionV9ToV10: Migration = {
-  from: 9,
-  describe: 'add the portal registry',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v9 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'portals')
-        ? state
-        : { ...state, portals: [] },
-    })
-  },
-}
-
-const migrateSessionV10ToV11: Migration = {
-  from: 10,
-  describe: 'add crop simulation state',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v10 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'crops')
-        ? state
-        : { ...state, crops: { crops: [] } },
-    })
-  },
-}
-
-const migrateSessionV11ToV12: Migration = {
-  from: 11,
-  describe: 'add container storage state',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v11 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'containerStorage')
-        ? state
-        : { ...state, containerStorage: { version: 2, containers: [] } },
-    })
-  },
-}
-
-const migrateSessionV12ToV13: Migration = {
-  from: 12,
-  describe: 'add dynamic entity roster',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v12 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'entities')
-        ? state
-        : { ...state, entities: EMPTY_ENTITY_ROSTER },
-    })
-  },
-}
-
-const migrateSessionV13ToV14: Migration = {
-  from: 13,
-  describe: 'add village residents and trade state',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v13 payload must contain an object state')
-    }
-
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'villagers')
-        ? state
-        : { ...state, villagers: EMPTY_VILLAGER_STATE },
-    })
-  },
-}
-
-const migrateSessionV14ToV15: Migration = {
-  from: 14,
-  describe: 'add brewing stand and player status effects',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v14 payload must contain an object state')
-    }
-    return Effect.succeed({
-      ...head,
-      state: {
-        ...state,
-        brewing: Object.prototype.hasOwnProperty.call(state, 'brewing')
-          ? state['brewing']
-          : emptyBrewingStandState(),
-        statusEffects: Object.prototype.hasOwnProperty.call(state, 'statusEffects')
-          ? state['statusEffects']
-          : emptyStatusEffectState(),
-      },
-    })
-  },
-}
-
-const migrateSessionV15ToV16: Migration = {
-  from: 15,
-  describe: 'add End portal and dragon encounter state',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v15 payload must contain an object state')
-    }
-    return Effect.succeed({
-      ...head,
-      state: Object.prototype.hasOwnProperty.call(state, 'end')
-        ? state
-        : { ...state, end: EMPTY_END_STATE },
-    })
-  },
-}
-
-const migrateSessionV16ToV17: Migration = {
-  from: 16,
-  describe: 'scope dynamic entity rosters by dimension',
-  migrate: (payload) => {
-    const head = asRecord(payload)
-    const state = asRecord(head?.['state'])
-    if (head === undefined || state === undefined) {
-      return Effect.fail('Session v16 payload must contain an object state')
-    }
-    const dimension = state['dimension']
-    const activeDimension: Dimension = dimension === 'nether' || dimension === 'end'
-      ? dimension
-      : 'overworld'
-    return Effect.succeed({
-      ...head,
-      state: {
-        ...state,
-        entities: {
-          ...EMPTY_ENTITY_ROSTERS,
-          [activeDimension]: normalizePersistedEntityRoster(state['entities']),
-        },
-      },
-    })
-  },
-}
-
-export const SESSION_FORMAT = defineFormat({
+// mc-save 0.3.0 removed format migrations (org decision, Wave 0: consumers
+// require the current format version; no migration shims). A session saved by
+// an older build now fails `loadSession` with `SaveDecodeError` instead of
+// being transformed forward — see the "rejects a legacy session version"
+// coverage below, which replaces the sixteen per-transition migration tests
+// this format used to carry (v1 through v16, one per SESSION_FORMAT_VERSION
+// bump).
+export const SESSION_FORMAT: SaveFormat<SessionHead, SessionHeadEncoded> = defineFormat({
   name: SESSION_FORMAT_NAME,
   version: SESSION_FORMAT_VERSION,
   schema: SessionHeadSchema,
-  migrations: [
-    migrateSessionV1ToV2,
-    migrateSessionV2ToV3,
-    migrateSessionV3ToV4,
-    migrateSessionV4ToV5,
-    migrateSessionV5ToV6,
-    migrateSessionV6ToV7,
-    migrateSessionV7ToV8,
-    migrateSessionV8ToV9,
-    migrateSessionV9ToV10,
-    migrateSessionV10ToV11,
-    migrateSessionV11ToV12,
-    migrateSessionV12ToV13,
-    migrateSessionV13ToV14,
-    migrateSessionV14ToV15,
-    migrateSessionV15ToV16,
-    migrateSessionV16ToV17,
-  ],
 })
 
 type SessionManifestErrorFields = {
@@ -1052,7 +933,6 @@ export const SessionManifestError: new (fields: SessionManifestErrorFields) => S
 export type SessionPersistenceError =
   | StorageError
   | SaveDecodeError
-  | MigrationError
   | InstanceType<typeof SessionManifestError>
 
 export const sessionHeadKey = (sessionId: string): SaveKey =>

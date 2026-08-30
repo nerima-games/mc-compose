@@ -92,9 +92,9 @@ import {
   type EndAudioEvent,
   type WeatherAudioHandle,
   type WeatherLoopKind,
-  type Vec3,
 } from '@nerima-games/mc-audio'
 import {
+  BLOCK_PROPERTY_DEFAULTS,
   blockIdOf,
   blockPosition,
   blockTypeOfId,
@@ -108,6 +108,7 @@ import {
   StageId,
   type CameraPoseSnapshot,
   type MonotonicTimeSecs,
+  type Position as Vec3,
 } from '@nerima-games/mc-kernel'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
@@ -137,6 +138,7 @@ import {
   STARTER_SMELTING_RECIPES,
   targetBlockFromPlayerPose,
   OccupantId,
+  EntityId as SimEntityId,
   type ContainerKind,
   type FurnaceState,
   type CropLocation,
@@ -170,6 +172,7 @@ import {
   makeChunkStoreMesher,
   makeProductionWorldRenderer,
   makeWorldRenderer,
+  QUALITY_PRESETS,
   RENDER_STAGE_IDS,
   renderModule,
   syncWorld,
@@ -1146,7 +1149,7 @@ const bootGame = async (
   canvas.setAttribute('data-audio-samples', String(Object.keys(sampleManifest).length))
   const audio = Effect.runSync(makeAudioRuntime({
     backend: audioBackend,
-    nowSecs: browserClock.monotonicSecs,
+    clockLayer: BrowserClockLayer,
     listener: () => readAudioListener(),
     listenerForward: () => readAudioListenerForward(),
     settings: playerSettings,
@@ -1326,7 +1329,41 @@ const bootGame = async (
   atlasTexture.minFilter = THREE.NearestFilter
   atlasTexture.needsUpdate = true
   canvas.setAttribute('data-atlas-size', `${String(terrainAtlas.width)}x${String(terrainAtlas.height)}`)
-  const webGlAvailable = canvas.getContext('webgl2') !== null || canvas.getContext('webgl') !== null
+  const glContext = canvas.getContext('webgl2') ?? canvas.getContext('webgl')
+  const webGlAvailable = glContext !== null
+  // mc-render 0.3.0's post-processing chain (GTAO/SSAO, bloom via the
+  // composite pass, SMAA) is newly wired into `makeProductionWorldRenderer`/
+  // `renderModule`, which defaults to `QUALITY_PRESETS.high` — enabling all
+  // three — whenever the caller does not pass a `quality` (see
+  // `domain/post-processing.ts`'s `QUALITY_PRESETS`; this app never did).
+  // Those passes are calibrated for a hardware rasterizer; on SwiftShader
+  // (this repository's headless CI target — see playwright.config.ts),
+  // measured with `QUALITY_PRESETS.low` instead, per-frame GPU
+  // command-processing time drops by roughly 15% at an identical
+  // chunk/geometry count (CDP tracing, `CommandBuffer::Flush`/`WebGL` event
+  // duration). That is a real but PARTIAL fix for
+  // e2e/performance-budget.e2e.ts's sub-8-FPS SwiftShader failures — a
+  // further ~2x per-GPU-command cost gap remains unexplained by this preset
+  // change or by `makeProductionWorldRenderer` vs the plain `makeWorldRenderer`
+  // (measured equivalent under `QUALITY_PRESETS.low` either way), so this is
+  // necessary but not sufficient; see the investigation this fix shipped
+  // with for what was ruled out. `WEBGL_debug_renderer_info` is the standard
+  // way to tell a software rasterizer from a real GPU; fall back to
+  // `QUALITY_PRESETS.low` (RenderPass + OutputPass only, matching pre-0.3.0
+  // behavior) there, and leave real hardware-accelerated players on the
+  // default `high` preset untouched.
+  const isSoftwareRenderer = (context: WebGL2RenderingContext | WebGLRenderingContext | null): boolean => {
+    if (context === null) return false
+    const info = context.getExtension('WEBGL_debug_renderer_info')
+    if (info === null) return false
+    const renderer = String(context.getParameter(info.UNMASKED_RENDERER_WEBGL))
+    return /swiftshader|software|llvmpipe|softpipe/iu.test(renderer)
+  }
+  // Read once and reused below for the streamed chunk radius: both fall back
+  // together on the same software-rasterizer signal.
+  const softwareRenderer = isSoftwareRenderer(glContext)
+  const renderQuality = softwareRenderer ? QUALITY_PRESETS.low : undefined
+  canvas.setAttribute('data-render-quality', renderQuality === undefined ? 'high' : 'low')
   const worldRenderer = webGlAvailable
     ? await Effect.runPromise(makeProductionWorldRenderer<
       HTMLCanvasElement,
@@ -1887,7 +1924,14 @@ const bootGame = async (
         enchantedItems: Object.fromEntries(
           [...enchantedItems].map(([slot, item]) => [slot, JSON.stringify(item)]),
         ),
-        deathDropDimension,
+        // `SessionStateSchema`'s `deathDropDimension` is `optionalWith(...,
+        // { exact: true })`: it requires the key to be OMITTED, not merely
+        // `undefined`-valued, or mc-save's integrity checksum rejects the
+        // encoded save (a present `undefined` key is not one of canonicalize's
+        // supported value kinds). `deathDropDimension` here is `undefined`
+        // whenever no death is pending, which is most saves, so this must be
+        // conditional rather than a bare shorthand property.
+        ...(deathDropDimension === undefined ? {} : { deathDropDimension }),
         respawn: respawnLocation,
       },
     }),
@@ -1920,7 +1964,32 @@ const bootGame = async (
   // STREAMING, keyed to where the player is — not a one-shot load at boot.
   //
   // A fixed radius bounds memory while still exercising both add and removal.
-  const STREAM_RADIUS_CHUNKS = 2
+  //
+  // Software-rasterizer-conditional, using the same `softwareRenderer` signal
+  // as the render-quality fallback above.
+  //
+  // mc-worldgen 0.2.0 added a deepslate layer at depth, absent from the
+  // pre-0.2.0 terrain this budget was originally calibrated against. Verified
+  // by isolating mc-worldgen alone (pnpm-workspace.yaml override, everything
+  // else held at the current pins): the same 25-chunk sample has nearly
+  // identical exposed-face and air-pocket counts either version, but 0.2.0
+  // splits the underground surface across two solid block ids (stone +
+  // deepslate) plus more ore variety — 20 distinct block ids in the sample
+  // versus 11 pre-0.2.0 — instead of one. Greedy meshing only merges runs of
+  // the SAME block id, so the same exposed surface now meshes into roughly
+  // 4x the indices at an unchanged face count — this is a merge-key
+  // diversity problem, not a "SwiftShader draws more chunks" problem.
+  //
+  // Measured (real SwiftShader, unthrottled, this 25-chunk scene):
+  //   radius 2: 153,426 indices/frame (25 chunks)
+  //   radius 1:  70,842 indices/frame (9 chunks) — a 2.17x cut, not a full
+  //     return to the pre-0.2.0 terrain's ~38,826 at radius 2; a residual
+  //     gap remains and is not explained by this fix.
+  // The software-rasterizer perf floor is 8 FPS
+  // (e2e/performance-budget.e2e.ts's MINIMUM_AVERAGE_FPS). Real
+  // hardware-accelerated players keep radius 2.
+  const STREAM_RADIUS_CHUNKS = softwareRenderer ? 1 : 2
+  canvas.setAttribute('data-stream-radius', String(STREAM_RADIUS_CHUNKS))
   let chunksStreamedIn = 0
   let chunksDropped = 0
 
@@ -2421,7 +2490,7 @@ const bootGame = async (
     capturedAtSecs: KernelMonotonicTimeSecs(0),
   }
 
-  const render = renderModule(undefined, undefined, worldRenderer, initialPose)
+  const render = renderModule(renderQuality, undefined, worldRenderer, initialPose)
 
   const registeredRender = await Effect.runPromise(
     Effect.provide(
@@ -2501,13 +2570,25 @@ const bootGame = async (
   let environmentalContactDamageState = INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE
   let simulationElapsedSecs = 0
   const isGameplayBlockSolid = solidityFromStore(currentChunkStore)
+  // mc-physics 0.2.1 replaced ResolveOptions.isBlockSolid (a boolean predicate)
+  // with blockPropertiesAt (the kernel's BlockProperties or null). The adapter
+  // must keep solidityFromStore's three-valued semantics: an unloaded chunk and
+  // out-of-world both read as SOLID (air there lets a player walk off a chunk
+  // edge and fall forever — see mx-gameplay's in-memory-world docstring), and a
+  // loaded block is solid exactly when it lacks the 'passable' capability.
+  // BLOCK_PROPERTY_DEFAULTS is kernel's "ordinary opaque solid cube", so this
+  // reproduces the pre-0.2.1 full-cube collision behavior exactly; per-shape
+  // registry collision (cactus inset, slabs) is a deliberate later change, not
+  // part of this migration.
   const simPhysicsConfig: SimPhysicsConfig = {
     resolve: {
+      blockPropertiesAt: (blockX, blockY, blockZ) =>
+        isGameplayBlockSolid({ x: blockX, y: blockY, z: blockZ })
+          ? BLOCK_PROPERTY_DEFAULTS
+          : null,
       halfWidth: PLAYER_HALF_WIDTH,
       // mc-sim exposes this branded field but not the brand constructor.
       halfHeight: PLAYER_HALF_HEIGHT as SimPhysicsConfig['resolve']['halfHeight'],
-      isBlockSolid: (blockX, blockY, blockZ) =>
-        isGameplayBlockSolid({ x: blockX, y: blockY, z: blockZ }),
     },
     walkSpeed: WALK_SPEED_M_PER_S,
     jumpSpeed: JUMP_SPEED_M_PER_S,
@@ -4219,8 +4300,12 @@ type MultiplayerInventorySelection = Readonly<{
             },
           },
           {
-            mobSimulation: multiplayer === undefined,
+            // The hand-rolled pickup loop (~line 8494) preserves
+            // metadata/durability/custom names that the stage-level pickup does
+            // not; droppedItemPickup: false keeps the two from consuming the
+            // same inventory in one frame (restored in mx-gameplay 0.3.3).
             droppedItemPickup: false,
+            mobSimulation: multiplayer === undefined,
           },
         ),
       ),
@@ -5118,7 +5203,12 @@ type MultiplayerInventorySelection = Readonly<{
       Effect.runSync(currentChunkStore.setBlock(position, 0))
     }
     for (const effect of plan.entityEffects) {
-      Effect.runSync(resolveBowHits(world.entities, [{ id: effect.id, damage: effect.damage }]))
+      // mc-kernel's `ExplosionEntityEffect.id` is a bare `string` (the
+      // explosion-physics layer does not own the `EntityId` brand);
+      // `resolveBowHits` requires mc-sim's branded id specifically (the
+      // already-imported `EntityId` here is mx-multiplayer's Schema.brand,
+      // which is not directly callable).
+      Effect.runSync(resolveBowHits(world.entities, [{ id: SimEntityId(effect.id), damage: effect.damage }]))
     }
     const playerPosition = Effect.runSync(playerApi.pose).feetPosition
     const playerDistance = Math.hypot(
@@ -6892,7 +6982,7 @@ type MultiplayerInventorySelection = Readonly<{
   const harvestFarmingCrop = () => {
     const dimension = Effect.runSync(playerApi.dimension)
     const location = { dimension, position: QA_FARM_CROP_BLOCK } as CropLocation
-    const ripe = Effect.runSync(crops.matureYieldAt(location)) !== null
+    const ripe = Effect.runSync(crops.matureYieldsAt(location)) !== null
     if (!ripe) return gameplaySnapshot()
     Effect.runSync(currentChunkStore.setBlock(QA_FARM_CROP_BLOCK, 0))
     Effect.runSync(crops.remove(location))
@@ -7116,7 +7206,14 @@ type MultiplayerInventorySelection = Readonly<{
 
   const seedVillageTradingEncounter = () => {
     let villager: PersistedVillager | undefined
-    for (let radius = 0; radius <= 64 && villager === undefined; radius += 1) {
+    // mc-worldgen 0.2.0's village placement is sparser than the org's
+    // previous algorithm: for `WORLD_SEED`, the nearest village to the
+    // origin is at chunk (-204, -15) — Chebyshev radius 204, confirmed by an
+    // exhaustive scan out to radius 300 finding nothing closer. The old
+    // bound of 64 predates that placement change and no longer reaches any
+    // village at all for this seed. 256 keeps comfortable margin above the
+    // measured 204 without scanning an unbounded area.
+    for (let radius = 0; radius <= 256 && villager === undefined; radius += 1) {
       for (let cx = -radius; cx <= radius && villager === undefined; cx += 1) {
         for (const cz of new Set([-radius, radius])) {
           const spawn = villageVillagerSpawnsForChunk(
@@ -8257,8 +8354,8 @@ type MultiplayerInventorySelection = Readonly<{
         && (Effect.runSync(inputApi.wasActionJustTriggered('use')) || nativeUse.triggered)
       const useHeld = held('use') > 0
       const lookDelta = {
-        x: walk.pointerDelta.x + consumedTouchLook.delta.x,
-        y: walk.pointerDelta.y + consumedTouchLook.delta.y,
+        x: walk.pointerDelta.x + consumedTouchLook.delta.positionX,
+        y: walk.pointerDelta.y + consumedTouchLook.delta.positionY,
       }
       const looked = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
         && (lookDelta.x !== 0 || lookDelta.y !== 0)
@@ -9296,7 +9393,7 @@ type MultiplayerInventorySelection = Readonly<{
                 }))
               } else if (target.blockId === POTATO_CROP_BLOCK_ID) {
                 const location = { dimension, position: target.position }
-                const ripe = Effect.runSync(crops.matureYieldAt(location)) !== null
+                const ripe = Effect.runSync(crops.matureYieldsAt(location)) !== null
                 Effect.runSync(currentChunkStore.setBlock(target.position, 0))
                 Effect.runSync(crops.remove(location))
                 nextItemUseRequestId += 1
@@ -10355,7 +10452,7 @@ type MultiplayerInventorySelection = Readonly<{
       if (brewingOpen) renderBrewingUi()
       renderPlayerUi()
       renderCrosshair(nowSecs)
-      const captions = playerSettings.captionsEnabled ? audio.visible(nowSecs) : []
+      const captions = playerSettings.captionsEnabled ? audio.visible(KernelMonotonicTimeSecs(nowSecs)) : []
       const nextCaptionSignature = captionRenderSignature(captions)
       if (nextCaptionSignature !== renderedCaptionSignature) {
         captionsParent.replaceChildren(...captions.map((caption) => {
