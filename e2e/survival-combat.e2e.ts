@@ -463,17 +463,24 @@ test('preserves Nether death drops and unrelated drops across respawn', async ({
   // above — a bare snapshot() taken immediately after the loop can read
   // before that tick has run, especially at CI's lower frame rate. Poll for
   // it, mirroring the pattern above, before reading the settled snapshot.
+  //
+  // No `id !== unrelatedDropId` exclusion here: entity ids are per-dimension
+  // serials (`dropped_item-N`), so the overworld drop's id can literally
+  // collide with the nether death drop's — on a slow runner a natural nether
+  // spawn takes serial 0 first, the death drop becomes dropped_item-1, and an
+  // id exclusion filters the real death drop out forever (the CI-only flat
+  // zero this comment replaces). The nether roster cannot contain the
+  // overworld drop at all — this test's own cross-dimension assertions below
+  // rely on exactly that scoping — so every dropped_item here IS death loot.
   await expect.poll(async () => {
     const current = await snapshot(page)
-    return current.entities.filter(
-      (entity) => entity.kind === 'dropped_item' && entity.id !== unrelatedDropId,
-    ).length
+    return current.entities.filter((entity) => entity.kind === 'dropped_item').length
   }).toBe(1)
   const death = await snapshot(page)
   expect(death.dimension).toBe('nether')
   expect(death.dead).toBe(true)
   const deathDropIds = death.entities
-    .filter((entity) => entity.kind === 'dropped_item' && entity.id !== unrelatedDropId)
+    .filter((entity) => entity.kind === 'dropped_item')
     .map((entity) => entity.id)
     .sort()
   expect(deathDropIds).toHaveLength(1)
