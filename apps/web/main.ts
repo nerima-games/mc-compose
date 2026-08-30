@@ -1359,7 +1359,10 @@ const bootGame = async (
     const renderer = String(context.getParameter(info.UNMASKED_RENDERER_WEBGL))
     return /swiftshader|software|llvmpipe|softpipe/iu.test(renderer)
   }
-  const renderQuality = isSoftwareRenderer(glContext) ? QUALITY_PRESETS.low : undefined
+  // Read once and reused below for the streamed chunk radius: both fall back
+  // together on the same software-rasterizer signal.
+  const softwareRenderer = isSoftwareRenderer(glContext)
+  const renderQuality = softwareRenderer ? QUALITY_PRESETS.low : undefined
   canvas.setAttribute('data-render-quality', renderQuality === undefined ? 'high' : 'low')
   const worldRenderer = webGlAvailable
     ? await Effect.runPromise(makeProductionWorldRenderer<
@@ -1961,7 +1964,19 @@ const bootGame = async (
   // STREAMING, keyed to where the player is — not a one-shot load at boot.
   //
   // A fixed radius bounds memory while still exercising both add and removal.
-  const STREAM_RADIUS_CHUNKS = 2
+  //
+  // Software-rasterizer-conditional: mc-worldgen 0.2.0's deepslate layer (see
+  // the investigation the render-quality fallback above shipped with) roughly
+  // quadruples the mesh index count per chunk versus the pre-0.2.0 terrain
+  // this budget was set against, because the same exposed rock surface is now
+  // split across two block types (stone/deepslate) instead of one, which
+  // defeats greedy meshing's same-blockId merge — not because SwiftShader
+  // renders more chunks. Measured: radius 2 here is ~153k indices/frame;
+  // radius 1 is ~71k, a 2.17x cut (not a full return to the pre-0.2.0 ~39k —
+  // see the investigation for what that residual gap is). Real
+  // hardware-accelerated players keep radius 2.
+  const STREAM_RADIUS_CHUNKS = softwareRenderer ? 1 : 2
+  canvas.setAttribute('data-stream-radius', String(STREAM_RADIUS_CHUNKS))
   let chunksStreamedIn = 0
   let chunksDropped = 0
 
