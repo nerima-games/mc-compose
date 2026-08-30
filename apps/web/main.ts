@@ -5134,6 +5134,14 @@ type MultiplayerInventorySelection = Readonly<{
       customNames: Object.fromEntries(customNames),
       enchantedItems: Object.fromEntries(enchantedItems),
     })
+    // DIAGNOSTIC — revert before merge: survival-combat.e2e.ts:433 reads zero
+    // death drops on CI only; this line shows whether the inventory was empty
+    // at death (correct-zero) or populated with the spawn suppressed.
+    console.log('DIAGNOSTIC death-drop state', JSON.stringify({
+      occupiedSlots: storage.inventory.slots.filter((slot) => slot !== undefined && slot !== null).length,
+      drops: drops.length,
+      deathPosition,
+    }))
     if (drops.length > 0) {
       const dropped = Effect.runSync(spawnDroppedItems(
         world.entities,
