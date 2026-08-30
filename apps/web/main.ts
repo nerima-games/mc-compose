@@ -7063,6 +7063,15 @@ type MultiplayerInventorySelection = Readonly<{
       ),
     )
     Effect.runSync(world.inventory.reset)
+    // The player spawns at QA_IGNITION_POSE, which sibling QA_IGNITION_POSE
+    // fixtures (e.g. seedZombiePursuitEncounter) pin to solid ground with
+    // QA_IGNITION_FLOOR_BLOCK — this fixture omitted it, so the player fell
+    // through unset Nether terrain onto whatever natural surface was below,
+    // shifting eye height enough to move the bed outside
+    // targetedRightClickRoute's raycast before the QA click landed.
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('bed')))
     Effect.runSync(currentChunkStore.setBlock({
