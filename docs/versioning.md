@@ -32,8 +32,11 @@ mc-compose は次の sibling package を runtime dependency として version pi
 - `mc-playground-kit` — ブラウザ bootstrap のための明示的な runtime 例外
 
 `effect` も直接依存し、`pnpm-lock.yaml` はこれらの解決結果を固定する。
-一部の公開 package には、この checkout の TypeScript 6 / pnpm 11 環境との互換性を保つため、
-`patches/` の patch を `pnpm-workspace.yaml` で適用している。
+まだ dist 形で公開されていない sibling package(ソースを直接 export しているもの)には、
+この checkout の TypeScript 7(`isolatedDeclarations` / `verbatimModuleSyntax` などの
+strictness)との互換性を保つため、`patches/` の patch を `pnpm-workspace.yaml` で適用している。
+その sibling が dist 形での公開に切り替わった時点で、対象パッケージの patch エントリは
+不要になる(mc-sim は 0.2.1 で切り替わり、Wave 0 でこの patch を削除した)。
 
 `pnpm install --frozen-lockfile` が単独 checkout でこの境界を再現する検証手段であり、
 兄弟リポジトリの source alias や `workspace:*` を runtime 解決には使わない。

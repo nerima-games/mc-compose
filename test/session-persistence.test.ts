@@ -3,15 +3,15 @@ import { Effect, Layer, Option } from 'effect'
 
 import {
   SaveKey,
+  sealSaveEnvelope,
   StorageError,
   StoragePort,
   type SaveEnvelope,
+  type SaveEnvelopeDraft,
   type StorageService,
 } from '@nerima-games/mc-save'
 import {
   FLINT_AND_STEEL_MAX_DURABILITY,
-  INITIAL_TIME_STATE,
-  INITIAL_WEATHER_STATE,
   INVENTORY_SLOT_COUNT,
   emptyFurnaceState,
   equipFromInventory,
@@ -54,6 +54,7 @@ import {
   saveSession as persistSession,
   sessionChunkKey,
   sessionHeadKey,
+  toStoredSessionState,
   type DimensionChunk,
   type SaveSessionInput,
   type SessionMetadata,
@@ -298,6 +299,20 @@ const saveSession = (
   input: Omit<SaveSessionInput, 'metadata'> & { readonly metadata?: SessionMetadata },
 ) => persistSession({ ...input, metadata: input.metadata ?? defaultMetadata })
 
+// Simulates a required field that is absent from the persisted JSON (JSON has
+// no way to write a literal `undefined`, so on disk "absent" and "explicitly
+// undefined" are the same thing — the key is simply missing). Building this
+// with `{ ...toStoredSessionState(state), [key]: undefined }` would put a raw
+// `undefined` back into the fixture and trip the same
+// `canonicalize`-rejects-`undefined` check `toStoredSessionState` exists to
+// route around, so the key is dropped instead of set.
+const storedStateWithout = (state: SessionState, key: keyof SessionState): unknown => {
+  const stored = toStoredSessionState(state) as Record<string, unknown>
+  const { [key]: omitted, ...rest } = stored
+  void omitted
+  return rest
+}
+
 type ControlledStorage = {
   readonly layer: Layer.Layer<StoragePort>
   failChunkKey: string | undefined
@@ -306,7 +321,7 @@ type ControlledStorage = {
   chunkWriteCount: number
   readonly keys: ReadonlyArray<string>
   readonly envelope: (key: string) => SaveEnvelope | undefined
-  readonly setEnvelope: (key: string, envelope: SaveEnvelope) => void
+  readonly setEnvelope: (key: string, envelope: SaveEnvelope | SaveEnvelopeDraft) => void
 }
 
 const controlledStorage = (): ControlledStorage => {
@@ -402,7 +417,16 @@ const controlledStorage = (): ControlledStorage => {
       return [...entries.keys()]
     },
     envelope: (key) => entries.get(key),
-    setEnvelope: (key, envelope) => entries.set(key, envelope),
+    // mc-save 0.3.0 made `integrity` a required part of `SaveEnvelope` (a
+    // checksum sealed over format/version/payload/extensions). Test fixtures
+    // below build envelopes as plain drafts — the shape this suite has always
+    // used to seed storage directly, bypassing `saveTo` — so seal on the way
+    // in rather than repeating `sealSaveEnvelope(...)` at every one of this
+    // file's call sites. An envelope that already carries `integrity` (for
+    // example one copied from a prior `saveSession`/`storage.envelope()` call)
+    // passes through unchanged.
+    setEnvelope: (key, envelope) =>
+      entries.set(key, 'integrity' in envelope ? envelope : sealSaveEnvelope(envelope)),
   }
 }
 
@@ -497,13 +521,13 @@ describe('session persistence', () => {
         sessionId,
         revision: 'r1',
         metadata: defaultMetadata,
-        state: {
+        state: toStoredSessionState({
           ...state,
           wither: {
             ...wither,
             withers: [{ ...wither.withers[0]!, rangedCooldownSecs: -1 }],
           },
-        },
+        }),
         chunks: [],
       },
     })
@@ -522,14 +546,14 @@ describe('session persistence', () => {
     const storage = controlledStorage()
     const state = sessionState(42)
     const invalidStates = [
-      { ...state, brewing: { ...state.brewing, fuelUnits: -1 } },
-      {
+      toStoredSessionState({ ...state, brewing: { ...state.brewing, fuelUnits: -1 } }),
+      toStoredSessionState({
         ...state,
         statusEffects: {
           effects: [{ type: 'speed', remainingSecs: Number.POSITIVE_INFINITY, pulseClockSecs: 0 }],
         },
-      },
-      {
+      }),
+      toStoredSessionState({
         ...state,
         villagers: {
           ...state.villagers,
@@ -540,7 +564,7 @@ describe('session persistence', () => {
             feetPosition: { x: 0, y: 64, z: 0 },
           }],
         },
-      },
+      }),
     ]
 
     for (const [index, invalidState] of invalidStates.entries()) {
@@ -566,160 +590,48 @@ describe('session persistence', () => {
     }).pipe(Effect.provide(storage.layer))
   })
 
-  it.effect('migrates a v8 session with an absent furnace registry', () => {
+  // mc-save 0.3.0 removed format migrations (org decision, Wave 0: consumers
+  // require the current format version, no migration shims). A session whose
+  // envelope names any version other than SESSION_FORMAT_VERSION now fails
+  // `loadSession` with a `SaveDecodeError` naming that version, in place of
+  // the per-transition migrations (v1 through v17) this format used to carry.
+  // This single test replaces what used to be one test per transition
+  // (absent furnace/portal/crop/container-storage/entity-roster registries at
+  // v8-v12, the v16 entity-roster redistribution, the v5 inventory->storage
+  // reshape, the v4 flat chunk manifest, and the v1-v3 vitals/time/weather
+  // introductions): none of that per-field repair behavior exists to test any
+  // more, because every one of these versions is rejected identically, before
+  // its payload is even inspected — see `format-codec.ts`'s `decodeSave`,
+  // which checks `envelope.version !== format.version` ahead of any schema
+  // decode. The payload below is otherwise fully current-shaped, which proves
+  // the rejection is the version check, not incidental payload damage.
+  it.effect('rejects every session envelope version older than the current format', () => {
     const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v8')
-    const { furnaces: _furnaces, ...v8State } = sessionState(42)
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 8,
-      payload: {
-        sessionId: 'legacy-v8',
-        revision: 'r1',
-        metadata: defaultMetadata,
-        state: v8State,
-        chunks: [],
-      },
-    })
+    const legacyVersions = [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 16]
 
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v8'))
-
-      expect(loaded.state.furnaces).toEqual([])
-      expect(storage.envelope(key)?.version).toBe(8)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('migrates a v9 session with an absent portal registry', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v9')
-    const { portals: _portals, ...v9State } = sessionState(42)
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 9,
-      payload: {
-        sessionId: 'legacy-v9',
-        revision: 'r1',
-        metadata: defaultMetadata,
-        state: v9State,
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v9'))
-
-      expect(loaded.state.portals).toEqual([])
-      expect(storage.envelope(key)?.version).toBe(9)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('migrates a v10 session with an absent crop registry', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v10')
-    const { crops: _crops, ...v10State } = sessionState(42)
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 10,
-      payload: {
-        sessionId: 'legacy-v10',
-        revision: 'r1',
-        metadata: defaultMetadata,
-        state: v10State,
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v10'))
-
-      expect(loaded.state.crops).toEqual({ crops: [] })
-      expect(storage.envelope(key)?.version).toBe(10)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('migrates a v11 session with absent container storage', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v11')
-    const { containerStorage: _containerStorage, ...v11State } = sessionState(42)
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 11,
-      payload: {
-        sessionId: 'legacy-v11',
-        revision: 'r1',
-        metadata: defaultMetadata,
-        state: v11State,
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v11'))
-
-      expect(loaded.state.containerStorage).toEqual({ version: 2, containers: [] })
-      expect(storage.envelope(key)?.version).toBe(11)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('migrates a v12 session with an absent dynamic entity roster', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v12')
-    const { entities: _entities, ...v12State } = sessionState(42)
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 12,
-      payload: {
-        sessionId: 'legacy-v12',
-        revision: 'r1',
-        metadata: defaultMetadata,
-        state: v12State,
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v12'))
-
-      expect(loaded.state.entities).toEqual(EMPTY_ENTITY_ROSTERS)
-      expect(storage.envelope(key)?.version).toBe(12)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('migrates a v16 entity roster into its active dimension', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v16-entities')
-    const entityRoster = {
-      entities: [{
-        id: 'blaze-3',
-        kind: 'blaze',
-        feetPosition: { x: 2.5, y: 70, z: -4.5 },
-        healthPoints: 20,
-        behaviour: { phase: 'idle' },
-      }],
-      nextSerial: 4,
-    }
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 16,
-      payload: {
-        sessionId: 'legacy-v16-entities',
-        revision: 'r1',
-        metadata: defaultMetadata,
-        state: { ...sessionState(42), dimension: 'nether', entities: entityRoster },
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v16-entities'))
-
-      expect(loaded.state.entities).toEqual({
-        overworld: EMPTY_ENTITY_ROSTER,
-        nether: entityRoster,
-        end: EMPTY_ENTITY_ROSTER,
+    for (const version of legacyVersions) {
+      storage.setEnvelope(sessionHeadKey(`legacy-v${String(version)}`), {
+        format: SESSION_FORMAT_NAME,
+        version,
+        payload: {
+          sessionId: `legacy-v${String(version)}`,
+          revision: 'r1',
+          metadata: defaultMetadata,
+          state: toStoredSessionState(sessionState(version)),
+          chunks: [],
+        },
       })
-      expect(storage.envelope(key)?.version).toBe(16)
+    }
+
+    return Effect.gen(function* () {
+      for (const version of legacyVersions) {
+        const error = yield* Effect.flip(loadSession(`legacy-v${String(version)}`))
+        expect(error).toMatchObject({
+          _tag: 'SaveDecodeError',
+          format: SESSION_FORMAT_NAME,
+          version,
+        })
+      }
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -733,7 +645,12 @@ describe('session persistence', () => {
         sessionId: 'current-entity-roster',
         revision: 'r1',
         metadata: defaultMetadata,
-        state: {
+        // `entities` is deliberately malformed (a missing-field roster entry,
+        // a null dimension roster) to exercise `normalizePersistedEntityRosters`,
+        // so this doesn't typecheck as `SessionState` — same reasoning as the
+        // untyped `encodePlayerStorageSlots`/`encodeBrewingUndefined` this
+        // flows through inside `toStoredSessionState`.
+        state: toStoredSessionState({
           ...sessionState(42),
           entities: {
             overworld: {
@@ -752,7 +669,7 @@ describe('session persistence', () => {
             nether: null,
             end: { entities: [], nextSerial: -4 },
           },
-        },
+        } as unknown as SessionState),
         chunks: [],
       },
     })
@@ -777,17 +694,17 @@ describe('session persistence', () => {
     }).pipe(Effect.provide(storage.layer))
   })
 
-  it.effect('rejects v11 container storage explicitly set to undefined', () => {
+  it.effect('rejects container storage explicitly set to undefined', () => {
     const storage = controlledStorage()
     const sessionId = 'undefined-v11-container-storage'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 11,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId,
         revision: 'r1',
         metadata: defaultMetadata,
-        state: { ...sessionState(42), containerStorage: undefined },
+        state: storedStateWithout(sessionState(42), 'containerStorage'),
         chunks: [],
       },
     })
@@ -797,7 +714,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 11,
+        version: SESSION_FORMAT_VERSION,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -807,18 +724,18 @@ describe('session persistence', () => {
     const sessionId = 'invalid-container-storage'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 11,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId,
         revision: 'r1',
         metadata: defaultMetadata,
-        state: {
+        state: toStoredSessionState({
           ...sessionState(42),
           containerStorage: {
             version: 2,
             containers: [{ id: '', kind: 'chest', slots: [] }],
           },
-        },
+        }),
         chunks: [],
       },
     })
@@ -828,22 +745,22 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 11,
+        version: SESSION_FORMAT_VERSION,
       })
     }).pipe(Effect.provide(storage.layer))
   })
 
-  it.effect('rejects a v9 portal registry explicitly set to undefined', () => {
+  it.effect('rejects a portal registry explicitly set to undefined', () => {
     const storage = controlledStorage()
     const sessionId = 'undefined-v9-portals'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 9,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId,
         revision: 'r1',
         metadata: defaultMetadata,
-        state: { ...sessionState(42), portals: undefined },
+        state: storedStateWithout(sessionState(42), 'portals'),
         chunks: [],
       },
     })
@@ -853,7 +770,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 9,
+        version: SESSION_FORMAT_VERSION,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -870,12 +787,17 @@ describe('session persistence', () => {
       const sessionId = `invalid-portal-${String(index)}`
       storage.setEnvelope(sessionHeadKey(sessionId), {
         format: SESSION_FORMAT_NAME,
-        version: 10,
+        version: SESSION_FORMAT_VERSION,
         payload: {
           sessionId,
           revision: 'r1',
           metadata: defaultMetadata,
-          state: { ...sessionState(index), portals: [portal] },
+          // `portal` is deliberately malformed (an unrecognized dimension
+          // string, fractional/infinite coordinates), so this doesn't
+          // typecheck as `SessionState`.
+          state: toStoredSessionState(
+            { ...sessionState(index), portals: [portal] } as unknown as SessionState,
+          ),
           chunks: [],
         },
       })
@@ -887,7 +809,7 @@ describe('session persistence', () => {
         expect(error).toMatchObject({
           _tag: 'SaveDecodeError',
           format: SESSION_FORMAT_NAME,
-          version: 10,
+          version: SESSION_FORMAT_VERSION,
         })
       }
     }).pipe(Effect.provide(storage.layer))
@@ -920,12 +842,17 @@ describe('session persistence', () => {
       const sessionId = `invalid-crops-${String(index)}`
       storage.setEnvelope(sessionHeadKey(sessionId), {
         format: SESSION_FORMAT_NAME,
-        version: 11,
+        version: SESSION_FORMAT_VERSION,
         payload: {
           sessionId,
           revision: 'r1',
           metadata: defaultMetadata,
-          state: { ...sessionState(index), crops: { crops } },
+          // `crops` is deliberately malformed (an unrecognized dimension,
+          // fractional coordinates, negative growth), so this doesn't
+          // typecheck as `SessionState`.
+          state: toStoredSessionState(
+            { ...sessionState(index), crops: { crops } } as unknown as SessionState,
+          ),
           chunks: [],
         },
       })
@@ -937,7 +864,7 @@ describe('session persistence', () => {
         expect(error).toMatchObject({
           _tag: 'SaveDecodeError',
           format: SESSION_FORMAT_NAME,
-          version: 11,
+          version: SESSION_FORMAT_VERSION,
         })
       }
     }).pipe(Effect.provide(storage.layer))
@@ -953,7 +880,7 @@ describe('session persistence', () => {
         sessionId,
         revision: 'r1',
         metadata: defaultMetadata,
-        state: sessionState(42),
+        state: toStoredSessionState(sessionState(42)),
         chunks: [],
       },
     })
@@ -1005,19 +932,22 @@ describe('session persistence', () => {
       const sessionId = `invalid-furnace-${String(index)}`
       storage.setEnvelope(sessionHeadKey(sessionId), {
         format: SESSION_FORMAT_NAME,
-        version: 9,
+        version: SESSION_FORMAT_VERSION,
         payload: {
           sessionId,
           revision: 'r1',
           metadata: defaultMetadata,
-          state: {
+          // `state` (the furnace state under test) is deliberately malformed
+          // (an unrecognized item id, non-finite timers), so this doesn't
+          // typecheck as `SessionState`.
+          state: toStoredSessionState({
             ...sessionState(index),
             furnaces: [{
               dimension: 'overworld',
               position: { x: 1, y: 64, z: 2 },
               state,
             }],
-          },
+          } as unknown as SessionState),
           chunks: [],
         },
       })
@@ -1029,7 +959,7 @@ describe('session persistence', () => {
         expect(error).toMatchObject({
           _tag: 'SaveDecodeError',
           format: SESSION_FORMAT_NAME,
-          version: 9,
+          version: SESSION_FORMAT_VERSION,
         })
       }
     }).pipe(Effect.provide(storage.layer))
@@ -1040,19 +970,19 @@ describe('session persistence', () => {
     const sessionId = 'fractional-furnace-coordinate'
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 9,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId,
         revision: 'r1',
         metadata: defaultMetadata,
-        state: {
+        state: toStoredSessionState({
           ...sessionState(42),
           furnaces: [{
             dimension: 'overworld',
             position: { x: 1.5, y: 64, z: 2 },
             state: emptyFurnaceState(),
           }],
-        },
+        }),
         chunks: [],
       },
     })
@@ -1062,7 +992,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 9,
+        version: SESSION_FORMAT_VERSION,
       })
     }).pipe(Effect.provide(storage.layer))
   })
@@ -1077,12 +1007,12 @@ describe('session persistence', () => {
     }
     storage.setEnvelope(sessionHeadKey(sessionId), {
       format: SESSION_FORMAT_NAME,
-      version: 9,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId,
         revision: 'r1',
         metadata: defaultMetadata,
-        state: { ...sessionState(42), furnaces: [furnace, furnace] },
+        state: toStoredSessionState({ ...sessionState(42), furnaces: [furnace, furnace] }),
         chunks: [],
       },
     })
@@ -1092,12 +1022,12 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 9,
+        version: SESSION_FORMAT_VERSION,
       })
     }).pipe(Effect.provide(storage.layer))
   })
 
-  it.effect('rejects v8 session metadata with a non-normalized world name', () => {
+  it.effect('rejects session metadata with a non-normalized world name', () => {
     const storage = controlledStorage()
     const invalidNames = ['', '   ', ' World ', 'w'.repeat(129)]
 
@@ -1105,12 +1035,12 @@ describe('session persistence', () => {
       const sessionId = `invalid-metadata-${String(index)}`
       storage.setEnvelope(sessionHeadKey(sessionId), {
         format: SESSION_FORMAT_NAME,
-        version: 8,
+        version: SESSION_FORMAT_VERSION,
         payload: {
           sessionId,
           revision: 'r1',
           metadata: { name, mode: 'survival' },
-          state: sessionState(index),
+          state: toStoredSessionState(sessionState(index)),
           chunks: [],
         },
       })
@@ -1122,7 +1052,7 @@ describe('session persistence', () => {
         expect(error).toMatchObject({
           _tag: 'SaveDecodeError',
           format: SESSION_FORMAT_NAME,
-          version: 8,
+          version: SESSION_FORMAT_VERSION,
         })
       }
     }).pipe(Effect.provide(storage.layer))
@@ -1147,13 +1077,16 @@ describe('session persistence', () => {
         state: sessionState(1),
         chunks: [],
       })
+      // A well-formed but pre-current-version envelope is skipped exactly like
+      // a structurally corrupt one (mc-save 0.3.0 removed migrations; there is
+      // no version this repository still knows how to bring forward).
       storage.setEnvelope(sessionHeadKey('legacy-v7'), {
         format: SESSION_FORMAT_NAME,
         version: 7,
         payload: {
           sessionId: 'legacy-v7',
           revision: 'legacy',
-          state: sessionState(7),
+          state: toStoredSessionState(sessionState(7)),
           chunks: [],
         },
       })
@@ -1168,7 +1101,7 @@ describe('session persistence', () => {
         payload: {
           sessionId: oversizedLegacySessionId,
           revision: 'legacy-oversized',
-          state: sessionState(8),
+          state: toStoredSessionState(sessionState(8)),
           chunks: [],
         },
       })
@@ -1189,13 +1122,11 @@ describe('session persistence', () => {
 
       expect(sessions.map(({ sessionId }) => sessionId)).toEqual([
         'alpha',
-        'legacy-v7',
         specialSessionId,
       ])
-      expect(sessions.map(({ revision }) => revision)).toEqual(['r2', 'legacy', 'r1'])
+      expect(sessions.map(({ revision }) => revision)).toEqual(['r2', 'r1'])
       expect(sessions.map(({ metadata }) => metadata)).toEqual([
         { name: 'Alpha Display', mode: 'creative' },
-        { name: 'legacy-v7', mode: 'survival' },
         defaultMetadata,
       ])
     }).pipe(Effect.provide(storage.layer))
@@ -1257,28 +1188,6 @@ describe('session persistence', () => {
     }).pipe(Effect.provide(storage.layer))
   })
 
-  it.effect('migrates v6 sessions with an empty lever state', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v6')
-    const { redstone: _redstone, ...v6State } = sessionState(42)
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 6,
-      payload: {
-        sessionId: 'legacy-v6',
-        revision: 'r1',
-        state: v6State,
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v6'))
-      expect(loaded.state.redstone).toEqual({ levers: [] })
-      expect(loaded.metadata).toEqual({ name: 'legacy-v6', mode: 'survival' })
-    }).pipe(Effect.provide(storage.layer))
-  })
-
   it.effect('round-trips partially damaged equipped tools', () => {
     const storage = controlledStorage()
     const inventory = {
@@ -1313,46 +1222,9 @@ describe('session persistence', () => {
     }).pipe(Effect.provide(storage.layer))
   })
 
-  it.effect('migrates a literal v5 inventory to complete player storage', () => {
+  it.effect('rejects a player storage that violates durability invariants', () => {
     const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v5')
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 5,
-      payload: {
-        sessionId: 'legacy-v5',
-        revision: 'r1',
-        state: {
-          ...legacySessionState(42),
-          inventory: { slots: [{ item: 'flint_and_steel', count: 1 }] },
-        },
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v5'))
-
-      expect(loaded.state.storage.inventory.slots).toHaveLength(INVENTORY_SLOT_COUNT)
-      expect(loaded.state.storage.inventoryDurability).toHaveLength(INVENTORY_SLOT_COUNT)
-      expect(loaded.state.storage.inventoryDurability[0]).toEqual({
-        current: FLINT_AND_STEEL_MAX_DURABILITY,
-        max: FLINT_AND_STEEL_MAX_DURABILITY,
-      })
-      expect(loaded.state.storage.equipment.slots).toEqual({
-        head: null,
-        chest: null,
-        legs: null,
-        feet: null,
-        offhand: null,
-      })
-      expect(storage.envelope(key)?.version).toBe(5)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('rejects a v6 player storage that violates durability invariants', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('invalid-v6-storage')
+    const key = sessionHeadKey('invalid-storage-durability')
     const validStorage = storageFromInventory({
       slots: Array.from({ length: INVENTORY_SLOT_COUNT }, (_, index) =>
         index === 0 ? { item: 'flint_and_steel' as const, count: 1 } : undefined,
@@ -1360,30 +1232,31 @@ describe('session persistence', () => {
     } as Inventory)
     storage.setEnvelope(key, {
       format: SESSION_FORMAT_NAME,
-      version: 6,
+      version: SESSION_FORMAT_VERSION,
       payload: {
-        sessionId: 'invalid-v6-storage',
+        sessionId: 'invalid-storage-durability',
         revision: 'r1',
-        state: {
+        metadata: defaultMetadata,
+        state: toStoredSessionState({
           ...sessionState(42),
           storage: {
             ...validStorage,
             inventoryDurability: Array.from({ length: INVENTORY_SLOT_COUNT }, () => null),
           },
-        },
+        }),
         chunks: [],
       },
     })
 
     return Effect.gen(function* () {
-      const error = yield* Effect.flip(loadSession('invalid-v6-storage'))
+      const error = yield* Effect.flip(loadSession('invalid-storage-durability'))
 
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 6,
+        version: SESSION_FORMAT_VERSION,
       })
-      expect(storage.envelope(key)?.version).toBe(6)
+      expect(storage.envelope(key)?.version).toBe(SESSION_FORMAT_VERSION)
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -1410,236 +1283,24 @@ describe('session persistence', () => {
     }).pipe(Effect.provide(storage.layer))
   })
 
-  it.effect('loads literal v4 chunks as overworld without rewriting and collects legacy keys', () => {
-    const storage = controlledStorage()
-    const headKey = sessionHeadKey('legacy-v4')
-    const legacyChunkKey = 'mc-compose/session/legacy-v4/revision/r1/chunk/0/0'
-
-    return Effect.gen(function* () {
-      const seed = yield* saveSession({
-        sessionId: 'legacy-v4',
-        revision: 'seed',
-        state: sessionState(42),
-        chunks: [dimensionChunk('overworld', 0, 0, 5)],
-      })
-      storage.setEnvelope(legacyChunkKey, storage.envelope(seed.chunks[0]!.key)!)
-      storage.setEnvelope(headKey, {
-        format: SESSION_FORMAT_NAME,
-        version: 4,
-        payload: {
-          sessionId: 'legacy-v4',
-          revision: 'r1',
-          state: { ...legacySessionState(42), dimension: 'nether' },
-          chunks: [{ coord: chunkCoord(0, 0), key: legacyChunkKey }],
-        },
-      })
-
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v4'))
-      expect(loaded.chunks).toEqual([
-        { dimension: 'overworld', coord: chunkCoord(0, 0), key: legacyChunkKey },
-      ])
-      expect(loaded.state.storage.inventory.slots).toHaveLength(INVENTORY_SLOT_COUNT)
-      expect(loaded.state.storage.inventoryDurability).toHaveLength(INVENTORY_SLOT_COUNT)
-      expect(storage.envelope(headKey)?.version).toBe(4)
-
-      const loadedChunks = yield* makeSessionChunkSource(
-        loaded,
-        'overworld',
-        (coord) => Effect.succeed(chunk(coord.cx, coord.cz, 9)),
-      )
-      yield* saveSession({
-        sessionId: 'legacy-v4',
-        revision: 'r2',
-        state: loaded.state,
-        chunks: loadedChunks.chunks,
-      })
-
-      expect(storage.envelope(legacyChunkKey)).toBeUndefined()
-      expect(storage.envelope(headKey)?.version).toBe(17)
-      expect(storage.keys).toContain(
-        sessionChunkKey('legacy-v4', 'r2', 'overworld', chunkCoord(0, 0)),
-      )
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('migrates a literal v1 session to spawn vitals', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v1')
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 1,
-      payload: {
-        sessionId: 'legacy-v1',
-        revision: 'r1',
-        state: {
-          seed: 73,
-          dimension: 'overworld',
-          player: {
-            feetPosition: { x: 1.5, y: 64, z: -2.5 },
-            yawRadians: 0.25,
-            pitchRadians: -0.1,
-          },
-          inventory: { slots: [{ item: 'stone', count: 12 }, undefined] },
-        },
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v1'))
-
-      expect(loaded.state.vitals).toEqual(SPAWN_PLAYER_VITALS)
-      expect(loaded.state.time).toEqual(INITIAL_TIME_STATE)
-      expect(loaded.state.weather).toEqual(INITIAL_WEATHER_STATE)
-      expect(storage.envelope(key)?.version).toBe(1)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('migrates a literal v2 session to the initial simulation time', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v2')
-    const legacyState = { ...legacySessionState(84) } as Record<string, unknown>
-    delete legacyState['time']
-    delete legacyState['weather']
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 2,
-      payload: {
-        sessionId: 'legacy-v2',
-        revision: 'r1',
-        state: legacyState,
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v2'))
-
-      expect(loaded.state.time).toEqual(INITIAL_TIME_STATE)
-      expect(loaded.state.weather).toEqual(INITIAL_WEATHER_STATE)
-      expect(storage.envelope(key)?.version).toBe(2)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('migrates a literal v3 session to the initial weather', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-v3')
-    const legacyState = { ...legacySessionState(91) } as Record<string, unknown>
-    delete legacyState['weather']
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 3,
-      payload: {
-        sessionId: 'legacy-v3',
-        revision: 'r1',
-        state: legacyState,
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const loaded = Option.getOrThrow(yield* loadSession('legacy-v3'))
-
-      expect(loaded.state.weather).toEqual(INITIAL_WEATHER_STATE)
-      expect(storage.envelope(key)?.version).toBe(3)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('does not repair an explicitly undefined v3 weather property', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-invalid-weather')
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 3,
-      payload: {
-        sessionId: 'legacy-invalid-weather',
-        revision: 'r1',
-        state: { ...legacySessionState(42), weather: undefined },
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const error = yield* Effect.flip(loadSession('legacy-invalid-weather'))
-
-      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 3 })
-      expect(storage.envelope(key)?.version).toBe(3)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('does not repair an explicitly undefined v1 vitals property', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('legacy-invalid-vitals')
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 1,
-      payload: {
-        sessionId: 'legacy-invalid-vitals',
-        revision: 'r1',
-        state: { ...legacySessionState(42), vitals: undefined },
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const error = yield* Effect.flip(loadSession('legacy-invalid-vitals'))
-
-      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 1 })
-      expect(storage.envelope(key)?.version).toBe(1)
-    }).pipe(Effect.provide(storage.layer))
-  })
-
-  it.effect('rejects a v2 session whose vitals property is missing', () => {
-    const storage = controlledStorage()
-    const key = sessionHeadKey('missing-vitals')
-    storage.setEnvelope(key, {
-      format: SESSION_FORMAT_NAME,
-      version: 2,
-      payload: {
-        sessionId: 'missing-vitals',
-        revision: 'r1',
-        state: {
-          seed: 42,
-          dimension: 'overworld',
-          player: {
-            feetPosition: { x: 1.5, y: 64, z: -2.5 },
-            yawRadians: 0.25,
-            pitchRadians: -0.1,
-          },
-          inventory: { slots: [] },
-        },
-        chunks: [],
-      },
-    })
-
-    return Effect.gen(function* () {
-      const error = yield* Effect.flip(loadSession('missing-vitals'))
-
-      expect(error).toMatchObject({
-        _tag: 'SaveDecodeError',
-        format: SESSION_FORMAT_NAME,
-        version: 2,
-      })
-      expect(storage.envelope(key)).toBeDefined()
-    }).pipe(Effect.provide(storage.layer))
-  })
 
   it.effect('rejects non-finite persisted vitals', () => {
     const storage = controlledStorage()
     const key = sessionHeadKey('non-finite-vitals')
     storage.setEnvelope(key, {
       format: SESSION_FORMAT_NAME,
-      version: 2,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId: 'non-finite-vitals',
         revision: 'r1',
-        state: {
-          ...legacySessionState(42),
+        metadata: defaultMetadata,
+        state: toStoredSessionState({
+          ...sessionState(42),
           vitals: {
-            ...legacySessionState(42).vitals,
+            ...sessionState(42).vitals,
             healthPoints: Number.POSITIVE_INFINITY,
           },
-        },
+        }),
         chunks: [],
       },
     })
@@ -1647,7 +1308,7 @@ describe('session persistence', () => {
     return Effect.gen(function* () {
       const error = yield* Effect.flip(loadSession('non-finite-vitals'))
 
-      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 2 })
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: SESSION_FORMAT_VERSION })
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -1656,14 +1317,15 @@ describe('session persistence', () => {
     const key = sessionHeadKey('invalid-time')
     storage.setEnvelope(key, {
       format: SESSION_FORMAT_NAME,
-      version: 3,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId: 'invalid-time',
         revision: 'r1',
-        state: {
-          ...legacySessionState(42),
+        metadata: defaultMetadata,
+        state: toStoredSessionState({
+          ...sessionState(42),
           time: { ticks: Number.POSITIVE_INFINITY, dayLengthTicks: 24_000 },
-        },
+        }),
         chunks: [],
       },
     })
@@ -1671,7 +1333,7 @@ describe('session persistence', () => {
     return Effect.gen(function* () {
       const error = yield* Effect.flip(loadSession('invalid-time'))
 
-      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 3 })
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: SESSION_FORMAT_VERSION })
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -1680,14 +1342,15 @@ describe('session persistence', () => {
     const key = sessionHeadKey('invalid-weather')
     storage.setEnvelope(key, {
       format: SESSION_FORMAT_NAME,
-      version: 4,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId: 'invalid-weather',
         revision: 'r1',
-        state: {
-          ...legacySessionState(42),
+        metadata: defaultMetadata,
+        state: toStoredSessionState({
+          ...sessionState(42),
           weather: { weather: 'rain', remainingSecs: 0 },
-        },
+        }),
         chunks: [],
       },
     })
@@ -1695,7 +1358,7 @@ describe('session persistence', () => {
     return Effect.gen(function* () {
       const error = yield* Effect.flip(loadSession('invalid-weather'))
 
-      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 4 })
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: SESSION_FORMAT_VERSION })
     }).pipe(Effect.provide(storage.layer))
   })
 
@@ -1704,14 +1367,15 @@ describe('session persistence', () => {
     const key = sessionHeadKey('invalid-vitals')
     storage.setEnvelope(key, {
       format: SESSION_FORMAT_NAME,
-      version: 2,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId: 'invalid-vitals',
         revision: 'r1',
-        state: {
-          ...legacySessionState(42),
-          vitals: { ...legacySessionState(42).vitals, healthPoints: 21, maxHealthPoints: 20 },
-        },
+        metadata: defaultMetadata,
+        state: toStoredSessionState({
+          ...sessionState(42),
+          vitals: { ...sessionState(42).vitals, healthPoints: 21, maxHealthPoints: 20 },
+        }),
         chunks: [],
       },
     })
@@ -1719,23 +1383,35 @@ describe('session persistence', () => {
     return Effect.gen(function* () {
       const error = yield* Effect.flip(loadSession('invalid-vitals'))
 
-      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: 2 })
+      expect(error).toMatchObject({ _tag: 'SaveDecodeError', version: SESSION_FORMAT_VERSION })
     }).pipe(Effect.provide(storage.layer))
   })
 
   it.effect('rejects a saved session containing an unknown inventory item id', () => {
     const storage = controlledStorage()
     const key = sessionHeadKey('unknown-item')
+    const base = sessionState(42)
     storage.setEnvelope(key, {
       format: SESSION_FORMAT_NAME,
-      version: 2,
+      version: SESSION_FORMAT_VERSION,
       payload: {
         sessionId: 'unknown-item',
         revision: 'r1',
-        state: {
-          ...legacySessionState(42),
-          inventory: { slots: [{ item: 'item_from_an_unknown_build', count: 1 }] },
-        },
+        metadata: defaultMetadata,
+        // The `item_from_an_unknown_build` slot is deliberately not an
+        // `ItemType` this build knows, so this doesn't typecheck as
+        // `SessionState`.
+        state: toStoredSessionState({
+          ...base,
+          storage: {
+            ...base.storage,
+            inventory: {
+              slots: base.storage.inventory.slots.map((slot, index) =>
+                index === 0 ? { item: 'item_from_an_unknown_build', count: 1 } : slot,
+              ),
+            },
+          },
+        } as unknown as SessionState),
         chunks: [],
       },
     })
@@ -1746,7 +1422,7 @@ describe('session persistence', () => {
       expect(error).toMatchObject({
         _tag: 'SaveDecodeError',
         format: SESSION_FORMAT_NAME,
-        version: 2,
+        version: SESSION_FORMAT_VERSION,
       })
       expect(storage.envelope(key)).toBeDefined()
     }).pipe(Effect.provide(storage.layer))

@@ -45,16 +45,16 @@ const readPort = (name: string, fallback: number): number => {
   return port
 }
 
-export const E2E_PORT = readPort('E2E_PORT', 5181)
-export const E2E_BASE_URL = `http://127.0.0.1:${String(E2E_PORT)}`
-export const E2E_MULTIPLAYER_PORT = readPort('E2E_MULTIPLAYER_PORT', 5182)
-export const E2E_MULTIPLAYER_URL = `ws://127.0.0.1:${String(E2E_MULTIPLAYER_PORT)}/ws`
+export const E2E_PORT: number = readPort('E2E_PORT', 5181)
+export const E2E_BASE_URL: string = `http://127.0.0.1:${String(E2E_PORT)}`
+export const E2E_MULTIPLAYER_PORT: number = readPort('E2E_MULTIPLAYER_PORT', 5182)
+export const E2E_MULTIPLAYER_URL: string = `ws://127.0.0.1:${String(E2E_MULTIPLAYER_PORT)}/ws`
 
 if (E2E_PORT === E2E_MULTIPLAYER_PORT) {
   throw new Error('E2E_PORT and E2E_MULTIPLAYER_PORT must be different')
 }
 
-export default defineConfig({
+const config: ReturnType<typeof defineConfig> = defineConfig({
   testDir: './e2e',
   testMatch: '**/*.e2e.ts',
   timeout: 60_000,
@@ -115,3 +115,5 @@ export default defineConfig({
     },
   ],
 })
+
+export default config

@@ -14,17 +14,17 @@ import {
   SaveKey,
   saveTo,
   defineFormat,
-  type MigrationError,
   type SaveDecodeError,
+  type SaveFormat,
   type StorageError,
   type StoragePort,
 } from '@nerima-games/mc-save'
 import { Effect, Option, Schema } from 'effect'
 
 export const PLAYER_SETTINGS_FORMAT_NAME = '@nerima-games/mc-compose/player-settings'
-export const PLAYER_SETTINGS_KEY = SaveKey('mc-compose/player-settings')
+export const PLAYER_SETTINGS_KEY: SaveKey = SaveKey('mc-compose/player-settings')
 
-export const PLAYER_BINDING_ACTIONS = INPUT_ACTIONS.filter(
+export const PLAYER_BINDING_ACTIONS: ReadonlyArray<Exclude<InputAction, 'escape'>> = INPUT_ACTIONS.filter(
   (action): action is Exclude<InputAction, 'escape'> => action !== 'escape',
 )
 
@@ -46,13 +46,13 @@ export const DEFAULT_PLAYER_SETTINGS: PlayerSettingsV1 = {
   captionsEnabled: true,
 }
 
-export const PLAYER_SETTINGS_FORMAT = defineFormat({
+export const PLAYER_SETTINGS_FORMAT: SaveFormat<unknown, unknown> = defineFormat({
   name: PLAYER_SETTINGS_FORMAT_NAME,
   version: 1,
   schema: Schema.Unknown,
 })
 
-export type PlayerSettingsPersistenceError = StorageError | SaveDecodeError | MigrationError
+export type PlayerSettingsPersistenceError = StorageError | SaveDecodeError
 
 const asRecord = (value: unknown): Readonly<Record<string, unknown>> | undefined =>
   typeof value === 'object' && value !== null && !Array.isArray(value)

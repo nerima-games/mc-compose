@@ -9,7 +9,17 @@ import {
   type TouchPoint,
 } from '@nerima-games/mc-render'
 
-export const TOUCH_CONTROL_ACTIONS = [
+export const TOUCH_CONTROL_ACTIONS: readonly [
+  'moveForward',
+  'moveBackward',
+  'moveLeft',
+  'moveRight',
+  'jump',
+  'attack',
+  'use',
+  'openInventory',
+  'escape',
+] = [
   'moveForward',
   'moveBackward',
   'moveLeft',
@@ -62,7 +72,7 @@ export type TouchLookControllerState = {
   readonly pending: TouchPoint
 }
 
-const ZERO_TOUCH_DELTA: TouchPoint = { x: 0, y: 0 }
+const ZERO_TOUCH_DELTA: TouchPoint = { positionX: 0, positionY: 0 }
 
 export const TOUCH_LOOK_CONTROLLER_IDLE: TouchLookControllerState = {
   activeIdentifier: null,
@@ -73,13 +83,13 @@ export const TOUCH_LOOK_CONTROLLER_IDLE: TouchLookControllerState = {
 export type TouchLookContactPhase = 'start' | 'move' | 'end' | 'cancel'
 
 const pointOf = (contact: TouchContact): TouchPoint => ({
-  x: contact.clientX,
-  y: contact.clientY,
+  positionX: contact.clientX,
+  positionY: contact.clientY,
 })
 
 const accumulate = (pending: TouchPoint, delta: TouchPoint): TouchPoint => ({
-  x: pending.x + delta.x,
-  y: pending.y + delta.y,
+  positionX: pending.positionX + delta.positionX,
+  positionY: pending.positionY + delta.positionY,
 })
 
 export const advanceTouchLook = (

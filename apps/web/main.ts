@@ -92,7 +92,6 @@ import {
   type EndAudioEvent,
   type WeatherAudioHandle,
   type WeatherLoopKind,
-  type Vec3,
 } from '@nerima-games/mc-audio'
 import {
   blockIdOf,
@@ -108,7 +107,9 @@ import {
   StageId,
   type CameraPoseSnapshot,
   type MonotonicTimeSecs,
+  type Position as Vec3,
 } from '@nerima-games/mc-kernel'
+import { resolveOptionsFromKernel, type BlockIdAt } from '@nerima-games/mc-physics'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   addExperience as addVitalsExperience,
@@ -137,6 +138,7 @@ import {
   STARTER_SMELTING_RECIPES,
   targetBlockFromPlayerPose,
   OccupantId,
+  EntityId as SimEntityId,
   type ContainerKind,
   type FurnaceState,
   type CropLocation,
@@ -1146,7 +1148,7 @@ const bootGame = async (
   canvas.setAttribute('data-audio-samples', String(Object.keys(sampleManifest).length))
   const audio = Effect.runSync(makeAudioRuntime({
     backend: audioBackend,
-    nowSecs: browserClock.monotonicSecs,
+    clockLayer: BrowserClockLayer,
     listener: () => readAudioListener(),
     listenerForward: () => readAudioListenerForward(),
     settings: playerSettings,
@@ -1887,7 +1889,14 @@ const bootGame = async (
         enchantedItems: Object.fromEntries(
           [...enchantedItems].map(([slot, item]) => [slot, JSON.stringify(item)]),
         ),
-        deathDropDimension,
+        // `SessionStateSchema`'s `deathDropDimension` is `optionalWith(...,
+        // { exact: true })`: it requires the key to be OMITTED, not merely
+        // `undefined`-valued, or mc-save's integrity checksum rejects the
+        // encoded save (a present `undefined` key is not one of canonicalize's
+        // supported value kinds). `deathDropDimension` here is `undefined`
+        // whenever no death is pending, which is most saves, so this must be
+        // conditional rather than a bare shorthand property.
+        ...(deathDropDimension === undefined ? {} : { deathDropDimension }),
         respawn: respawnLocation,
       },
     }),
@@ -2501,14 +2510,23 @@ const bootGame = async (
   let environmentalContactDamageState = INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE
   let simulationElapsedSecs = 0
   const isGameplayBlockSolid = solidityFromStore(currentChunkStore)
+  // mc-physics 0.2.1 replaced ResolveOptions.isBlockSolid (a boolean predicate)
+  // with blockPropertiesAt (returns the kernel's BlockProperties or null), so
+  // the resolver can read real block properties instead of a single flattened
+  // bit. blockIdAt adapts this repository's chunk store to the BlockIdAt shape
+  // resolveOptionsFromKernel expects, mirroring the `reading._tag !== 'Block'`
+  // pattern already used for environmental contact damage above.
+  const chunkStoreBlockIdAt: BlockIdAt = (blockX, blockY, blockZ) => {
+    const reading = Effect.runSync(currentChunkStore.getBlock({ x: blockX, y: blockY, z: blockZ }))
+    return reading._tag === 'Block' ? reading.block : null
+  }
   const simPhysicsConfig: SimPhysicsConfig = {
-    resolve: {
+    resolve: resolveOptionsFromKernel({
+      blockIdAt: chunkStoreBlockIdAt,
       halfWidth: PLAYER_HALF_WIDTH,
       // mc-sim exposes this branded field but not the brand constructor.
       halfHeight: PLAYER_HALF_HEIGHT as SimPhysicsConfig['resolve']['halfHeight'],
-      isBlockSolid: (blockX, blockY, blockZ) =>
-        isGameplayBlockSolid({ x: blockX, y: blockY, z: blockZ }),
-    },
+    }),
     walkSpeed: WALK_SPEED_M_PER_S,
     jumpSpeed: JUMP_SPEED_M_PER_S,
   }
@@ -4219,8 +4237,12 @@ type MultiplayerInventorySelection = Readonly<{
             },
           },
           {
-            mobSimulation: multiplayer === undefined,
+            // The hand-rolled pickup loop (~line 8494) preserves
+            // metadata/durability/custom names that the stage-level pickup does
+            // not; droppedItemPickup: false keeps the two from consuming the
+            // same inventory in one frame (restored in mx-gameplay 0.3.3).
             droppedItemPickup: false,
+            mobSimulation: multiplayer === undefined,
           },
         ),
       ),
@@ -5118,7 +5140,12 @@ type MultiplayerInventorySelection = Readonly<{
       Effect.runSync(currentChunkStore.setBlock(position, 0))
     }
     for (const effect of plan.entityEffects) {
-      Effect.runSync(resolveBowHits(world.entities, [{ id: effect.id, damage: effect.damage }]))
+      // mc-kernel's `ExplosionEntityEffect.id` is a bare `string` (the
+      // explosion-physics layer does not own the `EntityId` brand);
+      // `resolveBowHits` requires mc-sim's branded id specifically (the
+      // already-imported `EntityId` here is mx-multiplayer's Schema.brand,
+      // which is not directly callable).
+      Effect.runSync(resolveBowHits(world.entities, [{ id: SimEntityId(effect.id), damage: effect.damage }]))
     }
     const playerPosition = Effect.runSync(playerApi.pose).feetPosition
     const playerDistance = Math.hypot(
@@ -6892,7 +6919,7 @@ type MultiplayerInventorySelection = Readonly<{
   const harvestFarmingCrop = () => {
     const dimension = Effect.runSync(playerApi.dimension)
     const location = { dimension, position: QA_FARM_CROP_BLOCK } as CropLocation
-    const ripe = Effect.runSync(crops.matureYieldAt(location)) !== null
+    const ripe = Effect.runSync(crops.matureYieldsAt(location)) !== null
     if (!ripe) return gameplaySnapshot()
     Effect.runSync(currentChunkStore.setBlock(QA_FARM_CROP_BLOCK, 0))
     Effect.runSync(crops.remove(location))
@@ -8257,8 +8284,8 @@ type MultiplayerInventorySelection = Readonly<{
         && (Effect.runSync(inputApi.wasActionJustTriggered('use')) || nativeUse.triggered)
       const useHeld = held('use') > 0
       const lookDelta = {
-        x: walk.pointerDelta.x + consumedTouchLook.delta.x,
-        y: walk.pointerDelta.y + consumedTouchLook.delta.y,
+        x: walk.pointerDelta.x + consumedTouchLook.delta.positionX,
+        y: walk.pointerDelta.y + consumedTouchLook.delta.positionY,
       }
       const looked = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
         && (lookDelta.x !== 0 || lookDelta.y !== 0)
@@ -9296,7 +9323,7 @@ type MultiplayerInventorySelection = Readonly<{
                 }))
               } else if (target.blockId === POTATO_CROP_BLOCK_ID) {
                 const location = { dimension, position: target.position }
-                const ripe = Effect.runSync(crops.matureYieldAt(location)) !== null
+                const ripe = Effect.runSync(crops.matureYieldsAt(location)) !== null
                 Effect.runSync(currentChunkStore.setBlock(target.position, 0))
                 Effect.runSync(crops.remove(location))
                 nextItemUseRequestId += 1
@@ -10355,7 +10382,7 @@ type MultiplayerInventorySelection = Readonly<{
       if (brewingOpen) renderBrewingUi()
       renderPlayerUi()
       renderCrosshair(nowSecs)
-      const captions = playerSettings.captionsEnabled ? audio.visible(nowSecs) : []
+      const captions = playerSettings.captionsEnabled ? audio.visible(KernelMonotonicTimeSecs(nowSecs)) : []
       const nextCaptionSignature = captionRenderSignature(captions)
       if (nextCaptionSignature !== renderedCaptionSignature) {
         captionsParent.replaceChildren(...captions.map((caption) => {

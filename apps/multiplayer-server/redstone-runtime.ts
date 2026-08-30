@@ -10,6 +10,7 @@ import {
 import { blockIdOf, capabilityOfBlockId, isBlockType } from '@nerima-games/mc-kernel'
 import { Context, Effect, Layer, Scope } from 'effect'
 
+import { ServerClockLayer } from './clock'
 import type { MultiplayerServerCore } from './core'
 
 const lampBlocks = new Set(['redstone_lamp', 'redstone_lamp_lit'] as const)
@@ -108,7 +109,9 @@ export const makeMultiplayerRedstoneRuntime = async (
       }
       const elapsedSecs = Number.isFinite(elapsedMs) && elapsedMs > 0 ? elapsedMs / 1_000 : 0
       for (const stage of stages) {
-        Effect.runSync(stage.run(elapsedSecs as Parameters<typeof stage.run>[0]))
+        Effect.runSync(
+          stage.run(elapsedSecs as Parameters<typeof stage.run>[0]).pipe(Effect.provide(ServerClockLayer)),
+        )
       }
       for (const event of Effect.runSync(runtime.drainHopperTransferEvents)) {
         realmsByDimension.get(event.dimension)?.core.applyHopperTransfer(event.position)

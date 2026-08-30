@@ -11,7 +11,7 @@ const audioSource = ['../mc-audio/src/index.ts', '../../../../mc-audio/src/index
   .map((relativePath) => new URL(relativePath, import.meta.url))
   .find((url) => existsSync(url))
 
-export default defineConfig({
+const config: ReturnType<typeof defineConfig> = defineConfig({
   resolve: {
     alias: audioSource
       ? {
@@ -47,14 +47,13 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       enabled: false,
-      include: [
-        'src/index.ts',
-        'src/domain/**/*.ts',
-        'apps/web/chunk-sync-budget.ts',
-        'apps/web/mining-completion.ts',
-        'apps/web/native-input-queue.ts',
-        'apps/multiplayer-server/inventory-state.ts',
-      ],
+      // org standard (§2.8): src/** is the coverage surface. apps/ is not a
+      // distributed package (it is this repository's Vite web application), so
+      // it is out of the gate — the four files listed here previously were a
+      // repo-specific extension of the standard include list; e2e/ and
+      // test/support doubles still exercise apps/ code, just without a
+      // coverage requirement on it.
+      include: ['src/**/*.ts'],
       exclude: ['**/*.d.ts', '**/*.config.ts', '**/*.test.ts', '**/*.spec.ts'],
       reporter: ['text', 'json', 'html', 'lcov'],
       reportsDirectory: './coverage',
@@ -63,4 +62,11 @@ export default defineConfig({
       thresholds: { branches: 100, functions: 100, lines: 100, statements: 100 },
     },
   },
+  esbuild: {
+    target: 'node24',
+    format: 'esm',
+    platform: 'node',
+  },
 })
+
+export default config

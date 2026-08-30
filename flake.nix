@@ -4,6 +4,13 @@
   inputs = {
     # nixos-unstable, not nixpkgs-unstable: it advances only after the NixOS
     # release tests pass, so it is less likely to land a broken build.
+    #
+    # Locked to a specific revision rather than `nix flake update`: the
+    # nixos-unstable head at Wave 0 time ships oxlint >=1.79.0, whose
+    # `no-redeclare` rule misfires on the `type X = ... & Brand` +
+    # `const X = Brand.refined(...)` idiom used across this org's packages.
+    # oxlint 1.75.0 (this revision) is clean against that idiom. Re-check on
+    # the next nixpkgs bump.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
@@ -32,17 +39,35 @@
           # the `packageManager` field in package.json — one source of truth
           # instead of two that can drift.
           #
+          # oxlint and ast-grep are intentionally supplied by Nix rather than
+          # package.json/npm: this keeps the executable versions in the
+          # reproducible development shell and avoids a second package-manager
+          # lockfile entry. ast-grep covers what oxlint cannot (no
+          # no-restricted-syntax/no-restricted-properties/no-restricted-globals
+          # equivalents implemented) via `.ast-grep/rules/`.
+          #
+          # No `pkgs.playwright-driver.browsers` / `PLAYWRIGHT_BROWSERS_PATH`
+          # here: at this repo's pinned nixpkgs revision that driver ships
+          # 1.61.1, which can never serve @playwright/test's pinned 1.62.1 —
+          # confirmed by `browserType.launch: Executable doesn't exist`
+          # against the wrong chromium_headless_shell revision. `npx
+          # playwright install --with-deps chromium` (local, and the
+          # `e2e-browser` CI job before `pnpm e2e:browser` runs) uses
+          # playwright's own cache instead, which always matches the npm pin
+          # exactly — the same pattern mx-ui's flake already uses.
           default = pkgs.mkShell {
             packages = [
               pkgs.nodejs_24
               pkgs.corepack_24
               pkgs.typescript-language-server
+              pkgs.oxlint
+              pkgs.ast-grep
             ];
 
             shellHook = ''
-              mkdir -p "$PWD/.corepack"
-              corepack enable --install-directory "$PWD/.corepack" 2>/dev/null
-              export PATH="$PWD/.corepack:$PATH"
+              corepackDir="$(mktemp -d "''${TMPDIR:-/tmp}/mc-compose-corepack.XXXXXX")"
+              corepack enable --install-directory "$corepackDir"
+              export PATH="$corepackDir:$PATH"
             '';
           };
         }

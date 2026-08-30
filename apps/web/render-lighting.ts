@@ -1,4 +1,4 @@
-import type { MeshQuad, QuadColor } from '@nerima-games/mc-render'
+import type { GeometryQuad, QuadColor } from '@nerima-games/mc-render'
 import { Effect } from 'effect'
 
 type ChunkRef = { readonly cx: number; readonly cz: number }
@@ -12,7 +12,10 @@ export type RenderLightingSnapshot = {
 }
 
 export const trackChunkLightColor = (
-  resolve: (chunk: ChunkRef, quads: ReadonlyArray<MeshQuad>) => Effect.Effect<QuadColor>,
+  // `quads` is only ever forwarded to `resolve` and never inspected by name
+  // here, so widening from MeshQuad to mc-render's full GeometryQuad union
+  // (its syncWorld's colorForChunk signature) changes nothing behaviorally.
+  resolve: (chunk: ChunkRef, quads: ReadonlyArray<GeometryQuad>) => Effect.Effect<QuadColor>,
 ): {
   readonly colorForChunk: typeof resolve
   readonly snapshot: () => RenderLightingSnapshot

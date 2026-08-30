@@ -1,11 +1,17 @@
 import {
   makeRecordingBackend,
   type AudioBackend,
-  type Vec3,
   type WebAudioBackend,
 } from '@nerima-games/mc-audio'
+import {
+  EpochMillis,
+  FixedClockLayer,
+  MonotonicTimeSecs,
+  type ClockPort,
+  type Position,
+} from '@nerima-games/mc-kernel'
 import { describe, expect, it } from 'vitest'
-import { Effect } from 'effect'
+import { Effect, type Layer } from 'effect'
 
 import {
   announceConfirmedPlacements,
@@ -17,16 +23,26 @@ import {
   pruneExpiredCaptionEvents,
 } from '../apps/web/audio-runtime'
 
+// A fixed reading is enough for every test below: none of them advance the
+// clock mid-test, they just need a `ClockPort` in scope for
+// `makeSoundCueService` (mc-audio 0.2.7 reads caption timestamps from it
+// instead of taking a `nowSecs` effect directly).
+const fixedClockLayer = (atSecs: number): Layer.Layer<ClockPort> =>
+  FixedClockLayer({
+    monotonicSecs: MonotonicTimeSecs(atSecs),
+    wallClockEpochMillis: EpochMillis(0),
+  })
+
 const makeBackend = (
   backend: AudioBackend,
   lifecycle: { unlocks: number; closes: number },
-): AudioBackend & Pick<WebAudioBackend, 'unlock' | 'close'> => ({
+): AudioBackend & Pick<WebAudioBackend, 'unlock' | 'dispose'> => ({
   ...backend,
   unlock: Effect.sync(() => {
     lifecycle.unlocks += 1
     return 'ready' as const
   }),
-  close: Effect.sync(() => {
+  dispose: Effect.sync(() => {
     lifecycle.closes += 1
   }),
 })
@@ -44,7 +60,7 @@ describe('web audio runtime', () => {
     const runtime = await Effect.runPromise(
       makeAudioRuntime({
         backend: makeBackend(recording.backend, { unlocks: 0, closes: 0 }),
-        nowSecs: Effect.succeed(0),
+        clockLayer: fixedClockLayer(0),
         listener: () => ({ x: 0, y: 0, z: 0 }),
         listenerForward: () => horizontalListenerForward(yawRadians),
       }),
@@ -57,7 +73,7 @@ describe('web audio runtime', () => {
     const played = await Effect.runPromise(recording.played)
     expect(played[0]?.pan).toBeCloseTo(1)
     expect(played[1]?.pan).toBeCloseTo(-1)
-    expect(runtime.snapshot(0).listenerForward).toEqual(horizontalListenerForward(Math.PI))
+    expect(runtime.snapshot(MonotonicTimeSecs(0)).listenerForward).toEqual(horizontalListenerForward(Math.PI))
   })
 
   it('emits the damage caption while autoplay remains locked', async () => {
@@ -65,14 +81,14 @@ describe('web audio runtime', () => {
     const runtime = await Effect.runPromise(
       makeAudioRuntime({
         backend: makeBackend(recording.backend, { unlocks: 0, closes: 0 }),
-        nowSecs: Effect.succeed(12),
+        clockLayer: fixedClockLayer(12),
         listener: () => ({ x: 0, y: 0, z: 0 }),
       }),
     )
 
     runtime.play('playerHurt')
 
-    expect(runtime.visible(12)).toMatchObject([
+    expect(runtime.visible(MonotonicTimeSecs(12))).toMatchObject([
       { cueId: 'playerHurt', atSecs: 12, reason: 'gate-blocked' },
     ])
     expect(await Effect.runPromise(recording.played)).toEqual([])
@@ -83,14 +99,14 @@ describe('web audio runtime', () => {
     const runtime = await Effect.runPromise(
       makeAudioRuntime({
         backend: makeBackend(recording.backend, { unlocks: 0, closes: 0 }),
-        nowSecs: Effect.succeed(0),
+        clockLayer: fixedClockLayer(0),
         listener: () => ({ x: 0, y: 0, z: 0 }),
       }),
     )
 
     expect(announceInventoryTransition(runtime, false, true)).toBe(true)
     expect(announceInventoryTransition(runtime, true, true)).toBe(false)
-    expect(runtime.snapshot(0).cueIds).toEqual(['inventoryOpen'])
+    expect(runtime.snapshot(MonotonicTimeSecs(0)).cueIds).toEqual(['inventoryOpen'])
   })
 
   it('applies volume and mute changes immediately', async () => {
@@ -98,7 +114,7 @@ describe('web audio runtime', () => {
     const runtime = await Effect.runPromise(
       makeAudioRuntime({
         backend: makeBackend(recording.backend, { unlocks: 0, closes: 0 }),
-        nowSecs: Effect.succeed(0),
+        clockLayer: fixedClockLayer(0),
         listener: () => ({ x: 0, y: 0, z: 0 }),
       }),
     )
@@ -118,19 +134,19 @@ describe('web audio runtime', () => {
     const runtime = await Effect.runPromise(
       makeAudioRuntime({
         backend: makeBackend(recording.backend, { unlocks: 0, closes: 0 }),
-        nowSecs: Effect.succeed(0),
+        clockLayer: fixedClockLayer(0),
         listener: () => ({ x: 0, y: 0, z: 0 }),
       }),
     )
 
     expect(announceConfirmedPlacements(runtime, [])).toBe(false)
-    expect(runtime.snapshot(0).cueIds).toEqual([])
+    expect(runtime.snapshot(MonotonicTimeSecs(0)).cueIds).toEqual([])
     expect(announceConfirmedPlacements(runtime, ['oak_planks'])).toBe(true)
-    expect(runtime.snapshot(0).cueIds).toEqual(['blockPlace'])
+    expect(runtime.snapshot(MonotonicTimeSecs(0)).cueIds).toEqual(['blockPlace'])
   })
 
   it('clears an unconfirmed placement position before the next single in-flight request', () => {
-    const plays: Array<{ cueId: string; position: Vec3 | undefined }> = []
+    const plays: Array<{ cueId: string; position: Position | undefined }> = []
     const latch = makePlacementAudioLatch({
       play: (cueId, options) => plays.push({ cueId, position: options?.position }),
     })
@@ -154,7 +170,7 @@ describe('web audio runtime', () => {
     const runtime = await Effect.runPromise(
       makeAudioRuntime({
         backend: makeBackend(recording.backend, lifecycle),
-        nowSecs: Effect.succeed(0),
+        clockLayer: fixedClockLayer(0),
         listener: () => ({ x: 0, y: 0, z: 0 }),
       }),
     )
@@ -169,7 +185,7 @@ describe('web audio runtime', () => {
     await Promise.resolve()
 
     expect(lifecycle).toEqual({ unlocks: 1, closes: 1 })
-    expect(runtime.snapshot(0).cueIds).toEqual([])
+    expect(runtime.snapshot(MonotonicTimeSecs(0)).cueIds).toEqual([])
   })
 
   it('retries unlock after rejection and stops retrying after ready', async () => {
@@ -186,7 +202,7 @@ describe('web audio runtime', () => {
             return 'ready' as const
           }),
         },
-        nowSecs: Effect.succeed(0),
+        clockLayer: fixedClockLayer(0),
         listener: () => ({ x: 0, y: 0, z: 0 }),
       }),
     )
@@ -208,12 +224,12 @@ describe('web audio runtime', () => {
       cueId: 'playerHurt' as const,
       text: 'Player hurt',
       reason: 'gate-blocked' as const,
-      atSecs: 12,
+      atSecs: MonotonicTimeSecs(12),
     }
 
     expect(captionRenderSignature([caption])).toBe(captionRenderSignature([{ ...caption }]))
     expect(captionRenderSignature([caption])).not.toBe(
-      captionRenderSignature([{ ...caption, atSecs: 13 }]),
+      captionRenderSignature([{ ...caption, atSecs: MonotonicTimeSecs(13) }]),
     )
     expect(captionRenderSignature([])).not.toBe(captionRenderSignature([caption]))
   })
@@ -226,24 +242,24 @@ describe('web audio runtime', () => {
           ...recording.backend,
           playTone: () => Effect.die(new Error('backend defect')),
         }, { unlocks: 0, closes: 0 }),
-        nowSecs: Effect.succeed(4),
+        clockLayer: fixedClockLayer(4),
         listener: () => ({ x: 0, y: 0, z: 0 }),
       }),
     )
 
     expect(() => runtime.play('playerHurt')).not.toThrow()
-    expect(runtime.snapshot(4).cueIds).toEqual(['playerHurt'])
+    expect(runtime.snapshot(MonotonicTimeSecs(4)).cueIds).toEqual(['playerHurt'])
   })
 
   it('prunes only expired caption history across read times', () => {
     const captions = [
-      { cueId: 'playerHurt' as const, text: 'Expired', reason: 'audible' as const, atSecs: 0 },
-      { cueId: 'inventoryOpen' as const, text: 'Current', reason: 'audible' as const, atSecs: 2 },
-      { cueId: 'inventoryClose' as const, text: 'Future', reason: 'audible' as const, atSecs: 8 },
+      { cueId: 'playerHurt' as const, text: 'Expired', reason: 'audible' as const, atSecs: MonotonicTimeSecs(0) },
+      { cueId: 'inventoryOpen' as const, text: 'Current', reason: 'audible' as const, atSecs: MonotonicTimeSecs(2) },
+      { cueId: 'inventoryClose' as const, text: 'Future', reason: 'audible' as const, atSecs: MonotonicTimeSecs(8) },
     ]
 
-    const atFour = pruneExpiredCaptionEvents(captions, 4)
+    const atFour = pruneExpiredCaptionEvents(captions, MonotonicTimeSecs(4))
     expect(atFour.map((caption) => caption.text)).toEqual(['Current', 'Future'])
-    expect(pruneExpiredCaptionEvents(atFour, 8).map((caption) => caption.text)).toEqual(['Future'])
+    expect(pruneExpiredCaptionEvents(atFour, MonotonicTimeSecs(8)).map((caption) => caption.text)).toEqual(['Future'])
   })
 })

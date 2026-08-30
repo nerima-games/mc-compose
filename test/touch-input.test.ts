@@ -70,7 +70,7 @@ describe('touch look controller', () => {
     expect(ignoredStart).toBe(started)
     expect(ignoredMove).toBe(started)
     expect(moved.activeIdentifier).toBe(7)
-    expect(moved.pending).toStrictEqual({ x: 12, y: -5 })
+    expect(moved.pending).toStrictEqual({ positionX: 12, positionY: -5 })
   })
 
   it('accumulates movement and consumes it exactly once', () => {
@@ -80,8 +80,8 @@ describe('touch look controller', () => {
     const first = consumeTouchLook(secondMove)
     const second = consumeTouchLook(first.state)
 
-    expect(first.delta).toStrictEqual({ x: 10, y: 1 })
-    expect(second.delta).toStrictEqual({ x: 0, y: 0 })
+    expect(first.delta).toStrictEqual({ positionX: 10, positionY: 1 })
+    expect(second.delta).toStrictEqual({ positionX: 0, positionY: 0 })
     expect(second.state.activeIdentifier).toBe(3)
   })
 
@@ -93,8 +93,8 @@ describe('touch look controller', () => {
       const released = advanceTouchLook(moved, phase, contact(4, 28, 25))
 
       expect(released.activeIdentifier).toBeNull()
-      expect(released.pending).toStrictEqual({ x: 8, y: -5 })
-      expect(consumeTouchLook(released).delta).toStrictEqual({ x: 8, y: -5 })
+      expect(released.pending).toStrictEqual({ positionX: 8, positionY: -5 })
+      expect(consumeTouchLook(released).delta).toStrictEqual({ positionX: 8, positionY: -5 })
     },
   )
 

@@ -213,7 +213,7 @@ export const summonRuntimeWither = (
 export const matchRuntimeWitherSummon = (
   placedSkull: BlockCell,
   blockAt: (cell: BlockCell) => string | undefined,
-) => {
+): ReturnType<typeof matchWitherSummon> => {
   for (const base of [
     { x: placedSkull.x, y: placedSkull.y - 2, z: placedSkull.z },
     { x: placedSkull.x - 1, y: placedSkull.y - 2, z: placedSkull.z },

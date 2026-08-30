@@ -49,6 +49,7 @@ import {
   SKY_CLEAR_COLOR,
   syncWorld,
   type ChunkRef,
+  type GeometryQuad,
   type MeshQuad,
   type MirroredCameraState,
 } from '@nerima-games/mc-render'
@@ -132,7 +133,10 @@ type TerrainFixture = {
 }
 
 /** The tile the generator resolved, not one this page invents. */
-const fixtureTile = (quad: MeshQuad): number => (quad as FixtureQuad).tile
+// mc-render's QuadTile signature is `(quad: GeometryQuad) => number`, wider than
+// the MeshQuad-only fixtures this preview builds; the cast below is unchanged,
+// only the parameter type widened to satisfy that signature.
+const fixtureTile = (quad: GeometryQuad): number => (quad as FixtureQuad).tile
 
 /**
  * A 16x16 grid of flat, distinct colours, as a `THREE.Texture`.
