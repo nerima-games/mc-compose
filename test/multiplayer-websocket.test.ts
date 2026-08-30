@@ -1,5 +1,5 @@
 import { TransportError, type WireText } from '@nerima-games/mx-multiplayer'
-import { Effect, Either, Fiber, Queue } from 'effect'
+import { Effect, Either, Queue } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -12,7 +12,14 @@ class SocketDouble implements BrowserWebSocketLike {
   readyState = 0
   readonly sent: Array<string> = []
   readonly closes: Array<readonly [number | undefined, string | undefined]> = []
-  readonly listeners = new Map<keyof BrowserWebSocketEventMap, Set<(event: never) => void>>()
+  readonly listeners: {
+    [K in keyof BrowserWebSocketEventMap]: Set<(event: BrowserWebSocketEventMap[K]) => void>
+  } = {
+    open: new Set(),
+    message: new Set(),
+    close: new Set(),
+    error: new Set(),
+  }
   sendFailure: unknown | undefined
 
   send(data: string): void {
@@ -29,26 +36,24 @@ class SocketDouble implements BrowserWebSocketLike {
     type: K,
     listener: (event: BrowserWebSocketEventMap[K]) => void,
   ): void {
-    const listeners = this.listeners.get(type) ?? new Set()
-    listeners.add(listener as (event: never) => void)
-    this.listeners.set(type, listeners)
+    this.listeners[type].add(listener)
   }
 
   removeEventListener<K extends keyof BrowserWebSocketEventMap>(
     type: K,
     listener: (event: BrowserWebSocketEventMap[K]) => void,
   ): void {
-    this.listeners.get(type)?.delete(listener as (event: never) => void)
+    this.listeners[type].delete(listener)
   }
 
   emit<K extends keyof BrowserWebSocketEventMap>(type: K, event: BrowserWebSocketEventMap[K]): void {
     if (type === 'open') this.readyState = 1
     if (type === 'close') this.readyState = 3
-    for (const listener of this.listeners.get(type) ?? []) listener(event as never)
+    for (const listener of this.listeners[type]) listener(event)
   }
 
   listenerCount(): number {
-    return Array.from(this.listeners.values()).reduce((count, listeners) => count + listeners.size, 0)
+    return Object.values(this.listeners).reduce((count, listeners) => count + listeners.size, 0)
   }
 }
 
@@ -80,26 +85,27 @@ const makeAuthenticatedTransport = (
   )
 
 describe('browser websocket transport', () => {
-  it('waits for open before sending a frame', async () => {
+  it('fails before open without buffering a frame', async () => {
     const socket = new SocketDouble()
     const transport = await makeTransport(socket)
-    const sending = Effect.runPromise(transport.send('hello' as WireText))
 
-    await Promise.resolve()
+    const result = await Effect.runPromise(Effect.either(transport.send('early' as WireText)))
+    expect(Either.isLeft(result)).toBe(true)
+    if (Either.isLeft(result)) expect(result.left).toMatchObject({ reason: 'not-connected' })
     expect(socket.sent).toEqual([])
 
     socket.emit('open', undefined)
-    await sending
-    expect(socket.sent).toEqual(['hello'])
+    await Effect.runPromise(transport.send('live' as WireText))
+    expect(socket.sent).toEqual(['live'])
     expect(transport.state()).toBe('open')
+    expect(transport.isAuthenticated()).toBe(true)
   })
 
-  it('does not resume an interrupted send when the socket later opens', async () => {
+  it('does not send a frame while the socket is connecting', async () => {
     const socket = new SocketDouble()
     const transport = await makeTransport(socket)
-    const sending = Effect.runFork(transport.send('cancelled' as WireText))
-
-    await Effect.runPromise(Fiber.interrupt(sending))
+    const result = await Effect.runPromise(Effect.either(transport.send('cancelled' as WireText)))
+    expect(Either.isLeft(result)).toBe(true)
     socket.emit('open', undefined)
     await Effect.runPromise(transport.send('live' as WireText))
 
@@ -115,18 +121,25 @@ describe('browser websocket transport', () => {
       loadToken: () => 'old-token',
       saveToken: (token) => saved.push(token),
     })
-    const sending = Effect.runPromise(transport.send('normal-frame' as WireText))
+
+    const beforeOpen = await Effect.runPromise(Effect.either(transport.send('normal-frame' as WireText)))
+    expect(Either.isLeft(beforeOpen)).toBe(true)
+    expect(transport.isAuthenticated()).toBe(false)
 
     socket.emit('open', undefined)
-    await Promise.resolve()
     expect(socket.sent).toEqual([
       JSON.stringify({ _tag: 'PlayerResume', player: 'alice', token: 'old-token' }),
     ])
 
+    const beforeResume = await Effect.runPromise(Effect.either(transport.send('normal-frame' as WireText)))
+    expect(Either.isLeft(beforeResume)).toBe(true)
+    expect(transport.isAuthenticated()).toBe(false)
+
     socket.emit('message', {
       data: JSON.stringify({ _tag: 'PlayerResumeAccepted', player: 'alice', token: 'new-token' }),
     })
-    await sending
+    expect(transport.isAuthenticated()).toBe(true)
+    await Effect.runPromise(transport.send('normal-frame' as WireText))
 
     expect(socket.sent).toEqual([
       JSON.stringify({ _tag: 'PlayerResume', player: 'alice', token: 'old-token' }),
@@ -150,9 +163,8 @@ describe('browser websocket transport', () => {
 
     const plainSocket = new SocketDouble()
     const plain = await makeTransport(plainSocket)
-    const sending = Effect.runPromise(plain.send('plain' as WireText))
     plainSocket.emit('open', undefined)
-    await sending
+    await Effect.runPromise(plain.send('plain' as WireText))
     expect(plainSocket.sent).toEqual(['plain'])
   })
 
@@ -231,7 +243,6 @@ describe('browser websocket transport', () => {
         cleared = true
       },
     })
-    const sending = Effect.runPromise(Effect.either(transport.send('blocked' as WireText)))
 
     socket.emit('open', undefined)
     socket.emit('message', {
@@ -242,7 +253,8 @@ describe('browser websocket transport', () => {
       }),
     })
 
-    expect(Either.isLeft(await sending)).toBe(true)
+    const result = await Effect.runPromise(Effect.either(transport.send('blocked' as WireText)))
+    expect(Either.isLeft(result)).toBe(true)
     expect(cleared).toBe(false)
     expect(transport.state()).toBe('closed')
   })
@@ -259,11 +271,10 @@ describe('browser websocket transport', () => {
         loadToken: () => undefined,
         saveToken: (token) => saved.push(token),
       })
-      const sending = Effect.runPromise(Effect.either(transport.send('blocked' as WireText)))
       socket.emit('open', undefined)
       socket.emit('message', { data: JSON.stringify(response) })
 
-      const result = await sending
+      const result = await Effect.runPromise(Effect.either(transport.send('blocked' as WireText)))
       expect(Either.isLeft(result)).toBe(true)
       expect(saved).toEqual([])
       expect(transport.state()).toBe('closed')
@@ -291,7 +302,7 @@ describe('browser websocket transport', () => {
     expect(Array.from(await Effect.runPromise(Queue.takeAll(transport.inbound)))).toEqual([])
   })
 
-  it('fails sends waiting for authentication on close, error, or resume setup failure', async () => {
+  it('fails sends after close, error, or resume setup failure', async () => {
     for (const failure of ['close', 'error', 'load-token'] as const) {
       const socket = new SocketDouble()
       const transport = await makeAuthenticatedTransport(socket, {
@@ -302,13 +313,12 @@ describe('browser websocket transport', () => {
         },
         saveToken: () => undefined,
       })
-      const sending = Effect.runPromise(Effect.either(transport.send('blocked' as WireText)))
 
       socket.emit('open', undefined)
       if (failure === 'close') socket.emit('close', { code: 1006, reason: 'peer vanished' })
       if (failure === 'error') socket.emit('error', new Error('network'))
 
-      const result = await sending
+      const result = await Effect.runPromise(Effect.either(transport.send('blocked' as WireText)))
       expect(Either.isLeft(result)).toBe(true)
       expect(transport.state()).toBe('closed')
       expect(socket.listenerCount()).toBe(0)
@@ -398,29 +408,30 @@ describe('browser websocket transport', () => {
     )
   })
 
-  it('fails a pending and subsequent send when the peer closes', async () => {
+  it('fails sends before and after the peer closes', async () => {
     const socket = new SocketDouble()
     const transport = await makeTransport(socket)
-    const pending = Effect.runPromise(Effect.either(transport.send('pending' as WireText)))
+    const beforeOpen = await Effect.runPromise(Effect.either(transport.send('pending' as WireText)))
+    expect(Either.isLeft(beforeOpen)).toBe(true)
 
+    socket.emit('open', undefined)
+    await Effect.runPromise(transport.send('live' as WireText))
     socket.emit('close', { code: 1006, reason: 'peer vanished' })
-    const first = await pending
-    const second = await Effect.runPromise(Effect.either(transport.send('later' as WireText)))
+    const afterClose = await Effect.runPromise(Effect.either(transport.send('later' as WireText)))
 
-    expect(Either.isLeft(first)).toBe(true)
-    expect(Either.isLeft(second)).toBe(true)
-    if (Either.isLeft(first)) expect(first.left).toMatchObject({ reason: 'closed' })
+    expect(Either.isLeft(afterClose)).toBe(true)
+    if (Either.isLeft(afterClose)) expect(afterClose.left).toMatchObject({ reason: 'closed' })
     expect(transport.state()).toBe('closed')
     expect(socket.listenerCount()).toBe(0)
   })
 
-  it('turns socket error and send exceptions into TransportError', async () => {
+  it('closes on socket errors and turns send exceptions into TransportError', async () => {
     const erroredSocket = new SocketDouble()
     const errored = await makeTransport(erroredSocket)
-    const pending = Effect.runPromise(Effect.either(errored.send('pending' as WireText)))
+    erroredSocket.emit('open', undefined)
     erroredSocket.emit('error', new Error('network'))
 
-    const errorResult = await pending
+    const errorResult = await Effect.runPromise(Effect.either(errored.send('after-error' as WireText)))
     expect(Either.isLeft(errorResult)).toBe(true)
     if (Either.isLeft(errorResult)) {
       expect(errorResult.left).toBeInstanceOf(TransportError)

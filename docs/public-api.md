@@ -349,13 +349,21 @@ mc-compose はそれらを `BrowserRuntimeModule` として受け取り、ブラ
 | 操作 | 保証 |
 | --- | --- |
 | start | 入力配列の宣言順に直列実行する。各 runtime が返す登録済み `GameModule` を `composeGame` に渡す |
-| start 失敗 | その時点までに成功した runtime を逆順ですべて rollback する |
+| start 失敗 | その時点までに `start` が完了した runtime を逆順ですべて rollback する |
 | compose 失敗 | 成功した runtime を逆順ですべて rollback し、`StageOrderError` を保持する |
 | stop | 成功した runtime を逆順ですべて停止する。複数の停止失敗を集約し、残りの停止を妨げない |
 | stop 再実行 | 最初の呼び出しだけが teardown を所有し、以後は成功する no-op になる |
 
 rollback 中の停止失敗は元の start/compose 失敗を上書きせず、
 `BrowserSessionStartError.rollbackFailures` に併記される。
+
+`start` が完了していない runtime は `started` に登録されないため、失敗時や割り込み時の rollback 対象外になる。
+その場合は `BrowserSession` も返されない。
+
+起動中に割り込みを受けた場合も、成功済み runtime は逆順に rollback される。
+この rollback は `uninterruptible` として実行されるため、停止処理の途中で再度割り込まれず、rollback 自体も一度だけ実行される。
+割り込み時の rollback で発生した停止失敗は、割り込みの終了結果には返されず、停止処理を継続したうえで破棄される。
+`test/browser-session.test.ts` の割り込みテストは、完了済みの先行 runtime だけが一度停止され、起動途中の後続 runtime は停止されないことを検証する。
 
 ## 5. セッションライフサイクル(`domain/session.ts`)
 

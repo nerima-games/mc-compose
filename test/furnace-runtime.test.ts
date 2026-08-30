@@ -2,7 +2,7 @@ import { emptyFurnaceState, itemStack, type FurnaceState } from '@nerima-games/m
 import { planFurnaceAdvance } from '@nerima-games/mx-gameplay'
 import { describe, expect, it } from 'vitest'
 import { advanceFurnaceRuntime } from '../apps/web/furnace-runtime'
-import type { DeltaTimeSecs } from '../src/domain/kernel-vocabulary'
+import type { DeltaTimeSecs } from '@nerima-games/mc-kernel'
 
 const fueledFurnace = (): FurnaceState => ({
   input: itemStack('raw_iron', 1),

@@ -22,10 +22,9 @@ import {
   type CropLocation,
   type Inventory,
 } from '@nerima-games/mc-sim'
+import { CHUNK_SIZE_XZ, chunkCoord } from '@nerima-games/mc-kernel'
 import {
-  CHUNK_SIZE_XZ,
   CHUNK_VOLUME,
-  chunkCoord,
   type Chunk,
   type ChunkSource,
   type Dimension,

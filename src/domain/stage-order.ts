@@ -1,7 +1,7 @@
 /**
  * THE STAGE TOTAL ORDER RESOLVER — the core algorithm of this repository.
  *
- * PRE-AUDIT FIRST CUT (叩き台).
+ * Current frame-order resolver contract.
  *
  * ---------------------------------------------------------------------------
  * plan.md §2.3-3: "stage 実行順序表は compose が唯一所有"
@@ -48,7 +48,8 @@
  * resolver only knows ids and edges; it has never heard of a block, a player or
  * a chunk, and it must stay that way.
  */
-import { Brand, Either } from 'effect'
+import { Either } from 'effect'
+import { type StageId } from '@nerima-games/mc-kernel'
 
 /**
  * Named constants for the numeric literals below, so the values that ARE
@@ -67,21 +68,8 @@ const COMPARE_LESS = -1
 const COMPARE_EQUAL = 0
 const COMPARE_GREATER = 1
 
-/**
- * Identifies a frame stage. Mirrors `@nerima-games/mc-kernel`'s `StageId`
- * exactly, and is declared locally only because nothing in the roster is
- * published yet (see docs/versioning.md §3). When kernel ships, this becomes a
- * re-export and the local definition is deleted.
- *
- * Convention: `<owning-repo-suffix>:<stage>` — e.g. `gameplay:fluids`,
- * `render:draw`. Not enforced.
- */
-export type StageId = string & Brand.Brand<'StageId'>
-
-export const StageId = Brand.refined<StageId>(
-  (value) => value.trim().length > EMPTY_LENGTH,
-  (value) => Brand.error(`StageId must be a non-blank string, received ${JSON.stringify(value)}`),
-)
+/** Identifies a frame stage. mc-kernel owns the brand; this module re-exports it. */
+export { StageId } from '@nerima-games/mc-kernel'
 
 /**
  * What a module declares. Deliberately NOT the full `StageRegistration` —
@@ -365,17 +353,20 @@ const findCycle = (
     remaining: new Set(nodes),
   }
 
-  for (const node of nodes) {
-    const cycle = walk(node, state)
+  // Kahn's algorithm leaves cycle members and nodes that lead to a cycle in
+  // This set. A residual node can still be downstream from the cycle, so try
+  // Each candidate until DFS reaches one rather than assuming the first one.
+  // Non-null: `findStageCycle` calls this only when Kahn's order leaves at
+  // At least one registered node unplaced.
+  const first = nodes[STRING_START]!
+  let cycle = walk(first, state)
+  for (const node of nodes.slice(INDEX_STEP)) {
     if (typeof cycle !== 'undefined') {
-      return cycle
+      break
     }
+    cycle = walk(node, state)
   }
-
-  // Unreachable: this function is only called when Kahn's algorithm left nodes
-  // Unplaced, which happens exactly when a cycle exists. Returning the whole
-  // Remainder rather than throwing keeps the failure a value.
-  return nodes
+  return cycle!
 }
 
 /** --- 1. Registrations must be unique ------------------------------------- */

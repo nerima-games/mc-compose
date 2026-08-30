@@ -25,10 +25,10 @@ import {
   type HungerCommand,
   type HungerEvent,
 } from '@nerima-games/mx-multiplayer'
-import { blockIdOf, blockTypeOfId, isBlockType, isItemType, maxStackCountOfItem, propertyOfBlockId, StackCount } from '@nerima-games/mc-kernel'
+import { blockIdOf, blockTypeOfId, DeltaTimeSecs, isBlockType, isItemType, maxStackCountOfItem, propertyOfBlockId, StackCount, type ItemType } from '@nerima-games/mc-kernel'
 import { pistonPositionAt, validatePistonPlan, type PistonCellRead, type PistonMovementPlan } from '@nerima-games/mx-redstone'
 import { END_PORTAL_BLOCK, END_PORTAL_FRAME_OFFSETS, endPortalCenterForStronghold, nearestStrongholdSite, type Dimension } from '@nerima-games/mc-worldgen'
-import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, durabilityForItem, equipmentDefinitionFor, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, raycastArrowBlock, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
+import { EYE_LEVEL_OFFSET, containerCapacity, craftFromGrid, craftGrid, equipmentItem, forwardVector, isValidDurabilityForItem, itemStack, levelForTotalExperience, planExplosion, raycastArrowBlock, STARTER_RECIPES, targetBlockFromPlayerPose, totalExperienceAtLevel, type FurnaceState as SimFurnaceState } from '@nerima-games/mc-sim'
 import {
   BLAZE_KIND,
   BLAZE_XP_REWARD,
@@ -130,7 +130,6 @@ import {
   type EnchantedItem,
 } from '@nerima-games/mx-gameplay'
 import { Either, Option } from 'effect'
-import { DeltaTimeSecs } from '../../src/domain/kernel-vocabulary'
 import {
   SleepAuthority,
   decodeSleepWireMessage,
@@ -146,19 +145,24 @@ import {
   type WitherRuntimeSnapshot,
   type WitherRuntimeState,
 } from '../multiplayer-shared/wither-runtime'
-import { decodeWitherWireMessage, type WitherWireMessage } from '../multiplayer-shared/wither-network'
-import { decodeEnderDragonWireMessage, type EnderDragonWireMessage } from '../multiplayer-shared/ender-dragon-network'
+import {
+  decodeWitherWireMessage,
+  WITHER_MAX_WIRE_LENGTH,
+  type WitherWireMessage,
+} from '../multiplayer-shared/wither-network'
+import {
+  decodeEnderDragonWireMessage,
+  type EnderDragonWireMessage,
+} from '../multiplayer-shared/ender-dragon-network'
 import {
   decodePlayerDamageWireMessage,
-  PLAYER_DAMAGE_MAX_WIRE_LENGTH,
   type PlayerDamageCommand,
   type PlayerDamageCommandResult,
   type PlayerDamageWireMessage,
 } from '../multiplayer-shared/player-damage-network'
-import { CRAFTING_MAX_WIRE_LENGTH, decodeCraftingWireMessage, type CraftingCommand, type CraftingCommandResult } from '../multiplayer-shared/crafting-network'
-import { BREWING_MAX_WIRE_LENGTH, decodeBrewingWireMessage, type BrewingCommand, type BrewingCommandResult, type BrewingWireMessage } from '../multiplayer-shared/brewing-network'
+import { decodeCraftingWireMessage, type CraftingCommand, type CraftingCommandResult } from '../multiplayer-shared/crafting-network'
+import { decodeBrewingWireMessage, type BrewingCommand, type BrewingCommandResult, type BrewingWireMessage } from '../multiplayer-shared/brewing-network'
 import {
-  ANVIL_MAX_WIRE_LENGTH,
   decodeAnvilWireMessage,
   isValidAnvilName,
   type AnvilCommand,
@@ -168,13 +172,32 @@ import {
 } from '../multiplayer-shared/anvil-network'
 import {
   decodeEnchantingWireMessage,
-  ENCHANTING_MAX_WIRE_LENGTH,
   type EnchantingCommand,
   type EnchantingCommandResult,
   type EnchantingWireMessage,
   type PlayerEnchantmentsDelta,
 } from '../multiplayer-shared/enchanting-network'
-import { spendExperienceLevels } from '../multiplayer-shared/anvil-repair'
+import {
+  enchantedItemFromAnvilOutput,
+  planAnvilOperation,
+  spendExperienceLevels,
+} from '../multiplayer-shared/anvil-repair'
+import { frameTag, specializedFrameWireLengths, unknownRecord } from './wire-frame-validation'
+import {
+  addStackToInventory,
+  cloneInventory,
+  cloneStack,
+  emptyEquipmentState,
+  equipInventoryItem,
+  inventorySnapshot,
+  moveInventoryStack,
+  moveStack,
+  swapInventoryStacks,
+  unequipInventoryItem,
+  type InventoryState,
+  type ItemStack,
+  type MutableInventoryState,
+} from './inventory-state'
 
 export type ClientId = string
 export type SendFrame = (frame: WireText) => void
@@ -216,7 +239,7 @@ export interface MultiplayerServerOptions {
   }>
   readonly generatedBlockAt?: (position: BlockPos) => string | null
   readonly staticBlocks?: ReadonlyArray<Readonly<{ at: BlockPos; block: string | null }>>
-  readonly spawnAt?: BlockPos
+  readonly spawnAt: BlockPos
   readonly initialState?: MultiplayerServerState
   readonly onStateChanged?: (state: MultiplayerServerState) => void
   readonly maxMoveDistance?: number
@@ -279,6 +302,14 @@ export type ReceiveResult =
   | Readonly<{ accepted: true; message: NetworkMessage | SleepWireMessage | WitherWireMessage | EnderDragonWireMessage | PlayerDamageWireMessage | CraftingCommand | BrewingCommand | AnvilCommand | EnchantingCommand }>
   | Readonly<{ accepted: false; reason: 'unknown-client' | 'malformed-frame' | 'join-required' | 'duplicate-player' | 'identity-spoof' | 'wrong-world' | 'invalid-movement' | 'invalid-mutation' | 'invalid-command' }>
 
+type RejectedReceiveReason = Extract<ReceiveResult, { accepted: false }>['reason']
+
+const receiveReasonForRejection = (reason: string | undefined): RejectedReceiveReason => {
+  if (reason === 'unauthorized-player') return 'identity-spoof'
+  if (reason === 'wrong-world') return 'wrong-world'
+  return 'invalid-command'
+}
+
 interface ConnectedClient {
   readonly send: SendFrame
   playerId: PlayerId | null
@@ -297,18 +328,11 @@ interface MovementBudget {
   readonly availableDistance: number
 }
 
-type InventoryState = AuthoritativeSnapshot['inventories'][number]['state']
 type VitalsState = AuthoritativeSnapshot['vitals'][number]['state']
 type TimeWeatherState = AuthoritativeSnapshot['timeWeather']
 type ContainerState = AuthoritativeSnapshot['containers'][number]
 type FurnaceState = AuthoritativeSnapshot['furnaces'][number]
-type ItemStack = NonNullable<InventoryState['slots'][number]>
-type EquipmentState = NonNullable<InventoryState['equipment']>
-type EquipmentSlot = keyof EquipmentState
-type MutableEquipmentState = { -readonly [Slot in EquipmentSlot]: EquipmentState[Slot] }
 type MobWireState = NonNullable<Extract<AuthoritativeEntityState, { readonly _tag: 'living' }>['mobState']>
-type UnknownRecord = Readonly<Record<string, unknown>>
-
 const containerKindForBlock = (block: string): ContainerKind | undefined => {
   switch (block) {
     case 'chest':
@@ -324,9 +348,6 @@ const containerKindForBlock = (block: string): ContainerKind | undefined => {
 
 const emptyContainerSlots = (kind: ContainerKind): Array<ItemStack | null> =>
   Array.from({ length: containerCapacity(kind) }, () => null)
-
-const unknownRecord = (value: unknown): UnknownRecord | undefined =>
-  typeof value === 'object' && value !== null ? value as UnknownRecord : undefined
 
 export const isWeatherClockState = (value: unknown): value is WeatherClockState => {
   const record = unknownRecord(value)
@@ -446,13 +467,6 @@ const eyeOfEnderDestination = (
   return { x: origin.x + dx * scale, y: origin.y + 8, z: origin.z + dz * scale }
 }
 
-interface MutableInventoryState {
-  readonly slots: Array<ItemStack | null>
-  readonly durability: Array<{ readonly current: number; readonly max: number } | null>
-  readonly equipment: MutableEquipmentState
-  selectedSlot: number
-}
-
 interface MutableVitalsState {
   health: number
   hunger: number
@@ -528,46 +542,6 @@ const END_PORTAL_FRAME_EMPTY_BLOCK = blockTypeOfId(END_PORTAL_BLOCK.FRAME_EMPTY)
 const END_PORTAL_FRAME_FILLED_BLOCK = blockTypeOfId(END_PORTAL_BLOCK.FRAME_FILLED) ?? 'end_portal_frame_filled'
 const positionKey = ({ x, y, z }: BlockPos): string => `${String(x)},${String(y)},${String(z)}`
 
-const cloneStack = (stack: ItemStack | null): ItemStack | null => stack === null ? null : { ...stack }
-const emptyEquipmentState = (): EquipmentState => ({ head: null, chest: null, legs: null, feet: null, offhand: null })
-const cloneEquipmentStack = (stack: ItemStack | null, slot: EquipmentSlot): ItemStack | null => {
-  if (stack === null || !isItemType(stack.item) || stack.count !== 1 || equipmentDefinitionFor(stack.item)?.slot !== slot) return null
-  const durability = stack.durability ?? durabilityForItem(stack.item)
-  return durability === null || !isValidDurabilityForItem(stack.item, durability)
-    ? null
-    : { ...stack, durability: { ...durability } }
-}
-const cloneEquipment = (equipment: InventoryState['equipment']): EquipmentState => ({
-  head: cloneEquipmentStack(equipment?.head ?? null, 'head'),
-  chest: cloneEquipmentStack(equipment?.chest ?? null, 'chest'),
-  legs: cloneEquipmentStack(equipment?.legs ?? null, 'legs'),
-  feet: cloneEquipmentStack(equipment?.feet ?? null, 'feet'),
-  offhand: cloneEquipmentStack(equipment?.offhand ?? null, 'offhand'),
-})
-const cloneInventory = (state: InventoryState): MutableInventoryState => ({
-  slots: state.slots.map(cloneStack),
-  durability: state.slots.map((stack, index) => {
-    const durability = stack?.durability ?? state.durability?.[index]
-    if (stack === null || !isItemType(stack.item)) return null
-    return durability !== undefined && isValidDurabilityForItem(stack.item, durability)
-      ? { ...durability }
-      : durabilityForItem(stack.item)
-  }),
-  equipment: cloneEquipment(state.equipment),
-  selectedSlot: state.selectedSlot,
-})
-const inventorySnapshot = (state: MutableInventoryState): InventoryState => {
-  return {
-    slots: state.slots.map((stack, index) => {
-      const durability = state.durability[index]
-      return stack !== null && isItemType(stack.item) && durability !== null && durability !== undefined && isValidDurabilityForItem(stack.item, durability)
-        ? { ...stack, durability: { ...durability } }
-        : cloneStack(stack)
-    }),
-    selectedSlot: state.selectedSlot,
-    equipment: cloneEquipment(state.equipment),
-  }
-}
 const vitalsSnapshot = (state: MutableVitalsState): VitalsState => ({ ...state })
 const containerSnapshot = (state: MutableContainerState): ContainerState => ({
   containerId: state.containerId,
@@ -635,134 +609,6 @@ const isAuthoritativeCommand = (message: NetworkMessage): message is Authoritati
     message._tag === 'VehicleUseCommand' ||
     message._tag === 'FishingCommand' ||
   message._tag === 'VehicleCommand'
-
-const moveStack = (
-  sourceSlots: Array<ItemStack | null>,
-  sourceIndex: number,
-  destinationSlots: Array<ItemStack | null>,
-  destinationIndex: number,
-  count: number,
-): CommandRejectionReason | null => {
-  if (sourceSlots === destinationSlots && sourceIndex === destinationIndex) return 'invalid-command'
-  if (sourceIndex >= sourceSlots.length || destinationIndex >= destinationSlots.length) return 'invalid-command'
-  const source = sourceSlots[sourceIndex]
-  if (source === null || source === undefined || source.count < count) return 'insufficient-items'
-  const destination = destinationSlots[destinationIndex]
-  if (destination !== null && destination !== undefined && destination.item !== source.item) return 'invalid-command'
-  if (
-    destination !== null
-    && destination !== undefined
-    && isItemType(source.item)
-    && destination.count + count > maxStackCountOfItem(source.item)
-  ) return 'invalid-command'
-  sourceSlots[sourceIndex] = source.count === count ? null : { ...source, count: source.count - count }
-  destinationSlots[destinationIndex] = destination === null || destination === undefined
-    ? { ...source, count }
-    : { ...destination, count: destination.count + count }
-  return null
-}
-
-const swapStacks = (
-  slots: Array<ItemStack | null>,
-  sourceIndex: number,
-  destinationIndex: number,
-): CommandRejectionReason | null => {
-  if (sourceIndex === destinationIndex) return 'invalid-command'
-  if (sourceIndex >= slots.length || destinationIndex >= slots.length) return 'invalid-command'
-  if (slots[sourceIndex] === null || slots[sourceIndex] === undefined) return 'insufficient-items'
-  const source = slots[sourceIndex]
-  slots[sourceIndex] = slots[destinationIndex] ?? null
-  slots[destinationIndex] = source
-  return null
-}
-
-const moveInventoryStack = (
-  inventory: MutableInventoryState,
-  sourceIndex: number,
-  destinationIndex: number,
-  count: number,
-): CommandRejectionReason | null => {
-  const sourceDurability =
-    inventory.durability[sourceIndex] ?? inventory.slots[sourceIndex]?.durability ?? null
-  const reason = moveStack(inventory.slots, sourceIndex, inventory.slots, destinationIndex, count)
-  if (reason === null && inventory.slots[sourceIndex] === null) {
-    inventory.durability[sourceIndex] = null
-    inventory.durability[destinationIndex] = sourceDurability
-  }
-  return reason
-}
-
-const swapInventoryStacks = (
-  inventory: MutableInventoryState,
-  sourceIndex: number,
-  destinationIndex: number,
-): CommandRejectionReason | null => {
-  const reason = swapStacks(inventory.slots, sourceIndex, destinationIndex)
-  if (reason === null) {
-    const sourceDurability = inventory.durability[sourceIndex] ?? null
-    inventory.durability[sourceIndex] = inventory.durability[destinationIndex] ?? null
-    inventory.durability[destinationIndex] = sourceDurability
-  }
-  return reason
-}
-
-const equipInventoryItem = (
-  inventory: MutableInventoryState,
-  sourceIndex: number,
-  equipmentSlot: EquipmentSlot,
-): CommandRejectionReason | null => {
-  if (sourceIndex >= inventory.slots.length || inventory.equipment[equipmentSlot] !== null) return 'invalid-command'
-  const source = inventory.slots[sourceIndex]
-  if (source === null || source === undefined) return 'insufficient-items'
-  if (!isItemType(source.item) || source.count !== 1 || equipmentDefinitionFor(source.item)?.slot !== equipmentSlot) return 'invalid-command'
-  const durability =
-    inventory.durability[sourceIndex] ?? source.durability ?? durabilityForItem(source.item)
-  if (durability === null) return 'invalid-command'
-  inventory.slots[sourceIndex] = null
-  inventory.durability[sourceIndex] = null
-  inventory.equipment[equipmentSlot] = { item: source.item, count: 1, durability: { ...durability } }
-  return null
-}
-
-const unequipInventoryItem = (
-  inventory: MutableInventoryState,
-  equipmentSlot: EquipmentSlot,
-  destinationIndex: number | undefined,
-): CommandRejectionReason | null => {
-  const equipped = inventory.equipment[equipmentSlot]
-  if (equipped === null) return 'insufficient-items'
-  const destination = destinationIndex ?? inventory.slots.findIndex((stack) => stack === null)
-  if (destination < 0 || destination >= inventory.slots.length || inventory.slots[destination] !== null) return 'invalid-command'
-  if (!isItemType(equipped.item) || equipped.count !== 1 || equipmentDefinitionFor(equipped.item)?.slot !== equipmentSlot) return 'invalid-command'
-  const durability = equipped.durability ?? durabilityForItem(equipped.item)
-  if (durability === null) return 'invalid-command'
-  inventory.equipment[equipmentSlot] = null
-  inventory.slots[destination] = { item: equipped.item, count: 1 }
-  inventory.durability[destination] = { ...durability }
-  return null
-}
-
-/** Adds as much of a stack as possible and returns only the unplaceable remainder. */
-const addStackToInventory = (slots: Array<ItemStack | null>, stack: ItemStack): ItemStack | null => {
-  if (!isItemType(stack.item)) return stack
-  let remaining = stack.count
-  const maxStackCount = maxStackCountOfItem(stack.item)
-  for (const [index, current] of slots.entries()) {
-    if (current === null || current.item !== stack.item || current.count >= maxStackCount) continue
-    const added = Math.min(maxStackCount - current.count, remaining)
-    slots[index] = { ...current, count: current.count + added }
-    remaining -= added
-    if (remaining === 0) return null
-  }
-  for (const [index, current] of slots.entries()) {
-    if (current !== null) continue
-    const added = Math.min(maxStackCount, remaining)
-    slots[index] = { ...stack, count: added }
-    remaining -= added
-    if (remaining === 0) return null
-  }
-  return { ...stack, count: remaining }
-}
 
 export type RedstoneStatefulBlock =
   | 'door'
@@ -1052,7 +898,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   }
 
   const sendSleep = (client: ConnectedClient, message: SleepWireMessage): void => {
-    client.send(JSON.stringify(message) as WireText)
+    client.send(JSON.stringify(message))
   }
 
   const broadcastSleep = (message: SleepWireMessage): void => {
@@ -1060,27 +906,27 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   }
 
   const sendWither = (client: ConnectedClient, message: WitherWireMessage): void => {
-    client.send(JSON.stringify(message) as WireText)
+    client.send(JSON.stringify(message))
   }
 
   const sendEnderDragon = (client: ConnectedClient, message: EnderDragonWireMessage): void => {
-    client.send(JSON.stringify(message) as WireText)
+    client.send(JSON.stringify(message))
   }
 
   const sendPlayerDamage = (client: ConnectedClient, message: PlayerDamageCommandResult): void => {
-    client.send(JSON.stringify(message) as WireText)
+    client.send(JSON.stringify(message))
   }
   const sendCrafting = (client: ConnectedClient, message: CraftingCommandResult): void => {
-    client.send(JSON.stringify(message) as WireText)
+    client.send(JSON.stringify(message))
   }
   const sendBrewing = (client: ConnectedClient, message: BrewingWireMessage): void => {
-    client.send(JSON.stringify(message) as WireText)
+    client.send(JSON.stringify(message))
   }
   const sendAnvil = (client: ConnectedClient, message: AnvilWireMessage): void => {
-    client.send(JSON.stringify(message) as WireText)
+    client.send(JSON.stringify(message))
   }
   const sendEnchanting = (client: ConnectedClient, message: EnchantingWireMessage): void => {
-    client.send(JSON.stringify(message) as WireText)
+    client.send(JSON.stringify(message))
   }
 
   const broadcastWither = (message: WitherWireMessage): void => {
@@ -1663,7 +1509,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     if (message.action === 'respawn') {
       const playerVitals = vitals.get(message.player)
       if (playerVitals !== undefined) playerVitals.experience = 0
-      if (respawnedPlayer !== undefined && options.spawnAt !== undefined) {
+      if (respawnedPlayer !== undefined) {
         respawnedPlayer.at = { ...options.spawnAt }
         playerPositions.set(message.player, {
           at: { ...respawnedPlayer.at },
@@ -2622,6 +2468,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     message: AuthoritativeCommand,
     reason: CommandRejectionReason,
     cache = true,
+    receiveReason: RejectedReceiveReason = reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command',
   ): ReceiveResult => {
     const result: AuthoritativeCommandResult = {
       _tag: 'AuthoritativeCommandRejected',
@@ -2633,7 +2480,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     }
     if (cache) cacheCommandResult(message, result)
     sendMessage(client, result)
-    return { accepted: false, reason: reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command' }
+    return { accepted: false, reason: receiveReason }
   }
 
   const handleCommand = (clientId: ClientId, client: ConnectedClient, message: AuthoritativeCommand): ReceiveResult => {
@@ -2645,10 +2492,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       sendMessage(client, cached.result)
       return cached.result._tag === 'AuthoritativeCommandAccepted'
         ? { accepted: true, message }
-        : { accepted: false, reason: 'invalid-command' }
+        : { accepted: false, reason: receiveReasonForRejection(cached.result.reason) }
     }
-    if (message.player !== client.playerId || message.world !== worldId) {
+    if (message.player !== client.playerId) {
       return rejectCommand(client, message, 'unauthorized-player')
+    }
+    if (message.world !== worldId) {
+      return rejectCommand(client, message, 'unauthorized-player', false, 'wrong-world')
     }
     if (message.expectedRevision !== revision) return rejectCommand(client, message, 'stale-revision')
 
@@ -2768,6 +2618,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     client: ConnectedClient,
     message: Extract<NetworkMessage, { _tag: 'BlockPlace' | 'BlockBreak' }>,
     reason: BlockMutationRejected['reason'],
+    receiveReason: RejectedReceiveReason = reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-mutation',
   ): ReceiveResult => {
     sendMessage(client, {
       _tag: 'BlockMutationRejected',
@@ -2778,7 +2629,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       reason,
       revision,
     })
-    return { accepted: false, reason: reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-mutation' }
+    return { accepted: false, reason: receiveReason }
   }
 
   const removePlayer = (clientId: ClientId, client: ConnectedClient): void => {
@@ -2801,11 +2652,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
   const receive = (clientId: ClientId, frame: WireText): ReceiveResult => {
     const client = clients.get(clientId)
     if (client === undefined) return { accepted: false, reason: 'unknown-client' }
-    if ((frame.length > PLAYER_DAMAGE_MAX_WIRE_LENGTH && frame.includes('"_tag":"PlayerDamageCommand"'))
-      || (frame.length > CRAFTING_MAX_WIRE_LENGTH && frame.includes('"_tag":"CraftingCommand"'))
-      || (frame.length > BREWING_MAX_WIRE_LENGTH && frame.includes('"_tag":"BrewingCommand"'))
-      || (frame.length > ANVIL_MAX_WIRE_LENGTH && frame.includes('"_tag":"AnvilCommand"'))
-      || (frame.length > ENCHANTING_MAX_WIRE_LENGTH && frame.includes('"_tag":"EnchantingCommand"'))) {
+    const tag = frameTag(frame)
+    const maxWireLength = tag === undefined ? undefined : specializedFrameWireLengths.get(tag)
+    if (frame.length > WITHER_MAX_WIRE_LENGTH
+      || (maxWireLength !== undefined && frame.length > maxWireLength)) {
       return { accepted: false, reason: 'malformed-frame' }
     }
     const craftingMessage = decodeCraftingWireMessage(frame)
@@ -2818,7 +2668,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       if (cached !== undefined) {
         if (cached.fingerprint !== fingerprint) return { accepted: false, reason: 'invalid-command' }
         sendCrafting(client, cached.result)
-        return cached.result.accepted ? { accepted: true, message: craftingMessage } : { accepted: false, reason: cached.result.reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command' }
+        return cached.result.accepted ? { accepted: true, message: craftingMessage } : { accepted: false, reason: receiveReasonForRejection(cached.result.reason) }
       }
       const rejectCrafting = (reason: NonNullable<CraftingCommandResult['reason']>, receiveReason: Extract<ReceiveResult, { accepted: false }>['reason'] = 'invalid-command'): ReceiveResult => {
         const result: CraftingCommandResult = { _tag: 'CraftingCommandResult', commandId: command.commandId, accepted: false, revision, reason }
@@ -2874,7 +2724,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         sendAnvil(client, cached.result)
         return cached.result.accepted
           ? { accepted: true, message: anvilMessage }
-          : { accepted: false, reason: cached.result.reason === 'unauthorized-player' ? 'identity-spoof' : cached.result.reason === 'wrong-world' ? 'wrong-world' : 'invalid-command' }
+          : { accepted: false, reason: receiveReasonForRejection(cached.result.reason) }
       }
       const rejectAnvil = (
         reason: Extract<AnvilCommandResult, { accepted: false }>['reason'],
@@ -2894,27 +2744,62 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       if (inventory === undefined || presence === undefined || playerVitals === undefined || playerVitals.health <= 0) return rejectAnvil('invalid-command')
       const stack = inventory.slots[command.slot]
       if (stack === null || stack === undefined) return rejectAnvil('no-item')
-      const names = anvilNames.get(playerId) ?? new Map<number, string>()
-      const currentName = names.get(command.slot) ?? ''
-      const currentDurability = inventory.durability[command.slot]
-      const canRepair = currentDurability !== null && currentDurability !== undefined && currentDurability.current < currentDurability.max
-      if (currentName === command.name && !canRepair) return rejectAnvil('no-change')
-      const remainingExperience = spendExperienceLevels(playerVitals.experience, 1)
+      if (!isItemType(stack.item)) return rejectAnvil('invalid-command')
+      const metadata = inventorySlotMetadata(playerId, command.slot)
+      const requestedName = command.name.trim()
+      const currentName = metadata.name ?? ''
+      const currentDurability = inventory.durability[command.slot] ?? null
+      const needsRepair = currentDurability !== null && currentDurability.current < currentDurability.max
+      if (requestedName === currentName && !needsRepair) return rejectAnvil('no-change')
+      const ironSlot = needsRepair
+        ? inventory.slots.findIndex((candidate, slot) =>
+            slot !== command.slot && candidate?.item === 'iron_ingot' && candidate.count > 0,
+          )
+        : -1
+      const iron = ironSlot < 0 ? undefined : inventory.slots[ironSlot]
+      const material: { readonly item: ItemType; readonly count: number } | undefined =
+        iron !== null && iron !== undefined && isItemType(iron.item)
+          ? { item: iron.item, count: iron.count }
+          : undefined
+      const usableIron = material === undefined || iron === null || iron === undefined ? undefined : iron
+      const operationInput = {
+        item: stack.item,
+        durability: currentDurability,
+        name: requestedName,
+        currentName: metadata.name,
+        ...(metadata.enchantment === null ? {} : { enchantedItem: metadata.enchantment }),
+        ...(material === undefined
+          ? {}
+          : { material }),
+      }
+      const plan = planAnvilOperation(operationInput)
+      if (!plan.ok) {
+        const reason = plan.reason === 'nothing-to-do'
+          ? 'no-change'
+          : plan.reason === 'incompatible-input' && needsRepair && usableIron === undefined
+            ? 'missing-iron'
+            : 'invalid-command'
+        return rejectAnvil(reason)
+      }
+      if (plan.materialCost > 0 && (usableIron === undefined || usableIron.count < plan.materialCost)) {
+        return rejectAnvil('missing-iron')
+      }
+      const remainingExperience = spendExperienceLevels(playerVitals.experience, plan.levelCost)
       if (remainingExperience === undefined) return rejectAnvil('insufficient-experience')
-      const ironSlot = inventory.slots.findIndex((candidate, slot) =>
-        slot !== command.slot && candidate?.item === 'iron_ingot' && candidate.count > 0,
-      )
-      if (ironSlot < 0) return rejectAnvil('missing-iron')
-      const iron = inventory.slots[ironSlot]
-      if (iron === null || iron === undefined) return rejectAnvil('missing-iron')
-      inventory.slots[ironSlot] = iron.count === 1 ? null : { ...iron, count: iron.count - 1 }
-      if (iron.count === 1) inventory.durability[ironSlot] = null
-      const repairedDurability = isItemType(stack.item) ? durabilityForItem(stack.item) : null
-      if (repairedDurability !== null) inventory.durability[command.slot] = repairedDurability
+      const outputEnchantment = enchantedItemFromAnvilOutput(plan.output)
+      if (plan.output.enchantments.length > 0 && outputEnchantment === undefined) return rejectAnvil('invalid-command')
+      if (plan.materialCost > 0 && usableIron !== undefined) {
+        inventory.slots[ironSlot] = usableIron.count === plan.materialCost
+          ? null
+          : { ...usableIron, count: usableIron.count - plan.materialCost }
+        if (usableIron.count === plan.materialCost) inventory.durability[ironSlot] = null
+      }
+      inventory.durability[command.slot] = plan.output.durability
       playerVitals.experience = remainingExperience
-      if (command.name.length === 0) names.delete(command.slot)
-      else names.set(command.slot, command.name)
-      anvilNames.set(playerId, names)
+      setInventorySlotMetadata(playerId, command.slot, {
+        name: plan.output.customName === null ? null : String(plan.output.customName),
+        enchantment: outputEnchantment ?? null,
+      })
       revision += 1
       const result: AnvilCommandResult = { _tag: 'AnvilCommandResult', commandId: command.commandId, accepted: true, revision }
       cacheAnvilResult(resultKey, fingerprint, result)
@@ -2922,6 +2807,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       broadcast({ _tag: 'PlayerInventoryDelta', world: presence.world, revision, player: playerId, state: inventorySnapshot(inventory) })
       broadcast({ _tag: 'PlayerVitalsDelta', world: presence.world, revision, player: playerId, state: vitalsSnapshot(playerVitals) })
       sendAnvil(client, anvilNamesDelta(playerId))
+      sendEnchanting(client, enchantmentsDelta(playerId))
       sendAnvil(client, result)
       return { accepted: true, message: anvilMessage }
     }
@@ -2938,7 +2824,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         sendEnchanting(client, cached.result)
         return cached.result.accepted
           ? { accepted: true, message: enchantingMessage }
-          : { accepted: false, reason: cached.result.reason === 'unauthorized-player' ? 'identity-spoof' : cached.result.reason === 'wrong-world' ? 'wrong-world' : 'invalid-command' }
+          : { accepted: false, reason: receiveReasonForRejection(cached.result.reason) }
       }
       const rejectEnchanting = (
         reason: Extract<EnchantingCommandResult, { accepted: false }>['reason'],
@@ -3029,7 +2915,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       if (cached !== undefined) {
         if (cached.fingerprint !== fingerprint) return { accepted: false, reason: 'invalid-command' }
         sendBrewing(client, cached.result)
-        return cached.result.accepted ? { accepted: true, message: brewingMessage } : { accepted: false, reason: 'invalid-command' }
+        return cached.result.accepted ? { accepted: true, message: brewingMessage } : { accepted: false, reason: receiveReasonForRejection(cached.result.reason) }
       }
       const rejectBrewing = (reason: Extract<BrewingCommandResult, { accepted: false }>['reason'], receiveReason: Extract<ReceiveResult, { accepted: false }>['reason'] = 'invalid-command'): ReceiveResult => {
         const result: BrewingCommandResult = { _tag: 'BrewingCommandResult', commandId: command.commandId, accepted: false, revision, reason }
@@ -3117,7 +3003,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         sendPlayerDamage(client, cached.result)
         return cached.result.accepted
           ? { accepted: true, message: playerDamageMessage }
-          : { accepted: false, reason: cached.result.reason === 'unauthorized-player' ? 'identity-spoof' : 'invalid-command' }
+          : { accepted: false, reason: receiveReasonForRejection(cached.result.reason) }
       }
       const rejectDamage = (
         reason: NonNullable<PlayerDamageCommandResult['reason']>,
@@ -3366,7 +3252,7 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       }
       if (playerClients.has(message.player)) return { accepted: false, reason: 'duplicate-player' }
       const persistedPosition = playerPositions.get(message.player)
-      const authoritativeAt = persistedPosition?.at ?? options.spawnAt ?? message.at
+      const authoritativeAt = persistedPosition?.at ?? options.spawnAt
       const authoritativeFacing = persistedPosition?.facing ?? DEFAULT_FACING
       client.playerId = message.player
       players.set(message.player, {
@@ -3484,10 +3370,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         broadcast(message)
         return { accepted: true, message }
       case 'BlockPlace': {
-        if (message.world !== undefined && message.world !== worldId) return rejectMutation(client, message, 'unauthorized-player')
+        if (message.world !== undefined && message.world !== worldId) return rejectMutation(client, message, 'unauthorized-player', 'wrong-world')
         if (!isInBounds(message.at)) return rejectMutation(client, message, 'out-of-bounds')
         const player = players.get(message.player)
-        if (player === undefined || !isBlockWithinReach(player, message.at)) return rejectMutation(client, message, 'unauthorized-player')
+        if (player === undefined || !isBlockWithinReach(player, message.at)) return rejectMutation(client, message, 'unauthorized-player', 'invalid-mutation')
         if (message.block === 'air' || !options.allowedBlocks.has(message.block)) return rejectMutation(client, message, 'unknown-block')
         if (blockAt(message.at) !== null) return rejectMutation(client, message, 'occupied')
         const inventory = inventories.get(message.player)
@@ -3535,10 +3421,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         return { accepted: true, message }
       }
       case 'BlockBreak': {
-        if (message.world !== undefined && message.world !== worldId) return rejectMutation(client, message, 'unauthorized-player')
+        if (message.world !== undefined && message.world !== worldId) return rejectMutation(client, message, 'unauthorized-player', 'wrong-world')
         if (!isInBounds(message.at)) return rejectMutation(client, message, 'out-of-bounds')
         const player = players.get(message.player)
-        if (player === undefined || !isBlockWithinReach(player, message.at)) return rejectMutation(client, message, 'unauthorized-player')
+        if (player === undefined || !isBlockWithinReach(player, message.at)) return rejectMutation(client, message, 'unauthorized-player', 'invalid-mutation')
         const brokenBlock = blockAt(message.at)
         if (brokenBlock === null) return rejectMutation(client, message, 'missing-block')
         blocks.set(positionKey(message.at), { at: message.at, block: null })

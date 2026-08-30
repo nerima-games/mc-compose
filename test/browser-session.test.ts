@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
-import { Effect, Either } from 'effect'
+import { Deferred, Effect, Either, Fiber } from 'effect'
 import {
   EMPTY_MODULE_LAYER,
   StageId,
@@ -74,6 +74,66 @@ describe('startBrowserSession', () => {
         cause: 'no-webgl',
         rollbackFailures: [],
       })
+      expect(log).toStrictEqual(['start:sim', 'start:render', 'stop:sim'])
+    }),
+  )
+
+  it.effect('rolls back successful starts when a later runtime is interrupted', () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      const entered = yield* Deferred.make<void>()
+      const waitForInterrupt = yield* Deferred.make<GameModule>()
+      const blockedRuntime: BrowserRuntimeModule = {
+        name: 'render',
+        start: Effect.gen(function* () {
+          log.push('start:render')
+          yield* Deferred.succeed(entered, undefined)
+          return yield* Deferred.await(waitForInterrupt)
+        }),
+        stop: Effect.sync(() => {
+          log.push('stop:render')
+        }),
+      }
+      const fiber = yield* Effect.fork(startBrowserSession([
+        runtime('sim', log),
+        blockedRuntime,
+      ], { compose: { skeleton: [] } }))
+
+      yield* Deferred.await(entered)
+      yield* Fiber.interrupt(fiber)
+
+      expect(log).toStrictEqual(['start:sim', 'start:render', 'stop:sim'])
+    }),
+  )
+
+  it.effect('does not repeat rollback when startup failure is interrupted during rollback', () =>
+    Effect.gen(function* () {
+      const log: Array<string> = []
+      const stopEntered = yield* Deferred.make<void>()
+      const releaseStop = yield* Deferred.make<void>()
+      const rollbackRuntime: BrowserRuntimeModule = {
+        name: 'sim',
+        start: Effect.sync(() => {
+          log.push('start:sim')
+          return gameModule('sim')
+        }),
+        stop: Effect.gen(function* () {
+          log.push('stop:sim')
+          yield* Deferred.succeed(stopEntered, undefined)
+          yield* Deferred.await(releaseStop)
+        }),
+      }
+      const fiber = yield* Effect.fork(startBrowserSession([
+        rollbackRuntime,
+        runtime('render', log, { startError: 'no-render' }),
+      ]))
+
+      yield* Deferred.await(stopEntered)
+      yield* Fiber.interruptFork(fiber)
+      yield* Effect.yieldNow()
+      yield* Deferred.succeed(releaseStop, undefined)
+      yield* Fiber.await(fiber)
+
       expect(log).toStrictEqual(['start:sim', 'start:render', 'stop:sim'])
     }),
   )

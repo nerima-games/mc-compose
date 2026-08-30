@@ -111,7 +111,7 @@ export const makeThreePostProcessingRenderer: PostProcessingRendererFactory = ({
         }))
       }
       if (effect === 'smaa') {
-        composer.addPass(new SMAAPass(viewport.width, viewport.height))
+        composer.addPass(new SMAAPass())
       }
     }
     composer.addPass(new OutputPass())

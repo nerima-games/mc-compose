@@ -166,31 +166,33 @@ try/catch も、stage 単位の時間計測も、条件付きスキップも、�
 
 ### 3.1 依存ホワイトリスト(最重要)
 
-mc-compose が import してよいのは **4 つの体験モジュール + mc-render + mc-kernel だけ**である。
+mc-compose が import してよいのは、`package.json` に直接宣言した公開 API と `mc-kernel` である。
+現在の browser host は `mc-sim` / `mc-render` / `mc-save` / `mc-worldgen` / `mc-audio` と
+4 つの体験モジュールの公開 API を合成する。これはゲームルールの移植ではなく、公開 stage と
+service の登録・配線である。
 
 ```
 mc-compose -> mx-gameplay / mx-redstone / mx-ui / mx-multiplayer   ... OK
-mc-compose -> mc-render                                            ... OK（stage 配線。architecture.md §5）
-mc-compose -> mc-sim                                               ... transitive-import 違反
-mc-compose -> mc-worldgen / mc-physics / mc-save / mc-audio / mc-noise ... 同上
-mc-compose -> mc-meshing                                           ... 同上（mc-render の背後）
+mc-compose -> mc-render / mc-sim / mc-worldgen / mc-save / mc-audio ... OK（公開 API の合成）
+mc-compose -> mc-physics                                           ... package.json の公開依存として必要な場合のみ
+mc-compose -> mc-noise / mc-meshing                                 ... transitive-import 違反
 ```
 
-**mc-render のエッジは規範を弱めない。** それが許可するのは mc-render **だけ**であり、
-背後の mc-meshing と mc-sim は推移的に到達可能になるぶん `transitive-import` 違反になる。
-メッセージが変わるだけで、ハードエラーであることは変わらない。
-そして compose がやるのは「mc-render の `GameModule` を受け取り、Layer を merge し、
-`StageRegistration` をリゾルバに渡す」の 3 つで、mx-gameplay に対してやっているのとまったく同じである。
+**公開 API と推移依存を混同しない。** `mc-render` や `mc-sim` の公開 `GameModule` を
+直接登録することは、package.json に明示した依存境界の内側である。一方、背後の
+`mc-meshing` と `mc-noise` は推移的に到達可能でも、合成層からの import はハードエラーである。
+compose が行うのは公開 module を受け取り、Layer を merge し、`StageRegistration` を
+リゾルバに渡すことだけである。
 
 `pnpm install` すると `node_modules` にはこれら全部が物理的に置かれる。
-**それでも import は禁止**であり、`pnpm check:deps` が非ゼロ終了する。
+**それでも合成層からの import は禁止**であり、`.oxlintrc.json` の `no-restricted-imports` を
+`pnpm lint` が非ゼロ終了で検出する。
 
-**これが規範の機械化された半分である。** mc-sim を直接必要とするルールは、
-体験モジュールに属するルールである。
+**これが規範の機械化された半分である。** mc-sim の物理・インベントリ・相互作用のルールは
+mc-sim / mx-gameplay 側が所有し、mc-compose は公開サービスを同じ世界へ登録するだけである。
 ゲートは「mx-* を飛び越えてここに書く」をレビューの意見ではなくビルドの失敗にする。
 
-回帰テスト: `test/check-dependency-whitelist.test.ts` の
-`rejects reaching past the experience modules to mc-sim, and names the path` ほか。
+回帰テスト: `test/public-api.test.ts` と `pnpm lint` の import 境界検査ほか。
 
 ### 3.2 公開 API の名前検査
 
