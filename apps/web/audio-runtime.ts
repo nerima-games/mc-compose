@@ -16,7 +16,7 @@ import {
 import { ClockPort, type MonotonicTimeSecs, type Position } from '@nerima-games/mc-kernel'
 import { Effect, Layer, Ref } from 'effect'
 
-type RuntimeBackend = AudioBackend & Pick<WebAudioBackend, 'unlock' | 'dispose'>
+type RuntimeBackend = AudioBackend & Pick<WebAudioBackend, 'unlock' | 'dispose' | 'preloadSamples'>
 
 export type AudioRuntimeSnapshot = {
   readonly cueIds: ReadonlyArray<SoundCueId>
@@ -124,13 +124,18 @@ export const makeAudioRuntime = (input: {
       play: (cueId, options) => {
         if (closed) return
         cueIds.push(cueId)
-        const exit = Effect.runSyncExit(service.play(cueId, options))
-        // eslint-disable-next-line no-console
-        console.error('DIAG PLAY EXIT', cueId, JSON.stringify(exit))
+        Effect.runSyncExit(service.play(cueId, options))
       },
       unlock: () => {
         if (closed || unlocked || unlockPending !== undefined) return
         const pending = Effect.runPromise(input.backend.unlock)
+          .then((availability) =>
+            // mc-audio 0.2.7 cues play decoded samples; decoding is async, and
+            // `play` runs under runSync, so an un-preloaded first cue would be
+            // silently discarded. Preloading inside the unlock promise keeps
+            // "unlock settled" meaning "cues now schedule synchronously".
+            Effect.runPromise(input.backend.preloadSamples()).then(() => availability),
+          )
           .then((availability) => {
             if (availability === 'ready') unlocked = true
           })

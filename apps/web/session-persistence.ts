@@ -181,6 +181,26 @@ export const persistedItemDropLifetime = (behaviour: unknown): PersistedItemDrop
   }
 }
 
+// Same undefined-vs-null gap as `normalizePersistedEntityRoster`'s own
+// entity-level swap below, one object deeper: mx-gameplay's
+// `HostileMobSnapshot.behaviour: CreeperFuse | EndermanFlinch |
+// EcosystemMobState | undefined` (`mob-frame.d.ts`) names a mob this
+// repository has no fuse/flinch/ecosystem state for yet, and a zombie is
+// exactly that mob — only `OVERWORLD_ECOSYSTEM_HOSTILE_KINDS` and
+// `NETHER_HOSTILE_KINDS` are ecosystem-governed, so a zombie's nested
+// `behaviour` stays `undefined` for its whole lifetime. mc-save's integrity
+// checksum rejects that `undefined` exactly as it rejects the entity-level
+// one, but it sits a `MobBehaviour` union member two objects deep, so the
+// shallow entity-level swap never reaches it. Restrict the swap to
+// `HostileMobSnapshot`'s own nested field — other `MobBehaviour` members
+// (`CreeperFuse`, `DroppedItemBehaviour`, ...) use `null`/absence for
+// unrelated reasons and must not be touched here.
+const restoreHostileMobBehaviour = (behaviour: unknown): unknown => {
+  const record = asRecord(behaviour)
+  if (record === undefined || record['_tag'] !== 'HostileMob') return behaviour
+  return { ...record, behaviour: record['behaviour'] === null ? undefined : record['behaviour'] }
+}
+
 const normalizePersistedEntityBehaviour = (kind: string, behaviour: unknown): unknown => {
   if (kind !== 'dropped_item') return behaviour
   const drop = asRecord(behaviour)
@@ -296,7 +316,7 @@ export const normalizePersistedEntityRoster = (value: unknown): PersistedEntityR
       // opposite direction.
       behaviour: normalizePersistedEntityBehaviour(
         kind,
-        entity['behaviour'] === null ? undefined : entity['behaviour'],
+        restoreHostileMobBehaviour(entity['behaviour'] === null ? undefined : entity['behaviour']),
       ),
     })
   }
@@ -506,6 +526,17 @@ const PersistedEntityRosterSchema = Schema.Struct({
 // integrity checksum does. `normalizePersistedEntityRoster` already restores
 // `null` back to `undefined` on decode (see its comment); this is the
 // opposite direction.
+//
+// `encodeHostileMobBehaviour` is the same swap again, one object further in:
+// see `restoreHostileMobBehaviour`'s comment above for why a zombie's own
+// nested `behaviour` field is `undefined` for its whole lifetime and why the
+// swap is restricted to `HostileMobSnapshot`.
+const encodeHostileMobBehaviour = (behaviour: unknown): unknown => {
+  const record = asRecord(behaviour)
+  if (record === undefined || record['_tag'] !== 'HostileMob') return behaviour
+  return { ...record, behaviour: record['behaviour'] ?? null }
+}
+
 const encodePersistedEntityRosters = (rosters: unknown): unknown => {
   if (rosters === null || typeof rosters !== 'object') return rosters
   const encodeRoster = (roster: unknown): unknown => {
@@ -518,7 +549,7 @@ const encodePersistedEntityRosters = (rosters: unknown): unknown => {
       entities: entities.map((entity: unknown) => {
         if (entity === null || typeof entity !== 'object') return entity
         const entityRecord = entity as Record<string, unknown>
-        return { ...entityRecord, behaviour: entityRecord['behaviour'] ?? null }
+        return { ...entityRecord, behaviour: encodeHostileMobBehaviour(entityRecord['behaviour']) ?? null }
       }),
     }
   }

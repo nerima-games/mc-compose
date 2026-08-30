@@ -541,11 +541,26 @@ test('fires a bow through the authoritative multiplayer server', async ({ browse
     expect(itemCount(await snapshot(playerSession.page), 'arrow')).toBe(2)
     await playerSession.page.mouse.up({ button: 'right' })
 
+    // A minimally-drawn arrow lands within a block of the shooter, and the
+    // server converts a stuck arrow into an `:arrow:pickup:` item-drop the
+    // frame it lands — the in-flight `kind: 'arrow'` entity exists for less
+    // than one snapshot round-trip, so polling for it can only ever pass by
+    // luck (this assertion was red on main long before Wave 0). The drop's id
+    // is derived exclusively from the server-side arrow entity, so its arrival
+    // in the client's render list proves the same round-trip — spawn, flight
+    // simulation, impact conversion, entity delta, client render —
+    // deterministically. Rendering a long-lived transient entity needs a QA
+    // pause hook; deferred.
+    await expect.poll(async () => (await snapshot(playerSession.page)).renderedEntities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'dropped_item',
+          id: expect.stringMatching(/:arrow:pickup:/u),
+        }),
+      ]),
+    )
     await expect.poll(() => canvasRevision(playerSession.page)).toBeGreaterThan(revisionBeforeDraw)
     await expect.poll(async () => itemCount(await snapshot(playerSession.page), 'arrow')).toBe(1)
-    await expect.poll(async () => (await snapshot(playerSession.page)).renderedEntities).toEqual(
-      expect.arrayContaining([expect.objectContaining({ kind: 'arrow' })]),
-    )
   } finally {
     await alice?.context.close()
     await stopServer(server.process)
@@ -565,9 +580,24 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     state: {
       revision: 0,
       blocks: [],
+      // mc-sim 0.2.1's `restoreStorage` rejects any `slots` array whose length is
+      // not exactly 36 (`PlayerStorageValidationError: expected exactly 36
+      // slots` — see `player-storage.js`'s `hasExactKeys`/length check). The
+      // fixture below used to send just one slot; that was already invalid by
+      // this contract, but nothing on the path from this state file to
+      // `AuthoritativeSnapshot` (`apps/multiplayer-server/inventory-state.ts`'s
+      // `cloneInventory`, which is a 1:1 `.map`, not a pad-to-36) ever
+      // normalized it, and nothing rejected it either before 0.2.1's stricter
+      // validation. The first `AuthoritativeSnapshot` this fixture reaches — as
+      // soon as Bob joins — now throws inside `apps/web/main.ts`'s
+      // `applyNetworkInventory`, which crashes Alice's frame loop and freezes
+      // `data-multiplayer-player-count` at its initial value. Pad to 36 the
+      // same way the other multiplayer fixtures in this file already do
+      // (`emptySlots().slice(n)`, see lines above for the bow/nether-bed
+      // fixtures) rather than loosening the product's validation.
       inventories: [{
         player: 'alice-e2e',
-        state: { slots: [{ item: 'stone', count: 2 }], selectedSlot: 0 },
+        state: { slots: [{ item: 'stone', count: 2 }, ...emptySlots().slice(1)], selectedSlot: 0 },
       }],
       playerPositions: ['alice-e2e', 'bob-e2e'].map((player) => ({
         player,
@@ -606,7 +636,6 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     createCreativeWorld,
     playerContext,
   )
-
   try {
     const aliceCanvas = alice.page.locator('#game-canvas')
     const bobCanvas = bob.page.locator('#game-canvas')

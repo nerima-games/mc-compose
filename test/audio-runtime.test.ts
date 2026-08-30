@@ -36,12 +36,14 @@ const fixedClockLayer = (atSecs: number): Layer.Layer<ClockPort> =>
 const makeBackend = (
   backend: AudioBackend,
   lifecycle: { unlocks: number; closes: number },
-): AudioBackend & Pick<WebAudioBackend, 'unlock' | 'dispose'> => ({
+): AudioBackend & Pick<WebAudioBackend, 'unlock' | 'dispose' | 'preloadSamples'> => ({
   ...backend,
   unlock: Effect.sync(() => {
     lifecycle.unlocks += 1
     return 'ready' as const
   }),
+  preloadSamples: () =>
+    Effect.succeed({ requested: 0, loaded: 0, cached: 0, failed: 0 }),
   dispose: Effect.sync(() => {
     lifecycle.closes += 1
   }),
@@ -207,10 +209,15 @@ describe('web audio runtime', () => {
       }),
     )
 
+    // Three microtask hops per settle: the unlock promise chain gained a
+    // preloadSamples link, so clearing unlockPending takes one hop more than
+    // the pre-0.2.7 wiring this test was first calibrated against.
     runtime.unlock()
     await Promise.resolve()
     await Promise.resolve()
+    await Promise.resolve()
     runtime.unlock()
+    await Promise.resolve()
     await Promise.resolve()
     await Promise.resolve()
     runtime.unlock()

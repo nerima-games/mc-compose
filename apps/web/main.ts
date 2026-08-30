@@ -94,6 +94,7 @@ import {
   type WeatherLoopKind,
 } from '@nerima-games/mc-audio'
 import {
+  BLOCK_PROPERTY_DEFAULTS,
   blockIdOf,
   blockPosition,
   blockTypeOfId,
@@ -109,7 +110,6 @@ import {
   type MonotonicTimeSecs,
   type Position as Vec3,
 } from '@nerima-games/mc-kernel'
-import { resolveOptionsFromKernel, type BlockIdAt } from '@nerima-games/mc-physics'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   addExperience as addVitalsExperience,
@@ -2511,22 +2511,25 @@ const bootGame = async (
   let simulationElapsedSecs = 0
   const isGameplayBlockSolid = solidityFromStore(currentChunkStore)
   // mc-physics 0.2.1 replaced ResolveOptions.isBlockSolid (a boolean predicate)
-  // with blockPropertiesAt (returns the kernel's BlockProperties or null), so
-  // the resolver can read real block properties instead of a single flattened
-  // bit. blockIdAt adapts this repository's chunk store to the BlockIdAt shape
-  // resolveOptionsFromKernel expects, mirroring the `reading._tag !== 'Block'`
-  // pattern already used for environmental contact damage above.
-  const chunkStoreBlockIdAt: BlockIdAt = (blockX, blockY, blockZ) => {
-    const reading = Effect.runSync(currentChunkStore.getBlock({ x: blockX, y: blockY, z: blockZ }))
-    return reading._tag === 'Block' ? reading.block : null
-  }
+  // with blockPropertiesAt (the kernel's BlockProperties or null). The adapter
+  // must keep solidityFromStore's three-valued semantics: an unloaded chunk and
+  // out-of-world both read as SOLID (air there lets a player walk off a chunk
+  // edge and fall forever — see mx-gameplay's in-memory-world docstring), and a
+  // loaded block is solid exactly when it lacks the 'passable' capability.
+  // BLOCK_PROPERTY_DEFAULTS is kernel's "ordinary opaque solid cube", so this
+  // reproduces the pre-0.2.1 full-cube collision behavior exactly; per-shape
+  // registry collision (cactus inset, slabs) is a deliberate later change, not
+  // part of this migration.
   const simPhysicsConfig: SimPhysicsConfig = {
-    resolve: resolveOptionsFromKernel({
-      blockIdAt: chunkStoreBlockIdAt,
+    resolve: {
+      blockPropertiesAt: (blockX, blockY, blockZ) =>
+        isGameplayBlockSolid({ x: blockX, y: blockY, z: blockZ })
+          ? BLOCK_PROPERTY_DEFAULTS
+          : null,
       halfWidth: PLAYER_HALF_WIDTH,
       // mc-sim exposes this branded field but not the brand constructor.
       halfHeight: PLAYER_HALF_HEIGHT as SimPhysicsConfig['resolve']['halfHeight'],
-    }),
+    },
     walkSpeed: WALK_SPEED_M_PER_S,
     jumpSpeed: JUMP_SPEED_M_PER_S,
   }
