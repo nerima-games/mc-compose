@@ -300,7 +300,12 @@ describe('finding the checkouts', () => {
       const candidates = rosterRootCandidates({ MC_ROSTER_ROOT: '/explicit' })
       expect(candidates[0]).toContain('explicit')
       expect(candidates[2]).toContain(`mc-dev-meta${'/'}repos`)
-      expect(candidates[1]).not.toContain('mc-dev-meta')
+      // Candidate 1 is the repo root's own parent (the sibling working
+      // copies); assert it is a distinct root from the mirror rather than
+      // that its PATH avoids the string "mc-dev-meta" — when this repository
+      // is checked out inside mc-dev-meta's repos/ mirror (check:workspace
+      // does exactly that), the parent path legitimately contains that name.
+      expect(candidates[1]).not.toBe(candidates[2])
       expect(candidates).toHaveLength(3)
 
       expect(rosterRootCandidates({})).toHaveLength(2)
