@@ -286,7 +286,11 @@ const expectOutOfBoundsPlacementRejection = async (
 // `{ timeout }` override) for every existing caller. Two full game clients
 // booting concurrently in one browser context — only the two-Creative-
 // sessions test does this — measurably outlasts the bare 5s default on a
-// real CI runner; see that test's own `bootTimeout` argument to `openPlayer`.
+// real CI runner. That test threads `bootTimeout` through THREE call
+// sites of this same contention: both `openPlayer` joins, and Bob's own
+// reconnection after `bob.page.close()` — a plain `connectPage` call, not
+// an `openPlayer` one, but booting a full client back into a context where
+// Alice's is still live is the identical shape and needs the same budget.
 const connectPage = async (
   page: Page,
   url: string,
@@ -726,7 +730,10 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     await expect(aliceCanvas).toHaveAttribute('data-multiplayer-player-count', '1')
 
     const reconnectedBob = await bob.context.newPage()
-    await connectPage(reconnectedBob, bob.url)
+    // Same concurrent-client contention as Bob's initial join above (Alice's
+    // client is still fully live in this context) — confirmed flaky on CI at
+    // the bare 5s default (trace: timed out at ~5.2s, still "starting").
+    await connectPage(reconnectedBob, bob.url, undefined, 20_000)
     await expect(aliceCanvas).toHaveAttribute('data-multiplayer-player-count', '2')
     await expect(reconnectedBob.locator('#game-canvas')).toHaveAttribute(
       'data-multiplayer-player-count',

@@ -185,15 +185,25 @@ test.describe('player inventory experience', () => {
     })
 
     test('progresses from wood through diamond and mines obsidian', async ({ page }) => {
-    // 90s used to be tight even before the furnace wait below: traced via
-    // this test's own CI trace.zip, the wood/stone/iron/mining progression
-    // ahead of smelting already consumes ~50.5s on a real SwiftShader CI
-    // runner, leaving under 40s of the furnace step's own 50s allowance
-    // before the outer timeout fired first — the furnace output was still
-    // climbing (0 -> 1 -> 2 ingots observed), not stalled. 140s covers the
-    // pre-smelt phase, the full 50s furnace allowance, and the remaining
-    // steps after smelting with margin.
-    test.setTimeout(140_000)
+    // Raising the outer budget to 140s (below) let the furnace wait use its
+    // own full allowance instead of being cut off early — and traced via
+    // this test's own next CI trace.zip, that allowance is itself too tight.
+    // The wood/stone/iron/mining progression ahead of smelting consumed
+    // 53.2s on that run (exact trace timestamps: test start to the furnace
+    // assertion's start). The furnace wait then used its entire 50s budget
+    // and reached only 2 of 3 iron ingots (aria-label stuck at "iron_ingot,
+    // 2", trace duration 50,026.7ms). Playwright's own call-log retry counts
+    // in the failure (44 polls at empty, 40 at 1 ingot, 19 at 2 ingots) are
+    // used here as a time-proportional estimate, NOT exact per-poll
+    // timestamps — the trace doesn't record individual poll times for a
+    // single toHaveAttribute call. Scaling those counts against the known
+    // 50,026.7ms span: ingot 1 lands ~21.4s in, ingot 2 ~40.8s in (a
+    // ~19.4s/ingot steady-state smelt pace on this runner), so ingot 3
+    // should land ~60.2s in. 75s on the furnace wait leaves ~15s margin
+    // over that estimate. 170s outer covers the 53.2s pre-smelt phase, the
+    // full 75s furnace allowance, and the same post-smelt margin the
+    // previous 140s preserved.
+    test.setTimeout(170_000)
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
     await callQa(page, 'gameplay.seedWoodenPickaxeProgression')
@@ -426,8 +436,10 @@ test.describe('player inventory experience', () => {
     await furnaceFuel.click()
     await expect(furnaceFuel).toHaveAttribute('aria-label', /coal, 1/)
     await expect(cookProgress).not.toHaveAttribute('aria-valuenow', '0')
+    // 75s: see the derivation on this test's own `test.setTimeout` above —
+    // a real CI run reached only 2 of 3 ingots inside the previous 50s.
     await expect(furnaceOutput).toHaveAttribute('aria-label', /iron_ingot, 3/, {
-      timeout: 50_000,
+      timeout: 75_000,
     })
 
     await furnaceOutput.click()
