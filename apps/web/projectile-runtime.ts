@@ -154,11 +154,20 @@ export const projectileRuntimeSnapshot = (
   dimension: string
   state: Projectile['state']
   position: Readonly<{ x: number; y: number; z: number }>
+  // Exposed for e2e/bow-projectile.e2e.ts's physics-oracle assertion: with a
+  // real-time-driven charge, a test cannot know an exact expected landing
+  // position in advance, but it CAN replay `stepProjectile`/`ARROW_PROFILE`
+  // (the same functions `advanceProjectileRuntime` calls below) forward from
+  // an observed (position, velocity, ageSeconds) and check that the browser's
+  // own integration agrees with that independent replay. `arrow.velocity`
+  // already existed on this record; this only serializes it for that reader.
+  velocity: Readonly<{ x: number; y: number; z: number }>
   ageSeconds: number
 }>> => state.projectiles.map((projectile) => ({
   id: projectile.id,
   dimension: projectile.dimension,
   state: projectile.arrow.state,
   position: projectile.arrow.position,
+  velocity: projectile.arrow.velocity,
   ageSeconds: projectile.arrow.ageSeconds,
 }))
