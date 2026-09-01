@@ -268,6 +268,17 @@ const stallEachAnimationFrame = async (page: Page, stallMs: number): Promise<voi
 // follows the fake lock. grantPointerLock is duplicated across ~16 e2e files,
 // so the fix belongs in a shared helper rather than here.
 //
+// RULED OUT, tested on CI so nobody repeats it: the missing floor block.
+// Nine QA fixtures, this one included, restored the player to a pose without
+// placing the block that pose stands on, so the player fell through unset
+// terrain and a raycast from a dropping eye height missed its target. That
+// defect was real and is fixed, it explained three other tests, and falling
+// into water would produce the 'swimming' flag this trace recorded — so it
+// was a good candidate. It is not the cause here. Un-parking this test with
+// the block in place and nothing else changed still fails on CI with the
+// identical signature: the replay predicts a still-flying arrow where the
+// browser reports it embedded. The aim defect has some other cause.
+//
 // Do NOT un-park this by widening the tolerance. A separate 171-run study
 // found the tolerance floor's stated derivation is itself wrong for this
 // fixture — the step-schedule term measures exactly zero here, because swept
