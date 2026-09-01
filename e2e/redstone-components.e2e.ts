@@ -21,6 +21,8 @@ type RedstoneSnapshot = {
   observerLampTransitions: ReadonlyArray<LampTransitionRecord>
   comparator: number | null
   trigger: string | null
+  pressurePlate: boolean
+  pressurePlateLamp: number | null
 }
 
 const callQa = async <Result>(page: Page, command: string): Promise<Result> =>
@@ -69,6 +71,8 @@ test('redstone components place, activate, tick, and emit host transitions', asy
     observer: 81,
     observerLamp: 79,
     comparator: 82,
+    pressurePlate: false,
+    pressurePlateLamp: 79,
   })
 
   const canvas = page.locator('#game-canvas')
@@ -128,4 +132,39 @@ test('redstone components place, activate, tick, and emit host transitions', asy
   expect(afterPulse.observerLampTransitions).toContainEqual(
     expect.objectContaining({ lit: true, writtenBlock: 80 }),
   )
+
+  // The pressure plate is deliberately NOT driven through a QA teleport:
+  // @nerima-games/mx-redstone's README and its domain/pressure-plate.ts both
+  // document that entity/item contact — deciding who is standing on a plate —
+  // is out of scope for that package on purpose; occupancy is this host's
+  // job. So real WASD input is the only way to prove the host's half of the
+  // contract actually works. `KeyD` walks the
+  // player onto QA_REDSTONE_PLATE (see smoke.e2e.ts #9 / environmental-
+  // contact-damage.e2e.ts for the same strafe-along-+x convention from this
+  // spawn pose), and unlike the observer's pulse above, plate power is HELD
+  // for as long as the player stands there — a live poll is the right tool
+  // here, not a durable transition record.
+  await page.keyboard.down('KeyD')
+  try {
+    await waitForSimulationProgress(
+      page,
+      () => readRedstoneSnapshot(page),
+      (snapshot) => snapshot.pressurePlate && snapshot.pressurePlateLamp === 80,
+      { description: 'pressure plate powers on real player contact' },
+    )
+  } finally {
+    await page.keyboard.up('KeyD')
+  }
+
+  await page.keyboard.down('KeyA')
+  try {
+    await waitForSimulationProgress(
+      page,
+      () => readRedstoneSnapshot(page),
+      (snapshot) => !snapshot.pressurePlate && snapshot.pressurePlateLamp === 79,
+      { description: 'pressure plate unpowers once the player steps off' },
+    )
+  } finally {
+    await page.keyboard.up('KeyA')
+  }
 })
