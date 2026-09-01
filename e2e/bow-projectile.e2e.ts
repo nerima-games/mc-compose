@@ -1,4 +1,5 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
+import { ARROW_PROFILE, stepProjectile, type Projectile, type ProjectileWorld } from '@nerima-games/mc-sim'
 
 import { startGameSession } from './helpers/session'
 
@@ -10,6 +11,7 @@ type ProjectileSnapshot = Readonly<{
   id: string
   state: 'flying' | 'stuck' | 'despawned'
   position: Position
+  velocity: Position
   ageSeconds: number
 }>
 type GameplaySnapshot = Readonly<{
@@ -67,6 +69,129 @@ const grantPointerLock = async (page: Page): Promise<void> => {
   })
 }
 
+// PHYSICS ORACLE for the bow-projectile happy path below. A real-time-driven
+// charge (see the `raw`-not-`deltaSecs` comment at apps/web/main.ts's
+// `advanceBowUse` call site) means a test cannot know the exact charge — and
+// therefore the exact launch speed and landing position — that a given hold
+// will produce; the CI failure this replaces asserted a fixed landing box
+// sized for an assumed charge and broke the moment the real one drifted.
+// Instead of assuming, this replays `stepProjectile`/`ARROW_PROFILE` — the
+// SAME functions apps/web/projectile-runtime.ts's `advanceProjectileRuntime`
+// calls — starting from an OBSERVED (position, velocity) partway through the
+// real flight, for the OBSERVED elapsed simulated time, and checks that the
+// browser's own integration agrees with this independent replay. It never
+// needs to know what charge was achieved; it only needs two snapshots of the
+// same projectile in flight.
+//
+// The world model below knows only about the QA fixture's stone wall
+// (apps/web/main.ts's seedBowProjectileEncounter: x:6..10, y:62..69, z:2),
+// not the surrounding procedurally generated terrain, so this oracle is valid
+// only for a shot that actually lands on that wall — true for a normal,
+// unstalled hold (this is the same fixture the pre-fix test hit reliably
+// across repeated local runs), not necessarily true for a hold delayed enough
+// to fly past it, which is a different, already-covered concern: see "still
+// fires a genuinely long hold..." below for the discrete fire/no-fire
+// distinction under an actual stall.
+const FIXTURE_WALL_WORLD: ProjectileWorld = {
+  blockBounds: (start, end) => {
+    const bounds: Array<{
+      minX: number
+      minY: number
+      minZ: number
+      maxX: number
+      maxY: number
+      maxZ: number
+    }> = []
+    const minXi = Math.floor(Math.min(start.x, end.x))
+    const maxXi = Math.floor(Math.max(start.x, end.x))
+    const minYi = Math.floor(Math.min(start.y, end.y))
+    const maxYi = Math.floor(Math.max(start.y, end.y))
+    const minZi = Math.floor(Math.min(start.z, end.z))
+    const maxZi = Math.floor(Math.max(start.z, end.z))
+    for (let x = Math.max(6, minXi); x <= Math.min(10, maxXi); x += 1) {
+      for (let y = Math.max(62, minYi); y <= Math.min(69, maxYi); y += 1) {
+        if (minZi <= 2 && maxZi >= 2) {
+          bounds.push({ minX: x, minY: y, minZ: 2, maxX: x + 1, maxY: y + 1, maxZ: 3 })
+        }
+      }
+    }
+    return bounds
+  },
+  entities: [],
+  isInWater: () => false,
+  bounds: { minX: -10_000, minY: -10_000, minZ: -10_000, maxX: 10_000, maxY: 10_000, maxZ: 10_000 },
+}
+
+// Replays from an observed (position, velocity) for `flightSecs` of simulated
+// time, at a fixed `stepSecs` per call. Used both to produce the oracle's
+// prediction (a fine step) and, at the app's own coarsest step (0.1s, the
+// `Math.min(deltaSecs, 0.1)` cap in apps/web/main.ts's projectile-advance
+// call), to measure how much a real, irregular frame schedule could
+// legitimately diverge from that prediction.
+const replayFlight = (
+  origin: Readonly<{ position: Position; velocity: Position }>,
+  flightSecs: number,
+  stepSecs: number,
+): Projectile => {
+  let state: Projectile = {
+    position: origin.position,
+    velocity: origin.velocity,
+    ageSeconds: 0,
+    state: 'flying',
+  }
+  let remaining = flightSecs
+  while (state.state === 'flying' && remaining > 1e-9) {
+    const dt = Math.min(stepSecs, remaining)
+    state = stepProjectile(state, dt, FIXTURE_WALL_WORLD, ARROW_PROFILE).projectile
+    remaining -= dt
+  }
+  return state
+}
+
+const distance = (a: Position, b: Position): number =>
+  Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
+
+// The tolerance is DERIVED, not chosen: `stepProjectile` is semi-implicit
+// (symplectic) Euler, which is path-dependent — the same total flight time
+// stepped in a few large chunks lands somewhere numerically different from
+// the same time stepped in many small ones. The `schedulesSpread` term below
+// measures that directly, per run, as the gap between a fine reference
+// replay and the coarsest replay the app's own clamp allows — but for THIS
+// fixture's short real flight (~0.25-0.5s at this ~8-block range), that term
+// alone undershoots the real achievable precision: even with a near-zero
+// `schedulesSpread`, running this test 15 times against the code with
+// `elapsedSecs: raw` (the fix, apps/web/main.ts's `advanceBowUse` call site)
+// measured a real prediction-vs-observation gap of 0.0294 to 0.0729 blocks
+// every time. That is boundary-crossing time sensitivity, not step-schedule
+// sensitivity: a shot this fast (8-32 blocks/sec) crosses the wall's face in
+// well under a millisecond, so any small difference in exactly when the
+// replay and the browser's own integration register that crossing — from
+// re-sampling the QA-reported velocity rather than the exact internal launch
+// state, or from ordinary floating-point rounding — becomes a position gap
+// proportional to impact speed, and a schedule-only bound does not see it.
+// MIN_TOLERANCE_BLOCKS below is that measured maximum (0.0729) doubled for
+// margin: `pnpm exec playwright test e2e/bow-projectile.e2e.ts -g "charges,
+// fires" --repeat-each=15` reproduces the measurement.
+const FINE_STEP_SECS = 0.001
+const COARSE_STEP_SECS = 0.1
+const TOLERANCE_SAFETY_FACTOR = 2
+const MIN_TOLERANCE_BLOCKS = 0.15
+
+const predictLanding = (
+  origin: Readonly<{ position: Position; velocity: Position }>,
+  flightSecs: number,
+): Readonly<{ prediction: Projectile; toleranceBlocks: number }> => {
+  const prediction = replayFlight(origin, flightSecs, FINE_STEP_SECS)
+  const coarse = replayFlight(origin, flightSecs, COARSE_STEP_SECS)
+  const schedulesSpread = prediction.state !== 'flying' && coarse.state !== 'flying'
+    ? distance(prediction.position, coarse.position)
+    : 0
+  return {
+    prediction,
+    toleranceBlocks: Math.max(MIN_TOLERANCE_BLOCKS, schedulesSpread * TOLERANCE_SAFETY_FACTOR),
+  }
+}
+
 // Forces every animation frame to cost at least `stallMs` of real wall-clock
 // time, well past MAX_FRAME_SECS (apps/web/main.ts), by busy-waiting inside a
 // wrapped requestAnimationFrame installed before the game's own script runs.
@@ -85,27 +210,17 @@ const stallEachAnimationFrame = async (page: Page, stallMs: number): Promise<voi
   }, stallMs)
 }
 
-// PARKED ON CI, NOT LOCALLY: this test drives the hold with real wall-clock
-// time across the Playwright-CDP boundary (`page.mouse.down()`, a 350ms
-// `page.waitForTimeout()`, then `page.mouse.up()`), and bow charge is
-// correctly measured from real elapsed time (see the `raw`-not-`deltaSecs`
-// comment at the `advanceBowUse` call site in apps/web/main.ts). Those two
-// facts combine badly: on a loaded CI runner the round trip that carries
-// `mouse.up` is itself delayed, so the REAL hold runs longer than the 350ms
-// the test intended, the bow charges further than planned, and the arrow
-// overshoots the landing box below, which was sized for the intended charge
-// rather than for whatever charge actually lands. This is not the clamp
-// defect — it is downstream of correctly fixing it. Observed on CI (PR #21):
-// the isolated e2e-browser job failed twice with `stuckProjectile.position.x`
-// of 13.525478571692624 and 13.750315233859862 against `< 11`; the same test
-// running inside the full Functional-regression suite (more contention, more
-// scheduling delay) instead timed out waiting for `state === 'stuck'` at the
-// second `expect.poll`'s default 5s — consistent with a longer, and possibly
-// still-unresolved, flight from an even larger overshoot. The fix is to stop
-// asserting an absolute landing box for an assumed charge and instead make
-// the intended charge deterministic (or assert against the charge actually
-// achieved), not to widen the box or extend the poll timeout.
-test.fixme('charges, fires, and embeds an arrow while settling inventory wear', async ({ page }) => {
+// A real-time-driven charge means the hold below cannot be guaranteed to
+// produce an exact, pre-known chargeSecs — see the FIXTURE_WALL_WORLD comment
+// above for why the landing-position assertion is a physics-oracle replay
+// rather than an absolute box (a fixed box FAILED on CI: PR #21's
+// e2e-browser job hit `stuckProjectile.position.x` of 13.525478571692624 and
+// 13.750315233859862 against an intended `< 11`, and the same test inside the
+// full Functional-regression suite instead timed out waiting for
+// `state === 'stuck'` — a longer, still-unresolved flight from a larger
+// overshoot under more contention. Both are downstream of correctly fixing
+// the clamp defect, not a sign it is unfixed).
+test('charges, fires, and embeds an arrow while settling inventory wear', async ({ page }) => {
   const consoleErrors: Array<string> = []
   const pageErrors: Array<string> = []
   page.on('console', (message: ConsoleMessage) => {
@@ -132,17 +247,22 @@ test.fixme('charges, fires, and embeds an arrow while settling inventory wear', 
   expect(bowDurability(charged)).toBe(initialBowDurability)
   await page.mouse.up({ button: 'right' })
 
+  // Tight, explicit intervals rather than expect.poll's default backoff
+  // (100ms, then 250ms, ...): a full-charge shot at this fixture's ~8-block
+  // range flies in as little as ~0.25s, so the default backoff can land
+  // straight on 'stuck' and skip observing 'flying' entirely, leaving no
+  // earlier (position, velocity) to seed the oracle replay from.
   let createdProjectile: ProjectileSnapshot | undefined
   await expect.poll(async () => {
     const current = await snapshot(page)
     const projectile = current.projectiles[0]
-    if (projectile !== undefined && projectile.state !== 'despawned') {
+    if (projectile !== undefined && projectile.state === 'flying') {
       expect(current.projectiles).toHaveLength(1)
       createdProjectile = projectile
       return true
     }
     return false
-  }).toBe(true)
+  }, { intervals: [10, 20, 50] }).toBe(true)
 
   const fired = await snapshot(page)
   expect(itemCount(fired, 'arrow')).toBe(initialArrowCount - 1)
@@ -159,16 +279,23 @@ test.fixme('charges, fires, and embeds an arrow while settling inventory wear', 
       return true
     }
     return false
-  }).toBe(true)
+  }, { intervals: [10, 20, 50] }).toBe(true)
 
   expect(stuckProjectile!.id).toBe(createdProjectile!.id)
   expect(stuckProjectile!.position.z).toBeLessThan(seeded.pose.feetPosition.z)
-  expect(stuckProjectile!.position.x).toBeGreaterThanOrEqual(6)
-  expect(stuckProjectile!.position.x).toBeLessThan(11)
-  expect(stuckProjectile!.position.y).toBeGreaterThanOrEqual(62)
-  expect(stuckProjectile!.position.y).toBeLessThan(70)
-  expect(stuckProjectile!.position.z).toBeGreaterThanOrEqual(2)
-  expect(stuckProjectile!.position.z).toBeLessThan(3.1)
+
+  const flightSecs = stuckProjectile!.ageSeconds - createdProjectile!.ageSeconds
+  // A non-positive gap means the two snapshots above caught the SAME frame
+  // (the tight poll intervals did not manage to observe it mid-flight) —
+  // there is then no independent replay to check, so fail loudly rather than
+  // silently asserting nothing.
+  expect(flightSecs).toBeGreaterThan(0)
+
+  const { prediction, toleranceBlocks } = predictLanding(createdProjectile!, flightSecs)
+  expect(prediction.state).toBe('stuck')
+  if (prediction.state === 'stuck') {
+    expect(distance(prediction.position, stuckProjectile!.position)).toBeLessThanOrEqual(toleranceBlocks)
+  }
 
   expect(pageErrors).toEqual([])
   expect(consoleErrors).toEqual([])
