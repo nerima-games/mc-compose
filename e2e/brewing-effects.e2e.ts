@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -39,6 +40,25 @@ const callQa = <A>(page: Page, command: string, ...arguments_: ReadonlyArray<unk
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
+
+// Frame counter and snapshot read together in ONE round trip: split across two
+// they can describe different frames, and a wait comparing them would then be
+// reasoning about a state that never existed.
+const readWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, (...arguments_: ReadonlyArray<unknown>) => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      return {
+        frames: Number(document.body.getAttribute('data-frames')),
+        value: await operation(),
+      }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: GameplaySnapshot }>
 
 const grantPointerLock = (page: Page): Promise<void> => page.evaluate(() => {
   const canvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
@@ -111,11 +131,23 @@ test.describe('brewing, effects, and experience', () => {
     await selectAndInsert(page, 'Digit1')
     await selectAndInsert(page, 'Digit2')
     await selectAndInsert(page, 'Digit3')
-    await expect.poll(async () => (await snapshot(page)).brewing.bottle, { timeout: 30_000 })
-      .toEqual({ potion: 'awkward' })
+    // Brewing completes on accumulated simulation ticks, so a wall-clock budget
+    // expires while the stand is working correctly but slowly — the hand-tuned
+    // 30s figures these replace were chosen against a fast host and CI observed
+    // the bottle still unbrewed when they ran out.
+    await waitForSimulationProgress(
+      page,
+      () => readWithFrames(page),
+      (current) => JSON.stringify(current.brewing.bottle) === JSON.stringify({ potion: 'awkward' }),
+      { description: 'brewing the awkward potion' },
+    )
     await selectAndInsert(page, 'Digit4')
-    await expect.poll(async () => (await snapshot(page)).brewing.bottle, { timeout: 30_000 })
-      .toEqual({ potion: 'poison' })
+    await waitForSimulationProgress(
+      page,
+      () => readWithFrames(page),
+      (current) => JSON.stringify(current.brewing.bottle) === JSON.stringify({ potion: 'poison' }),
+      { description: 'brewing the poison potion' },
+    )
 
     const brewing = page.locator('#brewing-root')
     await brewing.locator('[data-brewing-action="collect"]').click()
