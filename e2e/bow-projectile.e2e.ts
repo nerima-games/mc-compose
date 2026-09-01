@@ -67,19 +67,25 @@ const grantPointerLock = async (page: Page): Promise<void> => {
   })
 }
 
-// BLOCKED: apps/web/bow-use.ts accumulates bow-draw `chargeSecs` from each
-// frame's `deltaSecs`, and apps/web/main.ts:531-536 clamps that delta to
-// MAX_FRAME_SECS = 0.05s regardless of real elapsed wall-clock time (a
-// backgrounded-tab safety clamp). Under sustained slow frames — CPU-throttled
-// or contended CI runners — the accumulated charge undercounts true hold
-// duration and can stay below mx-gameplay's BOW_MIN_CHARGE_SECS = 0.2s even
-// though the button was genuinely held long enough, so the shot is silently
-// discarded. Reproduced deterministically (3/3) under 4x CDP CPU throttling
-// locally; a 20s poll timeout does not help, since the release event has
-// already committed its (insufficient) chargeSecs. Not a test-timing bug —
-// needs a wall-clock-vs-simulation-time design decision in mx-gameplay's
-// draw-bow.ts, tracked separately.
-test.fixme('charges, fires, and embeds an arrow while settling inventory wear', async ({ page }) => {
+// Forces every animation frame to cost at least `stallMs` of real wall-clock
+// time, well past MAX_FRAME_SECS (apps/web/main.ts), by busy-waiting inside a
+// wrapped requestAnimationFrame installed before the game's own script runs.
+// A CPU-throttled CDP session does not reliably reproduce this on a fast
+// host — a fixture this cheap per frame stays under the clamp threshold even
+// at the DevTools Protocol's 20x throttling ceiling — so this simulates the
+// stall directly instead of relying on CPU throttling to induce one.
+const stallEachAnimationFrame = async (page: Page, stallMs: number): Promise<void> => {
+  await page.addInitScript((ms: number) => {
+    const request = window.requestAnimationFrame.bind(window)
+    window.requestAnimationFrame = (callback) => request((time) => {
+      const stallUntil = performance.now() + ms
+      while (performance.now() < stallUntil) { /* hold the main thread so real elapsed time exceeds the clamp */ }
+      callback(time)
+    })
+  }, stallMs)
+}
+
+test('charges, fires, and embeds an arrow while settling inventory wear', async ({ page }) => {
   const consoleErrors: Array<string> = []
   const pageErrors: Array<string> = []
   page.on('console', (message: ConsoleMessage) => {
@@ -143,6 +149,51 @@ test.fixme('charges, fires, and embeds an arrow while settling inventory wear', 
   expect(stuckProjectile!.position.y).toBeLessThan(70)
   expect(stuckProjectile!.position.z).toBeGreaterThanOrEqual(2)
   expect(stuckProjectile!.position.z).toBeLessThan(3.1)
+
+  expect(pageErrors).toEqual([])
+  expect(consoleErrors).toEqual([])
+})
+
+test('still fires a genuinely long hold when every frame stalls well past the physics clamp', async ({ page }) => {
+  // A 600ms/frame stall bounds each real frame to cost AT LEAST 600ms, so a
+  // 700ms hold can fit at most one full extra frame after the one that
+  // starts the draw — structurally at most 2 charge-contributing frames,
+  // never the 4 a clamped accumulator (MAX_FRAME_SECS=0.05s) would need to
+  // reach mx-gameplay's BOW_MIN_CHARGE_SECS=0.2s by accident (4 * 0.05 =
+  // 0.20, the inclusive boundary — an earlier version of this probe used
+  // parameters that landed almost exactly on it and passed even against the
+  // pre-fix clamped-delta code, which is why the margin here is deliberate
+  // and documented rather than tuned by feel). Real elapsed time across
+  // those same 1-2 frames is ~0.6-1.2s, well clear of the 0.2s threshold.
+  await stallEachAnimationFrame(page, 600)
+
+  const consoleErrors: Array<string> = []
+  const pageErrors: Array<string> = []
+  page.on('console', (message: ConsoleMessage) => {
+    if (message.type() === 'error') consoleErrors.push(message.text())
+  })
+  page.on('pageerror', (error: Error) => pageErrors.push(`${error.name}: ${error.message}`))
+
+  await startGameSession(page)
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  const seeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedBowProjectileEncounter')
+  const initialArrowCount = itemCount(seeded, 'arrow')
+  expect(initialArrowCount).toBeGreaterThan(0)
+
+  await grantPointerLock(page)
+  await page.locator('#game-canvas').hover()
+  await page.mouse.down({ button: 'right' })
+  await page.waitForTimeout(700)
+  await page.mouse.up({ button: 'right' })
+
+  await expect.poll(async () => {
+    const current = await snapshot(page)
+    return current.projectiles.length
+  }, { timeout: 30_000 }).toBeGreaterThan(0)
+
+  const fired = await snapshot(page)
+  expect(itemCount(fired, 'arrow')).toBe(initialArrowCount - 1)
 
   expect(pageErrors).toEqual([])
   expect(consoleErrors).toEqual([])

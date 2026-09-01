@@ -9101,6 +9101,12 @@ type MultiplayerInventorySelection = Readonly<{
 
       const bowInventory = Effect.runSync(world.inventory.snapshot)
       const selectedBowItem = bowInventory.slots[selectedHotbarIndex]?.item ?? null
+      // `raw`, NOT `deltaSecs` — bow charge is how long a player held a button,
+      // a wall-clock fact, not a physics integration step. `deltaSecs` clamps
+      // to MAX_FRAME_SECS to keep a backgrounded tab from taking one giant
+      // physics step, which is correct for physics but would make sustained
+      // slow frames undercount real hold duration and silently drop the shot.
+      // Do not fold this back into `deltaSecs` to "simplify" it.
       const bowAdvance = advanceBowUse({
         state: bowUseState,
         useTriggered,
