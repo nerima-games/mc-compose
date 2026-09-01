@@ -1,6 +1,7 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -62,9 +63,20 @@ test('catches fishing loot and consumes rod durability during the bite window', 
   await canvas.click({ button: 'right' })
   await expect(page.locator('body')).toHaveAttribute('data-fishing-phase', 'waiting')
 
-  await expect(page.locator('body')).toHaveAttribute('data-fishing-phase', 'bite', {
-    timeout: 15_000,
-  })
+  // FISHING_MIN_WAIT_SECS..FISHING_MAX_WAIT_SECS of SIMULATED time must
+  // accumulate before the bite window opens (mx-gameplay's fishing.ts), and
+  // simulated time falls behind wall-clock time under host contention — see
+  // waitForSimulationProgress. A wall-clock timeout here would time out
+  // exactly when the machine is busy despite nothing being wrong.
+  await waitForSimulationProgress(
+    page,
+    () => page.evaluate(() => ({
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: document.body.getAttribute('data-fishing-phase'),
+    })),
+    (phase) => phase === 'bite',
+    { description: 'fishing bite window' },
+  )
   await canvas.click({ button: 'right' })
   await expect(page.locator('body')).toHaveAttribute('data-fishing-result', /^caught-/)
   await expect(page.locator('body')).toHaveAttribute('data-fishing-phase', 'idle')
