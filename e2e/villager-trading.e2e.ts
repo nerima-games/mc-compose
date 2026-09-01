@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -40,6 +41,20 @@ const callQa = <A>(page: Page, command: string): Promise<A> =>
 
 const snapshot = (page: Page): Promise<Snapshot> => callQa(page, 'gameplay.snapshot')
 
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: Snapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const qa = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = qa?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      const value = await operation()
+      return { frames: Number(document.body.getAttribute('data-frames')), value }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: Snapshot }>
+
 const inventoryCount = (current: Snapshot, item: string): number =>
   current.inventory.slots.reduce(
     (total, slot) => total + (slot?.item === item ? slot.count : 0),
@@ -77,15 +92,26 @@ test('trades with a generated village resident and persists its stable state', a
     .find(({ id }) => id === villagerId)?.offers[0]
   expect(offer).toBeDefined()
 
+  // A trade attempt resolves once the frame loop processes the click — see
+  // waitForSimulationProgress.
   await page.locator(`[data-trade-offer-id="${offer!.id}"]`).click()
-  await expect.poll(async () => (await snapshot(page)).villagerUi.status)
-    .toBe('You do not have the required items')
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.villagerUi.status === 'You do not have the required items',
+    { description: 'villager trade rejected for missing items' },
+  )
   expect(inventoryCount(await snapshot(page), offer!.output.item)).toBe(0)
 
   await callQa(page, 'gameplay.grantNearestVillagerTradeInput')
   expect(inventoryCount(await snapshot(page), offer!.input.item)).toBe(offer!.input.count)
   await page.locator(`[data-trade-offer-id="${offer!.id}"]`).click()
-  await expect.poll(async () => (await snapshot(page)).villagerUi.status).toBe('Trade complete')
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.villagerUi.status === 'Trade complete',
+    { description: 'villager trade completes' },
+  )
   const traded = await snapshot(page)
   expect(inventoryCount(traded, offer!.input.item)).toBe(0)
   expect(inventoryCount(traded, offer!.output.item)).toBe(offer!.output.count)
