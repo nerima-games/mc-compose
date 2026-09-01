@@ -1,6 +1,7 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const DATABASE_NAME = 'nerima-games-minecraft'
@@ -66,6 +67,20 @@ const callQa = <A>(page: Page, command: string): Promise<A> =>
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
 
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      const value = await operation()
+      return { frames: Number(document.body.getAttribute('data-frames')), value }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: GameplaySnapshot }>
+
 const inventoryCount = (current: GameplaySnapshot, item: string): number =>
   current.inventory.slots.reduce(
     (total, slot) => total + (slot?.item === item ? slot.count : 0),
@@ -111,7 +126,14 @@ test('matures, persists, harvests, eats, and replants potatoes', async ({ page }
     cropStage: 'growing',
   })
 
-  await expect.poll(async () => (await snapshot(page)).farming.cropStage).toBe('mature')
+  // Crop growth accumulates growthSecs over simulated frames — see
+  // waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.farming.cropStage === 'mature',
+    { description: 'potato crop maturity' },
+  )
   const mature = await snapshot(page)
   expect(mature.farming.crops).toHaveLength(1)
   expect(mature.farming.crops[0]?.growthSecs).toBe(POTATO_MATURITY_SECS)
@@ -127,63 +149,61 @@ test('matures, persists, harvests, eats, and replants potatoes', async ({ page }
 
   const potatoesBeforeHarvest = inventoryCount(restored, 'potato')
   await callQa(page, 'gameplay.harvestFarmingCrop')
-  await expect.poll(async () => {
-    const current = await snapshot(page)
-    return {
-      action: current.itemUse?.action,
-      cropBlock: current.farming.cropBlock,
-      cropCount: current.farming.crops.length,
-      potatoes: inventoryCount(current, 'potato'),
-    }
-  }).toMatchObject({
-    action: 'HarvestPotato',
-    cropBlock: AIR_BLOCK_ID,
-    cropCount: 0,
-  })
+  // Harvesting, eating, and planting are each item-use actions that only
+  // resolve once the frame loop processes them — see
+  // waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => (
+      current.itemUse?.action === 'HarvestPotato'
+      && current.farming.cropBlock === AIR_BLOCK_ID
+      && current.farming.crops.length === 0
+    ),
+    { description: 'harvest potato action' },
+  )
   const harvested = await snapshot(page)
   const harvestYield = inventoryCount(harvested, 'potato') - potatoesBeforeHarvest
   expect(harvestYield).toBeGreaterThanOrEqual(2)
   expect(harvestYield).toBeLessThanOrEqual(5)
 
   await callQa(page, 'gameplay.preparePotatoEating')
-  await expect.poll(async () => (await snapshot(page)).vitals.hungerPoints).toBeLessThan(
-    harvested.vitals.maxHungerPoints,
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.vitals.hungerPoints < harvested.vitals.maxHungerPoints,
+    { description: 'hunger drops below maximum' },
   )
   const hungry = await snapshot(page)
   const potatoesBeforeEating = inventoryCount(hungry, 'potato')
   await grantPointerLock(page)
   await page.locator('#game-canvas').click({ button: 'right' })
-  await expect.poll(async () => {
-    const current = await snapshot(page)
-    return {
-      action: current.itemUse?.action,
-      hunger: current.vitals.hungerPoints,
-      potatoes: inventoryCount(current, 'potato'),
-    }
-  }).toEqual({
-    action: 'EatPotato',
-    hunger: hungry.vitals.hungerPoints + 1,
-    potatoes: potatoesBeforeEating - 1,
-  })
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => (
+      current.itemUse?.action === 'EatPotato'
+      && current.vitals.hungerPoints === hungry.vitals.hungerPoints + 1
+      && inventoryCount(current, 'potato') === potatoesBeforeEating - 1
+    ),
+    { description: 'eat potato action' },
+  )
   expect(inventoryCount(await snapshot(page), 'potato')).toBeGreaterThan(1)
 
   await callQa(page, 'gameplay.returnToFarmingPlot')
   const potatoesBeforePlanting = inventoryCount(await snapshot(page), 'potato')
   await page.locator('#game-canvas').click({ button: 'right' })
-  await expect.poll(async () => {
-    const current = await snapshot(page)
-    return {
-      action: current.itemUse?.action,
-      cropBlock: current.farming.cropBlock,
-      cropCount: current.farming.crops.length,
-      potatoes: inventoryCount(current, 'potato'),
-    }
-  }).toEqual({
-    action: 'PlantPotato',
-    cropBlock: POTATO_CROP_BLOCK_ID,
-    cropCount: 1,
-    potatoes: potatoesBeforePlanting - 1,
-  })
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => (
+      current.itemUse?.action === 'PlantPotato'
+      && current.farming.cropBlock === POTATO_CROP_BLOCK_ID
+      && current.farming.crops.length === 1
+      && inventoryCount(current, 'potato') === potatoesBeforePlanting - 1
+    ),
+    { description: 'plant potato action' },
+  )
 
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])

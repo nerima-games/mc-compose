@@ -24,6 +24,7 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 /** docs/testing.md §3.3. Deliberately not the reference's `__TS_MINECRAFT_QA__`. */
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
@@ -87,11 +88,17 @@ const settleOnSmokeTerrain = async (page: Page): Promise<void> => {
     if (typeof operation !== 'function') throw new Error('smoke grounding QA operation is unavailable')
     await operation()
   }, QA_GLOBAL_KEY)
-  await expect
-    .poll(async () => page.locator('#game-canvas').getAttribute('data-player-grounded'), {
-      timeout: 15_000,
-    })
-    .toBe('true')
+  // Settling onto the ground is physics simulated over several frames, not
+  // instant on spawn — see waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => page.locator('#game-canvas').evaluate((element) => ({
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: element.getAttribute('data-player-grounded'),
+    })),
+    (value) => value === 'true',
+    { description: 'player settles onto smoke terrain' },
+  )
 }
 
 test.describe('smoke — the composed frame in a real browser', () => {
@@ -636,27 +643,30 @@ test.describe('sustained play', () => {
     await page.locator('#game-canvas').click()
     await page.keyboard.down('KeyW')
     try {
-      // More than the first fill: anything counted here loaded because the player
-      // moved. Poll the observable rather than guessing how many frames CI renders.
-      await expect
-        .poll(
-          async () =>
-            Number(
-              await page.locator('#game-canvas').getAttribute('data-chunks-streamed-in'),
-            ),
-          { timeout: 10_000 },
-        )
-        .toBeGreaterThan(residentAtSpawn)
+      // More than the first fill: anything counted here loaded because the
+      // player moved — movement and the streaming it triggers are both
+      // simulated-frame-gated, not instant — see waitForSimulationProgress.
+      await waitForSimulationProgress(
+        page,
+        () => page.locator('#game-canvas').evaluate((element) => ({
+          frames: Number(document.body.getAttribute('data-frames')),
+          value: Number(element.getAttribute('data-chunks-streamed-in')),
+        })),
+        (value) => value > residentAtSpawn,
+        { description: 'chunks stream in as the player walks' },
+      )
 
       // And the other half — the one that catches a renderer that only ever adds,
       // which looks correct on screen and grows without bound.
-      await expect
-        .poll(
-          async () =>
-            Number(await page.locator('#game-canvas').getAttribute('data-chunks-dropped')),
-          { timeout: 10_000 },
-        )
-        .toBeGreaterThan(0)
+      await waitForSimulationProgress(
+        page,
+        () => page.locator('#game-canvas').evaluate((element) => ({
+          frames: Number(document.body.getAttribute('data-frames')),
+          value: Number(element.getAttribute('data-chunks-dropped')),
+        })),
+        (value) => value > 0,
+        { description: 'chunks drop as the player walks away' },
+      )
     } finally {
       await page.keyboard.up('KeyW')
     }

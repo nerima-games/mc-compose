@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -37,6 +38,20 @@ const callQa = <A>(page: Page, command: string): Promise<A> =>
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
+
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      const value = await operation()
+      return { frames: Number(document.body.getAttribute('data-frames')), value }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: GameplaySnapshot }>
 
 const equipmentItems = (equipment: Equipment): Record<keyof Equipment, string | null> => ({
   head: equipment.head?.item ?? null,
@@ -99,8 +114,14 @@ test('equips armour and offhand, rejects invalid gear, persists, and applies arm
 
   await callQa(page, 'gameplay.seedZombiePursuitEncounter')
   const armoredStart = await snapshot(page)
-  await expect.poll(async () => (await snapshot(page)).vitals.healthPoints, { timeout: 10_000 })
-    .toBeLessThan(armoredStart.vitals.healthPoints)
+  // Zombie pursuit and contact damage need several simulated frames — see
+  // waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.vitals.healthPoints < armoredStart.vitals.healthPoints,
+    { description: 'armored zombie contact damage' },
+  )
   const armoredHit = await snapshot(page)
   expect(armoredStart.vitals.healthPoints - armoredHit.vitals.healthPoints).toBeCloseTo(0.48, 5)
   for (const slot of ['head', 'chest', 'legs', 'feet'] as const) {
@@ -114,8 +135,12 @@ test('equips armour and offhand, rejects invalid gear, persists, and applies arm
   await expect.poll(async () => equipmentItems((await snapshot(page)).inventory.equipment))
     .toEqual({ ...expectedItems, head: null, chest: null, legs: null, feet: null })
   const unarmoredStart = await snapshot(page)
-  await expect.poll(async () => (await snapshot(page)).vitals.healthPoints, { timeout: 10_000 })
-    .toBeLessThan(unarmoredStart.vitals.healthPoints)
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.vitals.healthPoints < unarmoredStart.vitals.healthPoints,
+    { description: 'unarmored zombie contact damage' },
+  )
   const unarmoredHit = await snapshot(page)
   expect(unarmoredStart.vitals.healthPoints - unarmoredHit.vitals.healthPoints)
     .toBeGreaterThan(armoredStart.vitals.healthPoints - armoredHit.vitals.healthPoints)
