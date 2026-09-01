@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const EYES_REQUIRED = 13
@@ -58,6 +59,20 @@ const callQa = <A>(page: Page, command: string): Promise<A> =>
 
 const snapshot = (page: Page): Promise<EndSnapshot> =>
   callQa(page, 'gameplay.snapshot')
+
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: EndSnapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      const value = await operation()
+      return { frames: Number(document.body.getAttribute('data-frames')), value }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: EndSnapshot }>
 
 const grantPointerLock = async (page: Page): Promise<void> => {
   await page.evaluate(() => {
@@ -122,8 +137,17 @@ const collectMobDrop = async (
     )).toBe(maximumHealth)
 
     for (let attack = 0; attack < maximumAttacks; attack += 1) {
-      if (!(await snapshot(page)).entities.some((entity) => entity.kind === mob)) break
-      await callQa(page, 'gameplay.targetNearestHostile')
+      // targetNearestHostile is the sole read of whether the mob is still
+      // present. A separate snapshot() taken first, in an earlier round trip,
+      // goes stale the instant the mob dies between that read and this one —
+      // the same shape as sampling a transient condition through two
+      // independently-latency-bound calls instead of one.
+      try {
+        await callQa(page, 'gameplay.targetNearestHostile')
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('no hostile found')) break
+        throw error
+      }
       await canvas.click({ delay: 50 })
       await page.waitForTimeout(300)
     }
@@ -206,12 +230,15 @@ test('completes and persists a survival End journey without progression-state se
       && rendered.feetPosition.z === position.z
       && (position.x !== thrownEye?.position.x || position.z !== thrownEye.position.z)
   }).toBe(true)
-  // CI's SwiftShader runner ticks the simulation slower in wall-clock time
-  // than a real GPU does, so the eye's flight — real motion, confirmed by the
-  // poll just above — needs more real seconds to finish landing. This test
-  // already carries a 600s budget (see `test.setTimeout` above), so the
-  // extra 15s costs nothing there.
-  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length, { timeout: 20_000 }).toBe(0)
+  // The eye's flight is real, frame-by-frame motion — confirmed by the poll
+  // just above — so its completion is gated on simulated time, not
+  // wall-clock time. See waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (snap) => snap.eyesOfEnder.length === 0,
+    { description: 'eye of ender flight completion (first throw)' },
+  )
   await expect.poll(async () => (
     (await snapshot(page)).entities.some((entity) => (
       entity.kind === 'dropped_item' && entity.item === 'eye_of_ender'
@@ -231,10 +258,13 @@ test('completes and persists a survival End journey without progression-state se
   await expect.poll(async () => itemCount(await snapshot(page), 'eye_of_ender'))
     .toBe(EYES_REQUIRED - 1)
   await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length).toBe(1)
-  // Same frame-rate-scaled flight-completion wait as the poll above at the
-  // first eye launch — CI's software renderer stretches the flight well past
-  // the 5 s default.
-  await expect.poll(async () => (await snapshot(page)).eyesOfEnder.length, { timeout: 20_000 }).toBe(0)
+  // Same simulated-time-gated flight-completion wait as the first eye launch.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (snap) => snap.eyesOfEnder.length === 0,
+    { description: 'eye of ender flight completion (second throw)' },
+  )
   expect((await snapshot(page)).entities.some((entity) => (
     entity.kind === 'dropped_item' && entity.item === 'eye_of_ender'
   ))).toBe(false)
@@ -312,5 +342,12 @@ test('completes and persists a survival End journey without progression-state se
 
   await callQa(page, 'gameplay.targetEndExitPortal')
   await canvas.click({ button: 'right' })
-  await expect.poll(async () => (await snapshot(page)).dimension).toBe('overworld')
+  // The dimension transition streams chunks into the overworld over several
+  // simulated frames — gated the same way as the eye-of-ender flight above.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (snap) => snap.dimension === 'overworld',
+    { description: 'end exit portal dimension transition' },
+  )
 })

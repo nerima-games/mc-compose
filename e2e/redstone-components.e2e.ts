@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 type RedstoneSnapshot = {
   button: number | null
@@ -32,6 +33,21 @@ const useTargetedBlock = async (page: Page): Promise<void> => {
   await page.mouse.up({ button: 'right' })
 }
 
+const readRedstoneSnapshot = (
+  page: Page,
+): Promise<{ frames: number; value: RedstoneSnapshot }> =>
+  page.evaluate((commandName) => {
+    const qa = (globalThis as unknown as Record<string, unknown>)['__NERIMA_GAMES_QA__'] as
+      | Record<string, () => unknown>
+      | undefined
+    const operation = qa?.[commandName]
+    if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+    return {
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: operation() as RedstoneSnapshot,
+    }
+  }, 'gameplay.redstoneFixturesSnapshot')
+
 test('redstone components place, activate, tick, and emit host transitions', async ({ page }) => {
   await startGameSession(page, 'redstone-components-e2e')
   await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
@@ -59,19 +75,30 @@ test('redstone components place, activate, tick, and emit host transitions', asy
     document.dispatchEvent(new Event('pointerlockchange'))
   })
   await useTargetedBlock(page)
-  await expect.poll(
-    async () => (await callQa<RedstoneSnapshot>(page, 'gameplay.redstoneFixturesSnapshot')).lamp,
-  ).toBe(80)
+  // Redstone tick propagation is simulated-time-gated, same as the fishing
+  // bite window — see waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => readRedstoneSnapshot(page),
+    (snapshot) => snapshot.lamp === 80,
+    { description: 'redstone lamp pulse' },
+  )
 
   await callQa(page, 'gameplay.pressRedstoneBranchButton')
-  await expect.poll(
-    async () => callQa<RedstoneSnapshot>(page, 'gameplay.redstoneFixturesSnapshot'),
-  ).toMatchObject({ door: 107, poweredRail: true })
+  await waitForSimulationProgress(
+    page,
+    () => readRedstoneSnapshot(page),
+    (snapshot) => snapshot.door === 107 && snapshot.poweredRail,
+    { description: 'redstone branch button (door + powered rail)' },
+  )
   expect((await callQa<RedstoneSnapshot>(page, 'gameplay.redstoneFixturesSnapshot')).trigger)
     .toContain('dispenser:')
 
   await callQa(page, 'gameplay.mutateObserverInput')
-  await expect.poll(
-    async () => (await callQa<RedstoneSnapshot>(page, 'gameplay.redstoneFixturesSnapshot')).observerLamp,
-  ).toBe(80)
+  await waitForSimulationProgress(
+    page,
+    () => readRedstoneSnapshot(page),
+    (snapshot) => snapshot.observerLamp === 80,
+    { description: 'redstone observer lamp pulse' },
+  )
 })

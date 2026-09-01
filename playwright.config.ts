@@ -26,8 +26,14 @@
  * lock does not work headless, so anything needing mouselook goes through the
  * QA API rather than through real pointer capture.
  *
- * The port is 5181, not the reference's 5180 — `vite.config.ts` explains why.
+ * The base port is 5181, not the reference's 5180 — `vite.config.ts` explains
+ * why. The default here is derived per checkout path rather than fixed at
+ * 5181, so two `git worktree` checkouts running this suite concurrently on
+ * one machine land on different ports instead of racing each other's
+ * `vite preview` for the URL — see the port derivation below.
  */
+import { createHash } from 'node:crypto'
+
 import { defineConfig, devices } from '@playwright/test'
 
 // Read by specs that need to loosen a threshold for software rendering. Set
@@ -45,9 +51,29 @@ const readPort = (name: string, fallback: number): number => {
   return port
 }
 
-export const E2E_PORT: number = readPort('E2E_PORT', 5181)
+// `reuseExistingServer: false` below throws if THIS run's own port is
+// already bound — but that only guards a single run against its own leaked
+// orphan. Two separate `git worktree` checkouts of this repo both defaulting
+// to the hardcoded 5181/5182 would each pass that check independently, then
+// race each other for the URL: whichever server answers first is silently
+// accepted as "ready" by the other's health-check poll, so a concurrent
+// local run can end up testing a different worktree's build entirely.
+// Deriving the default from the absolute checkout path makes two worktrees
+// land on different ports without requiring a manually-set env var, so the
+// race has nothing to race over. CI is unaffected — one checkout per job.
+const PORT_RANGE_BASE = 20_000
+const PORT_RANGE_SIZE = 20_000
+const derivedPort = (seed: string): number => {
+  const digest = createHash('sha256').update(seed).digest()
+  return PORT_RANGE_BASE + (digest.readUInt32BE(0) % PORT_RANGE_SIZE)
+}
+
+export const E2E_PORT: number = readPort('E2E_PORT', derivedPort(`${process.cwd()}:e2e`))
 export const E2E_BASE_URL: string = `http://127.0.0.1:${String(E2E_PORT)}`
-export const E2E_MULTIPLAYER_PORT: number = readPort('E2E_MULTIPLAYER_PORT', 5182)
+export const E2E_MULTIPLAYER_PORT: number = readPort(
+  'E2E_MULTIPLAYER_PORT',
+  derivedPort(`${process.cwd()}:multiplayer`),
+)
 export const E2E_MULTIPLAYER_URL: string = `ws://127.0.0.1:${String(E2E_MULTIPLAYER_PORT)}/ws`
 
 if (E2E_PORT === E2E_MULTIPLAYER_PORT) {
