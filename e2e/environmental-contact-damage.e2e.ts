@@ -1,6 +1,7 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const PLAYER_HALF_WIDTH = 0.3
@@ -56,6 +57,20 @@ const callQa = <A>(page: Page, command: string): Promise<A> =>
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
+
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      const value = await operation()
+      return { frames: Number(document.body.getAttribute('data-frames')), value }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: GameplaySnapshot }>
 
 const overlapsPlayerAabb = (
   feetPosition: Position,
@@ -145,18 +160,18 @@ test('applies cactus damage on the first normal-physics side contact', async ({
 
   await page.keyboard.down('KeyD')
   try {
-    await expect.poll(async () => {
-      const current = await snapshot(page)
-      return {
-        hasCactusContact: current.environmentalContact.cells.some(
-          ({ block }) => block === 'cactus',
-        ),
-        healthPoints: current.vitals.healthPoints,
-      }
-    }, { intervals: [10], timeout: 2_000 }).toEqual({
-      hasCactusContact: true,
-      healthPoints: 19,
-    })
+    // Contact damage lands after the physics step registers the overlap on
+    // a simulated frame, not instantly on keydown — see
+    // waitForSimulationProgress.
+    await waitForSimulationProgress(
+      page,
+      () => snapshotWithFrames(page),
+      (current) => (
+        current.environmentalContact.cells.some(({ block }) => block === 'cactus')
+        && current.vitals.healthPoints === 19
+      ),
+      { description: 'cactus first-contact damage' },
+    )
   } finally {
     await page.keyboard.up('KeyD')
   }
@@ -184,12 +199,24 @@ test('resets lava cadence and preserves its half-second repeat interval', async 
   )
   expectRealContacts(seeded)
 
-  await expect.poll(async () => (await snapshot(page)).vitals.healthPoints).toBe(16)
+  // Lava damage repeats on a simulated cadence — see
+  // waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.vitals.healthPoints === 16,
+    { description: 'lava contact damage' },
+  )
   const reseeded = await callQa<GameplaySnapshot>(page, 'gameplay.seedDuplicateLavaContact')
   expect(reseeded.vitals.healthPoints).toBe(20)
   expect(reseeded.environmentalContact.lastDamageElapsedSecs).toBeNull()
 
-  await expect.poll(async () => (await snapshot(page)).vitals.healthPoints).toBe(16)
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.vitals.healthPoints === 16,
+    { description: 'lava contact damage after reset' },
+  )
   const afterResetDamage = await snapshot(page)
   const resetDamageElapsedSecs = afterResetDamage.environmentalContact.lastDamageElapsedSecs
   expect(resetDamageElapsedSecs).not.toBeNull()
@@ -198,7 +225,12 @@ test('resets lava cadence and preserves its half-second repeat interval', async 
   expect(resetDamageElapsedSecs! - reseeded.environmentalContact.simulationElapsedSecs)
     .toBeLessThan(0.15)
 
-  await expect.poll(async () => (await snapshot(page)).vitals.healthPoints).toBe(12)
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.vitals.healthPoints === 12,
+    { description: 'second lava contact damage tick' },
+  )
   const afterSecondDamage = await snapshot(page)
   const secondDamageElapsedSecs = afterSecondDamage.environmentalContact.lastDamageElapsedSecs
   expect(secondDamageElapsedSecs).not.toBeNull()
@@ -222,7 +254,12 @@ test('uses only the strongest simultaneous contact and preserves the lethal caus
   ])
   expectRealContacts(seeded)
 
-  await expect.poll(async () => (await snapshot(page)).dead).toBe(true)
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.dead,
+    { description: 'lethal contact damage' },
+  )
   const dead = await snapshot(page)
   expect(dead.vitals.healthPoints).toBe(0)
   expect(dead.vitals.lastDamageCause).toBe('lava')

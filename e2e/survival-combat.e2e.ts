@@ -1,6 +1,7 @@
 import { expect, test, type ConsoleMessage, type Locator, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -123,6 +124,20 @@ const callQa = <A>(page: Page, command: string, ...arguments_: ReadonlyArray<unk
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
 
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      const value = await operation()
+      return { frames: Number(document.body.getAttribute('data-frames')), value }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: GameplaySnapshot }>
+
 const selectedSlotIndex = async (hotbar: Locator): Promise<number> =>
   hotbar.locator('[data-mx-ui="slot"]').evaluateAll((slots) =>
     slots.findIndex((slot) => slot.hasAttribute('data-selected')),
@@ -243,20 +258,29 @@ test('renders a zombie pursuing the player and persists contact damage', async (
   )
   expect(initialDistance).toBeGreaterThan(2)
 
-  await expect.poll(async () => {
-    const current = await snapshot(page)
-    const zombie = current.entities.find((entity) => entity.id === zombieId)
-    if (zombie === undefined) return initialDistance
-    return Math.hypot(
-      zombie.feetPosition.x - current.pose.feetPosition.x,
-      zombie.feetPosition.z - current.pose.feetPosition.z,
-    )
-  }, { timeout: 10_000 }).toBeLessThan(initialDistance - 0.5)
+  // Zombie pursuit and contact damage both require the mob AI to reach a
+  // state over several simulated ticks — see waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => {
+      const zombie = current.entities.find((entity) => entity.id === zombieId)
+      if (zombie === undefined) return false
+      const distance = Math.hypot(
+        zombie.feetPosition.x - current.pose.feetPosition.x,
+        zombie.feetPosition.z - current.pose.feetPosition.z,
+      )
+      return distance < initialDistance - 0.5
+    },
+    { description: 'zombie pursuit closing distance' },
+  )
 
-  await expect.poll(async () => {
-    const current = await snapshot(page)
-    return current.vitals.healthPoints
-  }, { timeout: 10_000 }).toBeLessThan(pursuitStart.vitals.healthPoints)
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.vitals.healthPoints < pursuitStart.vitals.healthPoints,
+    { description: 'zombie contact damage' },
+  )
 
   const damaged = await snapshot(page)
   expect(damaged.entities.map((entity) => entity.id)).toContain(zombieId)
@@ -726,8 +750,17 @@ test('mines only after continuous hold and exposes progress at the crosshair', a
   const firstProgress = Number(await progress.getAttribute('aria-valuenow'))
   expect(firstProgress).toBeGreaterThan(0)
   expect(firstProgress).toBeLessThan(100)
-  await expect.poll(async () => Number(await progress.getAttribute('aria-valuenow')))
-    .toBeGreaterThan(firstProgress)
+  // Mining progress accumulates over simulated frames — see
+  // waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => progress.evaluate((element) => ({
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: Number(element.getAttribute('aria-valuenow')),
+    })),
+    (value) => value > firstProgress,
+    { description: 'mining progress increase' },
+  )
   await page.mouse.up({ button: 'left' })
 
   await expect(progress).toBeHidden()
@@ -739,10 +772,14 @@ test('mines only after continuous hold and exposes progress at the crosshair', a
   await callQa<unknown>(page, 'gameplay.setPose', targetBefore)
   await page.mouse.down({ button: 'left' })
   try {
-    await expect(canvas).toHaveAttribute(
-      'data-breaks-requested',
-      String(breaksBefore + 1),
-      { timeout: 10_000 },
+    await waitForSimulationProgress(
+      page,
+      () => canvas.evaluate((element) => ({
+        frames: Number(document.body.getAttribute('data-frames')),
+        value: element.getAttribute('data-breaks-requested'),
+      })),
+      (value) => value === String(breaksBefore + 1),
+      { description: 'mining break completion' },
     )
     await page.waitForTimeout(250)
     await expect(canvas).toHaveAttribute('data-breaks-requested', String(breaksBefore + 1))

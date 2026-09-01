@@ -1,6 +1,7 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -36,6 +37,20 @@ const callQa = <A>(page: Page, command: string): Promise<A> =>
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
 
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      const value = await operation()
+      return { frames: Number(document.body.getAttribute('data-frames')), value }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: GameplaySnapshot }>
+
 const startRunningGame = async (page: Page) => {
   const consoleErrors: Array<string> = []
   const pageErrors: Array<string> = []
@@ -49,18 +64,18 @@ const startRunningGame = async (page: Page) => {
 }
 
 const waitForLanding = async (page: Page, healthPoints: number) => {
-  await expect.poll(async () => {
-    const current = await snapshot(page)
-    return {
-      grounded: current.fall.grounded,
-      feetY: current.pose.feetPosition.y,
-      healthPoints: current.vitals.healthPoints,
-    }
-  }, { intervals: [10], timeout: 4_000 }).toEqual({
-    grounded: true,
-    feetY: 65,
-    healthPoints,
-  })
+  // Falling and landing are physics simulated over several frames, not
+  // instant — see waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => (
+      current.fall.grounded
+      && current.pose.feetPosition.y === 65
+      && current.vitals.healthPoints === healthPoints
+    ),
+    { description: 'fall landing' },
+  )
 }
 
 test('keeps a normal-physics fall within the safe distance harmless', async ({ page }) => {
@@ -91,10 +106,12 @@ test('uses the existing death and respawn flow for a lethal landing', async ({ p
   const faults = await startRunningGame(page)
   await callQa<GameplaySnapshot>(page, 'gameplay.seedLethalFall')
 
-  await expect.poll(async () => (await snapshot(page)).dead, {
-    intervals: [10],
-    timeout: 4_000,
-  }).toBe(true)
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.dead,
+    { description: 'lethal fall landing' },
+  )
   const dead = await snapshot(page)
   expect(dead.vitals.healthPoints).toBe(0)
   expect(dead.vitals.lastDamageCause).toBe('fall')

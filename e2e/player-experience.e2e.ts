@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -185,25 +186,13 @@ test.describe('player inventory experience', () => {
     })
 
     test('progresses from wood through diamond and mines obsidian', async ({ page }) => {
-    // Raising the outer budget to 140s (below) let the furnace wait use its
-    // own full allowance instead of being cut off early — and traced via
-    // this test's own next CI trace.zip, that allowance is itself too tight.
-    // The wood/stone/iron/mining progression ahead of smelting consumed
-    // 53.2s on that run (exact trace timestamps: test start to the furnace
-    // assertion's start). The furnace wait then used its entire 50s budget
-    // and reached only 2 of 3 iron ingots (aria-label stuck at "iron_ingot,
-    // 2", trace duration 50,026.7ms). Playwright's own call-log retry counts
-    // in the failure (44 polls at empty, 40 at 1 ingot, 19 at 2 ingots) are
-    // used here as a time-proportional estimate, NOT exact per-poll
-    // timestamps — the trace doesn't record individual poll times for a
-    // single toHaveAttribute call. Scaling those counts against the known
-    // 50,026.7ms span: ingot 1 lands ~21.4s in, ingot 2 ~40.8s in (a
-    // ~19.4s/ingot steady-state smelt pace on this runner), so ingot 3
-    // should land ~60.2s in. 75s on the furnace wait leaves ~15s margin
-    // over that estimate. 170s outer covers the 53.2s pre-smelt phase, the
-    // full 75s furnace allowance, and the same post-smelt margin the
-    // previous 140s preserved.
-    test.setTimeout(170_000)
+    // Wood/crafting/mining plus a 3-ingot smelt, end to end. The furnace
+    // fuel and smelt waits below are simulation-gated (see
+    // waitForSimulationProgress) rather than wall-clock-bound, so this outer
+    // budget only needs to be a coarse backstop against a genuine hang — it
+    // does not need to track a per-ingot pace estimate the way the removed
+    // wall-clock waits did.
+    test.setTimeout(300_000)
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
     await callQa(page, 'gameplay.seedWoodenPickaxeProgression')
@@ -310,9 +299,17 @@ test.describe('player inventory experience', () => {
       await grantPointerLock(page)
       await page.mouse.down({ button: 'left' })
       try {
-        await expect(canvas).toHaveAttribute('data-breaks-requested', String(before + 1), {
-          timeout: 10_000,
-        })
+        // Mining accumulates progress over simulated frames — see
+        // waitForSimulationProgress.
+        await waitForSimulationProgress(
+          page,
+          () => page.evaluate((expected) => ({
+            frames: Number(document.body.getAttribute('data-frames')),
+            value: document.querySelector('#game-canvas')?.getAttribute('data-breaks-requested') === expected,
+          }), String(before + 1)),
+          (matched) => matched,
+          { description: 'mining break progress' },
+        )
       } finally {
         await page.mouse.up({ button: 'left' })
       }
@@ -433,14 +430,33 @@ test.describe('player inventory experience', () => {
     await grantPointerLock(page)
     await canvas.click({ button: 'right' })
     await expect(inventory).toBeVisible()
+    const readFurnaceSlot = (
+      slot: Locator,
+    ): Promise<{ frames: number; value: string | null }> =>
+      slot.evaluate((element) => ({
+        frames: Number(document.body.getAttribute('data-frames')),
+        value: element.getAttribute('aria-label'),
+      }))
+
+    // Fuel consumption and smelt progress are both simulation-gated — the
+    // transfer and the cook time only advance once the simulation ticks far
+    // enough — see waitForSimulationProgress. The smelt output specifically
+    // has been observed taking upwards of a minute under CI contention for
+    // 3 ingots, so its backstop is set well above the helper's default.
     await furnaceFuel.click()
-    await expect(furnaceFuel).toHaveAttribute('aria-label', /coal, 1/)
+    await waitForSimulationProgress(
+      page,
+      () => readFurnaceSlot(furnaceFuel),
+      (label) => label !== null && /coal, 1/.test(label),
+      { description: 'furnace fuel insertion' },
+    )
     await expect(cookProgress).not.toHaveAttribute('aria-valuenow', '0')
-    // 75s: see the derivation on this test's own `test.setTimeout` above —
-    // a real CI run reached only 2 of 3 ingots inside the previous 50s.
-    await expect(furnaceOutput).toHaveAttribute('aria-label', /iron_ingot, 3/, {
-      timeout: 75_000,
-    })
+    await waitForSimulationProgress(
+      page,
+      () => readFurnaceSlot(furnaceOutput),
+      (label) => label !== null && /iron_ingot, 3/.test(label),
+      { description: 'furnace smelting progress (3 iron ingots)', backstopMs: 150_000 },
+    )
 
     await furnaceOutput.click()
     await expect.poll(() => itemCount('iron_ingot')).toBe(3)

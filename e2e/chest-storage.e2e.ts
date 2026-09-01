@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const DATABASE_NAME = 'nerima-games-minecraft'
 
@@ -57,6 +58,19 @@ const callQa = async <Result>(
     { command, arguments: arguments_ },
   )
 
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(() => {
+    const qa = (globalThis as unknown as Record<string, unknown>)['__NERIMA_GAMES_QA__'] as
+      | Record<string, () => unknown>
+      | undefined
+    const operation = qa?.['gameplay.snapshot']
+    if (operation === undefined) throw new Error('missing QA command: gameplay.snapshot')
+    return {
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: operation() as GameplaySnapshot,
+    }
+  })
+
 const clearDatabase = async (page: Page): Promise<void> => {
   await page.goto('/@vite/client')
   await page.evaluate(
@@ -100,19 +114,29 @@ const mineCurrentTarget = async (page: Page): Promise<void> => {
   await canvas.hover()
   await grantPointerLock(page)
   await page.mouse.down({ button: 'left' })
+  // Mining accumulates progress over simulated frames — see
+  // waitForSimulationProgress.
   try {
-    await expect(canvas).toHaveAttribute(
-      'data-breaks-requested',
-      String(requestedBefore + 1),
-      { timeout: 15_000 },
+    await waitForSimulationProgress(
+      page,
+      () => canvas.evaluate((element) => ({
+        frames: Number(document.body.getAttribute('data-frames')),
+        value: element.getAttribute('data-breaks-requested'),
+      })),
+      (value) => value === String(requestedBefore + 1),
+      { description: 'mining break request' },
     )
   } finally {
     await page.mouse.up({ button: 'left' })
   }
-  await expect(canvas).toHaveAttribute(
-    'data-breaks-completed',
-    String(completedBefore + 1),
-    { timeout: 15_000 },
+  await waitForSimulationProgress(
+    page,
+    () => canvas.evaluate((element) => ({
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: element.getAttribute('data-breaks-completed'),
+    })),
+    (value) => value === String(completedBefore + 1),
+    { description: 'mining break completion' },
   )
 }
 
@@ -165,16 +189,21 @@ test('moves, persists, and spills chest contents', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Close chest' }).click()
   await mineCurrentTarget(page)
-  await expect
-    .poll(async () => (await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')).target.block, {
-      timeout: 15_000,
-    })
-    .toBe(0)
+  // Block destruction settling and the dropped item's pickup both need
+  // several simulated frames to complete — see waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.target.block === 0,
+    { description: 'chest block destruction' },
+  )
 
-  await expect.poll(async () => {
-    const snapshot = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
-    return snapshot.inventory.slots.findIndex((slot) => slot?.item === 'oak_log')
-  }, { timeout: 15_000 }).toBeGreaterThanOrEqual(0)
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.inventory.slots.findIndex((slot) => slot?.item === 'oak_log') >= 0,
+    { description: 'dropped oak_log pickup' },
+  )
 
   snapshot = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
   expect(snapshot.containerStorage.containers).toEqual([])
@@ -260,10 +289,12 @@ test('retains chest item metadata through destruction, pickup, and reload', asyn
   await chest.getByRole('button', { name: 'Close chest' }).click()
   await mineCurrentTarget(page)
 
-  await expect.poll(async () => {
-    const snapshot = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
-    return snapshot.inventory.slots.findIndex((slot) => slot?.item === 'diamond_pickaxe')
-  }, { timeout: 15_000 }).toBeGreaterThanOrEqual(0)
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.inventory.slots.findIndex((slot) => slot?.item === 'diamond_pickaxe') >= 0,
+    { description: 'dropped diamond_pickaxe pickup' },
+  )
 
   let snapshot = await callQa<GameplaySnapshot>(page, 'gameplay.snapshot')
   const pickedUpSlot = snapshot.inventory.slots

@@ -1,6 +1,7 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 const DATABASE_NAME = 'nerima-games-minecraft'
@@ -117,6 +118,20 @@ const callQa = <A>(
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
+
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      const value = await operation()
+      return { frames: Number(document.body.getAttribute('data-frames')), value }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: GameplaySnapshot }>
 
 const hotbarText = (page: Page): Promise<ReadonlyArray<string | null>> =>
   page.locator('[data-mx-ui="hotbar"] [data-mx-ui="slot"]').allTextContents()
@@ -583,10 +598,14 @@ test('materializes, persists, and reuses a portal round trip without duplicates'
   expect(seeded.activePortal?.interiorBlock).toBe(NETHER_PORTAL_BLOCK_ID)
   expect(seeded.activePortal?.frameBlock).toBe(OBSIDIAN_BLOCK_ID)
 
-  await expect.poll(
-    async () => (await snapshot(page)).dimension,
-    { timeout: 10_000 },
-  ).toBe('nether')
+  // Portal dimension transitions stream chunks over several simulated
+  // frames — see waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.dimension === 'nether',
+    { description: 'portal transition to nether' },
+  )
   const generated = await snapshot(page)
   expect(generated.activeChunkDimension).toBe('nether')
   expect(generated.portals).toEqual([
@@ -610,10 +629,12 @@ test('materializes, persists, and reuses a portal round trip without duplicates'
   expect(restored.activePortal?.interiorBlock).toBe(NETHER_PORTAL_BLOCK_ID)
   expect(restored.activePortal?.frameBlock).toBe(OBSIDIAN_BLOCK_ID)
 
-  await expect.poll(
-    async () => (await snapshot(page)).dimension,
-    { timeout: 10_000 },
-  ).toBe('overworld')
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => current.dimension === 'overworld',
+    { description: 'portal transition to overworld' },
+  )
   const returned = await snapshot(page)
   expect(returned.activeChunkDimension).toBe('overworld')
   expect(returned.portals).toEqual(generated.portals)

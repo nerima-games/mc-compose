@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const BED_BLOCK_ID = 112
 const AIR_BLOCK_ID = 0
@@ -98,7 +99,17 @@ test('one player sleeps in a bed and advances to morning', async ({ page }) => {
   await expect(page.locator('#sleep-hud')).toHaveText('Sleeping 1/1')
   await expect(page.locator('#sleep-hud')).toBeVisible()
 
-  await expect(body).toHaveAttribute('data-sleep-result', 'morning-skipped', { timeout: 10_000 })
+  // Sleeping fast-forwards simulated time to morning — a simulated-time-gated
+  // transition, not an instant UI response — see waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => page.evaluate(() => ({
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: document.body.getAttribute('data-sleep-result'),
+    })),
+    (result) => result === 'morning-skipped',
+    { description: 'sleep fast-forward to morning' },
+  )
   await expect(body).toHaveAttribute('data-sleeping-players', '0')
   await expect(page.locator('#sleep-hud')).toBeHidden()
   await expect.poll(async () => (await callQa<SleepSnapshot>(page, 'gameplay.snapshot')).weather.weather)
