@@ -1,6 +1,7 @@
 import { expect, test, type CDPSession, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -10,6 +11,13 @@ type GameplaySnapshot = {
     readonly feetPosition: Position
     readonly yawRadians: number
   }
+  // Despite the nesting, this is the host's single global cumulative
+  // simulated-time clock (apps/web/main.ts's `simulationElapsedSecs`, `+=
+  // deltaSecs` unconditionally every frame) — not scoped to environmental
+  // contact. It is the one field in `gameplay.snapshot` that measures
+  // simulated time directly, so it is what a speed-in-game-terms assertion
+  // needs to divide by.
+  readonly environmentalContact: { readonly simulationElapsedSecs: number }
 }
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
@@ -22,28 +30,66 @@ const snapshot = (page: Page): Promise<GameplaySnapshot> =>
     return await operation()
   }, QA_GLOBAL_KEY) as Promise<GameplaySnapshot>
 
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(async (key) => {
+    const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+      | Record<string, () => unknown>
+      | undefined
+    const operation = surface?.['gameplay.snapshot']
+    if (operation === undefined) throw new Error('missing QA command: gameplay.snapshot')
+    return {
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: await operation() as GameplaySnapshot,
+    }
+  }, QA_GLOBAL_KEY)
+
 const horizontalDistance = (left: Position, right: Position): number =>
   Math.hypot(right.x - left.x, right.z - left.z)
 
-// A fixed "wait N ms, sample once" check assumes a frame budget the test
-// runner does not actually guarantee, so a slow run reads as ongoing motion
-// when momentum has simply not finished decaying against wall-clock time yet.
-// Poll two consecutive samples 280ms apart instead, so the assertion tracks
-// the real condition (has horizontal drift actually stopped) rather than a
-// fixed-latency proxy for it.
+// What "settled" means: horizontal speed below a floor, in game terms —
+// blocks per SIMULATED second, not blocks per real-time sample. The original
+// 0.03-blocks-per-280ms-sample bar is preserved as the intended threshold
+// (≈0.107 blocks/simulated-second); only the denominator changes. A
+// wall-clock sample interval is the wrong unit here: simulated time runs
+// slower than real time under host contention (see
+// waitForSimulationProgress), so a fixed real-time window covers less
+// simulated ground on a slow runner, and a delta-per-real-sample assertion
+// reads that as "still moving" when the simulation is behaving correctly —
+// exactly CI's observed failure. Speed-per-simulated-second stays true
+// regardless of how fast or slow the host is.
+const SETTLED_SPEED_BLOCKS_PER_SIMULATED_SECOND = 0.03 / 0.28
+
 const awaitMovementSettled = (page: Page): Promise<void> => {
-  let previous: Position | undefined
-  return expect
-    .poll(
-      async () => {
-        const current = (await snapshot(page)).pose.feetPosition
-        const delta = previous === undefined ? Number.POSITIVE_INFINITY : horizontalDistance(previous, current)
+  let previous: { readonly position: Position; readonly simSecs: number } | undefined
+  return waitForSimulationProgress(
+    page,
+    async () => {
+      const { frames, value } = await snapshotWithFrames(page)
+      return {
+        frames,
+        value: {
+          position: value.pose.feetPosition,
+          simSecs: value.environmentalContact.simulationElapsedSecs,
+        },
+      }
+    },
+    (current) => {
+      if (previous === undefined) {
         previous = current
-        return delta
-      },
-      { timeout: 5_000, intervals: [280] },
-    )
-    .toBeLessThan(0.03)
+        return false
+      }
+      const deltaSimSecs = current.simSecs - previous.simSecs
+      // No simulated time passed between these two reads (possible under
+      // dense polling): there is nothing to divide by, so this pair cannot
+      // judge speed — not evidence of settling.
+      const speed = deltaSimSecs > 0
+        ? horizontalDistance(previous.position, current.position) / deltaSimSecs
+        : Number.POSITIVE_INFINITY
+      previous = current
+      return speed < SETTLED_SPEED_BLOCKS_PER_SIMULATED_SECOND
+    },
+    { description: 'touch movement settles' },
+  ).then(() => undefined)
 }
 
 const centerOf = async (page: Page, selector: string): Promise<{ readonly x: number; readonly y: number }> => {

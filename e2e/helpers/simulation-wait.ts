@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test'
+import { test, type Page } from '@playwright/test'
 
 /**
  * `apps/web/main.ts` clamps every frame's simulated delta to `MAX_FRAME_SECS`
@@ -22,8 +22,31 @@ import type { Page } from '@playwright/test'
  */
 
 const DEFAULT_FRAME_STALL_TIMEOUT_MS = 5_000
-const DEFAULT_BACKSTOP_MS = 60_000
 const DEFAULT_POLL_INTERVALS_MS: ReadonlyArray<number> = [50]
+
+// A fixed default backstop equal to (or close to) the test's own wall-clock
+// timeout races Playwright's generic "Test timeout exceeded" against this
+// helper's own diagnostic error, and the generic one can win — found in
+// practice on bow-projectile.e2e.ts, where the helper's 60_000ms default
+// collided with playwright.config.ts's 60_000ms global test timeout and hid
+// the "frames stalled" / "condition never became true" message behind a bare
+// timeout with no useful detail. Deriving the default from the CURRENT
+// test's own configured timeout (test.info().timeout, which reflects any
+// test.setTimeout() call already made) keeps this helper's message ahead of
+// Playwright's by a fixed margin automatically, for every caller, without
+// requiring each call site to work out and set its own backstopMs.
+const BACKSTOP_MARGIN_BEFORE_TEST_TIMEOUT_MS = 15_000
+const MIN_BACKSTOP_MS = 5_000
+const NO_TEST_TIMEOUT_FALLBACK_BACKSTOP_MS = 60_000
+
+const defaultBackstopMs = (): number => {
+  const testTimeoutMs = test.info().timeout
+  // 0 is Playwright's convention for "no timeout" (e.g. an explicit
+  // `test.setTimeout(0)`) — that disables the outer race entirely, but this
+  // helper's own backstop against a true hang should still exist.
+  if (testTimeoutMs <= 0) return NO_TEST_TIMEOUT_FALLBACK_BACKSTOP_MS
+  return Math.max(MIN_BACKSTOP_MS, testTimeoutMs - BACKSTOP_MARGIN_BEFORE_TEST_TIMEOUT_MS)
+}
 
 export type SimulationRead<T> = { readonly frames: number; readonly value: T }
 
@@ -48,7 +71,7 @@ export const waitForSimulationProgress = async <T>(
   options: WaitForSimulationOptions,
 ): Promise<T> => {
   const frameStallTimeoutMs = options.frameStallTimeoutMs ?? DEFAULT_FRAME_STALL_TIMEOUT_MS
-  const backstopMs = options.backstopMs ?? DEFAULT_BACKSTOP_MS
+  const backstopMs = options.backstopMs ?? defaultBackstopMs()
   const pollIntervalsMs = options.pollIntervalsMs ?? DEFAULT_POLL_INTERVALS_MS
   const startedAt = Date.now()
   const deadline = startedAt + backstopMs
