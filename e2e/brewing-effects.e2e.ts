@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -40,6 +41,25 @@ const callQa = <A>(page: Page, command: string, ...arguments_: ReadonlyArray<unk
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
 
+// Frame counter and snapshot read together in ONE round trip: split across two
+// they can describe different frames, and a wait comparing them would then be
+// reasoning about a state that never existed.
+const readWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(
+    async ({ key, commandName }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, (...arguments_: ReadonlyArray<unknown>) => unknown>
+        | undefined
+      const operation = surface?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      return {
+        frames: Number(document.body.getAttribute('data-frames')),
+        value: await operation(),
+      }
+    },
+    { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+  ) as Promise<{ frames: number; value: GameplaySnapshot }>
+
 const grantPointerLock = (page: Page): Promise<void> => page.evaluate(() => {
   const canvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
   if (canvas === null) throw new Error('missing game canvas')
@@ -51,6 +71,14 @@ const grantPointerLock = (page: Page): Promise<void> => page.evaluate(() => {
 })
 
 const openBrewingStand = async (page: Page): Promise<void> => {
+  // hover() before grantPointerLock(): the render package's input adapter
+  // starts accumulating movementX/movementY as soon as it sees the faked
+  // pointerlockchange, and Playwright cannot grant genuine pointer lock, so a
+  // real cursor move (click()'s own move-to-target step included) after the
+  // fake lock is set would be read as a full-size look delta instead of a
+  // per-frame one. Moving the cursor first makes click()'s internal move a
+  // no-op.
+  await page.locator('#game-canvas').hover()
   await grantPointerLock(page)
   await page.locator('#game-canvas').click({ button: 'right' })
   await expect(page.locator('#brewing-root')).toBeVisible()
@@ -65,18 +93,15 @@ const selectAndInsert = async (page: Page, digit: string): Promise<void> => {
 }
 
 test.describe('brewing, effects, and experience', () => {
-  // BLOCKED: interaction-never-registers cluster — #brewing-root stays hidden
-  // through every poll in the 5s window (13-14 consecutive "hidden" reads,
-  // never one "visible") after a right-click on the canvas, i.e. the click
-  // appears to have zero effect rather than a slow one. Does NOT reproduce
-  // under 4x CPU throttling locally (ran clean 2/2 at 45s+ each under
-  // throttle, vs. the deterministic bow-projectile.e2e.ts repro), so this is
-  // not confirmed to share bow-projectile's clamped-deltaSecs mechanism. Root
-  // cause undetermined — possible CI-environment flakiness (network/GC/render
-  // scheduling not captured by CPU throttling alone) or a real input-delivery
-  // bug specific to right-click-while-pointer-locked. Needs reproduction on an
-  // actual CI runner or heavier throttling before further diagnosis.
-  test.fixme('brews through the normal UI and persists brewing and poison', async ({ page }) => {
+  // FIXED (was the interaction-never-registers cluster): seedBrewingEncounter
+  // restored the player to QA_IGNITION_POSE without setting
+  // QA_IGNITION_FLOOR_BLOCK under their feet, so the player free-fell for the
+  // whole encounter (same omission fixed once before for a sibling fixture,
+  // see main.ts's other QA_IGNITION_FLOOR_BLOCK call sites). The click itself
+  // always reached the input queue; requestTargetedBlockUse's raycast simply
+  // found nothing once eye height had drifted enough. Fixed in
+  // seedBrewingEncounter.
+  test('brews through the normal UI and persists brewing and poison', async ({ page }) => {
     test.setTimeout(120_000)
     const sessionId = `brewing-${String(Date.now())}`
     await startGameSession(page, sessionId)
@@ -106,11 +131,23 @@ test.describe('brewing, effects, and experience', () => {
     await selectAndInsert(page, 'Digit1')
     await selectAndInsert(page, 'Digit2')
     await selectAndInsert(page, 'Digit3')
-    await expect.poll(async () => (await snapshot(page)).brewing.bottle, { timeout: 30_000 })
-      .toEqual({ potion: 'awkward' })
+    // Brewing completes on accumulated simulation ticks, so a wall-clock budget
+    // expires while the stand is working correctly but slowly — the hand-tuned
+    // 30s figures these replace were chosen against a fast host and CI observed
+    // the bottle still unbrewed when they ran out.
+    await waitForSimulationProgress(
+      page,
+      () => readWithFrames(page),
+      (current) => JSON.stringify(current.brewing.bottle) === JSON.stringify({ potion: 'awkward' }),
+      { description: 'brewing the awkward potion' },
+    )
     await selectAndInsert(page, 'Digit4')
-    await expect.poll(async () => (await snapshot(page)).brewing.bottle, { timeout: 30_000 })
-      .toEqual({ potion: 'poison' })
+    await waitForSimulationProgress(
+      page,
+      () => readWithFrames(page),
+      (current) => JSON.stringify(current.brewing.bottle) === JSON.stringify({ potion: 'poison' }),
+      { description: 'brewing the poison potion' },
+    )
 
     const brewing = page.locator('#brewing-root')
     await brewing.locator('[data-brewing-action="collect"]').click()
@@ -126,20 +163,22 @@ test.describe('brewing, effects, and experience', () => {
     expect((await snapshot(page)).statusEffects.effects[0]?.remainingSecs).toBeGreaterThan(0)
   })
 
-  // BLOCKED: same interaction-never-registers cluster as
-  // "brews through the normal UI and persists brewing and poison" above — the
-  // mob entity count never drops to 0 (mob never dies) through the full 5s
-  // poll window after a sustained left-click. See that comment for the full
-  // citation; root cause undetermined, tracked separately.
-  test.fixme('awards mob experience through a normal attack and persists the HUD value', async ({ page }) => {
+  test('awards mob experience through a normal attack and persists the HUD value', async ({ page }) => {
     const sessionId = `experience-${String(Date.now())}`
     await startGameSession(page, sessionId)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
     await callQa(page, 'gameplay.seedMeleeDropEncounter')
     const experienceBefore = (await snapshot(page)).vitals.totalExperience
 
-    await grantPointerLock(page)
+    // Move the cursor BEFORE granting the synthetic lock. Once the lock flag is
+    // set, the input adapter accumulates every subsequent mouse movement as a
+    // look delta, and a cursor move made afterwards arrives as one large jump —
+    // enough to swing the aim off the target so a melee swing hits nothing.
+    // CI observed exactly that here: the mob survived the attack (one non-drop
+    // entity remaining where none was expected) while the same sequence passes
+    // locally, and every helper in this suite using this order has been reliable.
     await page.locator('#game-canvas').hover()
+    await grantPointerLock(page)
     await page.mouse.down({ button: 'left' })
     await page.waitForTimeout(250)
     await page.mouse.up({ button: 'left' })

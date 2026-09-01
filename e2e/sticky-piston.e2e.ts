@@ -53,17 +53,16 @@ const useTargetedBlock = async (page: Page): Promise<void> => {
   await page.mouse.up({ button: 'right' })
 }
 
-// BLOCKED: interaction-never-registers cluster (see
-// brewing-effects.e2e.ts for the fuller citation) — the piston/lever state
-// stays frozen at its pre-action value through the entire 5s poll window
-// after a right-click hold (useTargetedBlock), on both the initial attempt and
-// its retry (each missed a different one of the two toggles, so this is not
-// state leaking between attempts — clearDatabase resets per attempt). Passed
-// 5/5 locally with no throttling; not yet tested under CPU throttling. Root
-// cause undetermined — possible CI-environment flakiness or a real
-// input-delivery bug — needs reproduction on an actual CI runner or heavier
-// throttling before further diagnosis. Tracked separately.
-test.fixme('a lever extends and retracts a sticky piston through normal play input', async ({ page }) => {
+// FIXED (was the interaction-never-registers cluster): seedStickyPistonEncounter
+// restored the player to QA_IGNITION_POSE without setting
+// QA_IGNITION_FLOOR_BLOCK under their feet, so the player free-fell for the
+// whole encounter (the same omission fixed once before for a sibling
+// fixture, see main.ts's other QA_IGNITION_FLOOR_BLOCK call sites). The
+// input queue and use-action dispatch were never at fault — probe logging
+// showed useTriggered firing correctly on every click; requestTargetedBlockUse
+// simply found nothing along the raycast once eye height had drifted a
+// block or more between the two clicks. Fixed in seedStickyPistonEncounter.
+test('a lever extends and retracts a sticky piston through normal play input', async ({ page }) => {
   const consoleErrors: Array<string> = []
   const pageErrors: Array<string> = []
   page.on('console', (message) => {
