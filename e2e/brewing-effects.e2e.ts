@@ -51,6 +51,14 @@ const grantPointerLock = (page: Page): Promise<void> => page.evaluate(() => {
 })
 
 const openBrewingStand = async (page: Page): Promise<void> => {
+  // hover() before grantPointerLock(): the render package's input adapter
+  // starts accumulating movementX/movementY as soon as it sees the faked
+  // pointerlockchange, and Playwright cannot grant genuine pointer lock, so a
+  // real cursor move (click()'s own move-to-target step included) after the
+  // fake lock is set would be read as a full-size look delta instead of a
+  // per-frame one. Moving the cursor first makes click()'s internal move a
+  // no-op.
+  await page.locator('#game-canvas').hover()
   await grantPointerLock(page)
   await page.locator('#game-canvas').click({ button: 'right' })
   await expect(page.locator('#brewing-root')).toBeVisible()
@@ -65,18 +73,15 @@ const selectAndInsert = async (page: Page, digit: string): Promise<void> => {
 }
 
 test.describe('brewing, effects, and experience', () => {
-  // BLOCKED: interaction-never-registers cluster — #brewing-root stays hidden
-  // through every poll in the 5s window (13-14 consecutive "hidden" reads,
-  // never one "visible") after a right-click on the canvas, i.e. the click
-  // appears to have zero effect rather than a slow one. Does NOT reproduce
-  // under 4x CPU throttling locally (ran clean 2/2 at 45s+ each under
-  // throttle, vs. the deterministic bow-projectile.e2e.ts repro), so this is
-  // not confirmed to share bow-projectile's clamped-deltaSecs mechanism. Root
-  // cause undetermined — possible CI-environment flakiness (network/GC/render
-  // scheduling not captured by CPU throttling alone) or a real input-delivery
-  // bug specific to right-click-while-pointer-locked. Needs reproduction on an
-  // actual CI runner or heavier throttling before further diagnosis.
-  test.fixme('brews through the normal UI and persists brewing and poison', async ({ page }) => {
+  // FIXED (was the interaction-never-registers cluster): seedBrewingEncounter
+  // restored the player to QA_IGNITION_POSE without setting
+  // QA_IGNITION_FLOOR_BLOCK under their feet, so the player free-fell for the
+  // whole encounter (same omission fixed once before for a sibling fixture,
+  // see main.ts's other QA_IGNITION_FLOOR_BLOCK call sites). The click itself
+  // always reached the input queue; requestTargetedBlockUse's raycast simply
+  // found nothing once eye height had drifted enough. Fixed in
+  // seedBrewingEncounter.
+  test('brews through the normal UI and persists brewing and poison', async ({ page }) => {
     test.setTimeout(120_000)
     const sessionId = `brewing-${String(Date.now())}`
     await startGameSession(page, sessionId)
@@ -126,12 +131,7 @@ test.describe('brewing, effects, and experience', () => {
     expect((await snapshot(page)).statusEffects.effects[0]?.remainingSecs).toBeGreaterThan(0)
   })
 
-  // BLOCKED: same interaction-never-registers cluster as
-  // "brews through the normal UI and persists brewing and poison" above — the
-  // mob entity count never drops to 0 (mob never dies) through the full 5s
-  // poll window after a sustained left-click. See that comment for the full
-  // citation; root cause undetermined, tracked separately.
-  test.fixme('awards mob experience through a normal attack and persists the HUD value', async ({ page }) => {
+  test('awards mob experience through a normal attack and persists the HUD value', async ({ page }) => {
     const sessionId = `experience-${String(Date.now())}`
     await startGameSession(page, sessionId)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')

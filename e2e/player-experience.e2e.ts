@@ -551,16 +551,7 @@ test.describe('player inventory experience', () => {
     expect(afterObsidian.inventory.durability[diamondPickaxeSlotIndex]?.current).toBe(1560)
   })
 
-  // BLOCKED: interaction-never-registers cluster (see
-  // brewing-effects.e2e.ts for the fuller citation) — #inventory-root stays
-  // hidden through the entire 5s poll window after a right-click on the
-  // canvas, i.e. zero effect rather than a slow one. Does not reproduce under
-  // 4x CPU throttling locally, so not confirmed to share
-  // bow-projectile.e2e.ts's clamped-deltaSecs mechanism. Root cause
-  // undetermined — possible CI-environment flakiness or a real input-delivery
-  // bug — needs reproduction on an actual CI runner or heavier throttling
-  // before further diagnosis. Tracked separately.
-  test.fixme('opens an empty 3x3 crafting table through targeted canvas use', async ({ page }) => {
+  test('opens an empty 3x3 crafting table through targeted canvas use', async ({ page }) => {
     await startGameSession(page)
     await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
     await callQa(page, 'gameplay.seedCraftingTableEncounter')
@@ -575,6 +566,14 @@ test.describe('player inventory experience', () => {
     )
 
     await expect(hudHotbarSlot).toHaveAttribute('data-empty', '')
+    // hover() before grantPointerLock(): the render package's input adapter
+    // accumulates movementX/movementY once it sees the faked
+    // pointerlockchange, and Playwright cannot grant genuine pointer lock, so
+    // a real cursor move after the fake lock (click()'s own move-to-target
+    // step included) reads as a full-size look delta rather than a
+    // per-frame one. Moving the cursor first makes click()'s internal move a
+    // no-op.
+    await canvas.hover()
     await grantPointerLock(page)
     await canvas.click({ button: 'right' })
     await expect(inventory).toBeVisible()

@@ -6828,6 +6828,13 @@ type MultiplayerInventorySelection = Readonly<{
     resetSimState(true)
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add('stone', 1))
+    // The player spawns at QA_IGNITION_POSE, which sibling fixtures pin to
+    // solid ground with QA_IGNITION_FLOOR_BLOCK — this fixture omitted it, so
+    // the player fell through unset terrain for the whole encounter, shifting
+    // eye height enough that a right-click landed several seconds apart could
+    // miss the lever's raycast (see main.ts's other QA_IGNITION_FLOOR_BLOCK
+    // fixtures for the same bug already fixed once).
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     Effect.runSync(currentChunkStore.setBlock(QA_PISTON_LEVER, blockIdOf('lever')))
     Effect.runSync(currentChunkStore.setBlock(QA_PISTON, blockIdOf('piston')))
     Effect.runSync(currentChunkStore.setBlock(QA_PISTON_NEAR, blockIdOf('stone')))
@@ -7309,6 +7316,13 @@ type MultiplayerInventorySelection = Readonly<{
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('brewing_stand')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+    // The player spawns at QA_IGNITION_POSE, which sibling fixtures pin to
+    // solid ground with QA_IGNITION_FLOOR_BLOCK — this fixture omitted it, so
+    // the player fell through unset terrain for the whole encounter, shifting
+    // eye height enough that a right-click on the brewing stand could miss
+    // its raycast (same bug class already fixed once for other
+    // QA_IGNITION_FLOOR_BLOCK fixtures in this file).
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add('blaze_powder', 2))
     Effect.runSync(world.inventory.add('water_bottle', 1))
