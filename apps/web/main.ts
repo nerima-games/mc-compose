@@ -95,6 +95,7 @@ import {
 } from '@nerima-games/mc-audio'
 import {
   BLOCK_PROPERTY_DEFAULTS,
+  BlockId,
   blockIdOf,
   blockPosition,
   blockTypeOfId,
@@ -106,6 +107,7 @@ import {
   propertyOfBlockId,
   StackCount,
   StageId,
+  type BlockPosition,
   type CameraPoseSnapshot,
   type MonotonicTimeSecs,
   type Position as Vec3,
@@ -1750,6 +1752,11 @@ const bootGame = async (
       }),
     )),
   }
+  // mx-redstone's PistonPosition/RedstonePosition stayed plain {x,y,z}; the kernel's
+  // BlockPosition now brands each axis, so every redstone-domain position needs this
+  // conversion before it can address a chunkStore read or write.
+  const asBlockPosition = (position: { readonly x: number; readonly y: number; readonly z: number }): BlockPosition =>
+    blockPosition(position.x, position.y, position.z)
   const leverKeyOf = (lever: Pick<PersistedLeverState, 'dimension' | 'position'>): string =>
     JSON.stringify([lever.dimension, lever.position.x, lever.position.y, lever.position.z])
   const leverStates = new Map<string, PersistedLeverState>(
@@ -1760,6 +1767,12 @@ const bootGame = async (
   const observerInputs = new Map<string, number>()
   const observerPulses = new Map<string, number>()
   const poweredRails = new Set<string>()
+  // A drained lamp transition is a one-shot event; the QA surface needs a durable
+  // record of it, not another live read of block state, because some pulses
+  // (the observer's 2-tick / 0.2s window) are shorter than a single QA round trip.
+  // `writtenBlock` is a read-after-write confirmation, kept separate from `lit`
+  // so "the event fired" and "the write landed" stay two distinguishable claims.
+  const redstoneLampTransitionLog = new Map<string, Array<{ readonly lit: boolean; readonly writtenBlock: BlockId | null }>>()
   const restoredVehicles = Option.isSome(loadedSession) ? loadedSession.value.state.vehicles ?? [] : []
   const vehicleNextSerial = restoredVehicles.reduce((nextSerial, vehicle) => {
     const match = /^v:(\d+)$/.exec(String(vehicle.id))
@@ -2028,7 +2041,7 @@ const bootGame = async (
       })
 
       for (const chunk of changed) {
-        yield* context.chunkStore.load(chunk)
+        yield* context.chunkStore.load(chunkCoord(chunk.cx, chunk.cz)).pipe(Effect.catchAll(() => Effect.void))
         context.queueLoadedChunk(chunk)
         context.streamLoaded.add(chunkKeyOf(chunk))
         if (context.dimension === 'overworld') {
@@ -2073,7 +2086,7 @@ const bootGame = async (
           saveCoordinator.retainChunk({ dimension: context.dimension, chunk: snapshot })
           markSessionDirty()
         }
-        yield* context.chunkStore.unload(chunk)
+        yield* context.chunkStore.unload(chunkCoord(chunk.cx, chunk.cz)).pipe(Effect.catchAll(() => Effect.void))
         context.streamLoaded.delete(chunkKeyOf(chunk))
       }
 
@@ -2108,33 +2121,33 @@ const bootGame = async (
         for (let lz = 0; lz < 16; lz += 1) {
           for (let y = 0; y < 256; y += 1) {
             const block = chunk.blocks[y + lz * 256 + lx * 4096]
-            const kind = block === 74
+            const kind = block === blockIdOf('redstone_wire')
               ? 'wire'
-              : block === 75
+              : block === blockIdOf('redstone_torch')
                 ? 'torch'
-              : block === 76
+              : block === blockIdOf('lever')
                 ? 'lever'
-                : block === 77
+                : block === blockIdOf('stone_button')
                   ? 'button'
-                  : block === 78
+                  : block === blockIdOf('repeater')
                     ? 'repeater'
-                : block === 79 || block === 80
+                : block === blockIdOf('redstone_lamp') || block === blockIdOf('redstone_lamp_lit')
                   ? 'lamp'
-                  : block === 81
+                  : block === blockIdOf('observer')
                     ? 'observer'
-                    : block === 82
+                    : block === blockIdOf('comparator')
                       ? 'comparator'
-                      : block === 83
+                      : block === blockIdOf('dispenser')
                         ? 'dispenser'
-                        : block === 122
+                        : block === blockIdOf('dropper')
                           ? 'dropper'
-                        : block === 84
+                        : block === blockIdOf('hopper')
                           ? 'hopper'
-                  : block === 16
+                  : block === blockIdOf('piston')
                     ? 'piston'
-                    : block === 32
+                    : block === blockIdOf('powered_rail')
                       ? 'powered-rail'
-                      : block === 106 || block === 107
+                      : block === blockIdOf('door') || block === blockIdOf('door_open')
                         ? 'door'
                   : undefined
             if (kind === undefined) continue
@@ -2145,14 +2158,14 @@ const bootGame = async (
               components.push({ position, kind, active: leverStates.get(key)?.active ?? false })
             } else if (kind === 'piston') {
               const head = Effect.runSync(context.chunkStore.getBlock(
-                pistonPositionAt(position, 'north', 1),
+                asBlockPosition(pistonPositionAt(position, 'north', 1)),
               ))
               components.push({
                 position,
                 kind,
                 pistonFacing: 'north',
                 pistonKind: 'sticky',
-                pistonState: head._tag === 'Block' && head.block === 85 ? 'extended' : 'retracted',
+                pistonState: head._tag === 'Block' && head.block === blockIdOf('piston_head') ? 'extended' : 'retracted',
               })
             } else if (kind === 'repeater') {
               components.push({
@@ -2185,11 +2198,11 @@ const bootGame = async (
               })
             } else if (kind === 'observer') {
               const key = leverKeyOf({ dimension: context.dimension, position })
-              const watched = Effect.runSync(context.chunkStore.getBlock({
+              const watched = Effect.runSync(context.chunkStore.getBlock(asBlockPosition({
                 x: position.x,
                 y,
                 z: position.z + 1,
-              }))
+              })))
               const watchedBlock = watched._tag === 'Block' ? watched.block : 0
               const previous = observerInputs.get(key)
               if (previous !== undefined && previous !== watchedBlock) {
@@ -2204,7 +2217,7 @@ const bootGame = async (
                 pulseTicks: 2,
               })
             } else if (kind === 'door') {
-              components.push({ position, kind, powered: block === 107 })
+              components.push({ position, kind, powered: block === blockIdOf('door_open') })
             } else if (kind === 'powered-rail') {
               const key = leverKeyOf({ dimension: context.dimension, position })
               components.push({ position, kind, powered: poweredRails.has(key) })
@@ -2260,7 +2273,7 @@ const bootGame = async (
     const context = dimensionContexts.get(dimension)
     if (context === undefined) return undefined
 
-    const reading = Effect.runSync(context.chunkStore.getBlock(position))
+    const reading = Effect.runSync(context.chunkStore.getBlock(asBlockPosition(position)))
     if (reading._tag !== 'Block') return undefined
 
     const kind = containerKindForStorageBlock(blockTypeOfId(reading.block))
@@ -2348,7 +2361,7 @@ const bootGame = async (
 
     const context = dimensionContexts.get(dimension)
     if (context === undefined) return
-    const reading = Effect.runSync(context.chunkStore.getBlock(position))
+    const reading = Effect.runSync(context.chunkStore.getBlock(asBlockPosition(position)))
     if (reading._tag !== 'Block' || blockTypeOfId(reading.block) !== kind) return
 
     const containerId = containerIdForStorageBlock(dimension, position)
@@ -2423,15 +2436,15 @@ const bootGame = async (
       {
         read: (position) => {
           if (position.y < 0 || position.y >= 256) return { kind: 'out-of-world' }
-          const reading = Effect.runSync(context.chunkStore.getBlock(position))
+          const reading = Effect.runSync(context.chunkStore.getBlock(asBlockPosition(position)))
           if (reading._tag !== 'Block') return { kind: 'missing' }
-          return reading.block === 0
+          return reading.block === blockIdOf('air')
             ? { kind: 'empty' }
             : { kind: 'block', block: String(reading.block) }
         },
       },
       {
-        pistonImmovable: (block) => capabilityOfBlockId(Number(block), 'pistonImmovable'),
+        pistonImmovable: (block) => capabilityOfBlockId(BlockId(Number(block)), 'pistonImmovable'),
       },
     )
     if (outcome.kind !== 'move') return
@@ -2439,18 +2452,18 @@ const bootGame = async (
     Effect.runSync(applyPistonPlan(outcome.plan, {
       commit: (plan: PistonMovementPlan) => Effect.gen(function* () {
         for (const move of plan.moves) {
-          const source = yield* context.chunkStore.getBlock(move.from)
-          if (source._tag !== 'Block' || source.block !== Number(move.block)) {
+          const source = yield* context.chunkStore.getBlock(asBlockPosition(move.from))
+          if (source._tag !== 'Block' || source.block !== BlockId(Number(move.block))) {
             return yield* Effect.dieMessage('piston source changed before commit')
           }
         }
         const head = pistonPositionAt(plan.piston, plan.facing, 1)
-        if (plan.toState === 'retracted') yield* context.chunkStore.setBlock(head, 0)
+        if (plan.toState === 'retracted') yield* context.chunkStore.setBlock(asBlockPosition(head), blockIdOf('air'))
         for (const move of plan.moves) {
-          yield* context.chunkStore.setBlock(move.to, Number(move.block))
-          yield* context.chunkStore.setBlock(move.from, 0)
+          yield* context.chunkStore.setBlock(asBlockPosition(move.to), BlockId(Number(move.block)))
+          yield* context.chunkStore.setBlock(asBlockPosition(move.from), blockIdOf('air'))
         }
-        if (plan.toState === 'extended') yield* context.chunkStore.setBlock(head, 85)
+        if (plan.toState === 'extended') yield* context.chunkStore.setBlock(asBlockPosition(head), blockIdOf('piston_head'))
       }),
     }))
     markSessionDirty()
@@ -2667,7 +2680,7 @@ const bootGame = async (
           z < Math.ceil(maxZ + physicsContactEpsilon);
           z += 1
         ) {
-          const reading = Effect.runSync(currentChunkStore.getBlock({ x, y, z }))
+          const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(x, y, z)))
           if (reading._tag !== 'Block') continue
           const block = blockTypeOfId(reading.block)
           if (block !== 'lava' && block !== 'cactus') continue
@@ -2788,7 +2801,7 @@ const bootGame = async (
       dimension,
       [...portalStates.values()]
         .filter((portal) => portal.dimension === dimension)
-        .map((portal) => portal.position),
+        .map((portal) => blockPosition(portal.position.x, portal.position.y, portal.position.z)),
     )
   const syncPortalCandidateSnapshots = (): Effect.Effect<void> =>
     Effect.asVoid(Effect.all(portalDimensions.map(syncPortalCandidatesFor)))
@@ -2819,15 +2832,15 @@ const bootGame = async (
       }
       for (const [key, chunk] of chunkRefs) {
         if (context.streamLoaded.has(key)) continue
-        yield* context.chunkStore.load(chunk)
+        yield* context.chunkStore.load(chunkCoord(chunk.cx, chunk.cz)).pipe(Effect.catchAll(() => Effect.void))
         context.streamLoaded.add(key)
         chunksStreamedIn += 1
       }
       for (const position of layout.frame) {
-        yield* context.chunkStore.setBlock(position, OBSIDIAN_BLOCK_ID)
+        yield* context.chunkStore.setBlock(blockPosition(position.x, position.y, position.z), OBSIDIAN_BLOCK_ID)
       }
       for (const position of layout.interior) {
-        yield* context.chunkStore.setBlock(position, NETHER_PORTAL_BLOCK_ID)
+        yield* context.chunkStore.setBlock(blockPosition(position.x, position.y, position.z), NETHER_PORTAL_BLOCK_ID)
       }
       markSessionDirty()
     })
@@ -3196,7 +3209,7 @@ type MultiplayerInventorySelection = Readonly<{
     const dimension = dimensionFromWorld(worldId)
     if (dimension === undefined) return
     const context = getOrCreateDimensionChunkContext(dimension)
-    Effect.runSync(context.chunkStore.setBlock(at, block === null ? 0 : blockIdOf(block as Parameters<typeof blockIdOf>[0])))
+    Effect.runSync(context.chunkStore.setBlock(blockPosition(at.x, at.y, at.z), block === null ? blockIdOf('air') : blockIdOf(block as Parameters<typeof blockIdOf>[0])))
     if (dimension === currentChunkContext.dimension) redstoneDirty = true
   }
 
@@ -4797,7 +4810,7 @@ type MultiplayerInventorySelection = Readonly<{
     })
     const targetable = new Set<string>()
     for (const position of candidates) {
-      const reading = yield* currentChunkStore.getBlock(position)
+      const reading = yield* currentChunkStore.getBlock(blockPosition(position.x, position.y, position.z))
       if (reading._tag === 'Block' && reading.block !== 0) {
         targetable.add(coordinateKey(position.x, position.y, position.z))
         break
@@ -4809,7 +4822,7 @@ type MultiplayerInventorySelection = Readonly<{
       (x, y, z) => targetable.has(coordinateKey(x, y, z)),
     )
     if (Option.isNone(target)) return undefined
-    const reading = yield* currentChunkStore.getBlock(target.value.position)
+    const reading = yield* currentChunkStore.getBlock(blockPosition(target.value.position.x, target.value.position.y, target.value.position.z))
     return reading._tag === 'Block'
       ? { ...target.value, block: reading.block }
       : undefined
@@ -4824,7 +4837,7 @@ type MultiplayerInventorySelection = Readonly<{
     readonly isRaining: boolean
     readonly isOpenWater: boolean
   }> => Effect.gen(function* () {
-    const center = yield* currentChunkStore.getBlock(position)
+    const center = yield* currentChunkStore.getBlock(blockPosition(position.x, position.y, position.z))
     const hasWater = center._tag === 'Block' && blockTypeOfId(center.block) === 'water'
     if (!hasWater) return { hasWater: false, hasSkyAccess: false, isRaining, isOpenWater: false }
 
@@ -4866,7 +4879,7 @@ type MultiplayerInventorySelection = Readonly<{
   const materializeEndArrival = (): Effect.Effect<void> => Effect.gen(function* () {
     const arrival = endArrivalDescriptor(blockPosition(0, 64, 0))
     const context = getOrCreateDimensionChunkContext('end')
-    const mutations = [...arrival.platform, ...arrival.clear.map((at) => ({ at, block: 0 }))]
+    const mutations = [...arrival.platform, ...arrival.clear.map((at) => ({ at, block: blockIdOf('air') }))]
     const chunks = new Map<string, ChunkRef>()
     for (const mutation of mutations) {
       const chunk = { cx: Math.floor(mutation.at.x / 16), cz: Math.floor(mutation.at.z / 16) }
@@ -4874,7 +4887,7 @@ type MultiplayerInventorySelection = Readonly<{
     }
     for (const [key, chunk] of chunks) {
       if (!context.streamLoaded.has(key)) {
-        yield* context.chunkStore.load(chunk)
+        yield* context.chunkStore.load(chunkCoord(chunk.cx, chunk.cz)).pipe(Effect.catchAll(() => Effect.void))
         context.streamLoaded.add(key)
       }
     }
@@ -4947,7 +4960,7 @@ type MultiplayerInventorySelection = Readonly<{
     const target = isNearPortal ? yield* targetedBlock() : undefined
     if (isNearPortal) {
       for (const frameOffset of END_PORTAL_FRAME_OFFSETS) {
-        const position = { x: center.x + frameOffset.dx, y: center.y, z: center.z + frameOffset.dz }
+        const position = blockPosition(center.x + frameOffset.dx, center.y, center.z + frameOffset.dz)
         const reading = yield* currentChunkStore.getBlock(position)
         if (reading._tag === 'Block'
           && (reading.block === END_PORTAL_BLOCK.FRAME_EMPTY || reading.block === END_PORTAL_BLOCK.FRAME_FILLED)) {
@@ -4964,7 +4977,7 @@ type MultiplayerInventorySelection = Readonly<{
       && center.y === target.position.y
       && center.z + candidate.dz === target.position.z)
     if (target?.block === END_PORTAL_BLOCK.FRAME_EMPTY && offset !== undefined) {
-      yield* currentChunkStore.setBlock(target.position, END_PORTAL_BLOCK.FRAME_FILLED)
+      yield* currentChunkStore.setBlock(blockPosition(target.position.x, target.position.y, target.position.z), END_PORTAL_BLOCK.FRAME_FILLED)
       endPortalFrames.set(endPortalFrameKey(target.position), {
         position: target.position,
         facing: offset.facing,
@@ -5187,7 +5200,7 @@ type MultiplayerInventorySelection = Readonly<{
       radius,
       seed,
       blocks: (position) => {
-        const reading = Effect.runSync(currentChunkStore.getBlock(position))
+        const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(position.x, position.y, position.z)))
         if (reading._tag !== 'Block') return undefined
         const type = blockTypeOfId(reading.block)
         if (type === 'air') return { resistance: 0, destructible: false }
@@ -5200,7 +5213,7 @@ type MultiplayerInventorySelection = Readonly<{
       entities,
     })
     for (const position of plan.destroyedBlocks) {
-      Effect.runSync(currentChunkStore.setBlock(position, 0))
+      Effect.runSync(currentChunkStore.setBlock(blockPosition(position.x, position.y, position.z), blockIdOf('air')))
     }
     for (const effect of plan.entityEffects) {
       // mc-kernel's `ExplosionEntityEffect.id` is a bare `string` (the
@@ -6351,7 +6364,7 @@ type MultiplayerInventorySelection = Readonly<{
     observedMobDrops.splice(0)
     const validRespawn = validRespawnLocation(respawnLocation, (location) => {
       const context = getOrCreateDimensionChunkContext(location.dimension)
-      const reading = Effect.runSync(context.chunkStore.getBlock(location.bedPosition))
+      const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(location.bedPosition.x, location.bedPosition.y, location.bedPosition.z)))
       return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'bed'
     })
     if (validRespawn === null) respawnLocation = null
@@ -6639,14 +6652,14 @@ type MultiplayerInventorySelection = Readonly<{
     )
     const activePortalReading = activePortal === undefined
       ? undefined
-      : Effect.runSync(currentChunkStore.getBlock(activePortal.position))
+      : Effect.runSync(currentChunkStore.getBlock(blockPosition(activePortal.position.x, activePortal.position.y, activePortal.position.z)))
     const activePortalFramePosition = activePortal === undefined
       ? undefined
-      : {
-          x: activePortal.position.x - 1,
-          y: activePortal.position.y - 1,
-          z: activePortal.position.z,
-        }
+      : blockPosition(
+          activePortal.position.x - 1,
+          activePortal.position.y - 1,
+          activePortal.position.z,
+        )
     const activePortalFrameReading = activePortalFramePosition === undefined
       ? undefined
       : Effect.runSync(currentChunkStore.getBlock(activePortalFramePosition))
@@ -6779,10 +6792,10 @@ type MultiplayerInventorySelection = Readonly<{
     resetSimState(true)
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add(heldItem, 2))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 0))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     selectedHotbarIndex = 0
     inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
     inventoryInteraction.reset()
@@ -6796,7 +6809,7 @@ type MultiplayerInventorySelection = Readonly<{
   const stickyPistonSnapshot = () => {
     const dimension = Effect.runSync(playerApi.dimension)
     const readBlock = (position: { readonly x: number; readonly y: number; readonly z: number }) => {
-      const reading = Effect.runSync(currentChunkStore.getBlock(position))
+      const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(position.x, position.y, position.z)))
       return reading._tag === 'Block' ? reading.block : null
     }
     return {
@@ -6815,10 +6828,10 @@ type MultiplayerInventorySelection = Readonly<{
     resetSimState(true)
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add('stone', 1))
-    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_LEVER, 76))
-    Effect.runSync(currentChunkStore.setBlock(QA_PISTON, 16))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_LEVER, blockIdOf('lever')))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON, blockIdOf('piston')))
     Effect.runSync(currentChunkStore.setBlock(QA_PISTON_NEAR, blockIdOf('stone')))
-    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_FAR, 0))
+    Effect.runSync(currentChunkStore.setBlock(QA_PISTON_FAR, blockIdOf('air')))
     leverStates.set(leverKeyOf({ dimension, position: QA_PISTON_LEVER }), {
       dimension,
       position: QA_PISTON_LEVER,
@@ -6837,7 +6850,7 @@ type MultiplayerInventorySelection = Readonly<{
   const redstoneFixturesSnapshot = () => {
     const dimension = Effect.runSync(playerApi.dimension)
     const readBlock = (position: { readonly x: number; readonly y: number; readonly z: number }) => {
-      const reading = Effect.runSync(currentChunkStore.getBlock(position))
+      const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(position.x, position.y, position.z)))
       return reading._tag === 'Block' ? reading.block : null
     }
     return {
@@ -6850,6 +6863,9 @@ type MultiplayerInventorySelection = Readonly<{
       hopper: readBlock(QA_REDSTONE_HOPPER),
       observer: readBlock(QA_REDSTONE_OBSERVER),
       observerLamp: readBlock(QA_REDSTONE_OBSERVER_LAMP),
+      observerLampTransitions: redstoneLampTransitionLog.get(
+        leverKeyOf({ dimension, position: QA_REDSTONE_OBSERVER_LAMP }),
+      ) ?? [],
       comparator: readBlock(QA_REDSTONE_COMPARATOR),
       trigger: canvas.getAttribute('data-redstone-trigger'),
     }
@@ -6865,25 +6881,26 @@ type MultiplayerInventorySelection = Readonly<{
     selectedHotbarIndex = 0
     inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
     inventoryInteraction.reset()
-    const fixtures = [
-      [QA_REDSTONE_BUTTON, 77],
-      [QA_REDSTONE_REPEATER, 78],
-      [QA_REDSTONE_LAMP, 79],
-      [QA_REDSTONE_BRANCH_BUTTON, 77],
-      [QA_REDSTONE_BRANCH_WIRE, 74],
-      [QA_REDSTONE_DOOR, 106],
-      [QA_REDSTONE_RAIL, 32],
-      [QA_REDSTONE_DISPENSER, 83],
-      [QA_REDSTONE_HOPPER, 84],
-      [QA_REDSTONE_OBSERVER, 81],
-      [QA_REDSTONE_OBSERVER_INPUT, 2],
-      [QA_REDSTONE_OBSERVER_LAMP, 79],
-      [QA_REDSTONE_COMPARATOR, 82],
-    ] as const
+    const fixtures: ReadonlyArray<readonly [BlockPosition, BlockId]> = [
+      [QA_REDSTONE_BUTTON, blockIdOf('stone_button')],
+      [QA_REDSTONE_REPEATER, blockIdOf('repeater')],
+      [QA_REDSTONE_LAMP, blockIdOf('redstone_lamp')],
+      [QA_REDSTONE_BRANCH_BUTTON, blockIdOf('stone_button')],
+      [QA_REDSTONE_BRANCH_WIRE, blockIdOf('redstone_wire')],
+      [QA_REDSTONE_DOOR, blockIdOf('door')],
+      [QA_REDSTONE_RAIL, blockIdOf('powered_rail')],
+      [QA_REDSTONE_DISPENSER, blockIdOf('dispenser')],
+      [QA_REDSTONE_HOPPER, blockIdOf('hopper')],
+      [QA_REDSTONE_OBSERVER, blockIdOf('observer')],
+      [QA_REDSTONE_OBSERVER_INPUT, blockIdOf('stone')],
+      [QA_REDSTONE_OBSERVER_LAMP, blockIdOf('redstone_lamp')],
+      [QA_REDSTONE_COMPARATOR, blockIdOf('comparator')],
+    ]
     for (const [position, block] of fixtures) {
       Effect.runSync(currentChunkStore.setBlock(position, block))
     }
     poweredRails.delete(leverKeyOf({ dimension, position: QA_REDSTONE_RAIL }))
+    redstoneLampTransitionLog.clear()
     canvas.removeAttribute('data-redstone-trigger')
     redstoneDirty = true
     markSessionDirty()
@@ -6899,7 +6916,7 @@ type MultiplayerInventorySelection = Readonly<{
   }
 
   const mutateObserverInput = () => {
-    Effect.runSync(currentChunkStore.setBlock(QA_REDSTONE_OBSERVER_INPUT, 3))
+    Effect.runSync(currentChunkStore.setBlock(QA_REDSTONE_OBSERVER_INPUT, blockIdOf('dirt')))
     redstoneDirty = true
     return redstoneFixturesSnapshot()
   }
@@ -6910,10 +6927,10 @@ type MultiplayerInventorySelection = Readonly<{
     resetSimState(true)
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add('oak_log', 3))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 0))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     selectedHotbarIndex = 0
     inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
     inventoryInteraction.reset()
@@ -6930,10 +6947,10 @@ type MultiplayerInventorySelection = Readonly<{
     resetSimState(true)
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add('crafting_table', 1))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 0))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
-    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, 2))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     selectedHotbarIndex = 0
     inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
     inventoryInteraction.reset()
@@ -6984,7 +7001,7 @@ type MultiplayerInventorySelection = Readonly<{
     const location = { dimension, position: QA_FARM_CROP_BLOCK } as CropLocation
     const ripe = Effect.runSync(crops.matureYieldsAt(location)) !== null
     if (!ripe) return gameplaySnapshot()
-    Effect.runSync(currentChunkStore.setBlock(QA_FARM_CROP_BLOCK, 0))
+    Effect.runSync(currentChunkStore.setBlock(QA_FARM_CROP_BLOCK, blockIdOf('air')))
     Effect.runSync(crops.remove(location))
     nextItemUseRequestId += 1
     const requestId = `item-use-${String(nextItemUseRequestId)}`
@@ -7022,7 +7039,7 @@ type MultiplayerInventorySelection = Readonly<{
     }
     for (const position of QA_ENVIRONMENT_CONTACT_CELLS) {
       Effect.runSync(currentChunkStore.setBlock(position, air))
-      Effect.runSync(currentChunkStore.setBlock({ ...position, y: position.y + 1 }, air))
+      Effect.runSync(currentChunkStore.setBlock(blockPosition(position.x, position.y + 1, position.z), air))
     }
 
     if (kind === 'cactus') {
@@ -7061,9 +7078,9 @@ type MultiplayerInventorySelection = Readonly<{
       for (let zOffset = -1; zOffset <= 1; zOffset += 1) {
         const x = QA_FALL_CENTER.x + xOffset
         const z = QA_FALL_CENTER.z + zOffset
-        Effect.runSync(currentChunkStore.setBlock({ x, y: QA_FALL_FLOOR_Y, z }, stone))
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, QA_FALL_FLOOR_Y, z), stone))
         for (let y = QA_FALL_FLOOR_Y + 1; y <= QA_FALL_START_Y.lethal + 2; y += 1) {
-          Effect.runSync(currentChunkStore.setBlock({ x, y, z }, air))
+          Effect.runSync(currentChunkStore.setBlock(blockPosition(x, y, z), air))
         }
       }
     }
@@ -7160,15 +7177,14 @@ type MultiplayerInventorySelection = Readonly<{
     // shifting eye height enough to move the bed outside
     // targetedRightClickRoute's raycast before the QA click landed.
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
-    Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
-    Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(blockPosition(8, 65, 10), blockIdOf('air')))
+    Effect.runSync(currentChunkStore.setBlock(blockPosition(8, 66, 10), blockIdOf('air')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('bed')))
-    Effect.runSync(currentChunkStore.setBlock({
-      x: QA_IGNITION_HIT_BLOCK.x,
-      y: QA_IGNITION_HIT_BLOCK.y - 1,
-      z: QA_IGNITION_HIT_BLOCK.z,
-    }, blockIdOf('stone')))
+    Effect.runSync(currentChunkStore.setBlock(
+      blockPosition(QA_IGNITION_HIT_BLOCK.x, QA_IGNITION_HIT_BLOCK.y - 1, QA_IGNITION_HIT_BLOCK.z),
+      blockIdOf('stone'),
+    ))
     document.body.removeAttribute('data-bed-explosion-request')
     document.body.removeAttribute('data-sleep-result')
     markSessionDirty()
@@ -7193,7 +7209,7 @@ type MultiplayerInventorySelection = Readonly<{
     Effect.runSync(world.inventory.add('arrow', 8))
     for (let x = 6; x <= 10; x += 1) {
       for (let y = 62; y <= 69; y += 1) {
-        Effect.runSync(currentChunkStore.setBlock({ x, y, z: 2 }, blockIdOf('stone')))
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, y, 2), blockIdOf('stone')))
       }
     }
     selectedHotbarIndex = 0
@@ -7493,7 +7509,7 @@ type MultiplayerInventorySelection = Readonly<{
     endPortalFrames.clear()
     endPortalComplete = false
     for (const offset of END_PORTAL_FRAME_OFFSETS) {
-      const position = { x: center.x + offset.dx, y: center.y, z: center.z + offset.dz }
+      const position = blockPosition(center.x + offset.dx, center.y, center.z + offset.dz)
       const isFinal = offset === finalOffset
       Effect.runSync(currentChunkStore.setBlock(
         position,
@@ -7617,7 +7633,7 @@ type MultiplayerInventorySelection = Readonly<{
     alignActiveDimension('overworld')
     Effect.runSync(streamAround(currentChunkContext, center.x, center.z))
     const targetOffset = END_PORTAL_FRAME_OFFSETS.find((offset) => {
-      const position = { x: center.x + offset.dx, y: center.y, z: center.z + offset.dz }
+      const position = blockPosition(center.x + offset.dx, center.y, center.z + offset.dz)
       const reading = Effect.runSync(currentChunkStore.getBlock(position))
       return reading._tag === 'Block' && reading.block === END_PORTAL_BLOCK.FRAME_EMPTY
     })
@@ -7764,7 +7780,7 @@ type MultiplayerInventorySelection = Readonly<{
         setPose: (targetBlock?: number) => {
           Effect.runSync(playerApi.restore(QA_POSE, Effect.runSync(playerApi.dimension)))
           if (targetBlock !== undefined) {
-            Effect.runSync(currentChunkStore.setBlock(KNOWN_TARGET_BLOCK, targetBlock))
+            Effect.runSync(currentChunkStore.setBlock(KNOWN_TARGET_BLOCK, BlockId(targetBlock)))
           }
           resetSimState(true)
           markSessionDirty()
@@ -7775,10 +7791,10 @@ type MultiplayerInventorySelection = Readonly<{
           Effect.runSync(streamAround(currentChunkContext, QA_POSE.feetPosition.x, QA_POSE.feetPosition.z))
           for (let x = -16; x <= 32; x += 1) {
             for (let z = -16; z <= 32; z += 1) {
-              Effect.runSync(currentChunkStore.setBlock({ x, y: 62, z }, blockIdOf('stone')))
-              Effect.runSync(currentChunkStore.setBlock({ x, y: 63, z }, blockIdOf('stone')))
+              Effect.runSync(currentChunkStore.setBlock(blockPosition(x, 62, z), blockIdOf('stone')))
+              Effect.runSync(currentChunkStore.setBlock(blockPosition(x, 63, z), blockIdOf('stone')))
               for (let y = 64; y <= 68; y += 1) {
-                Effect.runSync(currentChunkStore.setBlock({ x, y, z }, blockIdOf('air')))
+                Effect.runSync(currentChunkStore.setBlock(blockPosition(x, y, z), blockIdOf('air')))
               }
             }
           }
@@ -7804,7 +7820,7 @@ type MultiplayerInventorySelection = Readonly<{
           resetSimState(true)
           Effect.runSync(world.inventory.reset)
           Effect.runSync(world.inventory.add('stone', 2))
-          Effect.runSync(currentChunkStore.setBlock(KNOWN_TARGET_BLOCK, 2))
+          Effect.runSync(currentChunkStore.setBlock(KNOWN_TARGET_BLOCK, blockIdOf('stone')))
           selectedHotbarIndex = 0
           inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
           inventoryInteraction.reset()
@@ -7817,9 +7833,9 @@ type MultiplayerInventorySelection = Readonly<{
           resetSimState(true)
           Effect.runSync(world.inventory.reset)
           Effect.runSync(world.inventory.add('stone', 2))
-          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, 2))
-          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 0))
-          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, 2))
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('stone')))
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
           selectedHotbarIndex = 0
           inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
           inventoryInteraction.reset()
@@ -7975,8 +7991,8 @@ type MultiplayerInventorySelection = Readonly<{
         seedZombiePursuitEncounter: () => {
           respawnPlayer()
           Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
-          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
-          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
+          Effect.runSync(currentChunkStore.setBlock(blockPosition(8, 65, 10), blockIdOf('air')))
+          Effect.runSync(currentChunkStore.setBlock(blockPosition(8, 66, 10), blockIdOf('air')))
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
           const currentPose = Effect.runSync(playerApi.pose)
@@ -7988,9 +8004,9 @@ type MultiplayerInventorySelection = Readonly<{
               z: currentPose.feetPosition.z,
             },
             candidate: {
-              groundBlock: 2,
-              footBlock: 0,
-              headBlock: 0,
+              groundBlock: blockIdOf('stone'),
+              footBlock: blockIdOf('air'),
+              headBlock: blockIdOf('air'),
               blockLight: 0,
               timeOfDay: 0,
               distanceToPlayerBlocksXZ: 16,
@@ -8007,8 +8023,8 @@ type MultiplayerInventorySelection = Readonly<{
           Effect.runSync(world.inventory.add('torch', 8))
           Effect.runSync(world.inventory.add('oak_planks', 4))
           Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
-          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 65, z: 10 }, blockIdOf('air')))
-          Effect.runSync(currentChunkStore.setBlock({ x: 8, y: 66, z: 10 }, blockIdOf('air')))
+          Effect.runSync(currentChunkStore.setBlock(blockPosition(8, 65, 10), blockIdOf('air')))
+          Effect.runSync(currentChunkStore.setBlock(blockPosition(8, 66, 10), blockIdOf('air')))
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
           const currentPose = Effect.runSync(playerApi.pose)
@@ -8020,9 +8036,9 @@ type MultiplayerInventorySelection = Readonly<{
               z: currentPose.feetPosition.z,
             },
             candidate: {
-              groundBlock: 2,
-              footBlock: 0,
-              headBlock: 0,
+              groundBlock: blockIdOf('stone'),
+              footBlock: blockIdOf('air'),
+              headBlock: blockIdOf('air'),
               blockLight: 0,
               timeOfDay: 0,
               distanceToPlayerBlocksXZ: 16,
@@ -8052,7 +8068,7 @@ type MultiplayerInventorySelection = Readonly<{
         seedFlintAndSteelIgnition: () => seedIgnitionEncounter('flint_and_steel'),
         seedRefusedFireChargeIgnition: () => {
           seedIgnitionEncounter('fire_charge')
-          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, 2))
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('stone')))
           nextItemUseRequestId += 1
           const requestId = `item-use-${String(nextItemUseRequestId)}`
           Effect.runSync(
@@ -8090,11 +8106,11 @@ type MultiplayerInventorySelection = Readonly<{
           }
           const eyeY = Math.floor(currentPose.feetPosition.y + EYE_LEVEL_OFFSET)
           for (let zOffset = 0; zOffset >= -3; zOffset -= 1) {
-            Effect.runSync(currentChunkStore.setBlock({
-              x: Math.floor(currentPose.feetPosition.x),
-              y: eyeY,
-              z: Math.floor(currentPose.feetPosition.z) + zOffset,
-            }, 0))
+            Effect.runSync(currentChunkStore.setBlock(blockPosition(
+              Math.floor(currentPose.feetPosition.x),
+              eyeY,
+              Math.floor(currentPose.feetPosition.z) + zOffset,
+            ), blockIdOf('air')))
           }
           Effect.runSync(
             world.entities.spawn({
@@ -8438,7 +8454,7 @@ type MultiplayerInventorySelection = Readonly<{
           setFishingResult('cancelled')
         } else {
           const fishingContext = getOrCreateDimensionChunkContext(fishingWater.dimension)
-          const water = Effect.runSync(fishingContext.chunkStore.getBlock(fishingWater.position))
+          const water = Effect.runSync(fishingContext.chunkStore.getBlock(blockPosition(fishingWater.position.x, fishingWater.position.y, fishingWater.position.z)))
           const advanced = advanceFishing(fishingSession, deltaSecs, {
             hasWater: water._tag === 'Block' && blockTypeOfId(water.block) === 'water',
           })
@@ -8679,7 +8695,7 @@ type MultiplayerInventorySelection = Readonly<{
       for (const pending of pendingBlockBreakConfirmations.splice(0)) {
         const context = dimensionContexts.get(pending.dimension)
         if (context === undefined) continue
-        const reading = Effect.runSync(context.chunkStore.getBlock(pending.position))
+        const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(pending.position.x, pending.position.y, pending.position.z)))
         const nextBlockBreakCounters = observeBlockBreakCompletion(
           blockBreakCounters,
           pending.blockId,
@@ -8776,7 +8792,7 @@ type MultiplayerInventorySelection = Readonly<{
       for (const pending of pendingMiningToolDamage.splice(0)) {
         const context = dimensionContexts.get(pending.dimension)
         if (context === undefined) continue
-        const reading = Effect.runSync(context.chunkStore.getBlock(pending.position))
+        const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(pending.position.x, pending.position.y, pending.position.z)))
         if (reading._tag !== 'Block' || reading.block === pending.blockId) continue
 
         const selected = Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]
@@ -9178,11 +9194,11 @@ type MultiplayerInventorySelection = Readonly<{
           postFramePose.feetPosition.x - poseBeforeFrame.feetPosition.x,
           postFramePose.feetPosition.z - poseBeforeFrame.feetPosition.z,
         )
-        const footstepBlock = Effect.runSync(currentChunkStore.getBlock({
-          x: Math.floor(postFramePose.feetPosition.x),
-          y: Math.floor(postFramePose.feetPosition.y - 0.1),
-          z: Math.floor(postFramePose.feetPosition.z),
-        }))
+        const footstepBlock = Effect.runSync(currentChunkStore.getBlock(blockPosition(
+          Math.floor(postFramePose.feetPosition.x),
+          Math.floor(postFramePose.feetPosition.y - 0.1),
+          Math.floor(postFramePose.feetPosition.z),
+        )))
         footstepRuntimeState = advanceFootstepRuntime(footstepRuntimeState, {
           grounded: groundedAfterFrame && !swimmingState.active,
           horizontalDistance,
@@ -9356,7 +9372,7 @@ type MultiplayerInventorySelection = Readonly<{
               : null
             let target: Parameters<typeof advanceMiningProgress>[0]['target'] = null
             if (resolution._tag === 'Block') {
-              const reading = Effect.runSync(currentChunkStore.getBlock(resolution.target.position))
+              const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(resolution.target.position.x, resolution.target.position.y, resolution.target.position.z)))
               if (reading._tag === 'Block') {
                 const position = {
                   x: Math.floor(resolution.target.position.x),
@@ -9394,7 +9410,7 @@ type MultiplayerInventorySelection = Readonly<{
               } else if (target.blockId === POTATO_CROP_BLOCK_ID) {
                 const location = { dimension, position: target.position }
                 const ripe = Effect.runSync(crops.matureYieldsAt(location)) !== null
-                Effect.runSync(currentChunkStore.setBlock(target.position, 0))
+                Effect.runSync(currentChunkStore.setBlock(target.position, blockIdOf('air')))
                 Effect.runSync(crops.remove(location))
                 nextItemUseRequestId += 1
                 const requestId = `item-use-${String(nextItemUseRequestId)}`
@@ -9619,7 +9635,9 @@ type MultiplayerInventorySelection = Readonly<{
                 {
                   activeDimension: dimension,
                   targetDimension: dimension,
-                  position: specialSelected.item === 'bucket' ? target.position : target.adjacentPosition,
+                  position: (specialSelected.item === 'bucket'
+                    ? blockPosition(target.position.x, target.position.y, target.position.z)
+                    : blockPosition(target.adjacentPosition.x, target.adjacentPosition.y, target.adjacentPosition.z)),
                   heldItem: specialSelected.item,
                 },
               ))
@@ -9704,11 +9722,11 @@ type MultiplayerInventorySelection = Readonly<{
         } else if (route?.kind === 'enchantingTable') {
           setInventoryOpen(true, 'enchanting')
         } else if (route?.kind === 'bed') {
-          const bedPosition = {
-            x: Math.floor(route.at.x),
-            y: Math.floor(route.at.y),
-            z: Math.floor(route.at.z),
-          }
+          const bedPosition = blockPosition(
+            Math.floor(route.at.x),
+            Math.floor(route.at.y),
+            Math.floor(route.at.z),
+          )
           const currentDimension = Effect.runSync(playerApi.dimension)
           if (currentDimension !== 'overworld' && multiplayer !== undefined) {
             document.body.setAttribute('data-sleep-result', 'unavailable')
@@ -9864,7 +9882,7 @@ type MultiplayerInventorySelection = Readonly<{
             ) {
               const blockTarget = Effect.runSync(resolveTargetedBlock(currentChunkStore, playerApi))
               const blockReading = Option.isSome(blockTarget)
-                ? Effect.runSync(currentChunkStore.getBlock(blockTarget.value.position))
+                ? Effect.runSync(currentChunkStore.getBlock(blockPosition(blockTarget.value.position.x, blockTarget.value.position.y, blockTarget.value.position.z)))
                 : undefined
               if (
                 multiplayer !== undefined &&
@@ -9940,7 +9958,7 @@ type MultiplayerInventorySelection = Readonly<{
                   ),
                 )
                 if (Option.isSome(target)) {
-                  const reading = Effect.runSync(currentChunkStore.getBlock(target.value.position))
+                  const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(target.value.position.x, target.value.position.y, target.value.position.z)))
                   if (reading._tag === 'Block' && reading.block === 76) {
                     pendingBlockUses.set(requestId, {
                       dimension: currentChunkContext.dimension,
@@ -10086,7 +10104,7 @@ type MultiplayerInventorySelection = Readonly<{
             )
             if (match !== undefined && context !== undefined) {
               for (const position of match.consumedBlocks) {
-                Effect.runSync(context.chunkStore.setBlock(blockPosition(position.x, position.y, position.z), 0))
+                Effect.runSync(context.chunkStore.setBlock(blockPosition(position.x, position.y, position.z), blockIdOf('air')))
               }
               witherRuntimeState = summonRuntimeWither(
                 witherRuntimeState,
@@ -10129,7 +10147,14 @@ type MultiplayerInventorySelection = Readonly<{
         for (const transition of Effect.runSync(redstoneRuntime.drainLampTransitions)) {
           const context = dimensionContexts.get(transition.dimension as Dimension)
           if (context === undefined) continue
-          Effect.runSync(context.chunkStore.setBlock(transition.position, transition.lit ? 80 : 79))
+          const lampPosition = asBlockPosition(transition.position)
+          Effect.runSync(context.chunkStore.setBlock(lampPosition, transition.lit ? blockIdOf('redstone_lamp_lit') : blockIdOf('redstone_lamp')))
+          const confirmedRead = Effect.runSync(context.chunkStore.getBlock(lampPosition))
+          const transitionKey = leverKeyOf({ dimension: transition.dimension as Dimension, position: transition.position })
+          redstoneLampTransitionLog.set(transitionKey, [
+            ...(redstoneLampTransitionLog.get(transitionKey) ?? []),
+            { lit: transition.lit, writtenBlock: confirmedRead._tag === 'Block' ? confirmedRead.block : null },
+          ])
           markSessionDirty()
         }
         for (const transition of Effect.runSync(redstoneRuntime.drainPistonTransitions)) {
@@ -10158,7 +10183,7 @@ type MultiplayerInventorySelection = Readonly<{
             position: transition.position,
           })
           if (transition.kind === 'door') {
-            Effect.runSync(context.chunkStore.setBlock(transition.position, transition.powered ? 107 : 106))
+            Effect.runSync(context.chunkStore.setBlock(asBlockPosition(transition.position), transition.powered ? blockIdOf('door_open') : blockIdOf('door')))
           } else if (transition.kind === 'powered-rail') {
             if (transition.powered) poweredRails.add(key)
             else poweredRails.delete(key)
@@ -10214,7 +10239,7 @@ type MultiplayerInventorySelection = Readonly<{
         connectedSurvivalPlayers,
         (location) => {
           const context = getOrCreateDimensionChunkContext(location.dimension)
-          const reading = Effect.runSync(context.chunkStore.getBlock(location.bedPosition))
+          const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(location.bedPosition.x, location.bedPosition.y, location.bedPosition.z)))
           return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'bed'
         },
       )
@@ -10423,7 +10448,7 @@ type MultiplayerInventorySelection = Readonly<{
               const portalY = 64
               for (let x = -1; x <= 1; x += 1) {
                 for (let z = -1; z <= 1; z += 1) {
-                  Effect.runSync(currentChunkStore.setBlock({ x, y: portalY, z }, END_PORTAL_BLOCK.PORTAL))
+                  Effect.runSync(currentChunkStore.setBlock(blockPosition(x, portalY, z), END_PORTAL_BLOCK.PORTAL))
                 }
               }
               exitPortalMaterialized = true
@@ -10487,7 +10512,7 @@ type MultiplayerInventorySelection = Readonly<{
           || multiplayerInboundStage === undefined
           || multiplayerOutboundStage === undefined
         ) return
-        Effect.runSync(multiplayerInboundStage.run(DeltaTimeSecs(0)))
+        Effect.runSync(multiplayerInboundStage.run(DeltaTimeSecs(0)).pipe(Effect.provide(BrowserClockLayer)))
         drainMultiplayerInbound()
         drainCraftingInbound()
         drainBrewingInbound()
@@ -10496,7 +10521,7 @@ type MultiplayerInventorySelection = Readonly<{
         drainPlayerDamageInbound()
         syncRenderedEntities()
         enqueueMultiplayerPlayerMove(performance.now() / 1_000)
-        Effect.runSync(multiplayerOutboundStage.run(DeltaTimeSecs(0)))
+        Effect.runSync(multiplayerOutboundStage.run(DeltaTimeSecs(0)).pipe(Effect.provide(BrowserClockLayer)))
       }, 100)
       surface.onCleanup(() => {
         window.clearInterval(hiddenNetworkPump)

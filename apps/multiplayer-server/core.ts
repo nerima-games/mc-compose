@@ -88,7 +88,7 @@ import {
   enderPearlDisplacement,
   reelFishing,
   ENDERMAN_TELEPORT_ATTEMPTS,
-  ENDERMAN_TELEPORT_MAX_BLOCKS,
+  endermanTeleportCandidateCells,
   endermanTeleportUrge,
   furnaceAdvanceChanged,
   FALLING_BLOCK_MOVES_PER_TICK,
@@ -433,9 +433,6 @@ const creeperWireState = (fuse: CreeperFuse, state: MobWireState): MobWireState 
 
 const creeperDeltaTime = (elapsedSecs: number): Parameters<typeof stepCreeperFuse>[2] =>
   elapsedSecs as Parameters<typeof stepCreeperFuse>[2]
-
-const endermanTeleportOffset = (roll: number): number =>
-  Math.max(0, Math.min(1, roll)) * ENDERMAN_TELEPORT_MAX_BLOCKS * 2 - ENDERMAN_TELEPORT_MAX_BLOCKS
 
 const mobExperienceReward = (kind: ReturnType<typeof supportedMobKind>): number => {
   if (kind === ZOMBIE_KIND) return ZOMBIE_XP_REWARD
@@ -3471,6 +3468,10 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         if (message.world !== worldId) return { accepted: false, reason: 'wrong-world' }
         sendMessage(client, authoritativeSnapshot())
         return { accepted: true, message }
+      // Everything below is a tag a legitimate client never sends here: broadcast-only
+      // deltas/snapshots/results, or — for anvil/crafting/enchanting/brewing/damage/wither/
+      // dragon — a command whose own wire format is decoded earlier in this function, so
+      // reaching this generic decode with one of those tags means the frame didn't match it.
       case 'WorldInfo':
       case 'WorldSnapshot':
       case 'RealmTransferSnapshot':
@@ -3490,6 +3491,34 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       case 'EyeOfEnderThrown':
       case 'AuthoritativeCommandAccepted':
       case 'AuthoritativeCommandRejected':
+      case 'AnvilCommand':
+      case 'AnvilCommandAccepted':
+      case 'AnvilCommandRejected':
+      case 'PlayerAnvilNamesDelta':
+      case 'CraftingCommand':
+      case 'CraftingCommandAccepted':
+      case 'CraftingCommandRejected':
+      case 'PlayerDamageCommand':
+      case 'PlayerDamageCommandAccepted':
+      case 'PlayerDamageCommandRejected':
+      case 'BrewingCommand':
+      case 'BrewingCommandAccepted':
+      case 'BrewingCommandRejected':
+      case 'BrewingStandDelta':
+      case 'PlayerStatusEffectsDelta':
+      case 'EnchantingCommand':
+      case 'EnchantingCommandAccepted':
+      case 'EnchantingCommandRejected':
+      case 'PlayerEnchantmentsDelta':
+      case 'DamageEnderDragonCommand':
+      case 'DamageEnderDragonCommandAccepted':
+      case 'DamageEnderDragonCommandRejected':
+      case 'EnderDragonSnapshotDelta':
+      case 'SummonWitherCommand':
+      case 'DamageWitherCommand':
+      case 'WitherCommandAccepted':
+      case 'WitherCommandRejected':
+      case 'WitherSnapshotDelta':
         return { accepted: false, reason: 'identity-spoof' }
     }
   }
@@ -4126,35 +4155,31 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
                 { length: ENDERMAN_TELEPORT_ATTEMPTS * 2 },
                 (_, index) => deterministicRoll(`${String(options.seed)}:${String(revision)}:${String(entity.entityId)}:enderman:teleport:${String(index)}`),
               )
-              const cells: EndermanTeleportCell[] = []
-              for (let attempt = 0; attempt < ENDERMAN_TELEPORT_ATTEMPTS; attempt += 1) {
-                const xRoll = rolls[attempt * 2]
-                const zRoll = rolls[attempt * 2 + 1]
-                if (xRoll === undefined || zRoll === undefined) continue
-                const destination = {
-                  x: anchor.x + endermanTeleportOffset(xRoll),
-                  y: entity.at.y,
-                  z: anchor.z + endermanTeleportOffset(zRoll),
-                }
-                for (const position of [
-                  { ...destination, y: destination.y - 1 },
-                  destination,
-                  { ...destination, y: destination.y + 1 },
-                ]) {
+              // The candidate positions must come from mx-gameplay's own
+              // `endermanTeleportCandidateCells`, not a hand-rolled offset loop here:
+              // `resolveSafeEndermanTeleport` derives its own candidates from `anchor`
+              // and `rolls` internally, and a cell array built from different positions
+              // never matches what it looks up, so every candidate reads as unloaded and
+              // the teleport is always refused.
+              const cells: EndermanTeleportCell[] = endermanTeleportCandidateCells(entity.at, anchor, rolls)
+                .filter((position) => isInBounds({
+                  x: Math.floor(position.x),
+                  y: Math.floor(position.y),
+                  z: Math.floor(position.z),
+                }))
+                .map((position) => {
                   const blockPosition = {
                     x: Math.floor(position.x),
                     y: Math.floor(position.y),
                     z: Math.floor(position.z),
                   }
-                  if (!isInBounds(blockPosition)) continue
                   const block = blockAt(blockPosition)
-                  cells.push({
+                  return {
                     position,
                     block: block ?? 'air',
                     solid: block !== null && options.passableBlocks?.has(block) !== true,
-                  })
-                }
-              }
+                  }
+                })
               at = resolveSafeEndermanTeleport(entity.at, anchor, rolls, cells)
             }
           }
