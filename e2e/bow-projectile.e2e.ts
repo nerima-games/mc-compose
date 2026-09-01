@@ -274,7 +274,7 @@ const stallEachAnimationFrame = async (page: Page, stallMs: number): Promise<voi
 // collision computes the crossing analytically — and that the real error
 // scales with flight time. That correction is worth landing, but it is a
 // different problem from the aim, and it cannot un-park this test.
-test.fixme('charges, fires, and embeds an arrow while settling inventory wear', async ({ page }) => {
+test('charges, fires, and embeds an arrow while settling inventory wear', async ({ page }) => {
   const consoleErrors: Array<string> = []
   const pageErrors: Array<string> = []
   page.on('console', (message: ConsoleMessage) => {
