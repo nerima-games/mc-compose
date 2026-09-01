@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -29,13 +30,35 @@ test('generated world lighting reaches rendered chunk vertex colors', async ({ p
       { key: QA_GLOBAL_KEY, command: 'render.snapshotLighting' },
     )
 
+  const snapshotLightingWithFrames = (): Promise<{ frames: number; value: LightingSnapshot }> =>
+    page.evaluate(
+      async ({ key, command }) => {
+        const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+          | Record<string, () => unknown>
+          | undefined
+        const operation = surface?.[command]
+        if (operation === undefined) throw new Error(`missing QA command: ${command}`)
+        return {
+          frames: Number(document.body.getAttribute('data-frames')),
+          value: (await operation()) as LightingSnapshot,
+        }
+      },
+      { key: QA_GLOBAL_KEY, command: 'render.snapshotLighting' },
+    )
+
   // `syncWorld` (mc-render's application/world-sync.ts) drains one dirty batch
   // per call and is driven off the RAF loop, so the spawn chunks it meshes are
   // only as fresh as the last-called frame. `framesDrawn` counts RAF ticks, not
   // drained batches, so waiting for frames > 1 does not guarantee a batch
-  // containing the spawn chunks has been drained yet. Poll the actual condition
-  // instead of a proxy for it.
-  await expect.poll(async () => (await snapshotLighting()).resolvedChunks).toBeGreaterThan(0)
+  // containing the spawn chunks has been drained yet — poll the actual
+  // condition (resolvedChunks) instead of a proxy for it, bounded by
+  // simulated progress rather than wall-clock — see waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    snapshotLightingWithFrames,
+    (current) => current.resolvedChunks > 0,
+    { description: 'chunk lighting resolution' },
+  )
 
   const snapshot = await snapshotLighting()
 

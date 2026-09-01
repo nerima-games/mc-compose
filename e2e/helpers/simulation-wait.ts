@@ -23,13 +23,21 @@ import type { Page } from '@playwright/test'
 
 const DEFAULT_FRAME_STALL_TIMEOUT_MS = 5_000
 const DEFAULT_BACKSTOP_MS = 60_000
-const POLL_INTERVAL_MS = 50
+const DEFAULT_POLL_INTERVALS_MS: ReadonlyArray<number> = [50]
 
 export type SimulationRead<T> = { readonly frames: number; readonly value: T }
 
 export type WaitForSimulationOptions = {
   readonly frameStallTimeoutMs?: number
   readonly backstopMs?: number
+  /**
+   * Cadence between reads, e.g. `[10, 20, 50]` to poll tightly at first and
+   * back off — the last entry repeats once exhausted. Needed when a
+   * transient state is narrow enough that the default 50ms cadence could
+   * skip over it entirely (a projectile's brief 'flying' state before it
+   * embeds, an observer's ~250ms redstone pulse). Defaults to a flat 50ms.
+   */
+  readonly pollIntervalsMs?: ReadonlyArray<number>
   readonly description: string
 }
 
@@ -41,12 +49,14 @@ export const waitForSimulationProgress = async <T>(
 ): Promise<T> => {
   const frameStallTimeoutMs = options.frameStallTimeoutMs ?? DEFAULT_FRAME_STALL_TIMEOUT_MS
   const backstopMs = options.backstopMs ?? DEFAULT_BACKSTOP_MS
+  const pollIntervalsMs = options.pollIntervalsMs ?? DEFAULT_POLL_INTERVALS_MS
   const startedAt = Date.now()
   const deadline = startedAt + backstopMs
 
   let lastFrames = -1
   let lastFramesAdvancedAt = startedAt
   let lastValue: T | undefined
+  let pollCount = 0
 
   for (;;) {
     const { frames, value } = await read()
@@ -73,6 +83,8 @@ export const waitForSimulationProgress = async <T>(
       )
     }
 
-    await page.waitForTimeout(POLL_INTERVAL_MS)
+    const interval = pollIntervalsMs[Math.min(pollCount, pollIntervalsMs.length - 1)] ?? 50
+    pollCount += 1
+    await page.waitForTimeout(interval)
   }
 }

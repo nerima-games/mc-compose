@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const DATABASE_NAME = 'nerima-games-minecraft'
 const SESSION_ID = 'block-placement-persistence-e2e'
@@ -30,6 +31,19 @@ const callQa = <Result>(page: Page, command: string): Promise<Result> =>
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
+
+const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: GameplaySnapshot }> =>
+  page.evaluate(async () => {
+    const qa = (globalThis as unknown as Record<string, unknown>)['__NERIMA_GAMES_QA__'] as
+      | Record<string, () => unknown>
+      | undefined
+    const operation = qa?.['gameplay.snapshot']
+    if (operation === undefined) throw new Error('missing QA command: gameplay.snapshot')
+    return {
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: await operation() as GameplaySnapshot,
+    }
+  })
 
 const inventoryCount = (current: GameplaySnapshot, item: string): number =>
   current.inventory.slots.reduce(
@@ -79,18 +93,18 @@ test('places one survival block atomically and restores it across reload', async
   await grantPointerLock(page)
   await canvas.click({ button: 'right' })
 
-  await expect.poll(async () => {
-    const current = await snapshot(page)
-    return {
-      requests: Number(await canvas.getAttribute('data-placements-requested')),
-      block: current.ignitionTarget.block,
-      stone: inventoryCount(current, 'stone'),
-    }
-  }).toEqual({
-    requests: placementsBefore + 1,
-    block: STONE_BLOCK_ID,
-    stone: 1,
-  })
+  // Placement registers once the frame loop processes the click — see
+  // waitForSimulationProgress.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => (
+      current.ignitionTarget.block === STONE_BLOCK_ID
+      && inventoryCount(current, 'stone') === 1
+    ),
+    { description: 'survival block placement' },
+  )
+  expect(Number(await canvas.getAttribute('data-placements-requested'))).toBe(placementsBefore + 1)
 
   const placed = await snapshot(page)
   await callQa(page, 'persistence.flush')
