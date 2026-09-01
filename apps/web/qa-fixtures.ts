@@ -1,34 +1,36 @@
-type Cell = { readonly x: number; readonly y: number; readonly z: number }
-type Pose = { readonly feetPosition: Cell; readonly yawRadians: number; readonly pitchRadians: number }
+import { blockIdOf, blockPosition, type BlockId, type BlockPosition } from '@nerima-games/mc-kernel'
 
-export const FARMLAND_BLOCK_ID = 49
-export const POTATO_CROP_BLOCK_ID = 72
-export const OBSIDIAN_BLOCK_ID = 40
-export const NETHER_PORTAL_BLOCK_ID = 118
+type Cell = BlockPosition
+type Pose = { readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }; readonly yawRadians: number; readonly pitchRadians: number }
 
-export const KNOWN_TARGET_BLOCK = { x: 8, y: 63, z: 8 } as const
-export const QA_FARM_CROP_BLOCK = { x: 8, y: 64, z: 8 } as const
-export const QA_IGNITION_HIT_BLOCK = { x: 8, y: 66, z: 8 } as const
-export const QA_IGNITION_CELL = { x: 8, y: 66, z: 9 } as const
-export const QA_IGNITION_SUPPORT_BLOCK = { x: 8, y: 65, z: 9 } as const
-export const QA_IGNITION_FLOOR_BLOCK = { x: 8, y: 64, z: 10 } as const
-export const QA_PISTON = { x: 8, y: 66, z: 8 } as const
-export const QA_PISTON_LEVER = { x: 8, y: 66, z: 9 } as const
-export const QA_PISTON_NEAR = { x: 8, y: 66, z: 7 } as const
-export const QA_PISTON_FAR = { x: 8, y: 66, z: 6 } as const
-export const QA_REDSTONE_BUTTON = { x: 8, y: 66, z: 9 } as const
-export const QA_REDSTONE_REPEATER = { x: 8, y: 66, z: 8 } as const
-export const QA_REDSTONE_LAMP = { x: 8, y: 66, z: 7 } as const
-export const QA_REDSTONE_BRANCH_BUTTON = { x: 12, y: 66, z: 9 } as const
-export const QA_REDSTONE_BRANCH_WIRE = { x: 12, y: 66, z: 8 } as const
-export const QA_REDSTONE_DOOR = { x: 11, y: 66, z: 8 } as const
-export const QA_REDSTONE_RAIL = { x: 13, y: 66, z: 8 } as const
-export const QA_REDSTONE_DISPENSER = { x: 12, y: 67, z: 8 } as const
-export const QA_REDSTONE_HOPPER = { x: 12, y: 65, z: 8 } as const
-export const QA_REDSTONE_OBSERVER = { x: 16, y: 66, z: 8 } as const
-export const QA_REDSTONE_OBSERVER_INPUT = { x: 16, y: 66, z: 9 } as const
-export const QA_REDSTONE_OBSERVER_LAMP = { x: 16, y: 66, z: 7 } as const
-export const QA_REDSTONE_COMPARATOR = { x: 20, y: 66, z: 8 } as const
+export const FARMLAND_BLOCK_ID: BlockId = blockIdOf('farmland')
+export const POTATO_CROP_BLOCK_ID: BlockId = blockIdOf('potato_crop')
+export const OBSIDIAN_BLOCK_ID: BlockId = blockIdOf('obsidian')
+export const NETHER_PORTAL_BLOCK_ID: BlockId = blockIdOf('nether_portal')
+
+export const KNOWN_TARGET_BLOCK: Cell = blockPosition(8, 63, 8)
+export const QA_FARM_CROP_BLOCK: Cell = blockPosition(8, 64, 8)
+export const QA_IGNITION_HIT_BLOCK: Cell = blockPosition(8, 66, 8)
+export const QA_IGNITION_CELL: Cell = blockPosition(8, 66, 9)
+export const QA_IGNITION_SUPPORT_BLOCK: Cell = blockPosition(8, 65, 9)
+export const QA_IGNITION_FLOOR_BLOCK: Cell = blockPosition(8, 64, 10)
+export const QA_PISTON: Cell = blockPosition(8, 66, 8)
+export const QA_PISTON_LEVER: Cell = blockPosition(8, 66, 9)
+export const QA_PISTON_NEAR: Cell = blockPosition(8, 66, 7)
+export const QA_PISTON_FAR: Cell = blockPosition(8, 66, 6)
+export const QA_REDSTONE_BUTTON: Cell = blockPosition(8, 66, 9)
+export const QA_REDSTONE_REPEATER: Cell = blockPosition(8, 66, 8)
+export const QA_REDSTONE_LAMP: Cell = blockPosition(8, 66, 7)
+export const QA_REDSTONE_BRANCH_BUTTON: Cell = blockPosition(12, 66, 9)
+export const QA_REDSTONE_BRANCH_WIRE: Cell = blockPosition(12, 66, 8)
+export const QA_REDSTONE_DOOR: Cell = blockPosition(11, 66, 8)
+export const QA_REDSTONE_RAIL: Cell = blockPosition(13, 66, 8)
+export const QA_REDSTONE_DISPENSER: Cell = blockPosition(12, 67, 8)
+export const QA_REDSTONE_HOPPER: Cell = blockPosition(12, 65, 8)
+export const QA_REDSTONE_OBSERVER: Cell = blockPosition(16, 66, 8)
+export const QA_REDSTONE_OBSERVER_INPUT: Cell = blockPosition(16, 66, 9)
+export const QA_REDSTONE_OBSERVER_LAMP: Cell = blockPosition(16, 66, 7)
+export const QA_REDSTONE_COMPARATOR: Cell = blockPosition(20, 66, 8)
 
 export const QA_ENVIRONMENT_OVERLAP_POSE = {
   feetPosition: { x: 24.95, y: 65, z: 8.5 },
@@ -40,15 +42,13 @@ export const QA_CACTUS_APPROACH_POSE = {
   yawRadians: 0,
   pitchRadians: 0,
 } as const
-export const QA_ENVIRONMENT_CONTACT_CELLS = [
-  { x: 24, y: 65, z: 8 },
-  { x: 25, y: 65, z: 8 },
-] as const
-export const QA_ENVIRONMENT_FLOOR_CELLS: ReadonlyArray<Cell> = Array.from({ length: 4 }, (_, offset) => ({
-  x: 23 + offset,
-  y: 64,
-  z: 8,
-}))
+export const QA_ENVIRONMENT_CONTACT_CELLS: readonly [Cell, Cell] = [
+  blockPosition(24, 65, 8),
+  blockPosition(25, 65, 8),
+]
+export const QA_ENVIRONMENT_FLOOR_CELLS: ReadonlyArray<Cell> = Array.from({ length: 4 }, (_, offset) =>
+  blockPosition(23 + offset, 64, 8),
+)
 export const QA_FALL_CENTER = { x: 28, z: 8 } as const
 export const QA_FALL_FLOOR_Y = 64
 export const QA_FALL_START_Y = {
@@ -57,7 +57,7 @@ export const QA_FALL_START_Y = {
   lethal: 88,
 } as const
 
-export const QA_PORTAL_ANCHOR = { x: 120, y: 65, z: 8 } as const
+export const QA_PORTAL_ANCHOR: Cell = blockPosition(120, 65, 8)
 export const QA_PORTAL_POSE = {
   feetPosition: { x: 120.5, y: 65, z: 8.5 },
   yawRadians: 0,
@@ -65,29 +65,25 @@ export const QA_PORTAL_POSE = {
 } as const
 export const QA_PORTAL_LAYOUT: { readonly frame: ReadonlyArray<Cell>; readonly interior: ReadonlyArray<Cell> } = {
   frame: [
-    ...Array.from({ length: 4 }, (_, offset) => ({ x: 119 + offset, y: 64, z: 8 })),
-    ...Array.from({ length: 4 }, (_, offset) => ({ x: 119 + offset, y: 68, z: 8 })),
-    ...Array.from({ length: 3 }, (_, offset) => ({ x: 119, y: 65 + offset, z: 8 })),
-    ...Array.from({ length: 3 }, (_, offset) => ({ x: 122, y: 65 + offset, z: 8 })),
+    ...Array.from({ length: 4 }, (_, offset) => blockPosition(119 + offset, 64, 8)),
+    ...Array.from({ length: 4 }, (_, offset) => blockPosition(119 + offset, 68, 8)),
+    ...Array.from({ length: 3 }, (_, offset) => blockPosition(119, 65 + offset, 8)),
+    ...Array.from({ length: 3 }, (_, offset) => blockPosition(122, 65 + offset, 8)),
   ],
-  interior: Array.from({ length: 6 }, (_, index) => ({
-    x: 120 + (index % 2),
-    y: 65 + Math.floor(index / 2),
-    z: 8,
-  })),
+  interior: Array.from({ length: 6 }, (_, index) =>
+    blockPosition(120 + (index % 2), 65 + Math.floor(index / 2), 8),
+  ),
 }
 export const QA_IGNITION_PORTAL_LAYOUT: { readonly frame: ReadonlyArray<Cell>; readonly interior: ReadonlyArray<Cell> } = {
   frame: [
-    ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 65, z: 9 })),
-    ...Array.from({ length: 4 }, (_, offset) => ({ x: 7 + offset, y: 69, z: 9 })),
-    ...Array.from({ length: 3 }, (_, offset) => ({ x: 7, y: 66 + offset, z: 9 })),
-    ...Array.from({ length: 3 }, (_, offset) => ({ x: 10, y: 66 + offset, z: 9 })),
+    ...Array.from({ length: 4 }, (_, offset) => blockPosition(7 + offset, 65, 9)),
+    ...Array.from({ length: 4 }, (_, offset) => blockPosition(7 + offset, 69, 9)),
+    ...Array.from({ length: 3 }, (_, offset) => blockPosition(7, 66 + offset, 9)),
+    ...Array.from({ length: 3 }, (_, offset) => blockPosition(10, 66 + offset, 9)),
   ],
-  interior: Array.from({ length: 6 }, (_, index) => ({
-    x: 8 + (index % 2),
-    y: 66 + Math.floor(index / 2),
-    z: 9,
-  })),
+  interior: Array.from({ length: 6 }, (_, index) =>
+    blockPosition(8 + (index % 2), 66 + Math.floor(index / 2), 9),
+  ),
 }
 
 export const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
