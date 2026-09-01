@@ -6883,6 +6883,10 @@ type MultiplayerInventorySelection = Readonly<{
     const dimension = Effect.runSync(playerApi.dimension)
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, dimension))
     resetSimState(true)
+    // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file: fixtures
+    // that restore the player to QA_IGNITION_POSE without it leave the
+    // player free-falling for the whole encounter.
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add('stone', 1))
     selectedHotbarIndex = 0
@@ -7128,6 +7132,10 @@ type MultiplayerInventorySelection = Readonly<{
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
     alignActiveDimension('overworld')
     resetSimState(true)
+    // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file: fixtures
+    // that restore the player to QA_IGNITION_POSE without it leave the
+    // player free-falling for the whole encounter.
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add('flint_and_steel', 1))
     portalStates.delete(portalKeyOf({
@@ -7211,6 +7219,10 @@ type MultiplayerInventorySelection = Readonly<{
         QA_IGNITION_POSE.feetPosition.z,
       ),
     )
+    // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file: fixtures
+    // that restore the player to QA_IGNITION_POSE without it leave the
+    // player free-falling for the whole encounter.
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add('bow', 1))
     Effect.runSync(world.inventory.add('arrow', 8))
@@ -7357,6 +7369,10 @@ type MultiplayerInventorySelection = Readonly<{
     ))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+    // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file: fixtures
+    // that restore the player to QA_IGNITION_POSE without it leave the
+    // player free-falling for the whole encounter.
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     Effect.runSync(world.inventory.reset)
     Effect.runSync(world.inventory.add('diamond_pickaxe', 1))
     Effect.runSync(world.inventory.add('lapis_lazuli', 3))
@@ -7404,6 +7420,10 @@ type MultiplayerInventorySelection = Readonly<{
         QA_IGNITION_POSE.feetPosition.z,
       ),
     )
+    // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file: fixtures
+    // that restore the player to QA_IGNITION_POSE without it leave the
+    // player free-falling for the whole encounter.
+    Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('anvil')))
     setInventoryOpen(false)
     markSessionDirty()
@@ -7850,6 +7870,10 @@ type MultiplayerInventorySelection = Readonly<{
           Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_HIT_BLOCK, blockIdOf('stone')))
           Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_CELL, blockIdOf('air')))
           Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_SUPPORT_BLOCK, blockIdOf('stone')))
+          // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file:
+          // fixtures that restore the player to QA_IGNITION_POSE without it
+          // leave the player free-falling for the whole encounter.
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
           selectedHotbarIndex = 0
           inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
           inventoryInteraction.reset()
@@ -7881,6 +7905,10 @@ type MultiplayerInventorySelection = Readonly<{
         returnToCraftingTable: () => {
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
+          // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file:
+          // fixtures that restore the player to QA_IGNITION_POSE without it
+          // leave the player free-falling for the whole encounter.
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
           markSessionDirty()
           return gameplaySnapshot()
         },
@@ -7928,6 +7956,10 @@ type MultiplayerInventorySelection = Readonly<{
         preparePotatoEating: () => {
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
+          // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file:
+          // fixtures that restore the player to QA_IGNITION_POSE without it
+          // leave the player free-falling for the whole encounter.
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
           Effect.runSync(world.vitals.addExhaustion(36))
           markSessionDirty()
           return gameplaySnapshot()
@@ -8067,6 +8099,10 @@ type MultiplayerInventorySelection = Readonly<{
           respawnPlayer()
           Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
           resetSimState(true)
+          // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file:
+          // fixtures that restore the player to QA_IGNITION_POSE without it
+          // leave the player free-falling for the whole encounter.
+          Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
           Effect.runSync(world.inventory.reset)
           Effect.runSync(world.inventory.add('potato', 2))
           applyPlayerDamage({ amount: 4, cause: 'generic' })
