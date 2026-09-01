@@ -138,8 +138,15 @@ test.describe('brewing, effects, and experience', () => {
     await callQa(page, 'gameplay.seedMeleeDropEncounter')
     const experienceBefore = (await snapshot(page)).vitals.totalExperience
 
-    await grantPointerLock(page)
+    // Move the cursor BEFORE granting the synthetic lock. Once the lock flag is
+    // set, the input adapter accumulates every subsequent mouse movement as a
+    // look delta, and a cursor move made afterwards arrives as one large jump —
+    // enough to swing the aim off the target so a melee swing hits nothing.
+    // CI observed exactly that here: the mob survived the attack (one non-drop
+    // entity remaining where none was expected) while the same sequence passes
+    // locally, and every helper in this suite using this order has been reliable.
     await page.locator('#game-canvas').hover()
+    await grantPointerLock(page)
     await page.mouse.down({ button: 'left' })
     await page.waitForTimeout(250)
     await page.mouse.up({ button: 'left' })
