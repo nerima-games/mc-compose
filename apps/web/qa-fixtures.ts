@@ -31,6 +31,25 @@ export const QA_REDSTONE_OBSERVER: Cell = blockPosition(16, 66, 8)
 export const QA_REDSTONE_OBSERVER_INPUT: Cell = blockPosition(16, 66, 9)
 export const QA_REDSTONE_OBSERVER_LAMP: Cell = blockPosition(16, 66, 7)
 export const QA_REDSTONE_COMPARATOR: Cell = blockPosition(20, 66, 8)
+// Own lane at spawn's own z=10 row, walkable from QA_IGNITION_POSE by real
+// movement input — every other redstone fixture sits at z=7-9, targeted by
+// raycast rather than walked onto, so this lane avoids them entirely.
+//
+// The plate sits IN the walkway (replacing a floor tile) rather than stacked
+// on top of one. mc-compose's physics wiring collides every solid block as a
+// full cube — main.ts's `simPhysicsConfig` comment records that per-shape
+// registry collision (the real ~1/16-tall plate box mc-physics itself models)
+// is a deliberate later migration, not done yet — so a plate placed a block
+// above the approach floor is, today, a solid wall the player cannot step
+// onto by walking. Placing it flush with the floor is what real WASD input
+// can actually reach under the engine as it exists right now.
+export const QA_REDSTONE_PLATE_FLOOR: ReadonlyArray<Cell> = [
+  blockPosition(9, 64, 10),
+  blockPosition(11, 64, 10),
+]
+export const QA_REDSTONE_PLATE: Cell = blockPosition(10, 64, 10)
+export const QA_REDSTONE_PLATE_WIRE: Cell = blockPosition(10, 64, 11)
+export const QA_REDSTONE_PLATE_LAMP: Cell = blockPosition(10, 64, 12)
 
 export const QA_ENVIRONMENT_OVERLAP_POSE = {
   feetPosition: { x: 24.95, y: 65, z: 8.5 },
@@ -101,6 +120,7 @@ export const REDSTONE_PLACEMENT_ITEMS: ReadonlySet<string> = new Set([
   'piston',
   'powered_rail',
   'door',
+  'pressure_plate',
 ])
 
 export const QA_POSE: Pose = {

@@ -223,6 +223,10 @@ import {
   QA_REDSTONE_OBSERVER,
   QA_REDSTONE_OBSERVER_INPUT,
   QA_REDSTONE_OBSERVER_LAMP,
+  QA_REDSTONE_PLATE,
+  QA_REDSTONE_PLATE_FLOOR,
+  QA_REDSTONE_PLATE_LAMP,
+  QA_REDSTONE_PLATE_WIRE,
   QA_REDSTONE_RAIL,
   QA_REDSTONE_REPEATER,
   REDSTONE_PLACEMENT_ITEMS,
@@ -1767,6 +1771,19 @@ const bootGame = async (
   const observerInputs = new Map<string, number>()
   const observerPulses = new Map<string, number>()
   const poweredRails = new Set<string>()
+  // A plate's occupancy is a fact about entities, which mx-redstone deliberately
+  // does not own (see @nerima-games/mx-redstone's domain/pressure-plate.ts) —
+  // this host computes it from the player's AABB and hands the graph only the
+  // `active` bit a lever's own player-driven flag would carry. Cached here
+  // rather than recomputed inside syncRedstoneSnapshot because that scan only
+  // runs when `redstoneDirty`, and the player walking onto a plate does not by
+  // itself dirty anything; the per-frame check below is what notices the edge
+  // and requests the resync.
+  const pressurePlateOccupancy = new Map<string, {
+    readonly dimension: Dimension
+    readonly position: { readonly x: number; readonly y: number; readonly z: number }
+    readonly occupied: boolean
+  }>()
   // A drained lamp transition is a one-shot event; the QA surface needs a durable
   // record of it, not another live read of block state, because some pulses
   // (the observer's 2-tick / 0.2s window) are shorter than a single QA round trip.
@@ -2116,6 +2133,7 @@ const bootGame = async (
     const residents = Effect.runSync(snapshotResidentChunks(context.worldgenChunkStore))
     const components: Array<RedstoneComponentSnapshot> = []
     const observedLevers = new Set<string>()
+    const observedPlates = new Set<string>()
     for (const chunk of residents) {
       for (let lx = 0; lx < 16; lx += 1) {
         for (let lz = 0; lz < 16; lz += 1) {
@@ -2143,6 +2161,8 @@ const bootGame = async (
                           ? 'dropper'
                         : block === blockIdOf('hopper')
                           ? 'hopper'
+                          : block === blockIdOf('pressure_plate')
+                            ? 'pressure-plate'
                   : block === blockIdOf('piston')
                     ? 'piston'
                     : block === blockIdOf('powered_rail')
@@ -2216,6 +2236,16 @@ const bootGame = async (
                 outputTo: { x: position.x, y, z: position.z - 1 },
                 pulseTicks: 2,
               })
+            } else if (kind === 'pressure-plate') {
+              const key = leverKeyOf({ dimension: context.dimension, position })
+              observedPlates.add(key)
+              // Occupancy is set by the per-frame check below, keyed off the
+              // player's AABB rather than recomputed from this scan's stale
+              // pose — a resync can run mid-frame relative to movement, and
+              // this map is the single source of truth for "who is on it".
+              const occupied = pressurePlateOccupancy.get(key)?.occupied ?? false
+              pressurePlateOccupancy.set(key, { dimension: context.dimension, position, occupied })
+              components.push({ position, kind, active: occupied })
             } else if (kind === 'door') {
               components.push({ position, kind, powered: block === blockIdOf('door_open') })
             } else if (kind === 'powered-rail') {
@@ -2238,6 +2268,19 @@ const bootGame = async (
       if (context.streamLoaded.has(residentKey) && !observedLevers.has(key)) {
         leverStates.delete(key)
         markSessionDirty()
+      }
+    }
+    for (const [key, plate] of pressurePlateOccupancy) {
+      if (plate.dimension !== context.dimension) continue
+      const residentKey = chunkKeyOf({
+        cx: Math.floor(plate.position.x / 16),
+        cz: Math.floor(plate.position.z / 16),
+      })
+      // Unlike leverStates this cache is not persisted — it is a derived read of
+      // "who is standing where" recomputed every time the plate is rescanned —
+      // so dropping a stale entry is not a session-dirtying change.
+      if (context.streamLoaded.has(residentKey) && !observedPlates.has(key)) {
+        pressurePlateOccupancy.delete(key)
       }
     }
     Effect.runSync(redstoneRuntime.syncSnapshot({ dimension: context.dimension, components }))
@@ -2637,6 +2680,32 @@ const bootGame = async (
     intervalOverlap(minX, maxX, x, x + 1) > 0 &&
     intervalOverlap(minY, maxY, y, y + 1) > 0 &&
     intervalOverlap(minZ, maxZ, z, z + 1) > 0
+  // "Standing on" is contact with a cell's TOP FACE, not volume overlap —
+  // unlike lava/cactus, which a player is immersed IN, a grounded player's
+  // feet rest exactly at the surface of whatever supports them, never inside
+  // it. simPhysicsConfig resolves every solid block (plate included) as a
+  // full cube, so that surface is always `cell.y + 1` for anything a player
+  // can stand on today, regardless of the block's own registry collisionShape.
+  const restingContactEpsilon = 1e-3
+  const isStandingOnCell = (
+    feetPosition: { readonly x: number; readonly y: number; readonly z: number },
+    x: number,
+    y: number,
+    z: number,
+  ): boolean =>
+    intervalOverlap(
+      feetPosition.x - PLAYER_HALF_WIDTH,
+      feetPosition.x + PLAYER_HALF_WIDTH,
+      x,
+      x + 1,
+    ) > 0 &&
+    intervalOverlap(
+      feetPosition.z - PLAYER_HALF_WIDTH,
+      feetPosition.z + PLAYER_HALF_WIDTH,
+      z,
+      z + 1,
+    ) > 0 &&
+    Math.abs(feetPosition.y - (y + 1)) < restingContactEpsilon
   const touchesCactusHorizontalSide = (
     minX: number,
     maxX: number,
@@ -6875,6 +6944,10 @@ type MultiplayerInventorySelection = Readonly<{
       ) ?? [],
       comparator: readBlock(QA_REDSTONE_COMPARATOR),
       trigger: canvas.getAttribute('data-redstone-trigger'),
+      pressurePlate: pressurePlateOccupancy.get(
+        leverKeyOf({ dimension, position: QA_REDSTONE_PLATE }),
+      )?.occupied ?? false,
+      pressurePlateLamp: readBlock(QA_REDSTONE_PLATE_LAMP),
     }
   }
 
@@ -6906,12 +6979,20 @@ type MultiplayerInventorySelection = Readonly<{
       [QA_REDSTONE_OBSERVER_INPUT, blockIdOf('stone')],
       [QA_REDSTONE_OBSERVER_LAMP, blockIdOf('redstone_lamp')],
       [QA_REDSTONE_COMPARATOR, blockIdOf('comparator')],
+      // Walkway to QA_REDSTONE_PLATE, in the same spirit as QA_IGNITION_FLOOR_BLOCK
+      // above — real WASD input needs solid ground the whole way, not just at spawn.
+      ...QA_REDSTONE_PLATE_FLOOR.map((position): readonly [BlockPosition, BlockId] =>
+        [position, blockIdOf('stone')]),
+      [QA_REDSTONE_PLATE, blockIdOf('pressure_plate')],
+      [QA_REDSTONE_PLATE_WIRE, blockIdOf('redstone_wire')],
+      [QA_REDSTONE_PLATE_LAMP, blockIdOf('redstone_lamp')],
     ]
     for (const [position, block] of fixtures) {
       Effect.runSync(currentChunkStore.setBlock(position, block))
     }
     poweredRails.delete(leverKeyOf({ dimension, position: QA_REDSTONE_RAIL }))
     redstoneLampTransitionLog.clear()
+    pressurePlateOccupancy.clear()
     canvas.removeAttribute('data-redstone-trigger')
     redstoneDirty = true
     markSessionDirty()
@@ -8937,6 +9018,28 @@ type MultiplayerInventorySelection = Readonly<{
         }
       }
       deadAfterFrame = playerIsDead()
+
+      // Plate occupancy is entity/AABB work this host owns (mx-redstone does
+      // not — see pressurePlateOccupancy's declaration), so it is computed
+      // from the resolved post-movement pose, same as environmental contact
+      // just below. Only an occupancy CHANGE dirties the redstone snapshot;
+      // syncRedstoneSnapshot itself does not run every frame, so re-detecting
+      // "still standing here" every tick would set redstoneDirty forever.
+      if (!deadAfterFrame && !dimensionChanged && multiplayer === undefined) {
+        for (const [key, plate] of pressurePlateOccupancy) {
+          if (plate.dimension !== dimensionAfterFrame) continue
+          const occupied = isStandingOnCell(
+            postFramePose.feetPosition,
+            plate.position.x,
+            plate.position.y,
+            plate.position.z,
+          )
+          if (occupied !== plate.occupied) {
+            pressurePlateOccupancy.set(key, { ...plate, occupied })
+            redstoneDirty = true
+          }
+        }
+      }
 
       // Landing damage resolves before block contact in the same frame.
       if (!deadAfterFrame && !dimensionChanged && multiplayer === undefined) {
