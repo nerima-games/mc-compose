@@ -2,6 +2,7 @@ import { expect, test, type ConsoleMessage, type Page } from '@playwright/test'
 import { ARROW_PROFILE, stepProjectile, type Projectile, type ProjectileWorld } from '@nerima-games/mc-sim'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
 
@@ -41,6 +42,26 @@ const callQa = <A>(page: Page, command: string): Promise<A> => page.evaluate(
 
 const snapshot = (page: Page): Promise<GameplaySnapshot> =>
   callQa(page, 'gameplay.snapshot')
+
+// The frame counter and the snapshot are read in ONE round trip. Split across
+// two, they can describe different frames, and a wait that compares them is
+// then reasoning about a state that never existed.
+const readGameplayWithFrames = (
+  page: Page,
+): Promise<{ frames: number; value: GameplaySnapshot }> => page.evaluate(
+  async ({ key, commandName }) => {
+    const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+      | Record<string, () => unknown>
+      | undefined
+    const operation = surface?.[commandName]
+    if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+    return {
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: await operation(),
+    }
+  },
+  { key: QA_GLOBAL_KEY, commandName: 'gameplay.snapshot' },
+) as Promise<{ frames: number; value: GameplaySnapshot }>
 
 const itemCount = (current: GameplaySnapshot, item: string): number =>
   current.inventory.slots.reduce(
@@ -269,17 +290,23 @@ test('charges, fires, and embeds an arrow while settling inventory wear', async 
   expect(bowDurability(fired)).toBe(initialBowDurability - 1)
   expect(createdProjectile).toBeDefined()
 
-  let stuckProjectile: ProjectileSnapshot | undefined
-  await expect.poll(async () => {
-    const current = await snapshot(page)
-    const projectile = current.projectiles.find(({ id }) => id === createdProjectile!.id)
-    if (projectile?.state === 'stuck') {
-      expect(current.projectiles).toHaveLength(1)
-      stuckProjectile = projectile
-      return true
-    }
-    return false
-  }, { intervals: [10, 20, 50] }).toBe(true)
+  // Landing is gated on the simulation advancing, not on wall-clock: the arrow
+  // covers its distance in ticks, and each frame contributes at most the
+  // clamped delta, so on a slow host the same flight takes proportionally
+  // longer in real time. A real-time budget here fails while the arrow is
+  // merely still travelling, which is what CI observed — 'flying' where it
+  // wanted 'stuck'. Unlike the in-flight poll above, this one has no transient
+  // to catch: a stuck arrow stays stuck, so the sampling rate does not matter.
+  const landed = await waitForSimulationProgress(
+    page,
+    () => readGameplayWithFrames(page),
+    (current) => current.projectiles.some(
+      ({ id, state }) => id === createdProjectile!.id && state === 'stuck',
+    ),
+    { description: 'bow arrow embedding in the wall' },
+  )
+  expect(landed.projectiles).toHaveLength(1)
+  const stuckProjectile = landed.projectiles.find(({ id }) => id === createdProjectile!.id)
 
   expect(stuckProjectile!.id).toBe(createdProjectile!.id)
   expect(stuckProjectile!.position.z).toBeLessThan(seeded.pose.feetPosition.z)
