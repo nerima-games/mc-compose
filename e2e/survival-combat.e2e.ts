@@ -16,6 +16,7 @@ type EntitySnapshot = {
   readonly kind: string
   readonly feetPosition: Position
   readonly healthPoints: number
+  readonly behaviour?: unknown
 }
 type RenderedEntitySnapshot = {
   readonly id: string
@@ -864,6 +865,133 @@ test('kills a hostile with a left click and collects its dropped item', async ({
     }).toEqual({ droppedItems: 0, gunpowder: gunpowderBefore + 1 })
   } finally {
     await page.keyboard.up('KeyW')
+  }
+
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('lands a melee attack on a full-health hostile after spawnFullHealthHostile repositions the player', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await startGameSession(page)
+  const body = page.locator('body')
+  const canvas = page.locator('#game-canvas')
+  await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await canvas.hover()
+  await page.evaluate(() => {
+    const gameCanvas = document.querySelector<HTMLCanvasElement>('#game-canvas')
+    if (gameCanvas === null) throw new Error('missing game canvas')
+    Object.defineProperty(document, 'pointerLockElement', {
+      configurable: true,
+      get: () => gameCanvas,
+    })
+    document.dispatchEvent(new Event('pointerlockchange'))
+  })
+
+  // spawnFullHealthHostile repositions the player with poseLookingAt, which
+  // centers the eye on the mob's own middle — for a ground-level mob that
+  // drops the feet below the surface with nothing guaranteed solid
+  // underneath. A free-falling player passes out of the melee targeting
+  // cylinder (radius 0.9, reach 3) in well under half a second, so "does the
+  // player eventually land somewhere" is not the defect: even a player who
+  // free-fell onto distant real terrain would pass a bare grounded check.
+  //
+  // targetNearestHostile shares restoreLookingAt and is called before every
+  // swing here, mirroring end-journey.e2e.ts's collectMobDrop — the same
+  // pattern that already exercises this fixture reliably over many repeated
+  // encounters.
+  for (const [command, kind, maxHealth] of [
+    ['gameplay.spawnFullHealthBlaze', 'blaze', 20],
+    ['gameplay.spawnFullHealthEnderman', 'enderman', 40],
+  ] as const) {
+    await callQa<unknown>(page, command)
+    let landed = false
+    for (let attempt = 0; attempt < 10 && !landed; attempt += 1) {
+      await callQa<unknown>(page, 'gameplay.targetNearestHostile')
+      await page.mouse.down({ button: 'left' })
+      await page.waitForTimeout(250)
+      await page.mouse.up({ button: 'left' })
+      const health = (await snapshot(page)).entities.find((entity) => entity.kind === kind)?.healthPoints
+      landed = health !== undefined && health < maxHealth
+    }
+    expect(
+      landed,
+      `${command} should let a melee attack land on the freshly spawned ${kind} within 10 attempts`,
+    ).toBe(true)
+  }
+
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('grounds the player within a couple of frames after spawnFullHealthHostile repositions them', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await startGameSession(page)
+  const body = page.locator('body')
+  const canvas = page.locator('#game-canvas')
+  await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await canvas.hover()
+  // A wall-clock bound on "how long until grounded" is load-sensitive (the
+  // suite runs concurrently with other work) and doesn't distinguish the
+  // bug from the fix anyway: both eventually settle onto whatever real
+  // terrain is below, given enough time. What actually differs is the
+  // SIMULATED frame count — main.ts clamps every frame's delta to
+  // MAX_FRAME_SECS, so simulating the ~500-600ms fall the bug produces
+  // costs a floor on frames regardless of host speed, where the fix costs
+  // one. Counting data-frames (not wall-clock) makes the assertion tight
+  // without being flaky under load.
+  for (const command of ['gameplay.spawnFullHealthBlaze', 'gameplay.spawnFullHealthEnderman'] as const) {
+    const frameAtSpawn = await framesDrawn(page)
+    let frameAtGrounded: number | undefined
+    for (let poll = 0; poll < 200 && frameAtGrounded === undefined; poll += 1) {
+      if (poll === 0) await callQa<unknown>(page, command)
+      if ((await canvas.getAttribute('data-player-grounded')) === 'true') {
+        frameAtGrounded = await framesDrawn(page)
+        break
+      }
+      await page.waitForTimeout(20)
+    }
+    expect(frameAtGrounded, `${command} should ground the player`).toBeDefined()
+    expect(
+      frameAtGrounded! - frameAtSpawn,
+      `${command} took ${String(frameAtGrounded! - frameAtSpawn)} frames to ground the player`,
+    ).toBeLessThanOrEqual(3)
+  }
+
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('spawns a full-health hostile with an initialised behaviour rather than an inert one', async ({ page }) => {
+  const faults = watchForFaults(page)
+
+  await startGameSession(page)
+  const body = page.locator('body')
+  const canvas = page.locator('#game-canvas')
+  await expect(body).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await canvas.hover()
+  for (const [command, kind] of [
+    ['gameplay.spawnFullHealthBlaze', 'blaze'],
+    ['gameplay.spawnFullHealthEnderman', 'enderman'],
+  ] as const) {
+    const seeded = await callQa<GameplaySnapshot>(page, command)
+    const mob = seeded.entities.find((entity) => entity.kind === kind)
+    // A raw `undefined` behaviour is what mx-gameplay's sweepMobs treats as
+    // "no rule for this mob" — the same inert treatment a pig gets — and
+    // that bailout sits ahead of the enderman-specific branch, so an
+    // enderman spawned with `behaviour: undefined` never reaches its
+    // teleport logic on any frame. The teleport itself is a probabilistic
+    // roll (~5% per frame while chasing), so asserting one happened within a
+    // bounded window would be flaky; asserting the behaviour actually
+    // initialised is the deterministic half of the same fact, and it is
+    // false on both mob kinds before the fix since both went through the
+    // same `behaviour: undefined` spawn call.
+    expect(mob?.behaviour, `${command} should give ${kind} an initial behaviour`).toBeDefined()
   }
 
   expect(faults.pageErrors).toEqual([])
