@@ -315,6 +315,7 @@ import {
   CREEPER_KIND,
   BLAZE_KIND,
   ENDERMAN_KIND,
+  initialBehaviourOfKind,
   drainBlockUseResults,
   drainBowKnockbacks,
   drainItemUseResults,
@@ -7573,6 +7574,104 @@ type MultiplayerInventorySelection = Readonly<{
     pitchRadians: 0,
   } as typeof QA_POSE)
 
+  // poseLookingAt centers the eye on the target's own middle, which for a
+  // ground-level target drops the feet below the target's surface with
+  // nothing guaranteed solid underneath — fine for a block the fixture
+  // already terraformed (fishing water, an end portal frame), but not for a
+  // live entity's feetPosition. spawnFullHealthHostile and
+  // targetNearestHostile both reposition the player next to a mob, so both
+  // go through here instead of calling playerApi.restore(poseLookingAt(...))
+  // directly, and both get the same floor.
+  //
+  // Two things measured live rule out "just place a block under the
+  // computed feet and let gravity settle it":
+  //
+  // 1. feet.y is never block-aligned (it's target.y + 0.5 -
+  //    EYE_LEVEL_OFFSET, always ~0.88 below whatever integer y the target
+  //    sits at), and mc-physics's collision here only resolves a boundary
+  //    the player's AABB crosses DURING a step — an AABB that starts the
+  //    frame already overlapping solid ground (teleported there, not
+  //    swept there) never triggers it and free-falls straight through,
+  //    confirmed by placing a block exactly at floor(feet.y) in an
+  //    otherwise-empty shaft and watching the player fall through it onto
+  //    the real floor two blocks further down regardless.
+  // 2. Leaving a real gap above a floor for gravity to close DOES resolve
+  //    correctly (measured landing exactly on the placed floor's top
+  //    face), but takes ~500-600ms real time to fall the ~0.88 blocks —
+  //    longer than the reach cylinder's own ~0.348-block tolerance, so the
+  //    player still spends the first half-second outside melee/bow range,
+  //    reproducing the reported symptom instead of fixing it.
+  //
+  // So the fix places the player already resting flush on a block boundary
+  // — zero gap, zero overlap, no physics settling required — rather than
+  // trying to preserve poseLookingAt's exact fractional y. That moves the
+  // eye point by less than one block from the "ideal" aim math, which is
+  // still well inside reach=3, and unlike either alternative above it holds
+  // from frame zero.
+  //
+  // A single column is not enough either: poseLookingAt's x/z are
+  // target.<axis> + 0.5 (+ distance for z), and every caller's target comes
+  // from another fixture's own .5-centered feetPosition, so the result
+  // routinely lands exactly on a block boundary (measured: x = 1.0 for a
+  // target.x of 0.5). The player's AABB extends PLAYER_HALF_WIDTH either
+  // side of that point, so a boundary-aligned spawn straddles two columns
+  // per axis — up to four — and filling only the one under the coordinate
+  // leaves the other corners of the footprint over open air. Filling every
+  // column the AABB's footprint can touch is the only way to guarantee
+  // support regardless of where the fraction lands.
+  //
+  // The floor alone is not enough either: it is placed at a height derived
+  // from the TARGET's y, but the player lands `distance` blocks away
+  // horizontally, and real terrain is not flat — measured with
+  // targetNearestHostile chasing a blaze across natural ground where the
+  // floor this places is correct but the real surface a few blocks over
+  // sits a block or two higher, embedding the player's own eye in solid
+  // ground and making every attack resolve as a block hit at distance ~0
+  // (mx-gameplay's own bow-shot.js: "A PLAYER WHOSE EYE IS INSIDE A
+  // BLOCKING CELL CANNOT FIRE AT ALL"). Clearing the body-height column
+  // above the floor — the same shape seedMeleeDropEncounter clears for its
+  // own line-of-sight, just centered on the player's own footprint instead
+  // of a fixed line to the target — removes whatever natural terrain might
+  // otherwise be standing there regardless of its height.
+  const restoreLookingAt = (
+    target: SessionPosition,
+    distance: number,
+    dimension: Parameters<typeof playerApi.restore>[1],
+  ) => {
+    const rawPose = poseLookingAt(target, distance)
+    // Rounding DOWN to the nearest block boundary costs the whole fractional
+    // part (~0.88 of a block, itself already past the 0.348 reach-cylinder
+    // tolerance — as bad as the original bug). Rounding UP costs only
+    // 1 - 0.88 = ~0.12, comfortably inside tolerance, so the floor goes at
+    // floor(feet.y) and the player rests on ITS top face rather than one
+    // level below it.
+    const floorY = Math.floor(rawPose.feetPosition.y)
+    const pose = {
+      ...rawPose,
+      feetPosition: { ...rawPose.feetPosition, y: floorY + 1 },
+    }
+    for (
+      let x = Math.floor(pose.feetPosition.x - PLAYER_HALF_WIDTH);
+      x <= Math.floor(pose.feetPosition.x + PLAYER_HALF_WIDTH);
+      x += 1
+    ) {
+      for (
+        let z = Math.floor(pose.feetPosition.z - PLAYER_HALF_WIDTH);
+        z <= Math.floor(pose.feetPosition.z + PLAYER_HALF_WIDTH);
+        z += 1
+      ) {
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, floorY, z), blockIdOf('stone')))
+        // PLAYER_HALF_HEIGHT * 2 = 1.8 blocks tall, spanning at most two
+        // integer cells above the feet; the eye (feet.y + EYE_LEVEL_OFFSET)
+        // falls inside that same span, so two cleared cells cover both body
+        // and sightline.
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, floorY + 1, z), blockIdOf('air')))
+        Effect.runSync(currentChunkStore.setBlock(blockPosition(x, floorY + 2, z), blockIdOf('air')))
+      }
+    }
+    Effect.runSync(playerApi.restore(pose, dimension))
+  }
+
   const seedFishingEncounter = () => {
     respawnPlayer()
     const water = { x: QA_IGNITION_HIT_BLOCK.x, y: QA_IGNITION_HIT_BLOCK.y, z: QA_IGNITION_HIT_BLOCK.z }
@@ -7745,8 +7844,13 @@ type MultiplayerInventorySelection = Readonly<{
       y: pose.feetPosition.y,
       z: pose.feetPosition.z - 3,
     }
-    Effect.runSync(world.entities.spawn({ kind, feetPosition: target, healthPoints, behaviour: undefined }))
-    Effect.runSync(playerApi.restore(poseLookingAt(target, 2), Effect.runSync(playerApi.dimension)))
+    Effect.runSync(world.entities.spawn({
+      kind,
+      feetPosition: target,
+      healthPoints,
+      behaviour: initialBehaviourOfKind(kind),
+    }))
+    restoreLookingAt(target, 2, Effect.runSync(playerApi.dimension))
     resetSimState(true)
     markSessionDirty()
     return gameplaySnapshot()
@@ -7765,10 +7869,7 @@ type MultiplayerInventorySelection = Readonly<{
         return distance(left.feetPosition) - distance(right.feetPosition)
       })[0]
     if (hostile === undefined) throw new Error('no hostile found')
-    Effect.runSync(playerApi.restore(
-      poseLookingAt(hostile.feetPosition, 2),
-      Effect.runSync(playerApi.dimension),
-    ))
+    restoreLookingAt(hostile.feetPosition, 2, Effect.runSync(playerApi.dimension))
     resetSimState(true)
     return gameplaySnapshot()
   }
