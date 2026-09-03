@@ -142,3 +142,50 @@ export const QA_IGNITION_POSE = {
   yawRadians: 0,
   pitchRadians: 0,
 } as const
+
+// Away from every other fixture's z=6-12 band, so terraforming this loop's
+// bounding box (main.ts's seedRailTrackEncounter) cannot clip a neighbour's
+// blocks and streaming it in cannot evict them.
+export const QA_RAIL_TRACK_ORIGIN: Cell = blockPosition(4, 64, 24)
+export const QA_RAIL_TRACK_WIDTH = 8
+export const QA_RAIL_TRACK_HEIGHT = 6
+
+/**
+ * The perimeter of a QA_RAIL_TRACK_WIDTH x QA_RAIL_TRACK_HEIGHT rectangle of
+ * track, anchored at QA_RAIL_TRACK_ORIGIN — the same closed-rectangle shape
+ * mx-gameplay's own `rectangularPoweredTrack` test fixture walks (see that
+ * package's test/vehicle-rail-simulation.test.ts), so a cart driven around
+ * this loop exercises the identical four-corner case its regression guard
+ * proves at the package level, but through the browser's real vehicle
+ * service and frame stage rather than an in-memory rig.
+ */
+export const QA_RAIL_TRACK_CELLS: ReadonlyArray<Cell> = (() => {
+  const cells: Array<Cell> = []
+  for (let x = 0; x <= QA_RAIL_TRACK_WIDTH; x += 1) {
+    cells.push(blockPosition(QA_RAIL_TRACK_ORIGIN.x + x, QA_RAIL_TRACK_ORIGIN.y, QA_RAIL_TRACK_ORIGIN.z))
+    cells.push(blockPosition(
+      QA_RAIL_TRACK_ORIGIN.x + x,
+      QA_RAIL_TRACK_ORIGIN.y,
+      QA_RAIL_TRACK_ORIGIN.z + QA_RAIL_TRACK_HEIGHT,
+    ))
+  }
+  for (let z = 1; z < QA_RAIL_TRACK_HEIGHT; z += 1) {
+    cells.push(blockPosition(QA_RAIL_TRACK_ORIGIN.x, QA_RAIL_TRACK_ORIGIN.y, QA_RAIL_TRACK_ORIGIN.z + z))
+    cells.push(blockPosition(
+      QA_RAIL_TRACK_ORIGIN.x + QA_RAIL_TRACK_WIDTH,
+      QA_RAIL_TRACK_ORIGIN.y,
+      QA_RAIL_TRACK_ORIGIN.z + z,
+    ))
+  }
+  return cells
+})()
+
+export const QA_RAIL_POSE: Pose = {
+  feetPosition: {
+    x: QA_RAIL_TRACK_ORIGIN.x + QA_RAIL_TRACK_WIDTH / 2,
+    y: QA_RAIL_TRACK_ORIGIN.y + 1,
+    z: QA_RAIL_TRACK_ORIGIN.z + QA_RAIL_TRACK_HEIGHT / 2,
+  },
+  yawRadians: 0,
+  pitchRadians: -Math.PI / 2 + 0.01,
+}
