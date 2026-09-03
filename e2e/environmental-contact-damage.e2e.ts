@@ -178,7 +178,18 @@ test('applies cactus damage on the first normal-physics side contact', async ({
   const contacted = await snapshot(page)
   const cactus = contacted.environmentalContact.cells.find(({ block }) => block === 'cactus')
   expect(cactus).toBeDefined()
-  expect(overlapsPlayerAabb(contacted.pose.feetPosition, cactus!.position)).toBe(false)
+  // This value is a regression guard FOR per-shape collision, not a weakened
+  // check: under full-cube collision the player stops at the cell's nominal
+  // face and this is false; under a cactus's real registry shape (inset one
+  // sixteenth on X and Z — main.ts's `blockPropertiesAt`) the collidable
+  // surface sits one sixteenth inside that face, so a player stopped against
+  // it legitimately overlaps the nominal 1x1x1 cell by that same sixteenth
+  // (measured: 0.0625). Revert the per-shape migration and this goes red.
+  // It is still not immersion: touchesCactusHorizontalSide below is what
+  // actually distinguishes a side touch (this test) from being inside the
+  // cell, the way lava's overlap check (this file, above) does for a block a
+  // player is meant to stand IN — that assertion is unchanged.
+  expect(overlapsPlayerAabb(contacted.pose.feetPosition, cactus!.position)).toBe(true)
   expect(touchesCactusHorizontalSide(contacted.pose.feetPosition, cactus!.position)).toBe(true)
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])

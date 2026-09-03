@@ -35,21 +35,25 @@ export const QA_REDSTONE_COMPARATOR: Cell = blockPosition(20, 66, 8)
 // movement input — every other redstone fixture sits at z=7-9, targeted by
 // raycast rather than walked onto, so this lane avoids them entirely.
 //
-// The plate sits IN the walkway (replacing a floor tile) rather than stacked
-// on top of one. mc-compose's physics wiring collides every solid block as a
-// full cube — main.ts's `simPhysicsConfig` comment records that per-shape
-// registry collision (the real ~1/16-tall plate box mc-physics itself models)
-// is a deliberate later migration, not done yet — so a plate placed a block
-// above the approach floor is, today, a solid wall the player cannot step
-// onto by walking. Placing it flush with the floor is what real WASD input
-// can actually reach under the engine as it exists right now.
+// The plate sits ON TOP of its own floor tile, one cell above the z=11/12
+// wire and lamp's floor — the real arrangement, not the walkway-flush stand-in
+// this used to be. main.ts's `simPhysicsConfig` now resolves each block's
+// actual registry collisionShape (the real ~1/16-tall plate box mc-physics
+// itself models), so a plate raised a block above the approach floor is
+// walkable rather than a solid wall. The wire and lamp move up in lockstep so
+// the circuit's relative shape — and its support, each on its own explicit
+// floor tile rather than on assumed ambient terrain — is unchanged from what
+// already passes.
 export const QA_REDSTONE_PLATE_FLOOR: ReadonlyArray<Cell> = [
   blockPosition(9, 64, 10),
+  blockPosition(10, 64, 10),
   blockPosition(11, 64, 10),
+  blockPosition(10, 64, 11),
+  blockPosition(10, 64, 12),
 ]
-export const QA_REDSTONE_PLATE: Cell = blockPosition(10, 64, 10)
-export const QA_REDSTONE_PLATE_WIRE: Cell = blockPosition(10, 64, 11)
-export const QA_REDSTONE_PLATE_LAMP: Cell = blockPosition(10, 64, 12)
+export const QA_REDSTONE_PLATE: Cell = blockPosition(10, 65, 10)
+export const QA_REDSTONE_PLATE_WIRE: Cell = blockPosition(10, 65, 11)
+export const QA_REDSTONE_PLATE_LAMP: Cell = blockPosition(10, 65, 12)
 
 export const QA_ENVIRONMENT_OVERLAP_POSE = {
   feetPosition: { x: 24.95, y: 65, z: 8.5 },

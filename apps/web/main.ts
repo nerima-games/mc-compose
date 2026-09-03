@@ -102,9 +102,11 @@ import {
   capabilityOfBlockId,
   DeltaTimeSecs,
   chunkCoord,
+  isEmpty,
   MonotonicTimeSecs as KernelMonotonicTimeSecs,
   position,
   propertyOfBlockId,
+  resolvedBlockOfId,
   StackCount,
   StageId,
   type BlockPosition,
@@ -112,6 +114,7 @@ import {
   type MonotonicTimeSecs,
   type Position as Vec3,
 } from '@nerima-games/mc-kernel'
+import { aabbOfCollisionShape } from '@nerima-games/mc-physics'
 import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   addExperience as addVitalsExperience,
@@ -624,6 +627,23 @@ const clampDelta = (raw: number): DeltaTimeSecs =>
  */
 const WALK_SPEED_M_PER_S = 4.3
 const JUMP_SPEED_M_PER_S = 8.4
+/**
+ * How tall an obstacle the player climbs by walking into it, no jump needed.
+ *
+ * mc-physics resolves X/Z/Y sequentially, so ANY vertical overlap between the
+ * player's box and a block's collision box blocks horizontal movement on that
+ * axis, however thin the box is — a 1/16-tall plate reads as just as much of
+ * a wall as a full cube unless the host arms step-up (`tryStepUp`,
+ * resolve-support.ts). That mechanism defaults to off (stepHeight 0); mc-
+ * physics's own test suite names both the mechanism and this exact value as
+ * the authority: `resolve.test.ts`'s "with no step height injected, the same
+ * slab is a wall" states outright that the value is mc-sim's — i.e. the
+ * host's — to arm, the same way WALK_SPEED_M_PER_S above is, and 0.6 is what
+ * that suite uses throughout as the vanilla-accurate reference. A full block
+ * is still 1.0 tall, well past this, so ordinary one-block terrain steps
+ * still require a jump, unchanged.
+ */
+const PLAYER_STEP_HEIGHT_M = 0.6
 const LOOK_SENSITIVITY = 0.0022
 const WORLD_SEED = 20260728
 const DATABASE_NAME = 'nerima-games-minecraft'
@@ -2627,24 +2647,32 @@ const bootGame = async (
   let simulationElapsedSecs = 0
   const isGameplayBlockSolid = solidityFromStore(currentChunkStore)
   // mc-physics 0.2.1 replaced ResolveOptions.isBlockSolid (a boolean predicate)
-  // with blockPropertiesAt (the kernel's BlockProperties or null). The adapter
-  // must keep solidityFromStore's three-valued semantics: an unloaded chunk and
-  // out-of-world both read as SOLID (air there lets a player walk off a chunk
-  // edge and fall forever — see mx-gameplay's in-memory-world docstring), and a
-  // loaded block is solid exactly when it lacks the 'passable' capability.
-  // BLOCK_PROPERTY_DEFAULTS is kernel's "ordinary opaque solid cube", so this
-  // reproduces the pre-0.2.1 full-cube collision behavior exactly; per-shape
-  // registry collision (cactus inset, slabs) is a deliberate later change, not
-  // part of this migration.
+  // with blockPropertiesAt (the kernel's BlockProperties or null), and
+  // resolve-shapes.ts reads exactly one field off it for collision,
+  // `properties.collisionShape` — so returning the block's REAL resolved
+  // properties (not a synthetic default) is what turns on per-shape collision
+  // (cactus inset, slabs, the pressure-plate box) without touching mc-physics
+  // itself. This must still keep solidityFromStore's three-valued semantics:
+  // an unloaded chunk and out-of-world both read as SOLID (air there lets a
+  // player walk off a chunk edge and fall forever — see mx-gameplay's
+  // in-memory-world docstring), so both sentinel readings fall back to
+  // BLOCK_PROPERTY_DEFAULTS, kernel's "ordinary opaque solid cube"
+  // (collisionShape: 'full') — exactly the box the pre-migration code used
+  // for every solid cell. A loaded, non-air block resolves to its own
+  // registry row via resolvedBlockOfId, the same accessor mc-physics's own
+  // kernel-world.ts adapter uses.
+  const blockPropertiesAt: SimPhysicsConfig['resolve']['blockPropertiesAt'] = (blockX, blockY, blockZ) => {
+    const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(blockX, blockY, blockZ)))
+    if (reading._tag !== 'Block') return BLOCK_PROPERTY_DEFAULTS
+    return isEmpty(reading.block) ? null : (resolvedBlockOfId(reading.block)?.properties ?? null)
+  }
   const simPhysicsConfig: SimPhysicsConfig = {
     resolve: {
-      blockPropertiesAt: (blockX, blockY, blockZ) =>
-        isGameplayBlockSolid({ x: blockX, y: blockY, z: blockZ })
-          ? BLOCK_PROPERTY_DEFAULTS
-          : null,
+      blockPropertiesAt,
       halfWidth: PLAYER_HALF_WIDTH,
       // mc-sim exposes this branded field but not the brand constructor.
       halfHeight: PLAYER_HALF_HEIGHT as SimPhysicsConfig['resolve']['halfHeight'],
+      stepHeight: PLAYER_STEP_HEIGHT_M,
     },
     walkSpeed: WALK_SPEED_M_PER_S,
     jumpSpeed: JUMP_SPEED_M_PER_S,
@@ -2683,29 +2711,38 @@ const bootGame = async (
   // "Standing on" is contact with a cell's TOP FACE, not volume overlap —
   // unlike lava/cactus, which a player is immersed IN, a grounded player's
   // feet rest exactly at the surface of whatever supports them, never inside
-  // it. simPhysicsConfig resolves every solid block (plate included) as a
-  // full cube, so that surface is always `cell.y + 1` for anything a player
-  // can stand on today, regardless of the block's own registry collisionShape.
+  // it. Now that simPhysicsConfig resolves each block's real registry
+  // collisionShape (a plate included), that surface is no longer always
+  // `cell.y + 1` — a plate's is `cell.y + PRESSURE_PLATE_SHAPE.maxY` — so the
+  // top height is read from the same shape table mc-physics's own resolver
+  // consults, rather than assumed.
   const restingContactEpsilon = 1e-3
   const isStandingOnCell = (
     feetPosition: { readonly x: number; readonly y: number; readonly z: number },
     x: number,
     y: number,
     z: number,
-  ): boolean =>
-    intervalOverlap(
-      feetPosition.x - PLAYER_HALF_WIDTH,
-      feetPosition.x + PLAYER_HALF_WIDTH,
-      x,
-      x + 1,
-    ) > 0 &&
-    intervalOverlap(
-      feetPosition.z - PLAYER_HALF_WIDTH,
-      feetPosition.z + PLAYER_HALF_WIDTH,
-      z,
-      z + 1,
-    ) > 0 &&
-    Math.abs(feetPosition.y - (y + 1)) < restingContactEpsilon
+  ): boolean => {
+    const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(x, y, z)))
+    if (reading._tag !== 'Block') return false
+    const shape = aabbOfCollisionShape(propertyOfBlockId(reading.block, 'collisionShape'))
+    if (shape === null) return false
+    return (
+      intervalOverlap(
+        feetPosition.x - PLAYER_HALF_WIDTH,
+        feetPosition.x + PLAYER_HALF_WIDTH,
+        x,
+        x + 1,
+      ) > 0 &&
+      intervalOverlap(
+        feetPosition.z - PLAYER_HALF_WIDTH,
+        feetPosition.z + PLAYER_HALF_WIDTH,
+        z,
+        z + 1,
+      ) > 0 &&
+      Math.abs(feetPosition.y - (y + shape.maxY)) < restingContactEpsilon
+    )
+  }
   const touchesCactusHorizontalSide = (
     minX: number,
     maxX: number,
@@ -6979,8 +7016,10 @@ type MultiplayerInventorySelection = Readonly<{
       [QA_REDSTONE_OBSERVER_INPUT, blockIdOf('stone')],
       [QA_REDSTONE_OBSERVER_LAMP, blockIdOf('redstone_lamp')],
       [QA_REDSTONE_COMPARATOR, blockIdOf('comparator')],
-      // Walkway to QA_REDSTONE_PLATE, in the same spirit as QA_IGNITION_FLOOR_BLOCK
-      // above — real WASD input needs solid ground the whole way, not just at spawn.
+      // Walkway and support floor for QA_REDSTONE_PLATE, in the same spirit as
+      // QA_IGNITION_FLOOR_BLOCK above — real WASD input needs solid ground the
+      // whole way, not just at spawn, and the plate/wire/lamp each need their
+      // own floor tile now that they sit a cell above it (qa-fixtures.ts).
       ...QA_REDSTONE_PLATE_FLOOR.map((position): readonly [BlockPosition, BlockId] =>
         [position, blockIdOf('stone')]),
       [QA_REDSTONE_PLATE, blockIdOf('pressure_plate')],
