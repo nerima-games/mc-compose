@@ -215,6 +215,11 @@ import {
   QA_PISTON_FAR,
   QA_PISTON_LEVER,
   QA_PISTON_NEAR,
+  QA_RAIL_POSE,
+  QA_RAIL_TRACK_CELLS,
+  QA_RAIL_TRACK_HEIGHT,
+  QA_RAIL_TRACK_ORIGIN,
+  QA_RAIL_TRACK_WIDTH,
   QA_REDSTONE_BRANCH_BUTTON,
   QA_REDSTONE_BRANCH_WIRE,
   QA_REDSTONE_BUTTON,
@@ -1960,7 +1965,23 @@ const bootGame = async (
         phase: multiplayer === undefined ? (fishingSession === undefined ? 'idle' : fishingPhase(fishingSession)) : networkFishingState.phase,
         water: fishingWater ?? null,
       },
-      vehicles: vehicleList(),
+      // An unoccupied vehicle's `occupant` is `undefined` (see
+      // vehicleById/boardVehicle call sites in this file), not an absent
+      // key — object literals in this codebase set it explicitly rather
+      // than omitting it. session-persistence.ts's PersistedVehiclesSchema
+      // validates this array as Schema.Unknown, so nothing schema-side ever
+      // strips that key the way this file's own exact:true optional fields
+      // do; an explicit `undefined` reaching mc-save's integrity
+      // canonicalizer is a hard encode failure there (see that file's
+      // comment on PersistedVehiclesSchema for the same failure mode on a
+      // different field). Stripped here, at the one place a Vehicle enters
+      // the persisted snapshot, the same way vehicle-motion.ts's own
+      // withoutOccupant already represents "no occupant" everywhere else.
+      vehicles: vehicleList().map((vehicle) => {
+        if (vehicle.occupant !== undefined) return vehicle
+        const { occupant: _occupant, ...withoutOccupant } = vehicle
+        return withoutOccupant
+      }),
       mountedVehicleId: mountedVehicleId ?? null,
       end: {
         frames: [...endPortalFrames.values()],
@@ -7065,6 +7086,98 @@ type MultiplayerInventorySelection = Readonly<{
     return redstoneFixturesSnapshot()
   }
 
+  const railTrackSnapshot = () => {
+    const dimension = Effect.runSync(playerApi.dimension)
+    const cart = vehicleList().find(
+      (vehicle) => vehicle.type === 'minecart' && vehicle.dimension === dimension,
+    )
+    return {
+      cart: cart === undefined ? null : { position: cart.position, velocity: cart.velocity },
+    }
+  }
+
+  // Closes the testability gap left by the minecart-corners fix: that fix has
+  // package-level proof (mx-gameplay's own closed-rectangle regression guard)
+  // but nothing reachable from the running game, since the only production
+  // path that spawns a minecart is a real right-click against a rail block,
+  // and a fresh session's starter kit holds neither a minecart nor rail. This
+  // fixture drives the cart through the SAME vehicleService and frame stage
+  // (gameplayStages, wired at this file's registerModule call) production
+  // play uses — it seeds track and a moving cart, not a hand-stepped
+  // position, so what the browser observes afterward is the real simulation
+  // turning the corners, not a QA-only substitute for it.
+  const seedRailTrackEncounter = () => {
+    respawnPlayer()
+    const dimension = Effect.runSync(playerApi.dimension)
+    for (const vehicle of vehicleList()) {
+      if (vehicle.type === 'minecart' && vehicle.dimension === dimension) {
+        Effect.runSync(vehicleService.despawn(vehicle.id))
+      }
+    }
+    Effect.runSync(streamAround(currentChunkContext, QA_RAIL_POSE.feetPosition.x, QA_RAIL_POSE.feetPosition.z))
+    Effect.runSync(playerApi.restore(QA_RAIL_POSE, dimension))
+    resetSimState(true)
+    // Flatten the loop's bounding box into a predictable floor one block
+    // below track level and open air at track level and above — the same
+    // terraforming seedSmokeGroundingEncounter uses so a purpose-built
+    // fixture does not depend on whatever height generated terrain happens
+    // to have here.
+    const margin = 2
+    for (let x = -margin; x <= QA_RAIL_TRACK_WIDTH + margin; x += 1) {
+      for (let z = -margin; z <= QA_RAIL_TRACK_HEIGHT + margin; z += 1) {
+        Effect.runSync(currentChunkStore.setBlock(
+          blockPosition(QA_RAIL_TRACK_ORIGIN.x + x, QA_RAIL_TRACK_ORIGIN.y - 1, QA_RAIL_TRACK_ORIGIN.z + z),
+          blockIdOf('stone'),
+        ))
+        for (let y = 0; y <= 3; y += 1) {
+          Effect.runSync(currentChunkStore.setBlock(
+            blockPosition(QA_RAIL_TRACK_ORIGIN.x + x, QA_RAIL_TRACK_ORIGIN.y + y, QA_RAIL_TRACK_ORIGIN.z + z),
+            blockIdOf('air'),
+          ))
+        }
+      }
+    }
+    for (const cell of QA_RAIL_TRACK_CELLS) {
+      Effect.runSync(currentChunkStore.setBlock(cell, blockIdOf('powered_rail')))
+      // Powered directly, the same way seedRedstoneFixtures and
+      // seedStickyPistonEncounter pre-seed an already-active circuit rather
+      // than requiring the player to build a power source — isPoweredRailAt
+      // (wired at this file's registerModule call) reads this same
+      // poweredRails set in production.
+      poweredRails.add(leverKeyOf({ dimension, position: cell }))
+    }
+    const spawned = Effect.runSync(vehicleService.spawn(
+      'minecart',
+      dimension,
+      {
+        x: QA_RAIL_TRACK_ORIGIN.x + 1.5,
+        y: QA_RAIL_TRACK_ORIGIN.y,
+        z: QA_RAIL_TRACK_ORIGIN.z + 0.5,
+      },
+      0,
+    ))
+    // A small nudge along the first leg's own direction, exactly as the real
+    // placement path at this file's VehicleCommand handling gives a freshly
+    // placed minecart a starting push — the powered loop takes it from there.
+    replaceVehicle({ ...spawned, velocity: { x: 1, y: 0, z: 0 } })
+    markSessionDirty()
+    renderPlayerUi()
+    // This loop is deliberately not wired into the interactive redstone
+    // circuit graph — there is no lever anywhere behind it — so the resync
+    // this function's own streamAround call marked pending
+    // (syncRedstoneSnapshot, gated on redstoneDirty in the frame loop above)
+    // would otherwise run on the very next frame, find no real power source
+    // for any of these cells, and correct the poweredRails entries just
+    // seeded above back to false — which is the redstone engine doing
+    // exactly its job, just not the job this fixture needs it to do here.
+    // Clearing the flag after seeding, rather than before, means every
+    // OTHER effect of that resync (this fixture's own terraforming, any
+    // unrelated component already in the loaded chunks) still ran once;
+    // only the specific correction this fixture does not want is skipped.
+    redstoneDirty = false
+    return railTrackSnapshot()
+  }
+
   const seedWoodenPickaxeProgression = () => {
     respawnPlayer()
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
@@ -8173,6 +8286,8 @@ type MultiplayerInventorySelection = Readonly<{
         redstoneFixturesSnapshot,
         pressRedstoneBranchButton,
         mutateObserverInput,
+        seedRailTrackEncounter,
+        railTrackSnapshot,
         seedFarmingEncounter,
         seedFishingEncounter,
         seedSubmergedSwimmingEncounter,
