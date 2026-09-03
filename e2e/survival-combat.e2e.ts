@@ -944,21 +944,37 @@ test('grounds the player within a couple of frames after spawnFullHealthHostile 
   // costs a floor on frames regardless of host speed, where the fix costs
   // one. Counting data-frames (not wall-clock) makes the assertion tight
   // without being flaky under load.
+  // The spawn and the polling both run INSIDE the page, in one round trip per
+  // command. Driving them from the test process instead would count the
+  // round trips themselves: the game keeps rendering during every `evaluate`
+  // and `getAttribute`, so a handful of frames elapse purely to observe, and
+  // on a slower runner that observation cost alone exceeded the budget this
+  // asserts. Measuring from inside the page removes the observer from the
+  // measurement, which is the only way a bound this tight can mean anything.
   for (const command of ['gameplay.spawnFullHealthBlaze', 'gameplay.spawnFullHealthEnderman'] as const) {
-    const frameAtSpawn = await framesDrawn(page)
-    let frameAtGrounded: number | undefined
-    for (let poll = 0; poll < 200 && frameAtGrounded === undefined; poll += 1) {
-      if (poll === 0) await callQa<unknown>(page, command)
-      if ((await canvas.getAttribute('data-player-grounded')) === 'true') {
-        frameAtGrounded = await framesDrawn(page)
-        break
+    const framesToGround = await page.evaluate(async (commandName) => {
+      const registry = (globalThis as unknown as Record<string, unknown>)['__NERIMA_GAMES_QA__'] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = registry?.[commandName]
+      if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
+      const framesNow = (): number => Number(document.body.getAttribute('data-frames'))
+      const isGrounded = (): boolean =>
+        document.querySelector('#game-canvas')?.getAttribute('data-player-grounded') === 'true'
+      const nextFrame = async (): Promise<void> => {
+        await new Promise((resolve) => { requestAnimationFrame(() => resolve(undefined)) })
       }
-      await page.waitForTimeout(20)
-    }
-    expect(frameAtGrounded, `${command} should ground the player`).toBeDefined()
+      const start = framesNow()
+      operation()
+      for (let frame = 0; frame < 200; frame += 1) {
+        if (isGrounded()) return framesNow() - start
+        await nextFrame()
+      }
+      return Number.POSITIVE_INFINITY
+    }, command)
     expect(
-      frameAtGrounded! - frameAtSpawn,
-      `${command} took ${String(frameAtGrounded! - frameAtSpawn)} frames to ground the player`,
+      framesToGround,
+      `${command} took ${String(framesToGround)} frames to ground the player`,
     ).toBeLessThanOrEqual(3)
   }
 
