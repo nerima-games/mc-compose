@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { startGameSession } from './helpers/session'
+import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const DATABASE_NAME = 'nerima-games-minecraft'
 
@@ -21,6 +22,27 @@ const callQa = async <Result>(page: Page, command: string): Promise<Result> =>
     if (operation === undefined) throw new Error(`missing QA command: ${commandName}`)
     return operation() as Result
   }, command)
+
+// Redstone signal propagation from the lever to the piston runs on the
+// simulation's own tick schedule, not on wall-clock time — the same reason
+// waitForSimulationProgress exists for every other multi-tick wait in this
+// suite (see e2e/helpers/simulation-wait.ts). A bare expect.poll here falls
+// back to Playwright's default 5s real-time budget, which is exactly the
+// wall-clock assumption that gets violated under host contention.
+const pistonSnapshotWithFrames = (
+  page: Page,
+): Promise<{ frames: number; value: PistonSnapshot }> =>
+  page.evaluate(() => {
+    const qa = (globalThis as unknown as Record<string, unknown>)['__NERIMA_GAMES_QA__'] as
+      | Record<string, () => unknown>
+      | undefined
+    const operation = qa?.['gameplay.stickyPistonSnapshot']
+    if (operation === undefined) throw new Error('missing QA command: gameplay.stickyPistonSnapshot')
+    return {
+      frames: Number(document.body.getAttribute('data-frames')),
+      value: operation() as PistonSnapshot,
+    }
+  })
 
 const clearDatabase = async (page: Page): Promise<void> => {
   await page.goto('/@vite/client')
@@ -85,14 +107,32 @@ test('a lever extends and retracts a sticky piston through normal play input', a
   await canvas.hover()
   await grantPointerLock(page)
   await useTargetedBlock(page)
-  await expect.poll(
-    async () => callQa<PistonSnapshot>(page, 'gameplay.stickyPistonSnapshot'),
-  ).toEqual({ active: true, lever: 76, piston: 16, near: 85, far: 2 })
+  await waitForSimulationProgress(
+    page,
+    () => pistonSnapshotWithFrames(page),
+    (snapshot) => (
+      snapshot.active === true
+      && snapshot.lever === 76
+      && snapshot.piston === 16
+      && snapshot.near === 85
+      && snapshot.far === 2
+    ),
+    { description: 'sticky piston extends' },
+  )
 
   await useTargetedBlock(page)
-  await expect.poll(
-    async () => callQa<PistonSnapshot>(page, 'gameplay.stickyPistonSnapshot'),
-  ).toEqual({ active: false, lever: 76, piston: 16, near: 2, far: 0 })
+  await waitForSimulationProgress(
+    page,
+    () => pistonSnapshotWithFrames(page),
+    (snapshot) => (
+      snapshot.active === false
+      && snapshot.lever === 76
+      && snapshot.piston === 16
+      && snapshot.near === 2
+      && snapshot.far === 0
+    ),
+    { description: 'sticky piston retracts' },
+  )
 
   expect(consoleErrors).toEqual([])
   expect(pageErrors).toEqual([])

@@ -450,7 +450,21 @@ test.describe('player inventory experience', () => {
       (label) => label !== null && /coal, 1/.test(label),
       { description: 'furnace fuel insertion' },
     )
-    await expect(cookProgress).not.toHaveAttribute('aria-valuenow', '0')
+    // Cook progress only leaves 0 once the simulation has ticked the
+    // furnace forward at least once — the same gating as the fuel and
+    // output waits above, just missed when those were routed. A bare
+    // `expect(...).not.toHaveAttribute` here falls back to Playwright's
+    // default 5s real-time budget, which is exactly the wall-clock
+    // assumption waitForSimulationProgress exists to avoid.
+    await waitForSimulationProgress(
+      page,
+      () => cookProgress.evaluate((element) => ({
+        frames: Number(document.body.getAttribute('data-frames')),
+        value: element.getAttribute('aria-valuenow'),
+      })),
+      (value) => value !== '0',
+      { description: 'furnace cook progress leaves zero' },
+    )
     await waitForSimulationProgress(
       page,
       () => readFurnaceSlot(furnaceOutput),

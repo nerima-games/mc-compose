@@ -307,22 +307,25 @@ test('completes and persists a survival End journey without progression-state se
     await callQa(page, 'gameplay.targetEndDragon')
     await canvas.click({ delay: 50 })
   }
-  await expect.poll(async () => {
-    const current = await snapshot(page)
-    return {
-      phase: current.end.dragon.phase,
-      health: current.end.dragon.health,
-      exit: current.end.exitPortalMaterialized,
-      egg: current.end.dragonEggRewarded,
-      experience: current.vitals.totalExperience,
-    }
-  }).toEqual({
-    phase: 'dead',
-    health: 0,
-    exit: true,
-    egg: true,
-    experience: experienceBeforeDragon + 12_000,
-  })
+  // The kill loop above stops as soon as health reads 0, but the exit
+  // portal materializing, the egg drop, and the experience award are
+  // follow-on effects the simulation applies on a later tick — the same
+  // shape as a mob's death-drop entity lagging its health hitting zero (see
+  // survival-combat.e2e.ts). A bare expect.poll here falls back to
+  // Playwright's default 5s real-time budget for what is actually a
+  // simulation-gated settle.
+  await waitForSimulationProgress(
+    page,
+    () => snapshotWithFrames(page),
+    (current) => (
+      current.end.dragon.phase === 'dead'
+      && current.end.dragon.health === 0
+      && current.end.exitPortalMaterialized
+      && current.end.dragonEggRewarded
+      && current.vitals.totalExperience === experienceBeforeDragon + 12_000
+    ),
+    { description: 'end dragon death settles (exit portal, egg, experience)' },
+  )
 
   await expect.poll(async () => (
     (await snapshot(page)).entities.some((entity) => entity.kind === 'dropped_item' && entity.item === 'dragon_egg')
