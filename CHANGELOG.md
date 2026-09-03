@@ -1,5 +1,20 @@
 # @nerima-games/mc-compose
 
+## 0.2.1
+
+### Patch Changes
+
+- [#35](https://github.com/nerima-games/mc-compose/pull/35) [`29d63f8`](https://github.com/nerima-games/mc-compose/commit/29d63f832897a21d704bed68f85f32250149383e) Thanks [@takeokunn](https://github.com/takeokunn)! - Advance the kernel pin so footsteps are audible across the world.
+  
+  The block registry previously carried a footstep material for fifteen of its
+  blocks and left the rest on the default, which the audio package maps to no cue
+  at all — so a player walking over most terrain, deepslate included, heard
+  nothing underfoot. The kernel release this pin picks up covers ninety-two more
+  blocks using the existing four-value vocabulary.
+  
+  The data lives in the kernel, so this pin is what actually reaches a player;
+  until it lands the shipped game stays silent regardless of the upstream fix.
+
 ## 0.2.0
 
 ### Minor Changes
