@@ -112,7 +112,15 @@ test.describe('brewing, effects, and experience', () => {
     await selectAndInsert(page, 'Digit1')
     await selectAndInsert(page, 'Digit2')
     await selectAndInsert(page, 'Digit3')
-    await expect.poll(async () => (await snapshot(page)).brewing.brewing?.output).toBe('awkward')
+    // Starting the brew (populating `brewing.output` and its countdown) needs
+    // the stand to process the completed ingredient set on a simulation
+    // tick, same as the completion waits below — see waitForSimulationProgress.
+    await waitForSimulationProgress(
+      page,
+      () => readWithFrames(page),
+      (current) => current.brewing.brewing?.output === 'awkward',
+      { description: 'brewing the awkward potion starts' },
+    )
 
     const beforeReload = await snapshot(page)
     expect(beforeReload.brewing.bottle).toBe('water_bottle')

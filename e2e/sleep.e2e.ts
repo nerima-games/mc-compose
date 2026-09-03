@@ -137,9 +137,27 @@ test('using a bed in the Nether explodes it and damages the player', async ({ pa
     'data-bed-explosion-request',
     'nether:8,66,8',
   )
-  await expect.poll(async () => (
-    await callQa<SleepSnapshot>(page, 'gameplay.snapshot')
-  ).bedExplosionProbe.block).toBe(AIR_BLOCK_ID)
-  await expect.poll(async () => (await callQa<SleepSnapshot>(page, 'gameplay.snapshot')).vitals.healthPoints)
-    .toBeLessThan(before.vitals.healthPoints)
+  // The explosion's block destruction and player damage settle over several
+  // simulated frames, same as any other physics-driven outcome — see
+  // waitForSimulationProgress. A bare expect.poll here defaults to
+  // Playwright's 5s real-time budget for what is a simulation-gated wait.
+  await waitForSimulationProgress(
+    page,
+    () => page.evaluate(async () => {
+      const qa = (globalThis as unknown as Record<string, unknown>)['__NERIMA_GAMES_QA__'] as
+        | Record<string, () => unknown>
+        | undefined
+      const operation = qa?.['gameplay.snapshot']
+      if (operation === undefined) throw new Error('missing QA command: gameplay.snapshot')
+      return {
+        frames: Number(document.body.getAttribute('data-frames')),
+        value: await operation() as SleepSnapshot,
+      }
+    }),
+    (current) => (
+      current.bedExplosionProbe.block === AIR_BLOCK_ID
+      && current.vitals.healthPoints < before.vitals.healthPoints
+    ),
+    { description: 'bed explosion settles (block destroyed, player damaged)' },
+  )
 })
