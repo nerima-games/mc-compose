@@ -2000,9 +2000,6 @@ const bootGame = async (
       ).then(() => undefined),
     onPublished: (publishedGeneration) => {
       savedGeneration = Math.max(savedGeneration, publishedGeneration)
-      if (savedGeneration === dirtyGeneration) {
-        document.body.setAttribute('data-session-persistence', 'saved')
-      }
     },
     onFailure: reportPersistenceFailure,
   })
@@ -6509,6 +6506,21 @@ type MultiplayerInventorySelection = Readonly<{
     do {
       await saveCoordinator.requestSave()
     } while (savedGeneration < targetGeneration)
+    // Compare against the generation captured above, at the moment this flush
+    // was initiated — not the live `dirtyGeneration`, which may have advanced
+    // while the save was in flight. Reading the live one is what starved this
+    // indicator: a player drifting in water dirties a new generation every
+    // frame, so the equality it used to require essentially never held and the
+    // attribute stuck on `dirty` forever while saves were in fact succeeding.
+    //
+    // The trade-off, stated plainly because this line overwrites whatever
+    // markSessionDirty wrote during the flight: if a newer generation arrived
+    // mid-save, this briefly claims `saved` while that newer one is genuinely
+    // unsaved. That window is bounded — the same drift re-arms the debounce,
+    // and the autosave interval is a hard backstop — and it is the deliberate
+    // choice over the alternative, which is an indicator that never once says
+    // `saved` to a player whose world is being saved every few seconds.
+    document.body.setAttribute('data-session-persistence', 'saved')
   }
 
   const requestBackgroundFlush = (): void => {

@@ -4,6 +4,7 @@ import { startGameSession } from './helpers/session'
 import { waitForSimulationProgress } from './helpers/simulation-wait'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
+const SAVED_MARKER_KEY = '__mcComposeSawSavedPersistence'
 const DATABASE_NAME = 'nerima-games-minecraft'
 const AIR_BLOCK_ID = 0
 const STONE_BLOCK_ID = 2
@@ -135,6 +136,35 @@ const snapshotWithFrames = (page: Page): Promise<{ frames: number; value: Gamepl
 
 const hotbarText = (page: Page): Promise<ReadonlyArray<string | null>> =>
   page.locator('[data-mx-ui="hotbar"] [data-mx-ui="slot"]').allTextContents()
+
+// A save that completes while the player keeps drifting can flip
+// `data-session-persistence` to 'saved' for as little as one frame before the
+// next drift-driven dirty event overwrites it — too narrow a window for
+// polling the attribute from outside the page to reliably catch. A
+// MutationObserver installed inside the page latches the instant it happens,
+// regardless of how often the test later checks in.
+const watchForSavedPersistence = (page: Page): Promise<void> =>
+  page.evaluate(({ key }) => {
+    const globalScope = globalThis as unknown as Record<string, boolean>
+    const body = document.body
+    const latch = (): void => {
+      if (body.getAttribute('data-session-persistence') === 'saved') globalScope[key] = true
+    }
+    globalScope[key] = false
+    latch()
+    new MutationObserver(latch).observe(body, {
+      attributes: true,
+      attributeFilter: ['data-session-persistence'],
+    })
+  }, { key: SAVED_MARKER_KEY })
+
+const sawSavedPersistenceWithFrames = (
+  page: Page,
+): Promise<{ frames: number; value: boolean }> =>
+  page.evaluate(({ key }) => ({
+    frames: Number(document.body.getAttribute('data-frames')),
+    value: (globalThis as unknown as Record<string, boolean>)[key] === true,
+  }), { key: SAVED_MARKER_KEY }) as Promise<{ frames: number; value: boolean }>
 
 const grantPointerLock = async (page: Page): Promise<void> => {
   await page.evaluate(() => {
@@ -643,6 +673,41 @@ test('materializes, persists, and reuses a portal round trip without duplicates'
   expect(returned.activePortal?.anchor).toEqual({ x: 120, y: 65, z: 8 })
   expect(returned.activePortal?.interiorBlock).toBe(NETHER_PORTAL_BLOCK_ID)
   expect(returned.activePortal?.frameBlock).toBe(OBSIDIAN_BLOCK_ID)
+  expect(faults.pageErrors).toEqual([])
+  expect(faults.consoleErrors).toEqual([])
+})
+
+test('reaches saved after an autosave, even while the player keeps drifting', async ({ page }) => {
+  const faults = watchForFaults(page)
+  await deleteSessionDatabase(page)
+
+  await startGameSession(page)
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  // Water buoyancy moves the player every frame with zero input — the same
+  // condition that starved the indicator in production: `main.ts`'s
+  // `if (looked || moved) markSessionDirty()` mints a fresh dirty generation
+  // on essentially every frame, so a save's async round trip is always
+  // racing a newer generation than the one it captured. The regression was
+  // that the indicator compared a just-completed save against whatever
+  // generation was live *when the callback ran*, which under continuous
+  // drift is (almost) never the generation the save actually covered.
+  await callQa(page, 'gameplay.seedSubmergedSwimmingEncounter')
+  await watchForSavedPersistence(page)
+
+  // AUTOSAVE_INTERVAL_MS (main.ts) is 5s and does not wait for a debounce
+  // gap the continuous drift never provides — this only needs to observe
+  // that a background save eventually completes and is shown, not to force
+  // one. waitForSimulationProgress backs this off by real frame progress
+  // rather than a fixed wall-clock sleep, matching the drift-sensitive
+  // waits elsewhere in this suite.
+  await waitForSimulationProgress(
+    page,
+    () => sawSavedPersistenceWithFrames(page),
+    (sawSaved) => sawSaved,
+    { description: 'save indicator reaches saved despite continuous drift' },
+  )
+
   expect(faults.pageErrors).toEqual([])
   expect(faults.consoleErrors).toEqual([])
 })
