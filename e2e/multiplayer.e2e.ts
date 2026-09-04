@@ -926,3 +926,98 @@ test('closing a chest is honored once a facility command already in flight resol
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
+
+test('breaking a chest through the authoritative multiplayer server drops its stored items instead of destroying them', async ({ page }) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
+  const stateFile = join(stateDirectory, 'state.json')
+  const claimsFile = join(stateDirectory, 'claims.json')
+  const player = 'alice-e2e'
+  const CHEST_BLOCK_ID = 105
+  const CHEST_CAPACITY = 27
+  const containerId = 'overworld:8,63,8'
+  await writeFile(stateFile, `${JSON.stringify({
+    format: 1,
+    worldId: 'overworld',
+    seed: 0,
+    state: {
+      revision: 4,
+      // Unlike the chest-close-race fixture above (which never actually
+      // needs the server to recognize the block, since it only exercises
+      // the client's own pending-command bookkeeping), breaking the chest
+      // requires the server's own `blockAt` to agree it's a chest — its
+      // worldgen is seeded independently of whatever the client's local QA
+      // fixture painted into its own chunk store, so an explicit override
+      // here is what makes the two agree, not a shared save file.
+      blocks: [{ at: { x: 8, y: 63, z: 8 }, block: 'chest' }],
+      inventories: [{
+        player,
+        state: { slots: emptySlots(), selectedSlot: 0 },
+      }],
+      containers: [{
+        containerId,
+        kind: 'chest',
+        slots: [{ item: 'stone', count: 5 }, ...Array.from({ length: CHEST_CAPACITY - 1 }, () => null)],
+      }],
+      playerPositions: [{
+        player,
+        at: { x: 8.5, y: 64.5, z: 8.5 },
+        facing: { yawRadians: 0, pitchRadians: -Math.PI / 2 + 0.01 },
+      }],
+    },
+  })}\n`, 'utf8')
+  await writeFile(claimsFile, `${JSON.stringify(claimsFor({ [player]: LEGACY_SECRETS[player] }))}\n`, 'utf8')
+  const server = await startServer(stateFile, claimsFile)
+
+  try {
+    // Same local-pass-places-terrain-only shape as the chest-close-race test
+    // above: the container's actual contents come from the server's state
+    // file, not from anything set client-side before the multiplayer
+    // connection replaces it with the authoritative snapshot. Creative mode
+    // (not the chest-close-race test's survival session) is required here:
+    // breaking is this test's real action, and a Creative attack gesture
+    // breaks instantly, while Survival mining progress against a bare hand
+    // never completes within the test's timeout.
+    await createCreativeWorld(page, 'Chest Break Drop E2E')
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+    await page.evaluate(({ key, targetBlock }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, (block: number) => unknown>
+        | undefined
+      const operation = surface?.['gameplay.setPose']
+      if (operation === undefined) throw new Error('missing QA command: gameplay.setPose')
+      return operation(targetBlock)
+    }, { key: QA_GLOBAL_KEY, targetBlock: CHEST_BLOCK_ID })
+    await page.keyboard.press('Escape')
+    await callQa(page, 'persistence.flush')
+    await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+    const sessionUrl = page.url()
+    await connectPage(page, multiplayerUrl(sessionUrl, player, 'Alice', server.url), LEGACY_SECRETS[player])
+    await expect.poll(() => canvasRevision(page)).toBe(4)
+
+    // A plain left click while pointer-locked is a real Creative-mode instant
+    // break (main.ts's `attackTriggered` path), sent over the network as a
+    // genuine `BlockBreak` command — the same path a live player uses, not a
+    // QA shortcut that reaches into server state directly.
+    const canvas = page.locator('#game-canvas')
+    await canvas.hover()
+    await grantPointerLock(page)
+    await canvas.click({ button: 'left' })
+    // Not gated on a specific revision number: other authoritative traffic
+    // (vitals/weather ticks, position reconciliation) advances the same
+    // counter independently of this break, so waiting for an exact value is
+    // its own source of flakiness. The inventory settling on 5 stone is the
+    // actual assertion; this is just giving that settling time to happen.
+    await expect.poll(() => canvasRevision(page), { timeout: 8_000 }).toBeGreaterThanOrEqual(5)
+
+    // The player stands directly above the broken chest, so the dropped
+    // stack is within pickup range and gets swept into the inventory before
+    // this test can observe it as a lingering `renderedEntities` entry — the
+    // inventory ending up with the stone is itself the proof the contents
+    // were not destroyed (mirrors the reporter's own repro: "zero stone in
+    // the player's inventory" was the failure signature before this fix).
+    await expect.poll(async () => itemCount(await snapshot(page), 'stone')).toBe(5)
+  } finally {
+    await stopServer(server.process)
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})

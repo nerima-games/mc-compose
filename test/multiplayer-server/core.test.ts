@@ -95,7 +95,7 @@ const makeFixture = (
   initialWeather: 'clear' | 'rain' | 'thunder' = 'clear',
   dimension: Dimension = 'overworld',
   options: Pick<MultiplayerServerOptions, 'staticBlocks' | 'onEndPortalUse' | 'onNetherPortalUse'> & Readonly<{
-    metadata?: Pick<MultiplayerServerState, 'anvilNames' | 'enchantments'>
+    metadata?: Partial<Pick<MultiplayerServerState, 'anvilNames' | 'enchantments' | 'containers' | 'furnaces' | 'brewingStands'>>
   }> = {},
 ) => {
   const { metadata, ...serverOptions } = options
@@ -970,5 +970,137 @@ describe('authoritative multiplayer server core', () => {
       player: playerId('alice'),
       state: expect.objectContaining({ health: 10 }),
     }))
+  })
+
+  describe('breaking a facility drops what it was storing', () => {
+    // Before the fix, `BlockBreak` deleted a chest/furnace/brewing stand's
+    // state with no preceding read of its contents, so the stored items were
+    // silently destroyed instead of dropped. Each case here seeds a facility
+    // with known contents through `initialState` (mirroring how the real
+    // server loads a state file) and asserts those contents survive as
+    // `item-drop` entities once the block is broken through the real
+    // `BlockBreak` command path.
+
+    it('drops a chest\'s stored items instead of destroying them', () => {
+      const at = { x: 1, y: 64, z: 1 }
+      const containerId = `world-1:${String(at.x)},${String(at.y)},${String(at.z)}`
+      const fixture = makeFixture(
+        ({ x, y, z }) => (x === at.x && y === at.y && z === at.z ? 'chest' : null),
+        6_000,
+        { x: 0, y: 64, z: 0 },
+        'clear',
+        'overworld',
+        { metadata: { containers: [{ containerId, kind: 'chest', slots: [{ item: 'stone', count: 5 }, null] }] } },
+      )
+      const frames = fixture.connect('socket-a')
+      fixture.receive('socket-a', join('alice'))
+      frames.length = 0
+
+      expect(fixture.receive('socket-a', { _tag: 'BlockBreak', player: playerId('alice'), at }).accepted).toBe(true)
+
+      expect(messages(frames)).toContainEqual(expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({ _tag: 'item-drop', stack: { item: 'stone', count: 5 } }),
+      }))
+    })
+
+    it('drops a furnace\'s input, fuel, and output instead of destroying them', () => {
+      const at = { x: 2, y: 64, z: 1 }
+      const furnaceId = JSON.stringify(['world-1', at.x, at.y, at.z])
+      const fixture = makeFixture(
+        ({ x, y, z }) => (x === at.x && y === at.y && z === at.z ? 'furnace' : null),
+        6_000,
+        { x: 0, y: 64, z: 0 },
+        'clear',
+        'overworld',
+        {
+          metadata: {
+            furnaces: [{
+              furnaceId,
+              input: { item: 'raw_iron', count: 3 },
+              fuel: { item: 'coal', count: 2 },
+              output: { item: 'iron_ingot', count: 1 },
+              burnTicksRemaining: 40,
+              cookTicks: 10,
+            }],
+          },
+        },
+      )
+      const frames = fixture.connect('socket-a')
+      fixture.receive('socket-a', join('alice'))
+      frames.length = 0
+
+      expect(fixture.receive('socket-a', { _tag: 'BlockBreak', player: playerId('alice'), at }).accepted).toBe(true)
+
+      const drops = messages(frames)
+        .filter((message): message is Extract<NetworkMessage, { readonly _tag: 'EntitySpawnDelta' }> => message._tag === 'EntitySpawnDelta')
+        .map((message) => message.entity)
+      expect(drops).toEqual(expect.arrayContaining([
+        expect.objectContaining({ _tag: 'item-drop', stack: { item: 'raw_iron', count: 3 } }),
+        expect.objectContaining({ _tag: 'item-drop', stack: { item: 'coal', count: 2 } }),
+        expect.objectContaining({ _tag: 'item-drop', stack: { item: 'iron_ingot', count: 1 } }),
+      ]))
+    })
+
+    it('drops a brewing stand\'s bottle and ingredient, discarding only fuel charge progress', () => {
+      const at = { x: 1, y: 64, z: 2 }
+      const fixture = makeFixture(
+        ({ x, y, z }) => (x === at.x && y === at.y && z === at.z ? 'brewing_stand' : null),
+        6_000,
+        { x: 0, y: 64, z: 0 },
+        'clear',
+        'overworld',
+        {
+          metadata: {
+            brewingStands: [{
+              at,
+              state: { fuelUnits: 1, bottle: 'water_bottle', ingredient: 'nether_wart', brewing: undefined },
+            }],
+          },
+        },
+      )
+      const frames = fixture.connect('socket-a')
+      fixture.receive('socket-a', join('alice'))
+      frames.length = 0
+
+      expect(fixture.receive('socket-a', { _tag: 'BlockBreak', player: playerId('alice'), at }).accepted).toBe(true)
+
+      const drops = messages(frames)
+        .filter((message): message is Extract<NetworkMessage, { readonly _tag: 'EntitySpawnDelta' }> => message._tag === 'EntitySpawnDelta')
+        .map((message) => message.entity)
+      expect(drops).toEqual(expect.arrayContaining([
+        expect.objectContaining({ _tag: 'item-drop', stack: { item: 'water_bottle', count: 1 } }),
+        expect.objectContaining({ _tag: 'item-drop', stack: { item: 'nether_wart', count: 1 } }),
+      ]))
+    })
+
+    it('converts a finished potion into its item form when the brewing stand holding it is broken', () => {
+      const at = { x: 1, y: 64, z: 3 }
+      const fixture = makeFixture(
+        ({ x, y, z }) => (x === at.x && y === at.y && z === at.z ? 'brewing_stand' : null),
+        6_000,
+        { x: 0, y: 64, z: 0 },
+        'clear',
+        'overworld',
+        {
+          metadata: {
+            brewingStands: [{
+              at,
+              state: { fuelUnits: 0, bottle: { potion: 'speed' }, ingredient: undefined, brewing: undefined },
+            }],
+          },
+        },
+      )
+      const frames = fixture.connect('socket-a')
+      fixture.receive('socket-a', join('alice'))
+      frames.length = 0
+
+      expect(fixture.receive('socket-a', { _tag: 'BlockBreak', player: playerId('alice'), at }).accepted).toBe(true)
+
+      expect(messages(frames)).toContainEqual(expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({ _tag: 'item-drop', stack: { item: 'potion_of_swiftness', count: 1 } }),
+      }))
+    })
   })
 })
