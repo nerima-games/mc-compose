@@ -238,6 +238,10 @@ import {
   QA_REDSTONE_PLATE_WIRE,
   QA_REDSTONE_RAIL,
   QA_REDSTONE_REPEATER,
+  QA_WATER_CELLS,
+  QA_WATER_ORIGIN,
+  QA_WATER_PLACEMENT_POSE,
+  QA_WATER_SIZE,
   REDSTONE_PLACEMENT_ITEMS,
 } from './qa-fixtures'
 import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
@@ -7297,6 +7301,77 @@ type MultiplayerInventorySelection = Readonly<{
     return railTrackSnapshot()
   }
 
+  const boatWaterSnapshot = () => {
+    const dimension = Effect.runSync(playerApi.dimension)
+    const boat = vehicleList().find(
+      (vehicle) => vehicle.type === 'boat' && vehicle.dimension === dimension,
+    )
+    return {
+      boat: boat === undefined ? null : {
+        position: boat.position,
+        velocity: boat.velocity,
+        yawRadians: boat.yawRadians,
+        mounted: boat.occupant !== undefined,
+      },
+    }
+  }
+
+  // Closes the same testability gap seedRailTrackEncounter closes for
+  // minecarts, for boats — but unlike that fixture, this one does NOT spawn
+  // or mount the boat itself. Placement is real-click and boarding is
+  // distance-gated (both in this file's VehicleCommand/`use` handling), and
+  // whether a real placement onto water lands the boat where the frame
+  // stage's own water check (mx-gameplay's vehicle-frame.ts `waterAt`,
+  // which reads the boat's OWN cell and the one above it) actually finds
+  // water is exactly the open question — a QA-only spawn at a hand-picked
+  // height would silently decide that question instead of testing it. This
+  // fixture only terraforms an open-water pool and equips the boat item;
+  // placement, mounting and driving all go through the SAME
+  // targetedBlock()-raycast placement, boarding-distance check and
+  // vehicleService/frame stage (gameplayStages) production play uses.
+  const seedBoatWaterEncounter = () => {
+    respawnPlayer()
+    for (const vehicle of vehicleList()) {
+      if (vehicle.type === 'boat' && vehicle.dimension === 'overworld') {
+        Effect.runSync(vehicleService.despawn(vehicle.id))
+      }
+    }
+    Effect.runSync(streamAround(currentChunkContext, QA_WATER_ORIGIN.x, QA_WATER_ORIGIN.z))
+    // A stone floor one block below the water and open air well above it —
+    // the same terraforming seedRailTrackEncounter and
+    // seedSmokeGroundingEncounter use so a purpose-built fixture does not
+    // depend on whatever height generated terrain happens to have here.
+    const margin = 1
+    for (let x = -margin; x <= QA_WATER_SIZE + margin; x += 1) {
+      for (let z = -margin; z <= QA_WATER_SIZE + margin; z += 1) {
+        Effect.runSync(currentChunkStore.setBlock(
+          blockPosition(QA_WATER_ORIGIN.x + x, QA_WATER_ORIGIN.y - 1, QA_WATER_ORIGIN.z + z),
+          blockIdOf('stone'),
+        ))
+        for (let y = 1; y <= 5; y += 1) {
+          Effect.runSync(currentChunkStore.setBlock(
+            blockPosition(QA_WATER_ORIGIN.x + x, QA_WATER_ORIGIN.y + y, QA_WATER_ORIGIN.z + z),
+            blockIdOf('air'),
+          ))
+        }
+      }
+    }
+    for (const cell of QA_WATER_CELLS) {
+      Effect.runSync(currentChunkStore.setBlock(cell, blockIdOf('water')))
+    }
+    Effect.runSync(playerApi.restore(QA_WATER_PLACEMENT_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(world.inventory.reset)
+    Effect.runSync(world.inventory.add('oak_boat', 1))
+    selectedHotbarIndex = 0
+    inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
+    inventoryInteraction.reset()
+    markSessionDirty()
+    renderPlayerUi()
+    return boatWaterSnapshot()
+  }
+
   const seedWoodenPickaxeProgression = () => {
     respawnPlayer()
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, Effect.runSync(playerApi.dimension)))
@@ -8478,6 +8553,8 @@ type MultiplayerInventorySelection = Readonly<{
         mutateObserverInput,
         seedRailTrackEncounter,
         railTrackSnapshot,
+        seedBoatWaterEncounter,
+        boatWaterSnapshot,
         seedFarmingEncounter,
         seedFishingEncounter,
         seedSubmergedSwimmingEncounter,
@@ -10276,7 +10353,24 @@ type MultiplayerInventorySelection = Readonly<{
             if (target !== undefined) {
               const type = specialSelected.item === 'oak_boat' ? 'boat' : 'minecart'
               const item = specialSelected.item
-              const at = type === 'minecart' && (blockTypeOfId(target.block) === 'rail' || blockTypeOfId(target.block) === 'powered_rail')
+              // A boat aimed at open water must land AT the water block's
+              // own cell, not the empty cell adjacent to whichever face was
+              // hit — the same reason a minecart lands at the rail's own
+              // cell rather than beside it. mx-gameplay's vehicle-frame.ts
+              // (`waterAt`) reads whether the BOAT'S OWN cell (or the one
+              // above it) is water to decide propulsion; a boat commonly
+              // gets placed by aiming down at open water, which hits the
+              // water block's TOP face, and `target.adjacentPosition` for a
+              // top-face hit is one cell ABOVE the water — never detected as
+              // in-water, so the boat only ever gets stepBoat's 15% off-water
+              // crawl (~0.05 blocks/sec measured) no matter how it is
+              // driven. Landed via a QA-seeded pool and the SAME real
+              // right-click placement path in e2e/boat-water.e2e.ts before
+              // this fix: placed at water's own y+1, terminal speed 0.048.
+              const at = (
+                (type === 'minecart' && (blockTypeOfId(target.block) === 'rail' || blockTypeOfId(target.block) === 'powered_rail'))
+                || (type === 'boat' && blockTypeOfId(target.block) === 'water')
+              )
                 ? target.position
                 : target.adjacentPosition
               const removed = Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, item, 1))

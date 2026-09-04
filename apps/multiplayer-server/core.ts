@@ -2139,8 +2139,17 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         const targetBlock = blockAt(target.position)
         const placedOnRail = vehicleType === 'minecart' &&
           (targetBlock === 'rail' || targetBlock === 'powered_rail')
-        const at = placedOnRail ? target.position : target.adjacentPosition
-        if (!isInBounds(at) || (!placedOnRail && blockAt(at) !== null)) {
+        // A boat aimed at open water lands AT the water block's own cell,
+        // the same reason a minecart lands at the rail's own cell rather
+        // than beside it — see apps/web/main.ts's single-player VehicleUseCommand
+        // handling for the full reasoning (mx-gameplay's vehicle-frame.ts
+        // `waterAt` only ever finds water in the boat's OWN cell or the one
+        // above it, and `target.adjacentPosition` for the common straight-down
+        // placement aim is one cell above the water, never detected as
+        // in-water).
+        const placedOnWater = vehicleType === 'boat' && targetBlock === 'water'
+        const at = placedOnRail || placedOnWater ? target.position : target.adjacentPosition
+        if (!isInBounds(at) || (!placedOnRail && !placedOnWater && blockAt(at) !== null)) {
           return { accepted: false, reason: 'invalid-command' }
         }
 

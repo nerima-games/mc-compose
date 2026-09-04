@@ -799,6 +799,44 @@ describe('multiplayer server authoritative state', () => {
     ]))
   })
 
+  // Regression guard for the same defect apps/web/main.ts's single-player
+  // VehicleUseCommand handling fixes: without `placedOnWater`, a boat aimed
+  // at water lands at `target.adjacentPosition` — the empty cell next to
+  // whichever face was hit, one cell above the water for the common
+  // straight-down aim — where mx-gameplay's `waterAt` (vehicle-frame.ts)
+  // never finds it in water, so it never gets real propulsion regardless of
+  // input. A boat must land in the water block's OWN cell, the same reason
+  // a minecart lands on the rail's own cell rather than beside it.
+  it('places boats on the targeted water, not beside it', () => {
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      blocks: [...state.blocks, { at: { x: 0, y: 65, z: -1 }, block: 'water' }],
+      inventories: [{
+        player: playerId('alice'),
+        state: { slots: [{ item: 'oak_boat', count: 1 }, null, null], selectedSlot: 0 },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'VehicleUseCommand', commandId: commandId('place-boat-on-water'), player: playerId('alice'),
+      world: worldId('world-1'), expectedRevision: 4,
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        _tag: 'PlayerInventoryDelta', revision: 5,
+        state: expect.objectContaining({ slots: [null, null, null], selectedSlot: 0 }),
+      }),
+      expect.objectContaining({
+        _tag: 'EntitySpawnDelta',
+        entity: expect.objectContaining({
+          _tag: 'vehicle', vehicleType: 'boat', at: { x: 0.5, y: 65, z: -0.5 }, occupant: null,
+        }),
+      }),
+    ]))
+  })
+
   it('keeps fishing, rod wear, and full-inventory loot drops authoritative', () => {
     const state = initialState()
     const fixture = makeFixture({

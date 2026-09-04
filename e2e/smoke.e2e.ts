@@ -323,6 +323,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
     expect(surface?.sort()).toEqual([
       'audio.report',
       'audio.snapshot',
+      'gameplay.boatWaterSnapshot',
       'gameplay.breakTarget',
       'gameplay.damage',
       'gameplay.eat',
@@ -345,6 +346,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.returnToCraftingTable',
       'gameplay.returnToFarmingPlot',
       'gameplay.seedBedExplosionEncounter',
+      'gameplay.seedBoatWaterEncounter',
       'gameplay.seedBowProjectileEncounter',
       'gameplay.seedBrewingEncounter',
       'gameplay.seedCactusApproach',
