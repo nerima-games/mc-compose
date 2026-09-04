@@ -663,6 +663,7 @@ const MISSING_SESSION_ERROR = 'The requested saved world could not be found.'
 class RequestedSessionNotFoundError extends Error {}
 const AUTOSAVE_INTERVAL_MS = 5_000
 const SAVE_DEBOUNCE_MS = 500
+const CRAFTING_STALE_RETRY_LIMIT = 4
 
 const EQUIPMENT_ONLY_ITEM_TYPES = [
   'iron_helmet',
@@ -3355,6 +3356,7 @@ type MultiplayerInventorySelection = Readonly<{
     readonly commandId: string
     readonly acceptedRevision: number | null
   } | null = null
+  let craftingStaleRetries = 0
   let pendingBrewingCommand: {
     readonly commandId: string
   } | null = null
@@ -3820,8 +3822,24 @@ type MultiplayerInventorySelection = Readonly<{
         world: WorldId.make(Effect.runSync(playerApi.dimension)),
         lastKnownRevision: multiplayerRevision,
       }))
+      // The server compares revisions for strict equality and advances its own
+      // on any world activity, so a perfectly valid craft loses this race
+      // whenever anything at all happens between reading the revision and the
+      // server handling the command — another player, an entity tick, the
+      // clock. The rejection carries the server's current revision, adopted
+      // just above, so re-issuing sends a fresh one. Bounded, because a craft
+      // rejected for any other reason must not spin.
+      if (message.reason === 'stale-revision' && craftingStaleRetries < CRAFTING_STALE_RETRY_LIMIT) {
+        craftingStaleRetries += 1
+        requestCrafting()
+        return
+      }
+      craftingStaleRetries = 0
+      document.body.setAttribute('data-crafting-rejection', message.reason ?? 'unknown')
       return
     }
+    craftingStaleRetries = 0
+    document.body.removeAttribute('data-crafting-rejection')
     pendingCrafting = { ...pendingCrafting, acceptedRevision: message.revision }
     if (lastCraftingInventoryRevision >= message.revision) {
       pendingCrafting = null
@@ -6082,7 +6100,26 @@ type MultiplayerInventorySelection = Readonly<{
       else requestCrafting()
     } else if (target.region === 'crafting-grid') {
       if (pendingCrafting !== null) return
-      Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
+      // Multiplayer never populates `inventoryCarried` (that would mutate the
+      // server-mirrored `world.inventory` locally via `clickInventoryItem`).
+      // Stage a read-only copy of the selected slot's item into the grid via
+      // `carried` instead: the grid stays client-local staging, real inventory
+      // items are only ever consumed by the server when `requestCrafting` submits.
+      if (
+        multiplayer !== undefined
+        && multiplayerInventorySelection !== null
+        && inventoryInteraction.state().carried === undefined
+      ) {
+        const selection = multiplayerInventorySelection
+        Effect.runSync(inventoryInteraction.pickupInventoryItem(selection.source))
+        Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
+        const remaining = selection.remaining - 1
+        multiplayerInventorySelection = remaining > 0 ? { ...selection, remaining } : null
+        equipmentActionStatus = ''
+        document.body.setAttribute('data-equipment-action', 'accepted')
+      } else {
+        Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
+      }
       Effect.runSync(inventoryInteraction.preview())
     } else if (target.region === 'hotbar') {
       Effect.runSync(inventoryInteraction.clickInventoryItem(target.index, button))

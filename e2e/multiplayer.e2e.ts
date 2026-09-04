@@ -819,6 +819,105 @@ test('multiplayer hotbar selection updates before the network round trip, not af
   }
 })
 
+// Regression for: a connected multiplayer player could not craft anything at
+// all. `activateInventoryTarget`'s multiplayer branch (main.ts) diverts every
+// hotbar/main slot click into the network `moveInventoryItem`/selection flow
+// and never calls `clickInventoryItem`, so `inventoryCarried` — the only
+// thing `interactCraftingCellFromInventory` reads to fill a grid cell — stayed
+// permanently `undefined`. Grid cells never received an item and the output
+// button stayed `aria-disabled="true"` forever; a real click on it timed out
+// against a genuinely disabled control. The fix reuses the local-only
+// `pickupInventoryItem`/`carried` primitives (a read of `world.inventory`, never
+// a `.click()` mutation of it) so the crafting grid stays client-local staging:
+// nothing leaves the server-authoritative inventory until `requestCrafting`
+// submits the grid contents and the server consumes the real slots itself.
+test('a connected multiplayer player can craft (regression for the empty-grid defect)', async ({ page }) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
+  const stateFile = join(stateDirectory, 'state.json')
+  const claimsFile = join(stateDirectory, 'claims.json')
+  const player = 'alice-e2e'
+  await writeFile(stateFile, `${JSON.stringify({
+    format: 1,
+    worldId: 'overworld',
+    seed: 0,
+    state: {
+      revision: 4,
+      blocks: [],
+      inventories: [{
+        player,
+        state: {
+          slots: [{ item: 'oak_planks', count: 4 }, ...emptySlots().slice(1)],
+          selectedSlot: 0,
+        },
+      }],
+      playerPositions: [{
+        player,
+        at: { x: 8.5, y: 65, z: 10.5 },
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      }],
+    },
+  })}\n`, 'utf8')
+  await writeFile(claimsFile, `${JSON.stringify(claimsFor({ [player]: LEGACY_SECRETS[player] }))}\n`, 'utf8')
+  const server = await startServer(stateFile, claimsFile)
+
+  try {
+    await startGameSession(page, 'mp-crafting-e2e')
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+    await page.keyboard.press('Escape')
+    await callQa(page, 'persistence.flush')
+    await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+    const sessionUrl = page.url()
+    await connectPage(page, multiplayerUrl(sessionUrl, player, 'Alice', server.url), LEGACY_SECRETS[player])
+    await expect.poll(() => canvasRevision(page)).toBe(4)
+
+    expect(itemCount(await snapshot(page), 'oak_planks')).toBe(4)
+    expect(itemCount(await snapshot(page), 'stick')).toBe(0)
+
+    const inventory = page.locator('#inventory-root')
+    const hotbarSlot = inventory.locator('[data-region="hotbar"] [data-slot-index="0"]')
+    // Stick is a shaped 1x2 recipe (`['P', 'P']`); the top-left column of the
+    // default 2x2 grid is cells 0 and 2.
+    const craftingCellTop = inventory.locator('[data-region="crafting-grid"] [data-slot-index="0"]')
+    const craftingCellBottom = inventory.locator('[data-region="crafting-grid"] [data-slot-index="2"]')
+    const output = inventory.locator('[data-mx-ui="crafting-output"]')
+    const outcome = inventory.locator('[data-mx-ui="crafting-outcome"]')
+
+    await page.keyboard.press('KeyE')
+    await expect(inventory).toBeVisible()
+    await expect(hotbarSlot).toHaveAttribute('aria-label', /oak_planks/)
+
+    // One click selects the whole plank stack as the multiplayer move-source
+    // (the same selection `activateInventoryTarget` already uses for
+    // slot-to-slot moves); each crafting-grid click below consumes exactly
+    // one item from it, so the same selection survives across both
+    // placements without re-clicking the hotbar slot in between.
+    await hotbarSlot.click()
+    await craftingCellTop.click()
+    await craftingCellBottom.click()
+
+    // Real state, not a status attribute: `data-crafting-state` and
+    // `aria-disabled` are both driven by the local recipe-match preview
+    // against the grid's actual contents, never by network-pending status.
+    await expect(outcome).toHaveAttribute('data-crafting-state', 'match')
+    await expect(output).toHaveAttribute('aria-disabled', 'false')
+    await expect(output).toHaveAttribute('aria-label', /stick, 4/)
+
+    // The real gate this defect broke: a genuine click on a genuinely
+    // enabled button reaching the server.
+    await output.click()
+
+    await expect.poll(async () => ({
+      rejection: await page.locator('body').getAttribute('data-crafting-rejection'),
+      sticks: itemCount(await snapshot(page), 'stick'),
+    })).toEqual({ rejection: null, sticks: 4 })
+    await expect.poll(async () => itemCount(await snapshot(page), 'oak_planks')).toBe(2)
+    await expect(craftingCellTop).toHaveAttribute('aria-label', /empty/)
+  } finally {
+    await stopServer(server.process)
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
 test('closing a chest is honored once a facility command already in flight resolves, not silently dropped', async ({ page }) => {
   const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
   const stateFile = join(stateDirectory, 'state.json')
