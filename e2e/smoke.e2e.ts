@@ -370,6 +370,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.seedLethalMixedContact',
       'gameplay.seedLethalZombieEncounter',
       'gameplay.seedMeleeDropEncounter',
+      'gameplay.seedPortalArrivalIntoSolidGround',
       'gameplay.seedPortalEncounter',
       'gameplay.seedPortalIgnitionEncounter',
       'gameplay.seedRailTrackEncounter',

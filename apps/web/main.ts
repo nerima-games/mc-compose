@@ -163,6 +163,7 @@ import {
   endPortalCenterForStronghold,
   generatedChunkSource,
   nearestStrongholdSite,
+  overworldToNether,
   surfaceHeightAt,
   villageVillagerSpawnsForChunk,
   type ChunkSource,
@@ -2969,6 +2970,123 @@ const bootGame = async (
       }
       markSessionDirty()
     })
+  // mc-worldgen's resolveNetherTravel computes `destination` from pure 8:1
+  // arithmetic with no knowledge of what occupies it, and mx-gameplay's
+  // applyPortalTravel already `moveTo`'d the player there earlier this
+  // frame — see the comment above the `applyPortalTravels()` call site.
+  // That destination lands inside solid terrain roughly as often as it
+  // lands in the open, since it is just wherever the scaled coordinate
+  // happens to fall on generated ground. An arrival inside solid terrain
+  // starts the frame already overlapping it (teleported there, not swept
+  // there), and mc-physics's resolver only resolves a boundary the
+  // player's box CROSSES during a step — the same fact `restoreLookingAt`
+  // above measured for QA-spawned hostiles — so it never gets pushed out:
+  // ungrounded, unfalling, and blocked in every direction by the same rock
+  // it is standing inside.
+  //
+  // This searches the arrival COLUMN — same x/z as the arithmetic
+  // destination, the one axis vanilla itself searches — for the nearest
+  // existing open pocket with solid footing, checked nearest-Y-first so a
+  // correction never drifts further than it has to from where the portal
+  // math actually pointed. If the two cells the player's body would
+  // actually occupy are already clear, nothing was overlapping in the
+  // first place and ordinary physics — falling through real open space,
+  // resting on real ground — is left to handle it untouched; this is what
+  // keeps the other, already-working half of arrivals unchanged. Only when
+  // no open pocket exists within the search bound (solid rock the whole
+  // way) does this carve one at the arithmetic destination itself, the
+  // same flush-floor-plus-cleared-column shape `restoreLookingAt` already
+  // proves out for the identical underlying defect.
+  const PORTAL_LANDING_SEARCH_BLOCKS = 32
+  const ensureSafePortalLanding = (
+    dimension: Dimension,
+    destination: PersistedPortalState['position'],
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const context = getOrCreateDimensionChunkContext(dimension)
+      const minX = Math.floor(destination.x - PLAYER_HALF_WIDTH)
+      const maxX = Math.floor(destination.x + PLAYER_HALF_WIDTH)
+      const minZ = Math.floor(destination.z - PLAYER_HALF_WIDTH)
+      const maxZ = Math.floor(destination.z + PLAYER_HALF_WIDTH)
+      const footprint: Array<{ readonly x: number; readonly z: number }> = []
+      for (let x = minX; x <= maxX; x += 1) {
+        for (let z = minZ; z <= maxZ; z += 1) {
+          footprint.push({ x, z })
+        }
+      }
+
+      const chunkRefs = new Map<string, ChunkRef>()
+      for (const cell of footprint) {
+        const chunk = { cx: Math.floor(cell.x / 16), cz: Math.floor(cell.z / 16) }
+        chunkRefs.set(chunkKeyOf(chunk), chunk)
+      }
+      for (const [key, chunk] of chunkRefs) {
+        if (context.streamLoaded.has(key)) continue
+        yield* context.chunkStore.load(chunkCoord(chunk.cx, chunk.cz)).pipe(Effect.catchAll(() => Effect.void))
+        context.streamLoaded.add(key)
+        chunksStreamedIn += 1
+      }
+
+      // The SAME notion of "does this cell obstruct a body" the real
+      // resolver uses — collisionShape, via blockPropertiesAt's own
+      // accessor above — and deliberately not solidityFromStore's
+      // `passable` capability check. The two disagree on nether_portal
+      // itself: it carries no `passable: true` capability (only
+      // `suffocates: false` and `validSpawnSurface: false`), so
+      // solidityFromStore reads a portal's own interior as solid ground,
+      // and a first version of this fix used that check — it "corrected"
+      // a player already standing safely inside a freshly built portal,
+      // dropping them out of it entirely and stranding the return trip.
+      // collisionShape is what mc-physics's own resolver reads for
+      // collision, and nether_portal resolves to no shape there (players
+      // walk through one to dwell in it), so this predicate agrees with
+      // what actually blocks movement instead of a check built for a
+      // different question (mob-spawn eligibility).
+      const isObstructed = (x: number, y: number, z: number): boolean => {
+        const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(x, y, z)))
+        if (reading._tag !== 'Block') return true
+        if (isEmpty(reading.block)) return false
+        return aabbOfCollisionShape(propertyOfBlockId(reading.block, 'collisionShape')) !== null
+      }
+      const clearAt = (y: number): boolean =>
+        footprint.every((cell) => !isObstructed(cell.x, y, cell.z))
+      const solidAt = (y: number): boolean =>
+        footprint.every((cell) => isObstructed(cell.x, y, cell.z))
+
+      if (clearAt(destination.y) && clearAt(destination.y + 1)) return
+
+      let floorY: number | undefined
+      for (
+        let offset = 0;
+        offset <= PORTAL_LANDING_SEARCH_BLOCKS && floorY === undefined;
+        offset += 1
+      ) {
+        const candidates =
+          offset === 0
+            ? [destination.y - 1]
+            : [destination.y - 1 + offset, destination.y - 1 - offset]
+        for (const candidate of candidates) {
+          if (solidAt(candidate) && clearAt(candidate + 1) && clearAt(candidate + 2)) {
+            floorY = candidate
+            break
+          }
+        }
+      }
+      const carved = floorY === undefined
+      const resolvedFloorY = floorY ?? destination.y - 1
+
+      for (const cell of footprint) {
+        if (carved) {
+          yield* context.chunkStore.setBlock(blockPosition(cell.x, resolvedFloorY, cell.z), blockIdOf('stone'))
+        }
+        yield* context.chunkStore.setBlock(blockPosition(cell.x, resolvedFloorY + 1, cell.z), blockIdOf('air'))
+        yield* context.chunkStore.setBlock(blockPosition(cell.x, resolvedFloorY + 2, cell.z), blockIdOf('air'))
+      }
+      if (carved) markSessionDirty()
+
+      const pose = yield* playerApi.pose
+      yield* playerApi.moveTo({ ...pose.feetPosition, y: resolvedFloorY + 1 })
+    })
   const applyPortalTravels = (): Effect.Effect<void> =>
     Effect.gen(function* () {
       const travels = yield* drainPortalTravels(gameplayState)
@@ -2987,6 +3105,7 @@ const bootGame = async (
             travel.plan.portalToCreate.value,
           )
         }
+        yield* ensureSafePortalLanding(travel.plan.toDimension, travel.plan.destination)
       }
     })
   Effect.runSync(syncPortalCandidateSnapshots())
@@ -7373,6 +7492,82 @@ type MultiplayerInventorySelection = Readonly<{
     return gameplaySnapshot()
   }
 
+  // Deterministic core for ensureSafePortalLanding: a QA harness that
+  // reproduces "the Nether side of the crossing is solid rock" on demand
+  // rather than hoping a live trial happens to land there. Leaving the
+  // Nether side undiscovered would let stepPortalTravel plan a FRESH portal
+  // at the scaled destination, and building that portal's own frame already
+  // guarantees footing underneath it — safe by construction, which is
+  // exactly the case that does NOT exercise this defect. Registering the
+  // Nether destination up front makes resolveNetherTravel REUSE it instead,
+  // so no frame gets built and the arrival lands on whatever this fixture
+  // put there.
+  //
+  // The fill has to cover the SAME footprint ensureSafePortalLanding checks
+  // (every column the player's half-width straddles, not just the single
+  // column under the integer coordinate — the destination is unrounded, so
+  // it routinely sits on a block boundary the way restoreLookingAt's own
+  // header describes). Two zones, not one:
+  //
+  //   AT and ABOVE the destination: solid through the whole vertical search
+  //   band. This both embeds the body (satisfying ensureSafePortalLanding's
+  //   own "is the body's own space clear" test the way real solid terrain
+  //   would) and blocks every candidate the search would try ABOVE the
+  //   destination.
+  //   BELOW the destination: air through the same band, so there is no
+  //   accidental floor for the search — or for unmodified moveTo — to
+  //   rest on by coincidence. This is what makes the fixture discriminate:
+  //   an EARLIER version of it also filled below solid, which let a body
+  //   read "resting" the instant it arrived (mc-physics's `isSupported` is a
+  //   pure position check, not a step-crossing one) whether or not the
+  //   correction ran, so the assertion below would have passed unfixed too.
+  //
+  // With both zones exhausted, the search must fall back to carving a
+  // landing at the arithmetic destination itself — the one outcome this
+  // fixture can pin exactly — while an unfixed arrival is left embedded
+  // with open air below it, which mc-physics's resolver (component-tested
+  // separately) does not push a body out of on its own.
+  const seedPortalArrivalIntoSolidGround = () => {
+    respawnPlayer()
+    Effect.runSync(playerApi.restore(QA_PORTAL_POSE, 'overworld'))
+    alignActiveDimension('overworld')
+    resetSimState(true)
+    Effect.runSync(materializePortal('overworld', QA_PORTAL_LAYOUT))
+    registerPortal({ dimension: 'overworld', position: QA_PORTAL_ANCHOR })
+
+    const netherDestination = overworldToNether(QA_PORTAL_ANCHOR)
+    registerPortal({ dimension: 'nether', position: netherDestination })
+    const netherContext = getOrCreateDimensionChunkContext('nether')
+    Effect.runSync(streamAround(netherContext, netherDestination.x, netherDestination.z))
+    const minX = Math.floor(netherDestination.x - PLAYER_HALF_WIDTH)
+    const maxX = Math.floor(netherDestination.x + PLAYER_HALF_WIDTH)
+    const minZ = Math.floor(netherDestination.z - PLAYER_HALF_WIDTH)
+    const maxZ = Math.floor(netherDestination.z + PLAYER_HALF_WIDTH)
+    const baseY: number = netherDestination.y
+    const minY = baseY - PORTAL_LANDING_SEARCH_BLOCKS - 2
+    const maxY = baseY + PORTAL_LANDING_SEARCH_BLOCKS + 2
+    for (let x = minX; x <= maxX; x += 1) {
+      for (let z = minZ; z <= maxZ; z += 1) {
+        for (let y = minY; y < baseY; y += 1) {
+          Effect.runSync(netherContext.chunkStore.setBlock(blockPosition(x, y, z), blockIdOf('air')))
+        }
+        for (let y = baseY; y <= maxY; y += 1) {
+          Effect.runSync(netherContext.chunkStore.setBlock(blockPosition(x, y, z), blockIdOf('stone')))
+        }
+      }
+    }
+
+    Effect.runSync(
+      streamAround(
+        currentChunkContext,
+        QA_PORTAL_POSE.feetPosition.x,
+        QA_PORTAL_POSE.feetPosition.z,
+      ),
+    )
+    markSessionDirty()
+    return gameplaySnapshot()
+  }
+
   const seedPortalIgnitionEncounter = () => {
     respawnPlayer()
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, 'overworld'))
@@ -8319,6 +8514,7 @@ type MultiplayerInventorySelection = Readonly<{
           return gameplaySnapshot()
         },
         seedPortalEncounter,
+        seedPortalArrivalIntoSolidGround,
         seedPortalIgnitionEncounter,
         seedWoodenPickaxeProgression,
         seedIronArmor: () => {
