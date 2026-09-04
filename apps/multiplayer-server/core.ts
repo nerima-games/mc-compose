@@ -1221,6 +1221,14 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     return undefined
   }
 
+  const brewingBottleItem = (bottle: BrewingBottle): ItemStack['item'] => {
+    if (bottle === 'water_bottle') return bottle
+    if (bottle.potion === 'awkward') return 'awkward_potion'
+    if (bottle.potion === 'speed') return 'potion_of_swiftness'
+    if (bottle.potion === 'poison') return 'potion_of_poison'
+    return 'potion_of_regeneration'
+  }
+
   const persistentState = (): MultiplayerServerState => ({
     revision,
     blocks: [...blocks.values()].map((mutation) => ({ ...mutation, at: { ...mutation.at } })),
@@ -3437,13 +3445,39 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
         poweredRails.delete(positionKey(message.at))
         levers.delete(positionKey(message.at))
         disturbFallingBlocks([message.at])
-        if (containerKindForBlock(brokenBlock) !== undefined) containers.delete(containerIdAt(message.at))
-        else if (brokenBlock === 'furnace') furnaces.delete(furnaceIdAt(message.at))
-        else if (brokenBlock === 'brewing_stand') brewingStands.delete(positionKey(message.at))
+        // Capture whatever a chest/shulker/dispenser/dropper/hopper, furnace, or brewing
+        // stand was holding before its state is deleted, so breaking it drops the
+        // contents instead of silently destroying them. Partial-progress fields (cook
+        // time, burn time, brew fuel charges) are not items and are intentionally
+        // discarded, matching the single-player break path in apps/web/main.ts.
+        const storedStacks: Array<ItemStack> = []
+        if (containerKindForBlock(brokenBlock) !== undefined) {
+          const containerId = containerIdAt(message.at)
+          const container = containers.get(containerId)
+          if (container !== undefined) {
+            for (const stack of container.slots) if (stack !== null && stack !== undefined) storedStacks.push(stack)
+          }
+          containers.delete(containerId)
+        } else if (brokenBlock === 'furnace') {
+          const furnaceId = furnaceIdAt(message.at)
+          const furnace = furnaces.get(furnaceId)
+          if (furnace !== undefined) {
+            for (const stack of [furnace.input, furnace.fuel, furnace.output]) if (stack !== null) storedStacks.push(stack)
+          }
+          furnaces.delete(furnaceId)
+        } else if (brokenBlock === 'brewing_stand') {
+          const brewingKey = positionKey(message.at)
+          const stand = brewingStands.get(brewingKey)
+          if (stand !== undefined) {
+            if (stand.state.bottle !== undefined) storedStacks.push({ item: brewingBottleItem(stand.state.bottle), count: 1 })
+            if (stand.state.ingredient !== undefined) storedStacks.push({ item: stand.state.ingredient, count: 1 })
+          }
+          brewingStands.delete(brewingKey)
+        }
         revision += 1
         const inventory = inventories.get(message.player)
         const heldItem = inventory?.slots[inventory.selectedSlot]?.item
-        const drops = isBlockType(brokenBlock)
+        const blockDrops = isBlockType(brokenBlock)
           ? blockLoot(
               blockIdOf(brokenBlock),
               miningLootContextForItem(typeof heldItem === 'string' && isItemType(heldItem) ? heldItem : null),
@@ -3457,6 +3491,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
               stack,
             }))
           : []
+        const contentsDrops = storedStacks.map((stack, index): AuthoritativeEntityState => ({
+          _tag: 'item-drop',
+          entityId: `contents:${positionKey(message.at)}:drop:${String(revision)}:${String(index)}` as AuthoritativeEntityState['entityId'],
+          at: { x: message.at.x + 0.5, y: message.at.y + 0.5, z: message.at.z + 0.5 },
+          stack,
+        }))
+        const drops = [...blockDrops, ...contentsDrops]
         for (const drop of drops) entities.set(drop.entityId, drop)
         notifyStateChanged()
         broadcast({ ...message, world: worldId })
