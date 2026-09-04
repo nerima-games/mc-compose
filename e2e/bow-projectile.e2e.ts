@@ -302,8 +302,17 @@ test.fixme('charges, fires, and embeds an arrow while settling inventory wear', 
   expect(initialArrowCount).toBeGreaterThan(0)
   expect(seeded.projectiles).toEqual([])
 
-  await grantPointerLock(page)
+  // hover() BEFORE grantPointerLock(), matching every other e2e file's order
+  // (this file was the one place it was reversed). Reversed, hover()'s
+  // synthetic mousemove (a jump from wherever Playwright last left the
+  // cursor to the canvas center) lands after the fake `pointerlockchange`,
+  // and mc-render's input-service.js `withPointerDelta` is gated on
+  // `isLocked` alone — verified by reading that gate — so it accepts the
+  // jump as a real look delta. A genuine `requestPointerLock()` grant never
+  // produces an analogous cursor teleport, so this ordering bug cannot
+  // reproduce during real play; see the fixme test below for the full trace.
   await page.locator('#game-canvas').hover()
+  await grantPointerLock(page)
   await page.mouse.down({ button: 'right' })
   await page.waitForTimeout(350)
   const charged = await snapshot(page)
@@ -399,8 +408,10 @@ test('still fires a genuinely long hold when every frame stalls well past the ph
   const initialArrowCount = itemCount(seeded, 'arrow')
   expect(initialArrowCount).toBeGreaterThan(0)
 
-  await grantPointerLock(page)
+  // Same reorder as the fixme test above, for consistency; this test does
+  // not assert aim, so it was never sensitive to the bug.
   await page.locator('#game-canvas').hover()
+  await grantPointerLock(page)
   await page.mouse.down({ button: 'right' })
   await page.waitForTimeout(700)
   await page.mouse.up({ button: 'right' })
