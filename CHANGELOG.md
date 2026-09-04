@@ -1,5 +1,27 @@
 # @nerima-games/mc-compose
 
+## 0.2.10
+
+### Patch Changes
+
+- [#56](https://github.com/nerima-games/mc-compose/pull/56) [`e02d74f`](https://github.com/nerima-games/mc-compose/commit/e02d74f692b7b08eff6f293c7df742ad0e0582a7) Thanks [@takeokunn](https://github.com/takeokunn)! - Fix breaking a chest, shulker box, dispenser, dropper, hopper, furnace, or brewing stand through the authoritative multiplayer server permanently destroying whatever was stored inside it, instead of dropping it like single-player already does.
+  
+  The multiplayer block-break handler deleted a facility's server-side state — its container slots, a furnace's input/fuel/output, a brewing stand's bottle and ingredient — with no preceding read of its contents, so breaking one anywhere in a multiplayer game silently erased everything it held. The single-player break path was never affected: it reads a container's slots before draining it and spawns dropped-item entities preserving them.
+  
+  Breaking any of these now captures its stored items first and drops them at the block, the same way single-player does. A furnace's or brewing stand's in-progress cook/burn/fuel-charge state is discarded (it isn't an item), matching single-player's own behaviour. Multiplayer containers can never hold a custom-named or enchanted item in the first place — moving one into a container or furnace is already rejected server-side — so, unlike single-player's drop path, there is no metadata to preserve here.
+  
+  Left unchanged: a chest block itself still doesn't drop as an item when broken, in either mode, because the loot table has no entry for it — a separate, pre-existing gap.
+  
+  `test/multiplayer-server/core.test.ts` and `e2e/multiplayer.e2e.ts` pin this: a container, a furnace, and a brewing stand (including a finished potion) are each seeded with known contents and broken through the real `BlockBreak` network path — verified to drop nothing without the fix and the exact contents with it.
+
+- [#55](https://github.com/nerima-games/mc-compose/pull/55) [`00639f0`](https://github.com/nerima-games/mc-compose/commit/00639f0bbb4762f6f539b5532d9af10f7e5f9706) Thanks [@takeokunn](https://github.com/takeokunn)! - Fix the multiplayer server silently discarding seven categories of world state on every restart.
+  
+  The server correctly wrote levers, the ender dragon encounter and its revision, brewing stands, status effects, anvil-given item names, and enchantments to disk on every save, but the loader that runs on server start never read any of them back — it decoded only the older fields (blocks, inventories, vitals, containers, and so on). Any restart while pointed at the same state file — a deploy, a crash, or a routine bounce — permanently reset every lever, discarded the entire ender dragon fight's progress, emptied every brewing stand mid-brew, cleared active status effects, and erased every anvil-renamed and enchanted item, with no error and no player action required to trigger it.
+  
+  The loader now reads all seven fields with the same fail-closed validation the existing fields already get: a malformed entry rejects the whole state file rather than starting with silently corrupted data, and a state file written before this fix (missing these fields entirely) still loads cleanly with those categories empty.
+  
+  `test/multiplayer-server/persistence.test.ts` pins the round trip: a state populated with every category is written and read back and must come back byte-for-byte identical — verified to fail (losing exactly these seven fields) without the fix and pass with it. `test/multiplayer-server/runtime.test.ts` extends its existing fail-closed table with a malformed case for each of the seven fields.
+
 ## 0.2.9
 
 ### Patch Changes
