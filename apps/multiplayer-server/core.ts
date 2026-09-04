@@ -188,12 +188,14 @@ import {
   cloneInventory,
   cloneStack,
   emptyEquipmentState,
+  EQUIPMENT_SLOTS,
   equipInventoryItem,
   inventorySnapshot,
   moveInventoryStack,
   moveStack,
   swapInventoryStacks,
   unequipInventoryItem,
+  type EquipmentSlot,
   type InventoryState,
   type ItemStack,
   type MutableInventoryState,
@@ -775,6 +777,13 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
       return [[player, { seed, items: new Map(decodedItems) }] as const]
     }),
   )
+  // Equipment slots have no numeric index, so they can't share anvilNames/enchantments'
+  // Map<PlayerId, Map<number, ...>> shape or the wire-level `slot: number` bound the anvil
+  // and enchanting protocols enforce (see apps/multiplayer-shared/{anvil,enchanting}-network.ts).
+  // This is server-local, unbroadcast state: equip/unequip move metadata into and out of it,
+  // and death reads it directly when dropping worn armor — it never rides the wire on its own.
+  const equipmentAnvilNames = new Map<PlayerId, Map<EquipmentSlot, string>>()
+  const equipmentEnchantments = new Map<PlayerId, Map<EquipmentSlot, EnchantedItem>>()
   const droppedItemMetadata = new Map<AuthoritativeEntityState['entityId'], Readonly<{ name: string | null; enchantment: EnchantedItem | null }>>()
   let villagerTrades: AuthoritativeSnapshot['villagerTrades'] = (options.initialState?.villagerTrades ?? []).map((state) => ({
     ...state,
@@ -1025,6 +1034,30 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
     const sourceMetadata = inventorySlotMetadata(player, source)
     setInventorySlotMetadata(player, source, inventorySlotMetadata(player, destination))
     setInventorySlotMetadata(player, destination, sourceMetadata)
+  }
+  const equipmentSlotMetadata = (player: PlayerId, slot: EquipmentSlot): Readonly<{ name: string | null; enchantment: EnchantedItem | null }> => ({
+    name: equipmentAnvilNames.get(player)?.get(slot) ?? null,
+    enchantment: equipmentEnchantments.get(player)?.get(slot) ?? null,
+  })
+  const setEquipmentSlotMetadata = (
+    player: PlayerId,
+    slot: EquipmentSlot,
+    metadata: Readonly<{ name: string | null; enchantment: EnchantedItem | null }>,
+  ): void => {
+    let names = equipmentAnvilNames.get(player)
+    if (names === undefined) {
+      names = new Map()
+      equipmentAnvilNames.set(player, names)
+    }
+    let items = equipmentEnchantments.get(player)
+    if (items === undefined) {
+      items = new Map()
+      equipmentEnchantments.set(player, items)
+    }
+    if (metadata.name === null) names.delete(slot)
+    else names.set(slot, metadata.name)
+    if (metadata.enchantment === null) items.delete(slot)
+    else items.set(slot, metadata.enchantment)
   }
 
   const witherSnapshot = (): WitherWireMessage => ({
@@ -1468,6 +1501,24 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           droppedItemMetadata.set(entity.entityId, inventorySlotMetadata(player, slot))
           setInventorySlotMetadata(player, slot, { name: null, enchantment: null })
         }
+        deltas.push({ _tag: 'EntitySpawnDelta', world: presence.world, revision: nextRevision, entity })
+      }
+      for (const slot of EQUIPMENT_SLOTS) {
+        const stack = inventory.equipment[slot]
+        if (stack === null) continue
+        const entity: AuthoritativeEntityState = {
+          _tag: 'item-drop',
+          entityId: `player:${String(player)}:death:${String(nextRevision)}:equipment:${slot}` as AuthoritativeEntityState['entityId'],
+          at: { ...presence.at },
+          stack: { ...stack },
+        }
+        entities.set(entity.entityId, entity)
+        const metadata = equipmentSlotMetadata(player, slot)
+        if (metadata.name !== null || metadata.enchantment !== null) {
+          droppedItemMetadata.set(entity.entityId, metadata)
+          setEquipmentSlotMetadata(player, slot, { name: null, enchantment: null })
+        }
+        inventory.equipment[slot] = null
         deltas.push({ _tag: 'EntitySpawnDelta', world: presence.world, revision: nextRevision, entity })
       }
       inventory.slots.fill(null)
@@ -2281,12 +2332,21 @@ export const makeMultiplayerServerCore = (options: MultiplayerServerOptions): Mu
           if (reason !== null) return { accepted: false, reason }
           swapInventorySlotMetadata(message.player, message.action.source, message.action.destination)
         } else if (message.action._tag === 'equip-item') {
-          if (hasInventorySlotMetadata(message.player, message.action.source)) return { accepted: false, reason: 'invalid-command' }
+          const metadata = inventorySlotMetadata(message.player, message.action.source)
           const reason = equipInventoryItem(inventory, message.action.source, message.action.equipmentSlot)
           if (reason !== null) return { accepted: false, reason }
+          if (metadata.name !== null || metadata.enchantment !== null) {
+            setInventorySlotMetadata(message.player, message.action.source, { name: null, enchantment: null })
+            setEquipmentSlotMetadata(message.player, message.action.equipmentSlot, metadata)
+          }
         } else if (message.action._tag === 'unequip-item') {
-          const reason = unequipInventoryItem(inventory, message.action.equipmentSlot, message.action.destination)
-          if (reason !== null) return { accepted: false, reason }
+          const metadata = equipmentSlotMetadata(message.player, message.action.equipmentSlot)
+          const outcome = unequipInventoryItem(inventory, message.action.equipmentSlot, message.action.destination)
+          if (!outcome.ok) return { accepted: false, reason: outcome.reason }
+          if (metadata.name !== null || metadata.enchantment !== null) {
+            setEquipmentSlotMetadata(message.player, message.action.equipmentSlot, { name: null, enchantment: null })
+            setInventorySlotMetadata(message.player, outcome.destination, metadata)
+          }
         } else {
           const source = inventory.slots[message.action.source]
           if (source === null || source === undefined) return { accepted: false, reason: 'insufficient-items' }

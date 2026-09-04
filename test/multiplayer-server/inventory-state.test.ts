@@ -151,7 +151,7 @@ describe('inventory state operations', () => {
       const toUnequip = mutableInventory([null], {
         equipment: equipment({ head: stack('iron_helmet') }),
       })
-      expect(unequipInventoryItem(toUnequip, 'head', 0)).toBe('invalid-command')
+      expect(unequipInventoryItem(toUnequip, 'head', 0)).toEqual({ ok: false, reason: 'invalid-command' })
     } finally {
       catalog['iron_helmet'] = originalDefinition
     }
@@ -264,28 +264,28 @@ describe('inventory state operations', () => {
     expect(equipInventoryItem(missingDurability, 0, 'head')).toBeNull()
     expect(missingDurability.equipment.head).toEqual(stack('iron_helmet', 1, { current: 165, max: 165 }))
 
-    expect(unequipInventoryItem(mutableInventory([null]), 'head', undefined)).toBe('insufficient-items')
-    expect(unequipInventoryItem(mutableInventory([stack('stone')], { equipment: equipment({ head: stack('iron_helmet') }) }), 'head', undefined)).toBe('invalid-command')
-    expect(unequipInventoryItem(mutableInventory([null], { equipment: equipment({ head: stack('iron_helmet') }) }), 'head', 1)).toBe('invalid-command')
-    expect(unequipInventoryItem(mutableInventory([stack('stone')], { equipment: equipment({ head: stack('iron_helmet') }) }), 'head', 0)).toBe('invalid-command')
+    expect(unequipInventoryItem(mutableInventory([null]), 'head', undefined)).toEqual({ ok: false, reason: 'insufficient-items' })
+    expect(unequipInventoryItem(mutableInventory([stack('stone')], { equipment: equipment({ head: stack('iron_helmet') }) }), 'head', undefined)).toEqual({ ok: false, reason: 'invalid-command' })
+    expect(unequipInventoryItem(mutableInventory([null], { equipment: equipment({ head: stack('iron_helmet') }) }), 'head', 1)).toEqual({ ok: false, reason: 'invalid-command' })
+    expect(unequipInventoryItem(mutableInventory([stack('stone')], { equipment: equipment({ head: stack('iron_helmet') }) }), 'head', 0)).toEqual({ ok: false, reason: 'invalid-command' })
 
     const noSpace = mutableInventory([stack('stone')], { equipment: equipment({ head: stack('iron_helmet') }) })
-    expect(unequipInventoryItem(noSpace, 'head', undefined)).toBe('invalid-command')
+    expect(unequipInventoryItem(noSpace, 'head', undefined)).toEqual({ ok: false, reason: 'invalid-command' })
 
     const invalidEquipped = mutableInventory([null], { equipment: equipment({ head: stack('stone') }) })
-    expect(unequipInventoryItem(invalidEquipped, 'head', 0)).toBe('invalid-command')
+    expect(unequipInventoryItem(invalidEquipped, 'head', 0)).toEqual({ ok: false, reason: 'invalid-command' })
     const invalidCount = mutableInventory([null], { equipment: equipment({ head: stack('iron_helmet', 2) }) })
-    expect(unequipInventoryItem(invalidCount, 'head', 0)).toBe('invalid-command')
+    expect(unequipInventoryItem(invalidCount, 'head', 0)).toEqual({ ok: false, reason: 'invalid-command' })
     const invalidSlot = mutableInventory([null], { equipment: equipment({ head: stack('iron_chestplate') }) })
-    expect(unequipInventoryItem(invalidSlot, 'head', 0)).toBe('invalid-command')
+    expect(unequipInventoryItem(invalidSlot, 'head', 0)).toEqual({ ok: false, reason: 'invalid-command' })
     const missingEquippedDurability = mutableInventory([null], { equipment: equipment({ head: stack('iron_helmet', 1, null) }) })
-    expect(unequipInventoryItem(missingEquippedDurability, 'head', 0)).toBeNull()
+    expect(unequipInventoryItem(missingEquippedDurability, 'head', 0)).toEqual({ ok: true, destination: 0 })
     expect(missingEquippedDurability.durability).toEqual([{ current: 165, max: 165 }])
 
     const explicitDestination = mutableInventory([null, null], {
       equipment: equipment({ head: stack('iron_helmet', 1, { current: 4, max: 165 }) }),
     })
-    expect(unequipInventoryItem(explicitDestination, 'head', 1)).toBeNull()
+    expect(unequipInventoryItem(explicitDestination, 'head', 1)).toEqual({ ok: true, destination: 1 })
     expect(explicitDestination.equipment.head).toBeNull()
     expect(explicitDestination.slots).toEqual([null, stack('iron_helmet')])
     expect(explicitDestination.durability).toEqual([null, { current: 4, max: 165 }])
@@ -293,7 +293,7 @@ describe('inventory state operations', () => {
     const implicitDestination = mutableInventory([null], {
       equipment: equipment({ head: stack('iron_helmet') }),
     })
-    expect(unequipInventoryItem(implicitDestination, 'head', undefined)).toBeNull()
+    expect(unequipInventoryItem(implicitDestination, 'head', undefined)).toEqual({ ok: true, destination: 0 })
     expect(implicitDestination.slots).toEqual([stack('iron_helmet')])
     expect(implicitDestination.durability).toEqual([{ current: 165, max: 165 }])
   })
