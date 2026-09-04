@@ -3361,6 +3361,11 @@ type MultiplayerInventorySelection = Readonly<{
     facilityDeltaRevision: number | null
     inventoryDeltaRevision: number | null
   } | null = null
+  // Set when a chest close was requested while a facility command was
+  // already in flight (`setInventoryOpen`'s guard below) — the close never
+  // got sent, so it must be retried once that command clears rather than
+  // silently dropped. See `clearPendingFacilityCommand`.
+  let closeChestOnFacilityIdle = false
   let networkSleepState: SleepClientState = initialSleepClientState()
   let nextSleepRequest = 1
   let nextPortalCommand = 1
@@ -3668,6 +3673,20 @@ type MultiplayerInventorySelection = Readonly<{
       expectedRevision: multiplayerRevision,
     } as NetworkMessage))
     return true
+  }
+
+  // Every site that clears `pendingFacilityCommand` must go through here,
+  // so a close that was blocked by an in-flight command (the guard in
+  // `setInventoryOpen`) gets retried the moment that command resolves,
+  // instead of leaving the dialog open until the player notices and
+  // presses again. `setInventoryOpen(false)` is itself a safe no-op if
+  // the inventory already closed some other way in the meantime.
+  const clearPendingFacilityCommand = (): void => {
+    pendingFacilityCommand = null
+    if (closeChestOnFacilityIdle) {
+      closeChestOnFacilityIdle = false
+      setInventoryOpen(false)
+    }
   }
 
   const pumpPlayerDamage = (): void => {
@@ -4308,7 +4327,7 @@ type MultiplayerInventorySelection = Readonly<{
             && pendingFacilityCommand.facilityDeltaRevision !== null
             && message.revision >= pendingFacilityCommand.acceptedRevision
             && pendingFacilityCommand.facilityDeltaRevision >= pendingFacilityCommand.acceptedRevision
-          ) pendingFacilityCommand = null
+          ) clearPendingFacilityCommand()
         }
         if (
           message.player === multiplayer.query.player
@@ -4393,13 +4412,13 @@ type MultiplayerInventorySelection = Readonly<{
           pumpEntityCommands()
         }
         if (message.commandId === pendingFacilityCommand?.commandId) {
-          if (!pendingFacilityCommand.expectsDelta) pendingFacilityCommand = null
+          if (!pendingFacilityCommand.expectsDelta) clearPendingFacilityCommand()
           else if (
             pendingFacilityCommand.facilityDeltaRevision !== null
             && pendingFacilityCommand.inventoryDeltaRevision !== null
             && pendingFacilityCommand.facilityDeltaRevision >= message.revision
             && pendingFacilityCommand.inventoryDeltaRevision >= message.revision
-          ) pendingFacilityCommand = null
+          ) clearPendingFacilityCommand()
           else pendingFacilityCommand.acceptedRevision = message.revision
         }
         if (message.commandId === pendingVillagerTradeCommand) {
@@ -4428,7 +4447,7 @@ type MultiplayerInventorySelection = Readonly<{
           else pumpEntityCommands()
         }
         if (message.commandId === pendingFacilityCommand?.commandId) {
-          pendingFacilityCommand = null
+          clearPendingFacilityCommand()
           chestStatus = message.reason
           furnaceStatus = message.reason
           if (inventoryOpen) renderPlayerUi()
@@ -6525,6 +6544,7 @@ type MultiplayerInventorySelection = Readonly<{
         action: { _tag: 'close' },
       })) {
         chestStatus = 'Wait for the pending facility action before closing'
+        closeChestOnFacilityIdle = true
         renderPlayerUi()
         return
       }
