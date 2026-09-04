@@ -895,12 +895,27 @@ test('closing a chest is honored once a facility command already in flight resol
     // gated behind a rendered frame the way the hotbar's key-action system
     // is). No settling wait needed between this and the close below.
     await chest.locator('[data-region="player-hotbar"] [data-interaction-slot="0"]').click()
-    await chest.locator('[data-region="chest"] [data-interaction-slot="0"]').click()
 
-    // Escape's handler calls `setInventoryOpen(false)` directly and
-    // synchronously (main.ts's document keydown listener), so by the time
-    // this resolves the close attempt has already run into the guard.
-    await page.keyboard.press('Escape')
+    // The move click and the Escape that follows it are dispatched in ONE
+    // page-side turn, deliberately. Driving them as two separate Playwright
+    // actions leaves a real round trip between them, and on a fast server the
+    // move's own command can resolve inside that gap — the close then succeeds
+    // immediately, which is correct behaviour but means the test never reached
+    // the state it exists to cover. Asserting the refusal below would then fail
+    // on a run where nothing is wrong. Both handlers are synchronous DOM
+    // listeners (`activateChestSlot`, and main.ts's document keydown), so
+    // dispatching them in the same synchronous turn makes "the command is still
+    // in flight when the close is attempted" true by construction rather than
+    // by luck.
+    await page.evaluate(() => {
+      const storage = document.querySelector('[data-mx-ui="chest-storage"]')
+      const destination = storage?.querySelector('[data-region="chest"] [data-interaction-slot="0"]')
+      if (destination === null || destination === undefined) throw new Error('chest destination slot missing')
+      destination.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))
+    })
+
+    // The guard refused the close, because the move it queued is still pending.
     expect(await page.locator('body').getAttribute('data-inventory-open')).toBe('true')
 
     // The move command is still in flight; the close should apply itself
