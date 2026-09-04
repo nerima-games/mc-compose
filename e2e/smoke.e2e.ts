@@ -327,6 +327,7 @@ test.describe('smoke — the composed frame in a real browser', () => {
       'gameplay.breakTarget',
       'gameplay.damage',
       'gameplay.eat',
+      'gameplay.enterEnd',
       'gameplay.enterNether',
       'gameplay.enterOverworld',
       'gameplay.forceNextEyeOfEnderBreak',
