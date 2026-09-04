@@ -189,3 +189,37 @@ export const QA_RAIL_POSE: Pose = {
   yawRadians: 0,
   pitchRadians: -Math.PI / 2 + 0.01,
 }
+
+// Away from every other fixture's footprint the same way QA_RAIL_TRACK_ORIGIN
+// is: every other QA_* fixture sits within x:4-28, z:6-12 or the portal's
+// x:119-122, z:8-9; the rail loop occupies x:4-12, z:24-30. z=40 clears the
+// rail loop's own margin so terraforming this pool cannot clip either.
+export const QA_WATER_ORIGIN: Cell = blockPosition(4, 64, 40)
+export const QA_WATER_SIZE = 8
+
+/** Every cell of the pool's single-layer water surface, at QA_WATER_ORIGIN.y. */
+export const QA_WATER_CELLS: ReadonlyArray<Cell> = (() => {
+  const cells: Array<Cell> = []
+  for (let x = 0; x <= QA_WATER_SIZE; x += 1) {
+    for (let z = 0; z <= QA_WATER_SIZE; z += 1) {
+      cells.push(blockPosition(QA_WATER_ORIGIN.x + x, QA_WATER_ORIGIN.y, QA_WATER_ORIGIN.z + z))
+    }
+  }
+  return cells
+})()
+
+// Hovering above the pool's centre, aimed nearly straight down at the open
+// water below (within DEFAULT_BLOCK_REACH) — the same aim a player uses to
+// place a boat on open water in practice, and the one that hits the water
+// block's TOP face rather than a side face. Used by the real right-click
+// placement sub-test to exercise the SAME targetedBlock() raycast production
+// placement uses, not a QA-only spawn.
+export const QA_WATER_PLACEMENT_POSE: Pose = {
+  feetPosition: {
+    x: QA_WATER_ORIGIN.x + QA_WATER_SIZE / 2,
+    y: QA_WATER_ORIGIN.y + 2,
+    z: QA_WATER_ORIGIN.z + QA_WATER_SIZE / 2,
+  },
+  yawRadians: 0,
+  pitchRadians: -Math.PI / 2 + 0.01,
+}
