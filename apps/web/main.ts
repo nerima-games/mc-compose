@@ -7150,6 +7150,17 @@ type MultiplayerInventorySelection = Readonly<{
     const dimension = Effect.runSync(playerApi.dimension)
     Effect.runSync(playerApi.restore(QA_IGNITION_POSE, dimension))
     resetSimState(true)
+    // Every sibling seed*Encounter fixture (seedBoatWaterEncounter,
+    // seedPortalEncounter, seedRailTrackEncounter, ...) streams its own
+    // coordinates in before writing blocks there; this one did not. A caller
+    // that teleports the player far away first (another fixture, a real
+    // player wandering) evicts this area from `currentChunkContext`'s
+    // `streamLoaded` set, and `currentChunkStore.setBlock` on an unloaded
+    // chunk is a silent no-op — every fixture write below then does nothing,
+    // and `redstoneFixturesSnapshot` reads back nulls. A real click on the
+    // (never-placed) button then has nothing to act on: the input path is
+    // fine, there is simply no button there.
+    Effect.runSync(streamAround(currentChunkContext, QA_IGNITION_POSE.feetPosition.x, QA_IGNITION_POSE.feetPosition.z))
     // See QA_IGNITION_FLOOR_BLOCK's other call sites in this file: fixtures
     // that restore the player to QA_IGNITION_POSE without it leave the
     // player free-falling for the whole encounter.

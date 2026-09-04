@@ -168,3 +168,46 @@ test('redstone components place, activate, tick, and emit host transitions', asy
     await page.keyboard.up('KeyA')
   }
 })
+
+// Regression for a "chained session" defect: a full-loop QA pass found real
+// clicks going dead on interactions that had worked fine in isolation, and
+// which of several actions failed varied between runs. The input path itself
+// turned out to be intact throughout (mousedown/mouseup still reached the
+// page, `document.pointerLockElement` still read the canvas) — the actual
+// cause was upstream of input entirely: `gameplay.seedRedstoneFixtures`, unlike
+// every sibling seed*Encounter fixture in apps/web/main.ts, never called
+// `streamAround` for its own coordinates before writing blocks there. A
+// fixture call that follows the player having been moved far away (by an
+// earlier fixture, or by ordinary chained play) lands on a chunk that has
+// streamed out, and `currentChunkStore.setBlock` on an unloaded chunk is a
+// silent no-op: every fixture block simply never gets placed, and a real
+// click on the (never-placed) button has nothing to act on. This is "input
+// received, target resolved to nothing" rather than "input not received".
+test('presses the redstone button after the player has traveled far away and back', async ({ page }) => {
+  await startGameSession(page, 'redstone-far-travel-e2e')
+  await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+
+  await callQa(page, 'gameplay.seedRedstoneFixtures')
+  // Move far away — mirrors a chained session visiting another fixture
+  // (or a real player simply wandering) before coming back to the button.
+  await callQa(page, 'gameplay.seedPortalEncounter')
+  const reseeded = await callQa<RedstoneSnapshot>(page, 'gameplay.seedRedstoneFixtures')
+  expect(reseeded).toMatchObject({ button: 77, lamp: 79 })
+
+  const canvas = page.locator('#game-canvas')
+  await canvas.hover()
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'pointerLockElement', {
+      configurable: true,
+      get: () => document.querySelector('#game-canvas'),
+    })
+    document.dispatchEvent(new Event('pointerlockchange'))
+  })
+  await useTargetedBlock(page)
+  await waitForSimulationProgress(
+    page,
+    () => readRedstoneSnapshot(page),
+    (snapshot) => snapshot.lamp === 80,
+    { description: 'redstone lamp pulse after a far-travel round trip' },
+  )
+})
