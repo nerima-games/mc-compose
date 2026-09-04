@@ -32,9 +32,16 @@ import {
   type WireText,
   type WorldId,
 } from '@nerima-games/mx-multiplayer'
+import {
+  decodeEnchantedItem,
+  decodeEnderDragonEncounterSnapshot,
+  isValidBrewingStandState,
+  isValidStatusEffectState,
+} from '@nerima-games/mx-gameplay'
 import { Either, Schema } from 'effect'
 import { WebSocket, WebSocketServer } from 'ws'
 
+import { isValidAnvilName } from '../multiplayer-shared/anvil-network'
 import { isValidWitherRuntimeSnapshot } from '../multiplayer-shared/wither-runtime'
 import { WITHER_MAX_WIRE_LENGTH } from '../multiplayer-shared/wither-network'
 import {
@@ -275,6 +282,84 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
       : null
   if (witherRevision === null) return undefined
 
+  const leversValue = state['levers']
+  if (leversValue !== undefined && !Array.isArray(leversValue)) return undefined
+  const levers = leversValue === undefined
+    ? []
+    : leversValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !isBlockPos(entry['at']) || typeof entry['active'] !== 'boolean') return []
+        return [{ at: entry['at'], active: entry['active'] }]
+      })
+  if (leversValue !== undefined && levers.length !== leversValue.length) return undefined
+
+  const enderDragonValue = state['enderDragon']
+  const enderDragon = enderDragonValue === undefined ? undefined : decodeEnderDragonEncounterSnapshot(enderDragonValue)
+  if (enderDragonValue !== undefined && enderDragon === undefined) return undefined
+
+  const enderDragonRevisionValue = state['enderDragonRevision']
+  const enderDragonRevision = enderDragonRevisionValue === undefined
+    ? undefined
+    : isNonNegativeSafeInteger(enderDragonRevisionValue)
+      ? enderDragonRevisionValue
+      : null
+  if (enderDragonRevision === null) return undefined
+
+  const brewingStandsValue = state['brewingStands']
+  if (brewingStandsValue !== undefined && !Array.isArray(brewingStandsValue)) return undefined
+  const brewingStands = brewingStandsValue === undefined
+    ? []
+    : brewingStandsValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !isBlockPos(entry['at']) || !isValidBrewingStandState(entry['state'])) return []
+        return [{ at: entry['at'], state: entry['state'] }]
+      })
+  if (brewingStandsValue !== undefined && brewingStands.length !== brewingStandsValue.length) return undefined
+
+  const statusEffectsValue = state['statusEffects']
+  if (statusEffectsValue !== undefined && !Array.isArray(statusEffectsValue)) return undefined
+  const statusEffects = statusEffectsValue === undefined
+    ? []
+    : statusEffectsValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !isValidStatusEffectState(entry['state'])) return []
+        const player = Schema.decodeUnknownEither(PlayerIdSchema)(entry['player'])
+        return Either.isLeft(player) ? [] : [{ player: player.right, state: entry['state'] }]
+      })
+  if (statusEffectsValue !== undefined && statusEffects.length !== statusEffectsValue.length) return undefined
+
+  const anvilNamesValue = state['anvilNames']
+  if (anvilNamesValue !== undefined && !Array.isArray(anvilNamesValue)) return undefined
+  const anvilNames = anvilNamesValue === undefined
+    ? []
+    : anvilNamesValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !Array.isArray(entry['names'])) return []
+        const player = Schema.decodeUnknownEither(PlayerIdSchema)(entry['player'])
+        if (Either.isLeft(player)) return []
+        const names = entry['names'].flatMap((nameEntry: unknown) => {
+          if (!isRecord(nameEntry) || !isNonNegativeSafeInteger(nameEntry['slot']) || !isValidAnvilName(nameEntry['name'])) return []
+          return [{ slot: nameEntry['slot'], name: nameEntry['name'] }]
+        })
+        if (names.length !== entry['names'].length) return []
+        return [{ player: player.right, names }]
+      })
+  if (anvilNamesValue !== undefined && anvilNames.length !== anvilNamesValue.length) return undefined
+
+  const enchantmentsValue = state['enchantments']
+  if (enchantmentsValue !== undefined && !Array.isArray(enchantmentsValue)) return undefined
+  const enchantments = enchantmentsValue === undefined
+    ? []
+    : enchantmentsValue.flatMap((entry: unknown) => {
+        if (!isRecord(entry) || !isNonNegativeSafeInteger(entry['seed']) || !Array.isArray(entry['items'])) return []
+        const player = Schema.decodeUnknownEither(PlayerIdSchema)(entry['player'])
+        if (Either.isLeft(player)) return []
+        const items = entry['items'].flatMap((itemEntry: unknown) => {
+          if (!isRecord(itemEntry) || !isNonNegativeSafeInteger(itemEntry['slot'])) return []
+          const decoded = decodeEnchantedItem(itemEntry['item'])
+          return decoded.ok ? [{ slot: itemEntry['slot'], item: decoded.value }] : []
+        })
+        if (items.length !== entry['items'].length) return []
+        return [{ player: player.right, seed: entry['seed'], items }]
+      })
+  if (enchantmentsValue !== undefined && enchantments.length !== enchantmentsValue.length) return undefined
+
   const decoded = Schema.decodeUnknownEither(AuthoritativeSnapshot)({
     _tag: 'AuthoritativeSnapshot',
     world: worldId,
@@ -315,10 +400,17 @@ const decodeServerState = (value: unknown, worldId: string): MultiplayerServerSt
     playerPositions,
     ...(wither === undefined ? {} : { wither }),
     ...(witherRevision === undefined ? {} : { witherRevision }),
+    levers,
+    ...(enderDragon === undefined ? {} : { enderDragon }),
+    ...(enderDragonRevision === undefined ? {} : { enderDragonRevision }),
+    brewingStands,
+    statusEffects,
+    anvilNames,
+    enchantments,
   }
 }
 
-const loadServerState = async (
+export const loadServerState = async (
   path: string,
   worldId: string,
   seed: number,
@@ -348,7 +440,7 @@ const loadServerState = async (
   return state
 }
 
-const writeServerState = async (
+export const writeServerState = async (
   path: string,
   worldId: string,
   seed: number,

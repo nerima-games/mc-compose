@@ -689,6 +689,13 @@ describe('multiplayer WebSocket runtime', () => {
     { name: 'revision', state: { revision: Number.MAX_SAFE_INTEGER + 1 } },
     { name: 'wither snapshot', state: { wither: {} } },
     { name: 'wither revision', state: { witherRevision: -1 } },
+    { name: 'lever position', state: { levers: [{ at: {}, active: true }] } },
+    { name: 'ender dragon encounter', state: { enderDragon: {} } },
+    { name: 'ender dragon revision', state: { enderDragonRevision: -1 } },
+    { name: 'brewing stand state', state: { brewingStands: [{ at: { x: 0, y: 0, z: 0 }, state: {} }] } },
+    { name: 'status effect state', state: { statusEffects: [{ player: 'alice', state: {} }] } },
+    { name: 'anvil name slot', state: { anvilNames: [{ player: 'alice', names: [{ slot: -1, name: 'x' }] }] } },
+    { name: 'enchanted item', state: { enchantments: [{ player: 'alice', seed: 1, items: [{ slot: 0, item: {} }] }] } },
   ])('refuses persisted authority state with invalid $name', async ({ state: invalidState }) => {
     const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-server-')), 'state.json')
     await writeFile(stateFile, JSON.stringify({
