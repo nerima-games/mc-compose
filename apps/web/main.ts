@@ -9011,8 +9011,16 @@ type MultiplayerInventorySelection = Readonly<{
           wrapHotbarSelection,
         )
         if (nextHotbarIndex !== selectedHotbarIndex) {
-          if (multiplayer === undefined) selectedHotbarIndex = nextHotbarIndex
-          else sendInventorySelection(nextHotbarIndex)
+          // Optimistic: the selection is purely local UI focus (which slot
+          // this client is pointing at), not authoritative game state, so it
+          // updates immediately regardless of connection mode — matching
+          // single-player exactly — while the network command still carries
+          // it to the server for reconciliation. Without this, a right-click
+          // or "use" landing before the server's echo (`applyNetworkInventory`
+          // at `selectedHotbarIndex = state.selectedSlot`) read the OLD
+          // slot for the whole round trip.
+          selectedHotbarIndex = nextHotbarIndex
+          if (multiplayer !== undefined) sendInventorySelection(nextHotbarIndex)
         }
       }
 

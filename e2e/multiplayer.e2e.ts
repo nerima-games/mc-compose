@@ -747,3 +747,73 @@ test('synchronizes two Creative browser sessions through the authoritative serve
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
+
+test('multiplayer hotbar selection updates before the network round trip, not after (regression for the stale-selection race)', async ({ page }) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
+  const stateFile = join(stateDirectory, 'state.json')
+  const claimsFile = join(stateDirectory, 'claims.json')
+  const player = 'alice-e2e'
+  await writeFile(stateFile, `${JSON.stringify({
+    format: 1,
+    worldId: 'overworld',
+    seed: 0,
+    state: {
+      revision: 4,
+      blocks: [],
+      inventories: [{
+        player,
+        state: {
+          slots: [{ item: 'stone', count: 5 }, { item: 'dirt', count: 5 }, ...emptySlots().slice(2)],
+          selectedSlot: 0,
+        },
+      }],
+      playerPositions: [{
+        player,
+        at: { x: 8.5, y: 65, z: 10.5 },
+        facing: { yawRadians: 0, pitchRadians: 0 },
+      }],
+    },
+  })}\n`, 'utf8')
+  await writeFile(claimsFile, `${JSON.stringify(claimsFor({ [player]: LEGACY_SECRETS[player] }))}\n`, 'utf8')
+  const server = await startServer(stateFile, claimsFile)
+
+  try {
+    const sessionUrl = await createCreativeWorld(page, 'Hotbar Race E2E')
+    await page.keyboard.press('Escape')
+    await callQa(page, 'persistence.flush')
+    await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+    await connectPage(page, multiplayerUrl(sessionUrl, player, 'Alice', server.url), LEGACY_SECRETS[player])
+    await expect.poll(() => canvasRevision(page)).toBe(4)
+
+    // Directly measures the state a same-tick right-click would read
+    // (`selectedHotbarIndex`, reflected in the HUD's `data-selected` marker)
+    // rather than racing a real click against Playwright's own CDP dispatch
+    // overhead: manual probing found that overhead comparable to or larger
+    // than the real ~90-130ms multiplayer round trip, so a literal
+    // press-then-click frequently resolved the click only after the
+    // selection had already settled — not a reliable oracle for "did this
+    // land inside the race" on a fast localhost link.
+    const hudHotbar = page.locator('#hud-root [data-mx-ui="hotbar"]')
+    const selectedSlotIndex = (): Promise<number> =>
+      hudHotbar.locator('[data-mx-ui="slot"]').evaluateAll((slots) =>
+        slots.findIndex((slot) => slot.hasAttribute('data-selected')),
+      )
+    expect(await selectedSlotIndex()).toBe(0)
+
+    await page.keyboard.press('Digit2')
+    // Frame-counted, not wall-clock: a single-player selection updates
+    // synchronously within the SAME frame tick that reads the key press
+    // (main.ts's hotbar-select block), so it is already correct after
+    // exactly one rendered frame. A multiplayer selection previously only
+    // updated once the server's echo returned — a real round trip spanning
+    // many frames — so one frame was never enough regardless of how fast
+    // that connection happened to be. Repeated manual measurement of the
+    // round trip itself varied 40-130ms depending on host load, which is
+    // why this asserts on frames rather than a millisecond budget.
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+    expect(await selectedSlotIndex()).toBe(1)
+  } finally {
+    await stopServer(server.process)
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
