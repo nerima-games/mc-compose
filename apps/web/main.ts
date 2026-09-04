@@ -2984,19 +2984,28 @@ const bootGame = async (
   // ungrounded, unfalling, and blocked in every direction by the same rock
   // it is standing inside.
   //
-  // This searches the arrival COLUMN — same x/z as the arithmetic
+  // This searches the arrival COLUMN ONLY — same x/z as the arithmetic
   // destination, the one axis vanilla itself searches — for the nearest
   // existing open pocket with solid footing, checked nearest-Y-first so a
   // correction never drifts further than it has to from where the portal
-  // math actually pointed. If the two cells the player's body would
-  // actually occupy are already clear, nothing was overlapping in the
-  // first place and ordinary physics — falling through real open space,
-  // resting on real ground — is left to handle it untouched; this is what
-  // keeps the other, already-working half of arrivals unchanged. Only when
-  // no open pocket exists within the search bound (solid rock the whole
-  // way) does this carve one at the arithmetic destination itself, the
-  // same flush-floor-plus-cleared-column shape `restoreLookingAt` already
-  // proves out for the identical underlying defect.
+  // math actually pointed. ONLY the one column, not every column the
+  // player's half-width footprint might straddle: a live round-trip test
+  // caught the wider check reading a portal's own frame as "the body isn't
+  // clear here", because a frame stands immediately adjacent to its
+  // interior by construction and a footprint sized for open terrain
+  // reaches straight into it. The player is TELEPORTED into that partial
+  // overlap the same as every arrival here, so it is the same harmless
+  // coexistence the header above describes, not a defect to correct.
+  //
+  // If the destination cell and the one above it are already clear,
+  // nothing was overlapping in the first place and ordinary physics —
+  // falling through real open space, resting on real ground — is left to
+  // handle it untouched; this is what keeps the other, already-working
+  // half of arrivals unchanged. Only when no open pocket exists within the
+  // search bound (solid rock the whole way) does this carve one at the
+  // arithmetic destination itself, the same flush-floor-plus-cleared-column
+  // shape `restoreLookingAt` already proves out for the identical
+  // underlying defect.
   const PORTAL_LANDING_SEARCH_BLOCKS = 32
   const ensureSafePortalLanding = (
     dimension: Dimension,
@@ -3004,24 +3013,9 @@ const bootGame = async (
   ): Effect.Effect<void> =>
     Effect.gen(function* () {
       const context = getOrCreateDimensionChunkContext(dimension)
-      const minX = Math.floor(destination.x - PLAYER_HALF_WIDTH)
-      const maxX = Math.floor(destination.x + PLAYER_HALF_WIDTH)
-      const minZ = Math.floor(destination.z - PLAYER_HALF_WIDTH)
-      const maxZ = Math.floor(destination.z + PLAYER_HALF_WIDTH)
-      const footprint: Array<{ readonly x: number; readonly z: number }> = []
-      for (let x = minX; x <= maxX; x += 1) {
-        for (let z = minZ; z <= maxZ; z += 1) {
-          footprint.push({ x, z })
-        }
-      }
-
-      const chunkRefs = new Map<string, ChunkRef>()
-      for (const cell of footprint) {
-        const chunk = { cx: Math.floor(cell.x / 16), cz: Math.floor(cell.z / 16) }
-        chunkRefs.set(chunkKeyOf(chunk), chunk)
-      }
-      for (const [key, chunk] of chunkRefs) {
-        if (context.streamLoaded.has(key)) continue
+      const chunk = { cx: Math.floor(destination.x / 16), cz: Math.floor(destination.z / 16) }
+      const key = chunkKeyOf(chunk)
+      if (!context.streamLoaded.has(key)) {
         yield* context.chunkStore.load(chunkCoord(chunk.cx, chunk.cz)).pipe(Effect.catchAll(() => Effect.void))
         context.streamLoaded.add(key)
         chunksStreamedIn += 1
@@ -3030,28 +3024,36 @@ const bootGame = async (
       // The SAME notion of "does this cell obstruct a body" the real
       // resolver uses — collisionShape, via blockPropertiesAt's own
       // accessor above — and deliberately not solidityFromStore's
-      // `passable` capability check. The two disagree on nether_portal
-      // itself: it carries no `passable: true` capability (only
-      // `suffocates: false` and `validSpawnSurface: false`), so
-      // solidityFromStore reads a portal's own interior as solid ground,
-      // and a first version of this fix used that check — it "corrected"
-      // a player already standing safely inside a freshly built portal,
-      // dropping them out of it entirely and stranding the return trip.
-      // collisionShape is what mc-physics's own resolver reads for
-      // collision, and nether_portal resolves to no shape there (players
-      // walk through one to dwell in it), so this predicate agrees with
-      // what actually blocks movement instead of a check built for a
-      // different question (mob-spawn eligibility).
-      const isObstructed = (x: number, y: number, z: number): boolean => {
-        const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(x, y, z)))
+      // `passable` capability check, which a first version of this fix
+      // used: nether_portal carries no `passable: true` capability (only
+      // `suffocates: false` and `validSpawnSurface: false`), so that check
+      // read a portal's own interior as solid ground and "corrected" a
+      // player already standing safely inside a freshly built one, dropping
+      // them out of it and stranding the return trip.
+      //
+      // ONE EXPLICIT EXEMPTION REMAINS EVEN AFTER SWITCHING TO
+      // collisionShape, and it also needed the live round-trip test to
+      // surface: nether_portal's registry row sets no collisionShape of its
+      // own either, so it defaults to kernel's ordinary "full solid cube"
+      // the same as any other undeclared block. Nothing in mc-physics ever
+      // pushes a body OUT of a cell it is already standing in when the body
+      // did not cross into it during a step — the identical fact this
+      // fix's whole header is about — so a player TELEPORTED into a portal
+      // interior (every arrival here, and every QA restore) simply
+      // coexists with that "solid" cell harmlessly, which is how dwelling
+      // has ever worked at all. Treating it as an obstruction this fix
+      // must correct fights that coexistence instead of relying on it, so
+      // nether_portal is read as clear here regardless of its shape — the
+      // same block-type test stepPortalTravel's own `inPortal` uses.
+      const isObstructed = (y: number): boolean => {
+        const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(destination.x, y, destination.z)))
         if (reading._tag !== 'Block') return true
         if (isEmpty(reading.block)) return false
+        if (blockTypeOfId(reading.block) === 'nether_portal') return false
         return aabbOfCollisionShape(propertyOfBlockId(reading.block, 'collisionShape')) !== null
       }
-      const clearAt = (y: number): boolean =>
-        footprint.every((cell) => !isObstructed(cell.x, y, cell.z))
-      const solidAt = (y: number): boolean =>
-        footprint.every((cell) => isObstructed(cell.x, y, cell.z))
+      const clearAt = (y: number): boolean => !isObstructed(y)
+      const solidAt = (y: number): boolean => isObstructed(y)
 
       if (clearAt(destination.y) && clearAt(destination.y + 1)) return
 
@@ -3075,13 +3077,11 @@ const bootGame = async (
       const carved = floorY === undefined
       const resolvedFloorY = floorY ?? destination.y - 1
 
-      for (const cell of footprint) {
-        if (carved) {
-          yield* context.chunkStore.setBlock(blockPosition(cell.x, resolvedFloorY, cell.z), blockIdOf('stone'))
-        }
-        yield* context.chunkStore.setBlock(blockPosition(cell.x, resolvedFloorY + 1, cell.z), blockIdOf('air'))
-        yield* context.chunkStore.setBlock(blockPosition(cell.x, resolvedFloorY + 2, cell.z), blockIdOf('air'))
+      if (carved) {
+        yield* context.chunkStore.setBlock(blockPosition(destination.x, resolvedFloorY, destination.z), blockIdOf('stone'))
       }
+      yield* context.chunkStore.setBlock(blockPosition(destination.x, resolvedFloorY + 1, destination.z), blockIdOf('air'))
+      yield* context.chunkStore.setBlock(blockPosition(destination.x, resolvedFloorY + 2, destination.z), blockIdOf('air'))
       if (carved) markSessionDirty()
 
       const pose = yield* playerApi.pose
@@ -7503,11 +7503,14 @@ type MultiplayerInventorySelection = Readonly<{
   // so no frame gets built and the arrival lands on whatever this fixture
   // put there.
   //
-  // The fill has to cover the SAME footprint ensureSafePortalLanding checks
-  // (every column the player's half-width straddles, not just the single
-  // column under the integer coordinate — the destination is unrounded, so
-  // it routinely sits on a block boundary the way restoreLookingAt's own
-  // header describes). Two zones, not one:
+  // The fill is the SINGLE COLUMN ensureSafePortalLanding checks — same
+  // x/z as the destination, nothing either side of it — because a wider
+  // footprint check was tried and measured wrong: `e2e/persistence.e2e.ts`'s
+  // portal round trip already exercises a REAL freshly built portal, whose
+  // frame stands one block outside its own interior by construction, and a
+  // footprint sized for open terrain reaches into that frame and reads a
+  // perfectly good landing as obstructed. Two zones in the one column, not
+  // one:
   //
   //   AT and ABOVE the destination: solid through the whole vertical search
   //   band. This both embeds the body (satisfying ensureSafePortalLanding's
@@ -7539,22 +7542,14 @@ type MultiplayerInventorySelection = Readonly<{
     registerPortal({ dimension: 'nether', position: netherDestination })
     const netherContext = getOrCreateDimensionChunkContext('nether')
     Effect.runSync(streamAround(netherContext, netherDestination.x, netherDestination.z))
-    const minX = Math.floor(netherDestination.x - PLAYER_HALF_WIDTH)
-    const maxX = Math.floor(netherDestination.x + PLAYER_HALF_WIDTH)
-    const minZ = Math.floor(netherDestination.z - PLAYER_HALF_WIDTH)
-    const maxZ = Math.floor(netherDestination.z + PLAYER_HALF_WIDTH)
     const baseY: number = netherDestination.y
     const minY = baseY - PORTAL_LANDING_SEARCH_BLOCKS - 2
     const maxY = baseY + PORTAL_LANDING_SEARCH_BLOCKS + 2
-    for (let x = minX; x <= maxX; x += 1) {
-      for (let z = minZ; z <= maxZ; z += 1) {
-        for (let y = minY; y < baseY; y += 1) {
-          Effect.runSync(netherContext.chunkStore.setBlock(blockPosition(x, y, z), blockIdOf('air')))
-        }
-        for (let y = baseY; y <= maxY; y += 1) {
-          Effect.runSync(netherContext.chunkStore.setBlock(blockPosition(x, y, z), blockIdOf('stone')))
-        }
-      }
+    for (let y = minY; y < baseY; y += 1) {
+      Effect.runSync(netherContext.chunkStore.setBlock(blockPosition(netherDestination.x, y, netherDestination.z), blockIdOf('air')))
+    }
+    for (let y = baseY; y <= maxY; y += 1) {
+      Effect.runSync(netherContext.chunkStore.setBlock(blockPosition(netherDestination.x, y, netherDestination.z), blockIdOf('stone')))
     }
 
     Effect.runSync(
