@@ -18,6 +18,8 @@ export type EquipmentState = NonNullable<InventoryState['equipment']>
 export type EquipmentSlot = keyof EquipmentState
 export type MutableEquipmentState = { -readonly [Slot in EquipmentSlot]: EquipmentState[Slot] }
 
+export const EQUIPMENT_SLOTS: ReadonlyArray<EquipmentSlot> = ['head', 'chest', 'legs', 'feet', 'offhand']
+
 export interface MutableInventoryState {
   readonly slots: Array<ItemStack | null>
   readonly durability: Array<{ readonly current: number; readonly max: number } | null>
@@ -164,22 +166,32 @@ export const equipInventoryItem = (
   return null
 }
 
+/**
+ * Unlike equipInventoryItem, the destination slot may be caller-omitted (server
+ * picks the first empty slot), so a plain rejection-reason-or-null result can't
+ * tell the caller where the item landed. Callers that carry metadata alongside
+ * the stack (anvil names, enchantments) need that resolved index to relocate it.
+ */
+export type UnequipOutcome =
+  | Readonly<{ readonly ok: true; readonly destination: number }>
+  | Readonly<{ readonly ok: false; readonly reason: CommandRejectionReason }>
+
 export const unequipInventoryItem = (
   inventory: MutableInventoryState,
   equipmentSlot: EquipmentSlot,
   destinationIndex: number | undefined,
-): CommandRejectionReason | null => {
+): UnequipOutcome => {
   const equipped = inventory.equipment[equipmentSlot]
-  if (equipped === null) return 'insufficient-items'
+  if (equipped === null) return { ok: false, reason: 'insufficient-items' }
   const destination = destinationIndex ?? inventory.slots.findIndex((stack) => stack === null)
-  if (destination < 0 || destination >= inventory.slots.length || inventory.slots[destination] !== null) return 'invalid-command'
-  if (!isItemType(equipped.item) || equipped.count !== 1 || equipmentDefinitionFor(equipped.item)?.slot !== equipmentSlot) return 'invalid-command'
+  if (destination < 0 || destination >= inventory.slots.length || inventory.slots[destination] !== null) return { ok: false, reason: 'invalid-command' }
+  if (!isItemType(equipped.item) || equipped.count !== 1 || equipmentDefinitionFor(equipped.item)?.slot !== equipmentSlot) return { ok: false, reason: 'invalid-command' }
   const durability = equipped.durability ?? durabilityForItem(equipped.item)
-  if (durability === null) return 'invalid-command'
+  if (durability === null) return { ok: false, reason: 'invalid-command' }
   inventory.equipment[equipmentSlot] = null
   inventory.slots[destination] = { item: equipped.item, count: 1 }
   inventory.durability[destination] = { ...durability }
-  return null
+  return { ok: true, destination }
 }
 
 /** Adds as much of a stack as possible and returns only the unplaceable remainder. */

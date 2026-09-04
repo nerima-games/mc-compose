@@ -1285,6 +1285,205 @@ describe('multiplayer server authoritative state', () => {
     }))
   })
 
+  it('equips a named enchanted item instead of refusing it, and preserves the metadata through unequip', () => {
+    const state = initialState()
+    const enchantedHelmet = {
+      item: 'iron_helmet' as const,
+      durability: { current: 80, max: 165 },
+      enchantments: [{ id: 'protection' as const, level: 2 }],
+    }
+    const fixture = makeFixture({
+      ...state,
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'iron_helmet', count: 1, durability: { current: 80, max: 165 } }, null, null],
+          selectedSlot: 0,
+        },
+      }],
+      anvilNames: [{ player: playerId('alice'), names: [{ slot: 0, name: 'Ironhead' }] }],
+      enchantments: [{ player: playerId('alice'), seed: 99, items: [{ slot: 0, item: enchantedHelmet }] }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('equip-named-helmet'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'equip-item', source: 0, equipmentSlot: 'head' },
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: 5,
+      state: expect.objectContaining({
+        slots: [null, null, null],
+        equipment: expect.objectContaining({
+          head: { item: 'iron_helmet', count: 1, durability: { current: 80, max: 165 } },
+        }),
+      }),
+    }))
+    // The vacated inventory slot's metadata must actually move, not merely be
+    // left readable in both places: the server unconditionally re-broadcasts
+    // the player's full anvil/enchant state after every inventory command, so
+    // an empty list here proves slot 0 no longer carries the name or enchantment.
+    expect(fixture.sent.map(decodeAnvilWireMessage)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta', world: 'world-1', revision: 5, player: 'alice', names: [],
+    })
+    expect(fixture.sent.map(decodeEnchantingWireMessage)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta', world: 'world-1', revision: 5, player: 'alice', seed: 99, items: [],
+    })
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('unequip-named-helmet'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 5,
+      action: { _tag: 'unequip-item', equipmentSlot: 'head', destination: 2 },
+    }).accepted).toBe(true)
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: 6,
+      state: expect.objectContaining({
+        slots: [null, null, { item: 'iron_helmet', count: 1, durability: { current: 80, max: 165 } }],
+        equipment: expect.objectContaining({ head: null }),
+      }),
+    }))
+    expect(fixture.sent.map(decodeAnvilWireMessage)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta', world: 'world-1', revision: 6, player: 'alice',
+      names: [{ slot: 2, name: 'Ironhead' }],
+    })
+    expect(fixture.sent.map(decodeEnchantingWireMessage)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta', world: 'world-1', revision: 6, player: 'alice', seed: 99,
+      items: [{ slot: 2, item: enchantedHelmet }],
+    })
+    expect(fixture.persisted.at(-1)).toMatchObject({
+      revision: 6,
+      anvilNames: [{ player: 'alice', names: [{ slot: 2, name: 'Ironhead' }] }],
+      enchantments: [{ player: 'alice', seed: 99, items: [{ slot: 2, item: enchantedHelmet }] }],
+    })
+  })
+
+  it('drops plain equipped armor and clears the equipment slot when the wearer dies', () => {
+    // Isolated from metadata (unlike the named/enchanted case below): this reproduces
+    // the defect exactly as live-confirmed — ordinary iron armor stayed worn forever
+    // through death because applyPlayerDeaths never read or cleared inventory.equipment.
+    const state = initialState()
+    const fixture = makeFixture({
+      ...state,
+      vitals: [{ player: playerId('alice'), state: { health: 1, hunger: 2, experience: 7 } }],
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'iron_helmet', count: 1, durability: { current: 165, max: 165 } }, null],
+          selectedSlot: 0,
+        },
+      }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('equip-plain-helmet'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'equip-item', source: 0, equipmentSlot: 'head' },
+    }).accepted).toBe(true)
+
+    fixture.sent.length = 0
+    expect(fixture.receiveDamage({
+      _tag: 'PlayerDamageCommand', commandId: 'lethal-plain-helmet', player: 'alice',
+      world: 'world-1', expectedRevision: 5, amount: 1,
+    }).accepted).toBe(true)
+
+    const drop = messages(fixture.sent).find((message) =>
+      message._tag === 'EntitySpawnDelta' && message.entity._tag === 'item-drop' && message.entity.stack.item === 'iron_helmet')
+    if (drop?._tag !== 'EntitySpawnDelta') throw new Error('missing equipment death drop')
+    if (drop.entity._tag !== 'item-drop') throw new Error('missing equipment death drop')
+    expect(drop.entity.stack).toEqual({ item: 'iron_helmet', count: 1, durability: { current: 165, max: 165 } })
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: drop.revision,
+      state: expect.objectContaining({ equipment: expect.objectContaining({ head: null }) }),
+    }))
+  })
+
+  it('drops equipped armor with its metadata, and clears the equipment slot, when the wearer dies', () => {
+    const state = initialState()
+    const enchantedBoots = {
+      item: 'iron_boots' as const,
+      durability: { current: 195, max: 195 },
+      enchantments: [{ id: 'protection' as const, level: 2 }],
+    }
+    const fixture = makeFixture({
+      ...state,
+      vitals: [{ player: playerId('alice'), state: { health: 1, hunger: 2, experience: 7 } }],
+      inventories: [{
+        player: playerId('alice'),
+        state: {
+          slots: [{ item: 'iron_boots', count: 1, durability: { current: 195, max: 195 } }, null, null],
+          selectedSlot: 0,
+        },
+      }],
+      anvilNames: [{ player: playerId('alice'), names: [{ slot: 0, name: 'Traveler' }] }],
+      enchantments: [{ player: playerId('alice'), seed: 42, items: [{ slot: 0, item: enchantedBoots }] }],
+    })
+    fixture.sent.length = 0
+
+    expect(fixture.receive({
+      _tag: 'PlayerInventoryCommand',
+      commandId: commandId('equip-named-boots'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: 4,
+      action: { _tag: 'equip-item', source: 0, equipmentSlot: 'feet' },
+    }).accepted).toBe(true)
+
+    fixture.sent.length = 0
+    expect(fixture.receiveDamage({
+      _tag: 'PlayerDamageCommand', commandId: 'lethal-boots', player: 'alice',
+      world: 'world-1', expectedRevision: 5, amount: 1,
+    }).accepted).toBe(true)
+
+    const drop = messages(fixture.sent).find((message) =>
+      message._tag === 'EntitySpawnDelta' && message.entity._tag === 'item-drop' && message.entity.stack.item === 'iron_boots')
+    if (drop?._tag !== 'EntitySpawnDelta') throw new Error('missing equipment death drop')
+    if (drop.entity._tag !== 'item-drop') throw new Error('missing equipment death drop')
+    // Real inventory/equipment state, not the accepted flag: proves the boots actually
+    // left the equipment slot and landed as a real dropped stack with durability intact.
+    expect(drop.entity.stack).toEqual({ item: 'iron_boots', count: 1, durability: { current: 195, max: 195 } })
+    expect(messages(fixture.sent)).toContainEqual(expect.objectContaining({
+      _tag: 'PlayerInventoryDelta',
+      revision: drop.revision,
+      state: expect.objectContaining({ equipment: expect.objectContaining({ feet: null }) }),
+    }))
+
+    fixture.sent.length = 0
+    expect(fixture.receive({
+      _tag: 'EntityPickupCommand',
+      commandId: commandId('pickup-boots'),
+      player: playerId('alice'),
+      world: worldId('world-1'),
+      expectedRevision: drop.revision,
+      entityId: drop.entity.entityId,
+    }).accepted).toBe(true)
+    // The dropped boots carry their name and enchantment back into a real inventory
+    // slot on pickup — the strongest available proof the metadata was not discarded
+    // when the armor was dropped, rather than merely absent from the drop's own stack.
+    expect(fixture.sent.map(decodeAnvilWireMessage)).toContainEqual({
+      _tag: 'PlayerAnvilNamesDelta', world: 'world-1', revision: drop.revision + 1, player: 'alice',
+      names: [{ slot: 0, name: 'Traveler' }],
+    })
+    expect(fixture.sent.map(decodeEnchantingWireMessage)).toContainEqual({
+      _tag: 'PlayerEnchantmentsDelta', world: 'world-1', revision: drop.revision + 1, player: 'alice', seed: 42,
+      items: [{ slot: 0, item: enchantedBoots }],
+    })
+  })
+
   it('drops inventory items at the authoritative player position exactly once', () => {
     const fixture = makeFixture(initialState(), { x: 7, y: 70, z: -3 })
     fixture.sent.length = 0
