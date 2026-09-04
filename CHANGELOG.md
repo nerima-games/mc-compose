@@ -1,5 +1,76 @@
 # @nerima-games/mc-compose
 
+## 0.2.11
+
+### Patch Changes
+
+- [#58](https://github.com/nerima-games/mc-compose/pull/58) [`1ab9dda`](https://github.com/nerima-games/mc-compose/commit/1ab9ddad5b49eec088f501cbdb189d60031b4ae2) Thanks [@takeokunn](https://github.com/takeokunn)! - The Nether and the End now look like the Nether and the End: entering either changes the rendered sky, and leaving restores the overworld's.
+  
+  All three dimensions previously rendered an identical sky — the only way to tell where you were was the HUD. mc-render's environment planner (`planRenderEnvironment`) had no dimension parameter at all, and this app drove it from a single global time service, so every dimension inherited whatever the overworld's sun happened to be doing.
+  
+  Bumps the `@nerima-games/mc-render` pin to 0.7.0, which adds `dimension` to `planRenderEnvironment`, `WorldRendererOptions`, and the per-frame `WorldWeatherSnapshot`. The renderer's initial dimension is now set from a restored session at construction, and — the change that actually matters, since it runs every frame the player is in the game — the per-frame weather snapshot now carries `currentChunkContext.dimension`, the same source `alignActiveDimension` already keeps current for chunk streaming and entity rosters.
+  
+  The Nether renders a fixed sunless haze regardless of daylight; the End renders a dark void; the overworld is unchanged. Weather particles and their audio are not yet dimension-gated — a rain or thunder cycle in progress when the player crosses into the Nether or the End will still show and sound, since mc-compose has one global weather state and mc-render's `planWeatherFrame` only reads `dimension` for the sky/fog, not for suppressing precipitation. Left as a follow-up rather than folded into this change.
+  
+  `e2e/dimension-sky.e2e.ts` pins this against the real WebGL2 context: the canvas's GL clear colour (what `setEnvironment` ultimately drives via `renderer.setClearColor`) must change on entering the Nether, change again on entering the End, and land back close to the overworld's original colour on return — closer than to either dimension visited, since the overworld's own sky drifts slightly with the day/night clock over the seconds the test spends elsewhere. Also adds a `gameplay.enterEnd` QA command, symmetric to the existing `enterNether`/`enterOverworld`, so the End side of this could be exercised at all.
+
+- [#59](https://github.com/nerima-games/mc-compose/pull/59) [`9dc8ac4`](https://github.com/nerima-games/mc-compose/commit/9dc8ac4a0a9b21c87a3090613e3f3a1fccf575e9) Thanks [@takeokunn](https://github.com/takeokunn)! - Let a connected multiplayer player craft. Until now they could not craft anything at all — not some recipes, none — because the crafting grid could never receive a single item, leaving the output permanently disabled.
+  
+  Two independent faults had to be fixed for one craft to complete.
+  
+  The grid could not be filled. Placing an item into a grid cell requires the interaction layer's carried item, and that was only ever set by the single-player slot-click handler. Multiplayer routes slot clicks through a separate selection-and-network-command system that returns before reaching it, so the carried item was permanently absent while connected. The grid now stages a copy of the selected slot's item, which leaves the server-authoritative inventory untouched: staging is local, and real items are consumed only when the server accepts the craft. Drag-to-craft remains deliberately unavailable and still says so.
+  
+  The craft was then rejected anyway. The server compares revisions for strict equality and advances its own on any world activity, so a valid craft lost that race whenever anything happened between the client reading the revision and the server handling the command. The rejection carries the server's current revision, so the client now adopts it and re-issues, bounded, and only for that one reason. This was invisible before because a rejected craft set nothing the player could see; it now records the reason, which is what made the diagnosis possible.
+  
+  Verified by a browser test driving real clicks against a real server and asserting on actual inventory contents and the output button's real disabled state, never a pending-status attribute. Without the staging fix the grid stays empty and the recipe never matches; without the retry the craft fails four times out of four under concurrent load and passes only when run alone.
+
+- [#60](https://github.com/nerima-games/mc-compose/pull/60) [`ce0e02a`](https://github.com/nerima-games/mc-compose/commit/ce0e02ac95f2d153fdefaeb0cb57e54e1b739294) Thanks [@takeokunn](https://github.com/takeokunn)! - Fix two coupled defects in the authoritative multiplayer server: equipping a custom-named or
+  enchanted item was refused outright, and dying never removed or dropped worn armor.
+  
+  A plain iron helmet equipped fine in multiplayer, but the same helmet renamed at an anvil or
+  enchanted could never be worn — `equip-item` rejected it with `invalid-command` before the
+  equip could even run, because the server's per-slot name and enchantment maps were keyed only
+  by numeric inventory-slot index and had nowhere to put metadata for an equipment slot.
+  Separately, and independent of the above, `applyPlayerDeaths` never read or cleared
+  `inventory.equipment`: driving a player's health to zero correctly emptied their carried
+  inventory but left every worn armor piece equipped at its exact pre-death durability, with no
+  drop entity spawned for any of it. Since the equip guard blocked metadata-bearing armor from
+  ever being worn, the two defects compounded — anything worth enchanting was both unwearable
+  and, had it been wearable, un-loseable on death.
+  
+  The server now carries equipment-slot metadata in a small server-local map
+  (`equipmentAnvilNames`/`equipmentEnchantments` in `core.ts`), separate from the wire-synced,
+  slot-number-keyed `anvilNames`/`enchantments` maps: `equip-item` moves a source slot's name and
+  enchantment into it instead of refusing the command, `unequip-item` moves them back to the
+  resolved destination slot, and death now drops each worn piece exactly like an inventory item —
+  capturing its name/enchantment into the same `droppedItemMetadata` path a normal death-dropped
+  item already uses, and clearing the equipment slot. `unequipInventoryItem` (in
+  `inventory-state.ts`) now returns the resolved destination slot index instead of a bare
+  accept/reject reason, since the caller needs it to relocate metadata when the destination was
+  server-picked rather than explicit.
+  
+  Deliberately left: this equipment metadata never rides the wire on its own. The anvil and
+  enchanting network protocols (`apps/multiplayer-shared/{anvil,enchanting}-network.ts`) bound
+  `slot` to `0 <= slot < 36`, matching the 36-slot inventory; extending that to cover a 5-slot
+  equipment key space is a wire-protocol change and was out of scope for this fix. A practical
+  consequence: the client's own armor-enchant damage-mitigation calculation
+  (`apps/web/main.ts`'s `applyPlayerDamage`) reads a purely client-local map keyed by
+  `equipmentMetadataKey(slot)`, and today only the single-player `equip`/`unequip` handlers
+  populate that map — the multiplayer branch sends the command and stops. So immediately after
+  this fix, a multiplayer player can equip named/enchanted armor and will no longer lose it to
+  death, but won't yet see its enchant-based damage mitigation applied client-side, or its glint
+  rendered, until `apps/web/main.ts`'s multiplayer `equip`/`unequip` handlers are taught to move
+  metadata the same way the single-player branch already does. That client-side change was left
+  for separate, sequenced work.
+  
+  `test/multiplayer-server/authority.test.ts` pins all three behaviours: equipping a named
+  enchanted helmet now succeeds and the metadata round-trips correctly back through unequip;
+  plain equipped armor is dropped and the equipment slot cleared on death (isolated from
+  metadata, reproducing the defect as originally live-confirmed); and named/enchanted equipped
+  armor is dropped with its metadata intact, verified by picking the drop back up and observing
+  the metadata reattach to the picked-up slot. Each test was confirmed to fail against the
+  pre-fix code with the exact symptom described above.
+
 ## 0.2.10
 
 ### Patch Changes
