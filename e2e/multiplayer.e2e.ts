@@ -10,6 +10,7 @@ import { Either } from 'effect'
 import { tsImport } from 'tsx/esm/api'
 import { WebSocket } from 'ws'
 
+import { startGameSession } from './helpers/session'
 import { E2E_MULTIPLAYER_URL } from '../playwright.config'
 
 const QA_GLOBAL_KEY = '__NERIMA_GAMES_QA__'
@@ -812,6 +813,99 @@ test('multiplayer hotbar selection updates before the network round trip, not af
     // why this asserts on frames rather than a millisecond budget.
     await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
     expect(await selectedSlotIndex()).toBe(1)
+  } finally {
+    await stopServer(server.process)
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test('closing a chest is honored once a facility command already in flight resolves, not silently dropped', async ({ page }) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), 'mc-compose-multiplayer-e2e-'))
+  const stateFile = join(stateDirectory, 'state.json')
+  const claimsFile = join(stateDirectory, 'claims.json')
+  const player = 'alice-e2e'
+  const CHEST_BLOCK_ID = 105
+  const CHEST_CAPACITY = 27
+  const containerId = 'overworld:8,63,8'
+  await writeFile(stateFile, `${JSON.stringify({
+    format: 1,
+    worldId: 'overworld',
+    seed: 0,
+    state: {
+      revision: 4,
+      blocks: [],
+      inventories: [{
+        player,
+        state: { slots: [{ item: 'oak_log', count: 1 }, ...emptySlots().slice(1)], selectedSlot: 0 },
+      }],
+      containers: [{
+        containerId,
+        kind: 'chest',
+        slots: Array.from({ length: CHEST_CAPACITY }, () => null),
+      }],
+      playerPositions: [{
+        player,
+        at: { x: 8.5, y: 64.5, z: 8.5 },
+        facing: { yawRadians: 0, pitchRadians: -Math.PI / 2 + 0.01 },
+      }],
+    },
+  })}\n`, 'utf8')
+  await writeFile(claimsFile, `${JSON.stringify(claimsFor({ [player]: LEGACY_SECRETS[player] }))}\n`, 'utf8')
+  const server = await startServer(stateFile, claimsFile)
+
+  try {
+    // Local single-player pass only places the chest BLOCK (terrain, which
+    // survives the multiplayer reconnect below) — inventory and the
+    // container's own contents are seeded through the server's state file
+    // instead, since the authoritative sync overwrites anything set
+    // client-side that isn't backed by the server (see the hotbar race
+    // test above for the same lesson).
+    await startGameSession(page, 'chest-close-race-e2e')
+    await expect(page.locator('body')).toHaveAttribute('data-mc-compose-boot', 'running')
+    // `callQa` above takes no arguments; `gameplay.setPose` needs the chest
+    // block id, so this calls it directly rather than widening the shared
+    // helper's signature for one call site.
+    await page.evaluate(({ key, targetBlock }) => {
+      const surface = (globalThis as unknown as Record<string, unknown>)[key] as
+        | Record<string, (block: number) => unknown>
+        | undefined
+      const operation = surface?.['gameplay.setPose']
+      if (operation === undefined) throw new Error('missing QA command: gameplay.setPose')
+      return operation(targetBlock)
+    }, { key: QA_GLOBAL_KEY, targetBlock: CHEST_BLOCK_ID })
+    await page.keyboard.press('Escape')
+    await callQa(page, 'persistence.flush')
+    await expect(page.locator('body')).toHaveAttribute('data-session-persistence', 'saved')
+    const sessionUrl = page.url()
+    await connectPage(page, multiplayerUrl(sessionUrl, player, 'Alice', server.url), LEGACY_SECRETS[player])
+    await expect.poll(() => canvasRevision(page)).toBe(4)
+
+    const canvas = page.locator('#game-canvas')
+    await canvas.hover()
+    await grantPointerLock(page)
+    await canvas.click({ button: 'right' })
+    const chest = page.locator('[data-mx-ui="chest-storage"]')
+    await expect(chest).toBeVisible()
+    await expect(page.locator('body')).toHaveAttribute('data-inventory-open', 'true')
+
+    // Two clicks select-then-move an item into the chest — this sends a
+    // `ContainerCommand` (`move-item`) and sets `pendingFacilityCommand`
+    // synchronously, before Playwright's click() promise even resolves
+    // (main.ts's `activateChestSlot`, a plain DOM click handler, not
+    // gated behind a rendered frame the way the hotbar's key-action system
+    // is). No settling wait needed between this and the close below.
+    await chest.locator('[data-region="player-hotbar"] [data-interaction-slot="0"]').click()
+    await chest.locator('[data-region="chest"] [data-interaction-slot="0"]').click()
+
+    // Escape's handler calls `setInventoryOpen(false)` directly and
+    // synchronously (main.ts's document keydown listener), so by the time
+    // this resolves the close attempt has already run into the guard.
+    await page.keyboard.press('Escape')
+    expect(await page.locator('body').getAttribute('data-inventory-open')).toBe('true')
+
+    // The move command is still in flight; the close should apply itself
+    // the moment that command resolves, without a second key press.
+    await expect(page.locator('body')).toHaveAttribute('data-inventory-open', 'false', { timeout: 5_000 })
   } finally {
     await stopServer(server.process)
     await rm(stateDirectory, { recursive: true, force: true })
