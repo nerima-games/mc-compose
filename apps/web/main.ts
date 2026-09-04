@@ -1271,6 +1271,16 @@ const bootGame = async (
     : creationMetadata ?? { name: sessionId, mode: 'survival' }
   const isCreativeMode = sessionMetadata.mode === 'creative'
 
+  // Computed here, ahead of renderer construction below, so the renderer's
+  // initial sky matches a restored session's dimension on the very first
+  // frame instead of only from the second frame onward (once the per-frame
+  // weather snapshot has run once). Section 2a re-derives nothing from this —
+  // it is the same binding, just declared before its first use moved earlier.
+  type Dimension = SessionState['dimension']
+  const initialDimension: Dimension = Option.isSome(loadedSession)
+    ? loadedSession.value.state.dimension
+    : 'overworld'
+
   // POINTER LOCK IS THE HOST'S TO ASK FOR. mc-render's `InputService` treats a
   // click as a GAME action only while the pointer is locked, and as a UI click
   // otherwise — the closed-world predicate `domain/input-bindings.ts` describes,
@@ -1413,13 +1423,14 @@ const bootGame = async (
       canvas,
       { width: canvas.clientWidth, height: canvas.clientHeight },
       atlasTexture,
-      {},
+      { dimension: initialDimension },
     ))
     : await Effect.runPromise(
         makeWorldRenderer<HTMLCanvasElement, THREE.BufferGeometry, THREE.MeshBasicMaterial>(
           THREE,
           canvas,
           { width: canvas.clientWidth, height: canvas.clientHeight },
+          { dimension: initialDimension },
         ),
       )
 
@@ -1490,10 +1501,6 @@ const bootGame = async (
         },
       }
   let initialKnownChunks: ReadonlyArray<DimensionChunk> = []
-  type Dimension = SessionState['dimension']
-  const initialDimension: Dimension = Option.isSome(loadedSession)
-    ? loadedSession.value.state.dimension
-    : 'overworld'
 
   const generatedSource = generatedChunkSource(
     Option.isSome(loadedSession) ? loadedSession.value.state.seed : WORLD_SEED,
@@ -1714,6 +1721,12 @@ const bootGame = async (
       daylight: weatherDaylight(Effect.runSync(time.timeOfDay)),
       temperature: 1,
       seed: activeSeed,
+      // The renderer plans sky, sun and fog from this every frame — see
+      // application/world-renderer.ts's setEnvironment. currentChunkContext
+      // is the same per-frame source alignActiveDimension keeps current for
+      // chunk streaming and entity rosters; this is that value read for
+      // render, not a second notion of where the player is.
+      dimension: currentChunkContext.dimension,
       ...(lightningSequence === undefined ? {} : { lightningSequence }),
     }, camera))
     const thunder = lightningSequence === undefined
@@ -8556,6 +8569,7 @@ type MultiplayerInventorySelection = Readonly<{
         },
         enterNether: () => enterQaDimension('nether'),
         enterOverworld: () => enterQaDimension('overworld'),
+        enterEnd: () => enterQaDimension('end'),
         seedBedExplosionEncounter,
         seedBowProjectileEncounter,
         breakTarget: () => {
