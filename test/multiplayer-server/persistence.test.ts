@@ -1,6 +1,20 @@
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import {
+  emptyBrewingStandState,
+  emptyStatusEffectState,
+  initialEnderDragonEncounter,
+} from '@nerima-games/mx-gameplay'
+import type { PlayerId } from '@nerima-games/mx-multiplayer'
 import { describe, expect, it } from 'vitest'
 
-import { createLatestStatePersistence } from '../../apps/multiplayer-server/main'
+import type { MultiplayerServerState } from '../../apps/multiplayer-server/core'
+import { createLatestStatePersistence, loadServerState, writeServerState } from '../../apps/multiplayer-server/main'
+import { initialWitherRuntimeState, snapshotWitherRuntime } from '../../apps/multiplayer-shared/wither-runtime'
+
+const playerId = (value: string): PlayerId => value as PlayerId
 
 const deferred = <T>() => {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -92,5 +106,82 @@ describe('latest multiplayer state persistence', () => {
     await persistence.drain()
 
     expect(writes).toEqual([undefined])
+  })
+})
+
+describe('multiplayer state file round trip', () => {
+  const worldId = 'round-trip-world'
+  const seed = 7
+  const alice = playerId('alice')
+
+  const fullyPopulatedState = (): MultiplayerServerState => ({
+    revision: 5,
+    blocks: [{ at: { x: 1, y: 64, z: 1 }, block: 'stone' }],
+    poweredRails: [{ at: { x: 2, y: 64, z: 2 }, powered: true }],
+    levers: [{ at: { x: 3, y: 64, z: 3 }, active: true }],
+    inventories: [{ player: alice, state: { slots: [], selectedSlot: 0 } }],
+    vitals: [{ player: alice, state: { health: 20, hunger: 20, experience: 0 } }],
+    timeWeather: { timeOfDay: 6_000, weather: 'clear' },
+    weatherClock: { remainingSecs: 30, seed: 1 },
+    containers: [],
+    furnaces: [],
+    villagerTrades: [],
+    entities: [],
+    eyeOfEnderRecoveries: [],
+    playerPositions: [{
+      player: alice,
+      at: { x: 0, y: 64, z: 0 },
+      facing: { yawRadians: 0, pitchRadians: 0 },
+    }],
+    wither: snapshotWitherRuntime(initialWitherRuntimeState()),
+    witherRevision: 2,
+    enderDragon: initialEnderDragonEncounter(),
+    enderDragonRevision: 3,
+    brewingStands: [{ at: { x: 4, y: 64, z: 4 }, state: emptyBrewingStandState() }],
+    statusEffects: [{ player: alice, state: emptyStatusEffectState() }],
+    anvilNames: [{ player: alice, names: [{ slot: 0, name: 'Endbringer' }] }],
+    enchantments: [{
+      player: alice,
+      seed: 73,
+      items: [{ slot: 0, item: { item: 'stone', durability: null, enchantments: [] } }],
+    }],
+  })
+
+  it('reads back every category the writer persists, including levers, the ender dragon encounter, brewing stands, status effects, anvil names, and enchantments', async () => {
+    const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-round-trip-')), 'state.json')
+    const written = fullyPopulatedState()
+
+    await writeServerState(stateFile, worldId, seed, written)
+    const loaded = await loadServerState(stateFile, worldId, seed)
+
+    expect(loaded).toEqual(written)
+  })
+
+  it('still loads a state file predating these fields, leaving the new categories empty', async () => {
+    const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-round-trip-')), 'state.json')
+    const legacyState: MultiplayerServerState = {
+      revision: 1,
+      blocks: [{ at: { x: 1, y: 64, z: 1 }, block: 'stone' }],
+      inventories: [],
+      vitals: [],
+      timeWeather: { timeOfDay: 6_000, weather: 'clear' },
+      containers: [],
+      furnaces: [],
+      villagerTrades: [],
+    }
+
+    await writeServerState(stateFile, worldId, seed, legacyState)
+    const loaded = await loadServerState(stateFile, worldId, seed)
+
+    expect(loaded).toMatchObject({
+      revision: 1,
+      levers: [],
+      brewingStands: [],
+      statusEffects: [],
+      anvilNames: [],
+      enchantments: [],
+    })
+    expect(loaded?.enderDragon).toBeUndefined()
+    expect(loaded?.enderDragonRevision).toBeUndefined()
   })
 })
