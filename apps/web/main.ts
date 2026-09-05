@@ -637,7 +637,65 @@ const clampDelta = (raw: number): DeltaTimeSecs =>
  * makes this product composition's tuning explicit.
  */
 const WALK_SPEED_M_PER_S = 4.3
-const JUMP_SPEED_M_PER_S = 8.4
+/**
+ * Jump take-off speed, m/s.
+ *
+ * Was 8.4 (`0.42 blocks/tick x 20 ticks/s`, vanilla Java's own tick-rate
+ * conversion) until it was measured against gravity and found to send an
+ * ordinary jump 3.5+ blocks into the air — real enough to trigger this
+ * package's `ceil(fallDistance - 3)` fall-damage rule on every single jump.
+ *
+ * That is not a fall-damage bug; it is this constant. `@nerima-games/mc-physics`'s
+ * `GRAVITY_Y = -9.82` is independently CITED to the reference implementation's
+ * own source (`docs/public-api.md`'s constants table: `packages/game/
+ * application/game-state-support.ts:10`, wired at `game-state-service.ts:104`),
+ * and that doc quotes the reference's own integrator
+ * (`physics-world-service.ts:39-54`) verbatim: a continuous, per-second,
+ * semi-implicit-Euler stepper — `velocity.y += gravityY * deltaTime` — not
+ * Minecraft Java's discrete 20-tick/`0.08 blocks/tick^2` model. The old 8.4 was
+ * derived FROM that discrete tick model and never re-validated against the
+ * continuous one actually running here, which is why combining a
+ * correctly-cited gravity with an uncited jump speed produced an apex three
+ * times too high. `8.4` has no citation anywhere in this repo's history, in
+ * mc-sim's, or in mc-physics's — grepped across all three for `JUMP_SPEED`,
+ * `jumpVelocity`, `0.42` and the reference paths above.
+ *
+ * `5.0` is chosen to reproduce the vanilla-standard ~1.25-block jump height
+ * under the verified -9.82 gravity: simulated directly against
+ * `@nerima-games/mc-physics`'s own `integrateBody` (not the idealized
+ * no-drag parabola formula) across delta times from 60fps down to the
+ * MAX_DELTA_SECS=0.05 floor, apex lands at 1.15-1.23 blocks — comfortably
+ * clear of the safe-fall threshold with margin for terrain and frame-timing
+ * variance, and not a number invented from scratch: it is what recovers the
+ * genre's well-known jump feel once gravity is taken as given. It is still
+ * PROVISIONAL: no file in this org's accessible repos cites the reference
+ * implementation's own jump-velocity constant the way GRAVITY_Y is cited, so
+ * this value should be superseded the moment that citation surfaces.
+ */
+const JUMP_SPEED_M_PER_S = 5.0
+/**
+ * Sprint horizontal speed, m/s.
+ *
+ * `@nerima-games/mc-physics` already prices sprint in its own
+ * `MovementConfig`/`applyMovementInput` (`sprintMultiplier`, gated on
+ * `forward > 0`, the same gate this file applies below) — but
+ * `@nerima-games/mc-sim`'s stage never calls that function; its stage
+ * hand-rolls movement straight off `SimPhysicsConfig.walkSpeed`
+ * (`mc-sim/dist/stages/registration.js`: `vx = ... * config.walkSpeed`), and
+ * that config has no sprint field at all. So sprint has to be applied here,
+ * at the host, the same way an active Speed status effect already is (see
+ * `getPlayerMovementSpeedMultiplier` below): by substituting the effective
+ * walkSpeed sent into `SimPhysicsConfig` for the frame.
+ *
+ * The value is not invented. `@nerima-games/mc-physics`'s own
+ * `test/resolve.test.ts` names its `REFERENCE_TOP_SPEED` as "the fastest the
+ * reference's player ever moves horizontally: a sprint (5.612) times the
+ * sprint-jump multiplier (1.2)", citing
+ * `packages/entity/application/movement-service.ts:25-32` in the reference
+ * implementation. 5.612 is the plain-sprint half of that product; the extra
+ * 1.2x sprint-jump boost is a separate mechanic this change does not add.
+ */
+const SPRINT_SPEED_M_PER_S = 5.612
 /**
  * How tall an obstacle the player climbs by walking into it, no jump needed.
  *
@@ -9185,12 +9243,17 @@ type MultiplayerInventorySelection = Readonly<{
         strafe: swimmingState.active ? 0 : movementStrafe,
       }))
       Effect.runSync(Ref.set(simState.jumpIntent, mountedVehicle === undefined && held('jump') > 0))
+      // Vanilla only sprints moving forward — not backward, not strafe-only —
+      // which is the same gate mc-physics's own (unused-by-mc-sim)
+      // applyMovementInput encodes for `input.sprint && forward > 0`.
+      const sprinting = mountedVehicle === undefined && !swimmingState.active
+        && movementForward > 0 && held('sprint') > 0
       Effect.runSync(
         Ref.set(simState.physicsConfig, dead || mountedVehicle !== undefined || swimmingState.active
           ? Option.none()
           : Option.some({
               ...simPhysicsConfig,
-              walkSpeed: simPhysicsConfig.walkSpeed
+              walkSpeed: (sprinting ? SPRINT_SPEED_M_PER_S : simPhysicsConfig.walkSpeed)
                 * Effect.runSync(getPlayerMovementSpeedMultiplier(gameplayState)),
             })),
       )
@@ -10000,14 +10063,21 @@ type MultiplayerInventorySelection = Readonly<{
         if (!isCreativeMode && horizontalDistance > 0) {
           if (multiplayer === undefined) survivalHunger.submit(swimmingState.active
             ? { _tag: 'swim', distance: horizontalDistance }
-            : { _tag: 'walk', distance: horizontalDistance })
+            : sprinting
+              ? { _tag: 'sprint', distance: horizontalDistance }
+              : { _tag: 'walk', distance: horizontalDistance })
+          // mx-multiplayer's PlayerVitalsCommand has no 'sprint' activity
+          // literal (protocol.d.ts: Schema.Literal<['walk','swim','jump',
+          // 'attack','mine']>), so the network path folds sprinting into
+          // 'walk' — a narrower exhaustion cost than single-player until the
+          // protocol grows the tag.
           else sendVitalsCommand({ _tag: 'activity', activity: swimmingState.active ? 'swim' : 'walk', amount: horizontalDistance })
         }
         if (
           !isCreativeMode && groundedBeforeFrame &&
           !groundedAfterFrame && held('jump') > 0
         ) {
-          if (multiplayer === undefined) survivalHunger.submit({ _tag: 'jump', count: 1 })
+          if (multiplayer === undefined) survivalHunger.submit({ _tag: 'jump', count: 1, sprinting })
             else sendVitalsCommand({ _tag: 'activity', activity: 'jump', amount: 1 })
         }
       } else {
