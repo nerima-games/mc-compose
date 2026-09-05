@@ -487,6 +487,73 @@ describe('multiplayer WebSocket runtime', () => {
     await expect(crossPlayerClosed).resolves.toBe(1008)
   })
 
+  it('accepts a tokenless resume of a known but currently-inactive player id, and retires the old token', async () => {
+    const runtime = await startMultiplayerServer({
+      host: '127.0.0.1', port: 0, worldId: 'lost-token-world', seed: 73, installSignalHandlers: false,
+    })
+    runtimes.push(runtime)
+
+    // Establish 'carol' once, as an ordinary first join (no legacy claims involved),
+    // then disconnect cleanly -- this is the same shape as closing a tab.
+    const first = await connect(runtime)
+    const firstCarol = await authenticate(first, 'carol')
+    const firstSnapshot = nextMessage(first)
+    first.send(encode({
+      _tag: 'PlayerJoin', player: 'carol' as PlayerId, name: 'Carol' as PlayerName,
+      at: { x: 0, y: 200, z: 0 },
+    }))
+    await firstSnapshot
+    const firstClosed = waitForClose(first)
+    first.close()
+    await firstClosed
+
+    // A second device, or a cleared browser, or the join form used again: same
+    // player id, no resume token at all. Before the fix this always fell through
+    // to a rejected handshake, permanently locking the id out of the server.
+    const second = await connect(runtime)
+    const secondCarol = await authenticate(second, 'carol')
+    expect(secondCarol.token).not.toBe(firstCarol.token)
+    const secondSnapshot = nextMessage(second)
+    second.send(encode({
+      _tag: 'PlayerJoin', player: 'carol' as PlayerId, name: 'Carol' as PlayerName,
+      at: { x: 5, y: 200, z: 5 },
+    }))
+    await secondSnapshot
+    const secondClosed = waitForClose(second)
+    second.close()
+    await secondClosed
+
+    // The old token is retired by this recovery, not kept alive alongside the new
+    // one -- a tokenless resume takes over the id rather than forking it.
+    const staleReplay = await connect(runtime)
+    const staleReplayClosed = waitForClose(staleReplay)
+    staleReplay.send(JSON.stringify({ _tag: 'PlayerResume', player: 'carol', token: firstCarol.token }))
+    await expect(staleReplayClosed).resolves.toBe(1008)
+  })
+
+  it('still rejects a tokenless resume while the same player id is actively connected', async () => {
+    const runtime = await startMultiplayerServer({
+      host: '127.0.0.1', port: 0, worldId: 'active-guard-world', seed: 73, installSignalHandlers: false,
+    })
+    runtimes.push(runtime)
+
+    const incumbent = await connect(runtime)
+    await authenticate(incumbent, 'dave')
+    const incumbentSnapshot = nextMessage(incumbent)
+    incumbent.send(encode({
+      _tag: 'PlayerJoin', player: 'dave' as PlayerId, name: 'Dave' as PlayerName,
+      at: { x: 0, y: 200, z: 0 },
+    }))
+    await incumbentSnapshot
+
+    const contender = await connect(runtime)
+    const contenderClosed = waitForClose(contender)
+    contender.send(JSON.stringify({ _tag: 'PlayerResume', player: 'dave' }))
+    await expect(contenderClosed).resolves.toBe(1008)
+
+    incumbent.close()
+  })
+
   it('refuses to start with a corrupt persisted state file', async () => {
     const stateFile = join(await mkdtemp(join(tmpdir(), 'mc-compose-server-')), 'state.json')
     await writeFile(stateFile, '{"format":1,"worldId":', 'utf8')
