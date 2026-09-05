@@ -1,5 +1,13 @@
 # @nerima-games/mc-compose
 
+## 0.2.13
+
+### Patch Changes
+
+- [#65](https://github.com/nerima-games/mc-compose/pull/65) [`22ab362`](https://github.com/nerima-games/mc-compose/commit/22ab3623bd8d61d1a040029f77a665620b864edb) Thanks [@takeokunn](https://github.com/takeokunn)! - Jumping no longer costs a health point. An ordinary jump was landing 3.5+ blocks in the air — past this project's `ceil(fallDistance - 3)` fall-damage rule — because the host's jump take-off speed had never been re-validated against the gravity it actually runs under; it is now tuned to a ~1.2-block apex with margin to spare.
+  
+  Sprint now does something. Holding the bound Sprint key (`ControlLeft` by default) increases movement speed, matching the reference implementation's sprint speed, and prices the extra exhaustion the same way ordinary walking and jumping already do.
+
 ## 0.2.12
 
 ### Patch Changes
