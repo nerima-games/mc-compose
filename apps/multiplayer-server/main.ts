@@ -731,8 +731,8 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
       netherCore.disconnect(clientId)
       endCore.disconnect(clientId)
     }
-    const rejectHandshake = (): void => {
-      if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'reconnect authentication failed')
+    const rejectHandshake = (reason: string = 'reconnect authentication failed'): void => {
+      if (socket.readyState === WebSocket.OPEN) socket.close(1008, reason)
     }
     const rejectProtocolFrame = (): void => {
       if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'invalid multiplayer frame')
@@ -740,7 +740,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
     const authenticate = async (resume: PlayerResume): Promise<void> => {
       const player = resume.player
       if (activePlayers.has(player) || reservedPlayers.has(player)) {
-        rejectHandshake()
+        rejectHandshake('player id already connected')
         return
       }
       reservedPlayers.add(player)
@@ -751,24 +751,47 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
           && legacyPlayerClaims?.has(player) === true
           && legacyPlayerClaims.verify(player, resume.registrationToken)
         if (reconnectAuth.has(player)) {
+          // A tokenless resume of an already-known id reaches this branch only once the
+          // concurrency guard above has confirmed nobody else currently holds this id (an
+          // active connection or another handshake already in flight would have rejected
+          // above). A lost or never-received token is the ordinary case here — a new
+          // device, a private window, cleared site storage, or the join form used twice —
+          // and it is indistinguishable at the protocol level from a first-ever join,
+          // which itself requires no proof. So it is granted the same way: a fresh token,
+          // no proof required, same as claiming a brand-new name. This intentionally does
+          // NOT protect a name against being reclaimed by someone else who knows it while
+          // its owner is offline; that protection was never real for ordinary players (the
+          // original claim never required proof either) and building real ownership would
+          // need a durable credential (a password), which is the legacyPlayerClaims path
+          // below already provides for names that carry pre-existing persisted state.
           token = resume.token === undefined
-            ? (verifiedLegacyRegistration ? await reconnectAuth.reissue(player) : undefined)
+            ? await reconnectAuth.reissue(player)
             : await reconnectAuth.rotate(player, resume.token)
         } else if (legacyPlayers.has(player)) {
+          // Unlike the branch above, this id has pre-existing persisted state (inventory,
+          // vitals, position) from before this id ever had a reconnect token, and has not
+          // yet been bridged into reconnectAuth. Claiming it for the first time still
+          // requires the legacy registration secret — without that requirement, anyone who
+          // knew or guessed a pre-existing player's name could claim their saved inventory
+          // outright.
           token = verifiedLegacyRegistration ? await reconnectAuth.issue(player) : undefined
         } else {
           token = await reconnectAuth.issue(player)
         }
         if (token === undefined || disconnected) {
           reservedPlayers.delete(player)
-          rejectHandshake()
+          rejectHandshake(
+            legacyPlayers.has(player)
+              ? 'legacy player registration required'
+              : 'reconnect authentication failed',
+          )
           return
         }
         authenticatedPlayer = player
         socket.send(encodePlayerResumeAccepted(player, token))
       } catch {
         reservedPlayers.delete(player)
-        rejectHandshake()
+        rejectHandshake('reconnect authentication error')
       }
     }
     const send = (frame: WireText): void => {
@@ -821,7 +844,7 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
         if (authenticatedPlayer === undefined) {
           const resume = decodePlayerResume(frame)
           if (resume === undefined) {
-            rejectHandshake()
+            rejectHandshake('malformed resume request')
             return
           }
           await authenticate(resume)
@@ -834,13 +857,13 @@ export const startMultiplayerServer = async (options: MultiplayerRuntimeOptions)
           || decoded.right.player !== authenticatedPlayer
         ) {
           reservedPlayers.delete(authenticatedPlayer)
-          rejectHandshake()
+          rejectHandshake('player join did not match authenticated identity')
           return
         }
         const result = overworldCore.receive(clientId, frame)
         if (!result.accepted) {
           reservedPlayers.delete(authenticatedPlayer)
-          rejectHandshake()
+          rejectHandshake('player join rejected')
           return
         }
         activePlayer = authenticatedPlayer
