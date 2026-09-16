@@ -82,17 +82,7 @@
  * block edits and mc-render meshing all observe the same mc-worldgen store;
  * dirty chunk notifications are the only render synchronization path.
  */
-import * as THREE from 'three'
 import { Context, Effect, Either, Exit, Layer, Option, Queue, Ref, Scope } from 'effect'
-import {
-  createOriginalSampleManifest,
-  makeEndAudioController,
-  makeWeatherAudioController,
-  makeWebAudioBackend,
-  type EndAudioEvent,
-  type WeatherAudioHandle,
-  type WeatherLoopKind,
-} from '@nerima-games/mc-audio'
 import {
   BLOCK_PROPERTY_DEFAULTS,
   BlockId,
@@ -169,16 +159,11 @@ import {
   type ChunkSource,
 } from '@nerima-games/mc-worldgen'
 import {
-  browserInputLayer,
   ESCAPE_KEY_CODE,
   InputService,
   chunkKeyOf,
-  generateTerrainAtlas,
   makeChunkStoreLightColor,
   makeChunkStoreMesher,
-  makeProductionWorldRenderer,
-  makeWorldRenderer,
-  QUALITY_PRESETS,
   RENDER_STAGE_IDS,
   renderModule,
   syncWorld,
@@ -297,11 +282,8 @@ import {
 } from '@nerima-games/mx-ui'
 import {
   applyPistonPlan,
-  makeRuntimeRedstoneStages,
   pistonPositionAt,
   planPistonTransition,
-  RedstoneWorldRuntime,
-  RedstoneWorldRuntimeLayer,
   type PistonMovementPlan,
   type PoweredPistonTransition,
   type RedstoneComponentSnapshot,
@@ -517,8 +499,6 @@ import {
   announceInventoryTransition,
   captionRenderSignature,
   horizontalListenerForward,
-  makeAudioRuntime,
-  makePlacementAudioLatch,
 } from './audio-runtime'
 import { createInventoryInteraction } from './inventory-interaction'
 import {
@@ -584,7 +564,6 @@ import {
 } from './touch-input'
 import {
   listSessions,
-  loadSession,
   makeSessionChunkSource,
   saveSession,
   EMPTY_ENTITY_ROSTER,
@@ -609,6 +588,14 @@ import {
   sessionHref,
   type SessionRoute,
 } from './session-navigation'
+import {
+  DATABASE_NAME,
+  MISSING_SESSION_ERROR,
+  RequestedSessionNotFoundError,
+  makePlatformAdapters,
+  makeSettingsWriteQueue,
+  type SettingsWriteQueue,
+} from './platform-adapters'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -715,10 +702,6 @@ const SPRINT_SPEED_M_PER_S = 5.612
 const PLAYER_STEP_HEIGHT_M = 0.6
 const LOOK_SENSITIVITY = 0.0022
 const WORLD_SEED = 20260728
-const DATABASE_NAME = 'nerima-games-minecraft'
-const MISSING_SESSION_ERROR = 'The requested saved world could not be found.'
-
-class RequestedSessionNotFoundError extends Error {}
 const AUTOSAVE_INTERVAL_MS = 5_000
 const SAVE_DEBOUNCE_MS = 500
 const CRAFTING_STALE_RETRY_LIMIT = 4
@@ -784,16 +767,6 @@ const INVENTORY_PRESENTATIONS = {
   anvil: { label: 'Anvil', width: 0, height: 0 },
   enchanting: { label: 'Enchanting Table', width: 0, height: 0 },
 } as const
-
-type SettingsWriteQueue = {
-  tail: Promise<void>
-  failure: { readonly error: unknown } | undefined
-}
-
-const makeSettingsWriteQueue = (): SettingsWriteQueue => ({
-  tail: Promise.resolve(),
-  failure: undefined,
-})
 
 const enqueueSettingsWrite = (
   queue: SettingsWriteQueue,
@@ -1104,7 +1077,6 @@ const bootGame = async (
   route: SessionRoute,
 ): Promise<void> => {
   const { sessionId } = route
-  const creationMetadata = route.kind === 'create' ? route.metadata : undefined
   const gameShell = requireElement('game-shell')
   const pauseOverlay = requireElement('pause-overlay')
   const resumeButton = requireElement('resume-button')
@@ -1216,290 +1188,42 @@ const bootGame = async (
   // -------------------------------------------------------------------------
   // 1. Platform adapters
   // -------------------------------------------------------------------------
-
-  // The scope stays open for the life of the page ON PURPOSE. `browserInputLayer`
-  // is `Layer.scoped` and removes its listeners when the scope closes; closing
-  // it here would install the listeners and immediately take them away.
-  const scope = Effect.runSync(Scope.make())
-  const storageContext = await Effect.runPromise(
-    Effect.provideService(
-      Layer.build(indexedDbStorageLayer({ factory: indexedDB, databaseName: DATABASE_NAME })),
-      Scope.Scope,
-      scope,
-    ),
-  )
-  const runStorage = <A, E>(effect: Effect.Effect<A, E, never>): Promise<A> =>
-    Effect.runPromise(effect)
-  let playerSettings: PlayerSettingsV1 = await runStorage(
-    Effect.provide(loadPlayerSettings(), storageContext),
-  ).catch(() => DEFAULT_PLAYER_SETTINGS)
-  const settingsWrites = makeSettingsWriteQueue()
-  let readAudioListener = (): Vec3 => ({ x: 0, y: 0, z: 0 })
-  let readAudioListenerForward = (): Vec3 => horizontalListenerForward(0)
-  const sampleManifest = createOriginalSampleManifest()
-  const audioBackend = Effect.runSync(makeWebAudioBackend({
-    global: globalThis,
-    initialMasterGain: playerSettings.audioEnabled ? playerSettings.masterVolume : 0,
-    sampleManifest,
-  }))
-  canvas.setAttribute('data-audio-samples', String(Object.keys(sampleManifest).length))
-  const audio = Effect.runSync(makeAudioRuntime({
-    backend: audioBackend,
-    clockLayer: BrowserClockLayer,
-    listener: () => readAudioListener(),
-    listenerForward: () => readAudioListenerForward(),
-    settings: playerSettings,
-  }))
-  const endAudio = makeEndAudioController({
-    createLoop: (_kind, initialGain) => Effect.runSync(audioBackend.playTone({
-      durationSecs: 3600,
-      frequency: 42,
-      gain: initialGain,
-      loop: true,
-      pan: 0,
-      wave: 'sine',
-    })),
-    setLoopGain: () => {},
-    stopLoop: (handle) => Effect.runSync(audioBackend.stopTone(handle)),
-    playEvent: () => null,
-    playFallback: (request) => Effect.runSync(audioBackend.playTone({ ...request, loop: false })),
-    release: () => {},
-  })
-  let nextWeatherAudioHandleId = -1
-  const pendingThunder = new Map<number, number>()
-  const weatherAudio = makeWeatherAudioController({
-    createLoop: (kind: WeatherLoopKind, initialGain: number) => Effect.runSync(
-      audioBackend.playTone({
-        durationSecs: 3600,
-        frequency: kind === 'rain' ? 180 : 72,
-        gain: initialGain,
-        loop: true,
-        pan: 0,
-        wave: kind === 'rain' ? 'sawtooth' : 'triangle',
-      }),
-    ),
-    setLoopGain: () => {},
-    stopLoop: (handle) => Effect.runSync(audioBackend.stopTone(handle)),
-    playThunder: ({ delaySecs, gain, pan }): WeatherAudioHandle => {
-      const handle = { id: nextWeatherAudioHandleId-- }
-      const timeout = window.setTimeout(() => {
-        pendingThunder.delete(handle.id)
-        Effect.runSync(audioBackend.playTone({
-          durationSecs: 1.8,
-          frequency: 46,
-          gain,
-          loop: false,
-          pan,
-          wave: 'sawtooth',
-        }))
-      }, delaySecs * 1_000)
-      pendingThunder.set(handle.id, timeout)
-      return handle
-    },
-    release: (handle) => {
-      const timeout = pendingThunder.get(handle.id)
-      if (timeout !== undefined) {
-        window.clearTimeout(timeout)
-        pendingThunder.delete(handle.id)
-      }
-    },
-  })
-  let nextEndAudioEventId = 0
-  const pendingEndAudioEvents: EndAudioEvent[] = []
-  const queueEndAudio = (kind: EndAudioEvent['kind'], position: Vec3): void => {
-    pendingEndAudioEvents.push({
-      id: `end-${String(nextEndAudioEventId++)}`,
-      kind,
-      position,
-    })
-  }
-  const placementAudio = makePlacementAudioLatch(audio)
-  const loadedSession = await runStorage(
-    Effect.provide(loadSession(sessionId), storageContext),
-  )
-  if (route.kind === 'load' && Option.isNone(loadedSession)) {
-    throw new RequestedSessionNotFoundError(MISSING_SESSION_ERROR)
-  }
-  if (route.kind === 'create') {
-    const canonicalUrl = new URL(window.location.href)
-    canonicalUrl.search = new URLSearchParams({ session: sessionId }).toString()
-    window.history.replaceState(null, '', canonicalUrl)
-  }
-  const sessionMetadata = Option.isSome(loadedSession)
-    ? loadedSession.value.metadata
-    : creationMetadata ?? { name: sessionId, mode: 'survival' }
-  const isCreativeMode = sessionMetadata.mode === 'creative'
-
-  // Computed here, ahead of renderer construction below, so the renderer's
-  // initial sky matches a restored session's dimension on the very first
-  // frame instead of only from the second frame onward (once the per-frame
-  // weather snapshot has run once). Section 2a re-derives nothing from this —
-  // it is the same binding, just declared before its first use moved earlier.
-  type Dimension = SessionState['dimension']
-  const initialDimension: Dimension = Option.isSome(loadedSession)
-    ? loadedSession.value.state.dimension
-    : 'overworld'
-
-  // POINTER LOCK IS THE HOST'S TO ASK FOR. mc-render's `InputService` treats a
-  // click as a GAME action only while the pointer is locked, and as a UI click
-  // otherwise — the closed-world predicate `domain/input-bindings.ts` describes,
-  // and the reason a HUD click cannot steal the pointer. Without this, `attack`
-  // never fires and no block can be broken.
-  const inputLayer = browserInputLayer({
-    targets: { window, document },
+  //
+  // Storage, audio, input, redstone, and renderer are constructed in
+  // `./platform-adapters` and returned as one typed struct. The two closures
+  // keep the adapters' pointer-lock / modal predicates reading this host's
+  // live UI state instead of a stale copy of it.
+  const adapters = await makePlatformAdapters({
+    route,
     canvas,
-    bindings: playerSettings.bindings,
-    allowsPointerLock: () => !inventoryOpen && !tradeOpen && !brewingOpen && !paused,
     touchControls,
+    allowsPointerLock: () => !inventoryOpen && !tradeOpen && !brewingOpen && !paused,
+    uiModalOpen: () => inventoryOpen || tradeOpen || brewingOpen,
   })
+  const {
+    storageContext,
+    runStorage,
+    settingsWrites,
+    audio,
+    endAudio,
+    weatherAudio,
+    queueEndAudio,
+    placementAudio,
+    loadedSession,
+    sessionMetadata,
+    isCreativeMode,
+    initialDimension,
+    inputContext,
+    redstoneRuntime,
+    runtimeRedstoneStages,
+    atlasTexture,
+    softwareRenderer,
+    renderQuality,
+    worldRenderer,
+  } = adapters
+  let playerSettings = adapters.playerSettings
 
-  // The gesture the browser requires: pointer lock can only be requested from a
-  // user activation, so the canvas asks on click.
-  //
-  // A REFUSAL IS NOT AN ERROR. Some environments decline pointer lock outright
-  // — Playwright on SwiftShader is one, and answers `WrongDocumentError` — and
-  // a host that let that reach the console would make every automated run
-  // report a failure it cannot do anything about. The game degrades exactly as
-  // mc-render's `UNAVAILABLE_POINTER_LOCK` describes: keyboard still works,
-  // clicks stay UI clicks, and `attack` does not fire.
-  canvas.addEventListener('click', (event) => {
-    if (event.isTrusted) audio.unlock()
-    if (inventoryOpen || tradeOpen || brewingOpen || document.pointerLockElement === canvas) {
-      return
-    }
-    try {
-      const requested: unknown = canvas.requestPointerLock()
-      if (requested instanceof Promise) {
-        requested.catch(() => {
-          canvas.setAttribute('data-pointer-lock', 'refused')
-        })
-      }
-    } catch {
-      // The attribute IS the record. A boolean nobody reads would be the
-      // unread-field shape this project keeps finding; a test can see this.
-      canvas.setAttribute('data-pointer-lock', 'refused')
-    }
-  })
-  canvas.addEventListener('keydown', (event) => {
-    if (event.isTrusted) audio.unlock()
-  })
-
-  // Built ONCE, into a Context, and then provided as a Context rather than as a
-  // Layer. `mx-multiplayer/stages/registration.ts` records why this matters:
-  // "providing `Layer.effect` twice builds two services" — and two
-  // `InputService`s means the stage clears the edges on one of them while the
-  // DOM listeners write to the other, so every key would appear stuck down.
-  const inputContext = await Effect.runPromise(
-    Effect.provideService(Layer.build(inputLayer), Scope.Scope, scope),
-  )
-  const redstoneContext = await Effect.runPromise(
-    Effect.provideService(Layer.build(RedstoneWorldRuntimeLayer), Scope.Scope, scope),
-  )
-  const redstoneRuntime = Context.get(redstoneContext, RedstoneWorldRuntime)
-  const runtimeRedstoneStages = await Effect.runPromise(
-    Effect.provide(makeRuntimeRedstoneStages, redstoneContext),
-  )
-
-  // -------------------------------------------------------------------------
-  // 2. Registration
-  // -------------------------------------------------------------------------
-
-  // The renderer. mc-render builds it; this file supplies only the two things
-  // it cannot reach — the `three` namespace and the element to draw on.
-  //
-  // `clientWidth`/`clientHeight` and not `width`/`height`: the canvas has the
-  // host's CSS 100vw/100vh rule on it and no width attribute, so the attribute
-  // pair is three's default 300x150 and the layout pair is the viewport. That
-  // distinction is also why mc-render passes `updateStyle: false` to `setSize`
-  // — see `application/world-renderer.ts`.
-  //
-  // THE THREE TYPE ARGUMENTS ARE NOT OPTIONAL, and mc-render's
-  // `application/three-surface.ts` records why at length: `typeof
-  // THREE.BufferGeometry` is itself generic and defaults to
-  // `BufferGeometry<NormalOrGLBufferAttributes>`, while `typeof THREE.Mesh`
-  // wants the narrower `BufferGeometry<NormalBufferAttributes>` — so inference
-  // draws incompatible conclusions from the same namespace and fails four
-  // levels down, naming `GLBufferAttribute`. mc-render cannot pin either from
-  // its side without naming a `three` type, which is the one thing that seam
-  // exists not to do. The host has `three` in scope and pins them here.
-  const terrainAtlas = generateTerrainAtlas()
-  const atlasData = new Uint8Array(new ArrayBuffer(terrainAtlas.data.byteLength))
-  atlasData.set(terrainAtlas.data)
-  const atlasTexture = new THREE.DataTexture(
-    atlasData,
-    terrainAtlas.width,
-    terrainAtlas.height,
-    THREE.RGBAFormat,
-  )
-  atlasTexture.magFilter = THREE.NearestFilter
-  atlasTexture.minFilter = THREE.NearestFilter
-  atlasTexture.needsUpdate = true
-  canvas.setAttribute('data-atlas-size', `${String(terrainAtlas.width)}x${String(terrainAtlas.height)}`)
-  const glContext = canvas.getContext('webgl2') ?? canvas.getContext('webgl')
-  const webGlAvailable = glContext !== null
-  // mc-render 0.3.0's post-processing chain (GTAO/SSAO, bloom via the
-  // composite pass, SMAA) is newly wired into `makeProductionWorldRenderer`/
-  // `renderModule`, which defaults to `QUALITY_PRESETS.high` — enabling all
-  // three — whenever the caller does not pass a `quality` (see
-  // `domain/post-processing.ts`'s `QUALITY_PRESETS`; this app never did).
-  // Those passes are calibrated for a hardware rasterizer; on SwiftShader
-  // (this repository's headless CI target — see playwright.config.ts),
-  // measured with `QUALITY_PRESETS.low` instead, per-frame GPU
-  // command-processing time drops by roughly 15% at an identical
-  // chunk/geometry count (CDP tracing, `CommandBuffer::Flush`/`WebGL` event
-  // duration). That is a real but PARTIAL fix for
-  // e2e/performance-budget.e2e.ts's sub-8-FPS SwiftShader failures — a
-  // further ~2x per-GPU-command cost gap remains unexplained by this preset
-  // change or by `makeProductionWorldRenderer` vs the plain `makeWorldRenderer`
-  // (measured equivalent under `QUALITY_PRESETS.low` either way), so this is
-  // necessary but not sufficient; see the investigation this fix shipped
-  // with for what was ruled out. `WEBGL_debug_renderer_info` is the standard
-  // way to tell a software rasterizer from a real GPU; fall back to
-  // `QUALITY_PRESETS.low` (RenderPass + OutputPass only, matching pre-0.3.0
-  // behavior) there, and leave real hardware-accelerated players on the
-  // default `high` preset untouched.
-  const isSoftwareRenderer = (context: WebGL2RenderingContext | WebGLRenderingContext | null): boolean => {
-    if (context === null) return false
-    const info = context.getExtension('WEBGL_debug_renderer_info')
-    if (info === null) return false
-    const renderer = String(context.getParameter(info.UNMASKED_RENDERER_WEBGL))
-    return /swiftshader|software|llvmpipe|softpipe/iu.test(renderer)
-  }
-  // Read once and reused below for the streamed chunk radius: both fall back
-  // together on the same software-rasterizer signal.
-  const softwareRenderer = isSoftwareRenderer(glContext)
-  const renderQuality = softwareRenderer ? QUALITY_PRESETS.low : undefined
-  canvas.setAttribute('data-render-quality', renderQuality === undefined ? 'high' : 'low')
-  const worldRenderer = webGlAvailable
-    ? await Effect.runPromise(makeProductionWorldRenderer<
-      HTMLCanvasElement,
-      THREE.BufferGeometry,
-      THREE.MeshBasicMaterial,
-      THREE.InstancedBufferGeometry,
-      THREE.ShaderMaterial
-    >(
-      THREE,
-      canvas,
-      { width: canvas.clientWidth, height: canvas.clientHeight },
-      atlasTexture,
-      { dimension: initialDimension },
-    ))
-    : await Effect.runPromise(
-        makeWorldRenderer<HTMLCanvasElement, THREE.BufferGeometry, THREE.MeshBasicMaterial>(
-          THREE,
-          canvas,
-          { width: canvas.clientWidth, height: canvas.clientHeight },
-          { dimension: initialDimension },
-        ),
-      )
-
-  // The canvas is the host's element and its SIZE is the host's business, so
-  // the resize listener is here rather than in mc-render — mc-render ships no
-  // `lib.DOM` and could not add one. It tells the renderer; the renderer
-  // decides what that means for the projection.
-  window.addEventListener('resize', () => {
-    Effect.runSync(worldRenderer.resize(canvas.clientWidth, canvas.clientHeight))
-  })
+  type Dimension = SessionState['dimension']
 
   // -------------------------------------------------------------------------
   // 2a. The generated world, shared by gameplay and rendering
@@ -1799,7 +1523,7 @@ const bootGame = async (
       mode: state.weather,
       intensity,
       listener: camera,
-      listenerForward: readAudioListenerForward(),
+      listenerForward: adapters.getReadAudioListenerForward(),
       occlusion: 0,
       ...(thunder === undefined ? {} : { thunder }),
     })
@@ -2668,7 +2392,7 @@ const bootGame = async (
     Effect.provide(
       registerModule({
         name: '@nerima-games/mc-render',
-        layers: inputLayer,
+        layers: adapters.inputLayer,
         frameStages: render.frameStages,
       }),
       inputContext,
@@ -2723,10 +2447,10 @@ const bootGame = async (
   // mc-compose is allowed to import mx-gameplay. Nothing here reaches past it.
   //
   const playerApi = world.player
-  readAudioListener = () => Effect.runSync(playerApi.pose).feetPosition
-  readAudioListenerForward = () => horizontalListenerForward(
+  adapters.setReadAudioListener(() => Effect.runSync(playerApi.pose).feetPosition)
+  adapters.setReadAudioListenerForward(() => horizontalListenerForward(
     Effect.runSync(playerApi.pose).yawRadians,
-  )
+  ))
   const inputApi = Context.get(inputContext, InputService)
   const applyBindings = (bindings: PlayerSettingsV1['bindings']): void => {
     for (const action of PLAYER_BINDING_ACTIONS) {
@@ -8968,7 +8692,7 @@ type MultiplayerInventorySelection = Readonly<{
     {
       namespace: 'audio',
       commands: {
-        report: () => Effect.runSync(audioBackend.report),
+        report: () => Effect.runSync(adapters.audioBackend.report),
         snapshot: () => audio.snapshot(Effect.runSync(browserClock.monotonicSecs)),
       },
     },
@@ -9016,8 +8740,7 @@ type MultiplayerInventorySelection = Readonly<{
     settingsView.dispose()
     endAudio.dispose()
     weatherAudio.dispose()
-    for (const timeout of pendingThunder.values()) window.clearTimeout(timeout)
-    pendingThunder.clear()
+    adapters.clearPendingThunder()
     window.removeEventListener('mousedown', handleNativeMouseDown, true)
     Effect.runSync(worldRenderer.dispose)
     atlasTexture.dispose()
@@ -11340,8 +11063,8 @@ type MultiplayerInventorySelection = Readonly<{
         phase: dragonSnapshot.phase === 'dead' ? 'defeated' : 'active',
         nowSecs,
         listener: postFramePose.feetPosition,
-        listenerForward: readAudioListenerForward(),
-        events: pendingEndAudioEvents.splice(0),
+        listenerForward: adapters.getReadAudioListenerForward(),
+        events: adapters.drainEndAudioEvents(),
       })
 
       syncRenderedEntities()
