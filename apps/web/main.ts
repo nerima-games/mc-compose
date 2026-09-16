@@ -94,13 +94,11 @@ import {
   chunkCoord,
   isEmpty,
   MonotonicTimeSecs as KernelMonotonicTimeSecs,
-  position,
   propertyOfBlockId,
   resolvedBlockOfId,
   StackCount,
   StageId,
   type BlockPosition,
-  type CameraPoseSnapshot,
   type MonotonicTimeSecs,
   type Position as Vec3,
 } from '@nerima-games/mc-kernel'
@@ -128,7 +126,6 @@ import {
   resetLandingImpact,
   changed,
   UNCHANGED,
-  simStages,
   STARTER_FUEL_RULES,
   STARTER_SMELTING_RECIPES,
   targetBlockFromPlayerPose,
@@ -165,7 +162,6 @@ import {
   makeChunkStoreLightColor,
   makeChunkStoreMesher,
   RENDER_STAGE_IDS,
-  renderModule,
   syncWorld,
   wrapHotbarSelection,
   type ChunkRef,
@@ -267,7 +263,6 @@ import {
   mainMenuViewModel,
   makeUiFrameState,
   slotSnapshotOf,
-  uiStages,
   type CreateWorldRequest,
   type ChestStorageSlotTarget,
   type FurnaceSlotId,
@@ -325,7 +320,6 @@ import {
   emptyBrewingStandState,
   emptyStatusEffectState,
   fishingPhase,
-  gameplayStages,
   getPlayerMovementSpeedMultiplier,
   insertBrewingBottle,
   insertBrewingFuel,
@@ -472,9 +466,6 @@ import {
 } from '../multiplayer-shared/wither-runtime'
 import {
   composeGame,
-  EMPTY_MODULE_LAYER,
-  registerModule,
-  type GameModule,
   type StageRegistration,
 } from '../../src/domain/composition'
 
@@ -596,6 +587,7 @@ import {
   makeSettingsWriteQueue,
   type SettingsWriteQueue,
 } from './platform-adapters'
+import { makeHostModules } from './host-modules'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -1215,10 +1207,8 @@ const bootGame = async (
     initialDimension,
     inputContext,
     redstoneRuntime,
-    runtimeRedstoneStages,
     atlasTexture,
     softwareRenderer,
-    renderQuality,
     worldRenderer,
   } = adapters
   let playerSettings = adapters.playerSettings
@@ -2357,79 +2347,7 @@ const bootGame = async (
     streamAround(currentChunkContext, spawnPose.feetPosition.x, spawnPose.feetPosition.z),
   )
 
-  // `renderModule()` supplies the render stages and receives the concrete draw
-  // port. Chunk synchronization is a separate composition stage so it follows
-  // the camera mirror and runs once per frame against the active dimension.
-  /**
-   * The starting pose, derived from the generated surface height.
-   *
-   * The TYPE IS DERIVED FROM THE FUNCTION rather than named, because
-   * `CameraPoseSnapshot` is a shared kernel vocabulary type. The render
-   * function remains the source of truth here, so `Parameters<typeof
-   * renderModule>[3]` follows its signature and a
-   * change to it fails here rather than drifting.
-   *
-   * The values are constructed with mc-kernel's branded constructors. The
-   * brands have no runtime representation and the renderer reads five numbers
-   * off this, but the construction remains checked at this boundary.
-   *
-   * The camera is eye-level above the player service's feet position.
-   */
-  const initialPose: CameraPoseSnapshot = {
-    position: position(
-      spawnPose.feetPosition.x,
-      spawnPose.feetPosition.y + EYE_LEVEL_OFFSET,
-      spawnPose.feetPosition.z,
-    ),
-    yawRadians: spawnPose.yawRadians,
-    pitchRadians: spawnPose.pitchRadians,
-    capturedAtSecs: KernelMonotonicTimeSecs(0),
-  }
-
-  const render = renderModule(renderQuality, undefined, worldRenderer, initialPose)
-
-  const registeredRender = await Effect.runPromise(
-    Effect.provide(
-      registerModule({
-        name: '@nerima-games/mc-render',
-        layers: adapters.inputLayer,
-        frameStages: render.frameStages,
-      }),
-      inputContext,
-    ),
-  )
-
-  const registeredChunkSync = await Effect.runPromise(
-    registerModule({
-      name: '@nerima-games/mc-render/world-sync',
-      layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed([chunkSyncStage]),
-    }),
-  )
-
-  // `EMPTY_MODULE_LAYER` and not `uiModule.layers`, even though the two are the
-  // same value. `Layer.empty` is typed `Layer<never, never, never>` and does NOT
-  // assign to `ModuleLayer`: `Layer` declares `in ROut` contravariantly, so the
-  // empty Layer is the single case where `any` would have to assign to `never`.
-  // `domain/composition.ts` exports the constant precisely so that the cast
-  // lives in one place — and `pnpm typecheck:preview` caught this the first
-  // time, which is the whole argument for that project existing.
   const uiFrameState = Effect.runSync(makeUiFrameState)
-  const registeredUi = await Effect.runPromise(
-    registerModule({
-      name: '@nerima-games/mx-ui',
-      layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed(uiStages(uiFrameState)),
-    }),
-  )
-
-  const registeredRedstone = await Effect.runPromise(
-    registerModule({
-      name: '@nerima-games/mx-redstone',
-      layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed(runtimeRedstoneStages),
-    }),
-  )
 
   // -------------------------------------------------------------------------
   // 2c. gameplayModule, and the four services it requires
@@ -4363,63 +4281,29 @@ type MultiplayerInventorySelection = Readonly<{
     multiplayerChatInput.addEventListener(eventName, (event) => event.stopPropagation())
   }
 
-  const registeredSim = await Effect.runPromise(
-    registerModule({
-      name: '@nerima-games/mc-sim',
-      layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed(simStages(simState, time, playerApi, crops)),
-    }),
-  )
-
-  const registeredGameplay = await Effect.runPromise(
-    registerModule({
-      name: '@nerima-games/mx-gameplay',
-      layers: EMPTY_MODULE_LAYER,
-      frameStages: Effect.succeed(
-        gameplayStages(
-          gameplayState,
-          currentChunkStore,
-          world.entities,
-          world.inventory,
-          world.player,
-          time,
-          vehicleService,
-          {
-            isActiveDimension: (dimension) => dimension === currentChunkContext.dimension,
-            isPoweredRailAt: (dimension, position) => poweredRails.has(leverKeyOf({ dimension, position })),
-            controlsForVehicle: (vehicle) => String(vehicle.id) === mountedVehicleId ? vehicleControls : { throttle: 0, steering: 0 },
-            onVehicleExit: (vehicle) => {
-              if (String(vehicle.id) === mountedVehicleId) mountedVehicleId = undefined
-            },
-          },
-          {
-            // The hand-rolled pickup loop (~line 8494) preserves
-            // metadata/durability/custom names that the stage-level pickup does
-            // not; droppedItemPickup: false keeps the two from consuming the
-            // same inventory in one frame (restored in mx-gameplay 0.3.3).
-            droppedItemPickup: false,
-            mobSimulation: multiplayer === undefined,
-          },
-        ),
-      ),
-    }),
-  )
-
-  const modules: ReadonlyArray<GameModule> = [
-    registeredRender,
-    registeredChunkSync,
-    registeredUi,
-    registeredRedstone,
-    registeredSim,
-    registeredGameplay,
-    ...(multiplayer === undefined
-      ? []
-      : [{
-          name: 'mx-multiplayer',
-          layers: EMPTY_MODULE_LAYER,
-          frameStages: multiplayer.host.stages,
-        }]),
-  ]
+  const modules = await makeHostModules({
+    adapters,
+    spawnPose,
+    chunkSyncStage,
+    uiFrameState,
+    simState,
+    time,
+    playerApi,
+    crops,
+    gameplayState,
+    currentChunkStore,
+    world,
+    vehicleService,
+    isActiveDimension: (dimension) => dimension === currentChunkContext.dimension,
+    poweredRails,
+    leverKeyOf,
+    getMountedVehicleId: () => mountedVehicleId,
+    setMountedVehicleId: (id) => {
+      mountedVehicleId = id
+    },
+    getVehicleControls: () => vehicleControls,
+    multiplayer,
+  })
 
   // -------------------------------------------------------------------------
   // 3. Composition
