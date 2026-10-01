@@ -186,14 +186,14 @@ import { type AudioRuntime } from './audio-runtime'
  * `QaNamespace`/`QaCommand` in `src/domain/qa-api`; the host only authors the
  * namespace entries and lets compose validate and merge them.
  */
-export type QaSurfaceApi = {
+type QaSurfaceApi = {
   readonly install: () => void
 }
 
 /** The chunk context QA helpers stream around. Structurally identical to the
  * `DimensionChunkContext` `bootGame` builds, so the `streamAround` and
  * `getOrCreateDimensionChunkContext` closures accept it without a cast. */
-export type QaChunkContext = {
+type QaChunkContext = {
   readonly dimension: Dimension
   readonly chunkStore: ChunkStoreApi
   readonly worldgenChunkStore: ChunkStoreApi
@@ -205,18 +205,18 @@ export type QaChunkContext = {
   readonly streamLoaded: Set<string>
 }
 
-export type QaMultiplayerRuntime = {
+type QaMultiplayerRuntime = {
   readonly query: { readonly player: PlayerId }
   readonly host: MultiplayerHost
 }
 
-export type QaPose = {
+type QaPose = {
   readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
   readonly yawRadians: number
   readonly pitchRadians: number
 }
 
-export type PendingItemUse =
+type PendingItemUse =
   | {
       readonly kind: 'ignition'
       readonly slotIndex: number
@@ -232,18 +232,18 @@ export type PendingItemUse =
     }
   | { readonly kind: 'eat'; readonly slotIndex: number }
 
-export type PendingBlockUse = {
+type PendingBlockUse = {
   readonly dimension: Dimension
   readonly position: { readonly x: number; readonly y: number; readonly z: number }
 }
 
-export type EnvironmentalContactCell = EnvironmentalContact & {
+type EnvironmentalContactCell = EnvironmentalContact & {
   readonly position: { readonly x: number; readonly y: number; readonly z: number }
 }
 
-export type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest' | 'anvil' | 'enchanting'
+type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest' | 'anvil' | 'enchanting'
 
-export type PortalLayout = {
+type PortalLayout = {
   readonly frame: ReadonlyArray<SessionPosition>
   readonly interior: ReadonlyArray<SessionPosition>
 }
@@ -253,7 +253,7 @@ export type PortalLayout = {
  * flattened. Each field is concrete: no `any`, no `unknown`, no `ReturnType`
  * over a factory. Mutable `let` bindings cross as getter/action closures.
  */
-export type QaSurfaceDeps = {
+type QaSurfaceDeps = {
   readonly render: {
     readonly weather: WeatherServiceApi
     readonly getLightingSnapshot: () => RenderLightingSnapshot
