@@ -681,8 +681,8 @@ export const makeQaSurface = (
     // solid ground with QA_IGNITION_FLOOR_BLOCK — this fixture omitted it, so
     // the player fell through unset terrain for the whole encounter, shifting
     // eye height enough that a right-click landed several seconds apart could
-    // miss the lever's raycast (see main.ts's other QA_IGNITION_FLOOR_BLOCK
-    // fixtures for the same bug already fixed once).
+    // miss the lever's raycast (see the sibling QA_IGNITION_FLOOR_BLOCK
+    // fixtures for the same previously fixed bug).
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     Effect.runSync(currentChunkStore.setBlock(QA_PISTON_LEVER, blockIdOf('lever')))
     Effect.runSync(currentChunkStore.setBlock(QA_PISTON, blockIdOf('piston')))
@@ -822,7 +822,7 @@ export const makeQaSurface = (
   // path that spawns a minecart is a real right-click against a rail block,
   // and a fresh session's starter kit holds neither a minecart nor rail. This
   // fixture drives the cart through the SAME vehicleService and frame stage
-  // (gameplayStages, wired at this file's registerModule call) production
+  // (gameplayStages, wired during host module registration) production
   // play uses — it seeds track and a moving cart, not a hand-stepped
   // position, so what the browser observes afterward is the real simulation
   // turning the corners, not a QA-only substitute for it.
@@ -862,7 +862,7 @@ export const makeQaSurface = (
       // Powered directly, the same way seedRedstoneFixtures and
       // seedStickyPistonEncounter pre-seed an already-active circuit rather
       // than requiring the player to build a power source — isPoweredRailAt
-      // (wired at this file's registerModule call) reads this same
+      // (wired during host module registration) reads this same
       // poweredRails set in production.
       poweredRails.add(leverKeyOf({ dimension, position: cell }))
     }

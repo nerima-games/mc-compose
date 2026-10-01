@@ -180,7 +180,7 @@ export const makeHostModules = async (
             },
           },
           {
-            // The hand-rolled pickup loop below preserves
+            // This pickup configuration preserves
             // metadata/durability/custom names that the stage-level pickup does
             // not; droppedItemPickup: false keeps the two from consuming the
             // same inventory in one frame (restored in mx-gameplay 0.3.3).
