@@ -45,7 +45,7 @@ import { type PersistedLeverState } from './session-persistence'
  * in three places, `vehicleControls` is reassigned every frame, and
  * `currentChunkContext.dimension` changes when the player crosses a portal.
  */
-export type HostModulesDeps = {
+type HostModulesDeps = {
   readonly adapters: PlatformAdapters
   readonly spawnPose: PlayerPose
   readonly chunkSyncStage: StageRegistration
@@ -95,21 +95,7 @@ export const makeHostModules = async (
   // `renderModule()` supplies the render stages and receives the concrete draw
   // port. Chunk synchronization is a separate composition stage so it follows
   // the camera mirror and runs once per frame against the active dimension.
-  /**
-   * The starting pose, derived from the generated surface height.
-   *
-   * The TYPE IS DERIVED FROM THE FUNCTION rather than named, because
-   * `CameraPoseSnapshot` is a shared kernel vocabulary type. The render
-   * function remains the source of truth here, so `Parameters<typeof
-   * renderModule>[3]` follows its signature and a
-   * change to it fails here rather than drifting.
-   *
-   * The values are constructed with mc-kernel's branded constructors. The
-   * brands have no runtime representation and the renderer reads five numbers
-   * off this, but the construction remains checked at this boundary.
-   *
-   * The camera is eye-level above the player service's feet position.
-   */
+  /** The starting camera pose, one eye level above the player's feet. */
   const initialPose: CameraPoseSnapshot = {
     position: position(
       spawnPose.feetPosition.x,
@@ -147,8 +133,7 @@ export const makeHostModules = async (
   // assign to `ModuleLayer`: `Layer` declares `in ROut` contravariantly, so the
   // empty Layer is the single case where `any` would have to assign to `never`.
   // `domain/composition.ts` exports the constant precisely so that the cast
-  // lives in one place — and `pnpm typecheck:preview` caught this the first
-  // time, which is the whole argument for that project existing.
+  // lives in one place and is checked by the preview TypeScript project.
   const registeredUi = await Effect.runPromise(
     registerModule({
       name: '@nerima-games/mx-ui',
@@ -195,7 +180,7 @@ export const makeHostModules = async (
             },
           },
           {
-            // The hand-rolled pickup loop (~line 8494) preserves
+            // This pickup configuration preserves
             // metadata/durability/custom names that the stage-level pickup does
             // not; droppedItemPickup: false keeps the two from consuming the
             // same inventory in one frame (restored in mx-gameplay 0.3.3).

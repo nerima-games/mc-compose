@@ -186,14 +186,14 @@ import { type AudioRuntime } from './audio-runtime'
  * `QaNamespace`/`QaCommand` in `src/domain/qa-api`; the host only authors the
  * namespace entries and lets compose validate and merge them.
  */
-export type QaSurfaceApi = {
+type QaSurfaceApi = {
   readonly install: () => void
 }
 
 /** The chunk context QA helpers stream around. Structurally identical to the
  * `DimensionChunkContext` `bootGame` builds, so the `streamAround` and
  * `getOrCreateDimensionChunkContext` closures accept it without a cast. */
-export type QaChunkContext = {
+type QaChunkContext = {
   readonly dimension: Dimension
   readonly chunkStore: ChunkStoreApi
   readonly worldgenChunkStore: ChunkStoreApi
@@ -205,18 +205,18 @@ export type QaChunkContext = {
   readonly streamLoaded: Set<string>
 }
 
-export type QaMultiplayerRuntime = {
+type QaMultiplayerRuntime = {
   readonly query: { readonly player: PlayerId }
   readonly host: MultiplayerHost
 }
 
-export type QaPose = {
+type QaPose = {
   readonly feetPosition: { readonly x: number; readonly y: number; readonly z: number }
   readonly yawRadians: number
   readonly pitchRadians: number
 }
 
-export type PendingItemUse =
+type PendingItemUse =
   | {
       readonly kind: 'ignition'
       readonly slotIndex: number
@@ -232,18 +232,18 @@ export type PendingItemUse =
     }
   | { readonly kind: 'eat'; readonly slotIndex: number }
 
-export type PendingBlockUse = {
+type PendingBlockUse = {
   readonly dimension: Dimension
   readonly position: { readonly x: number; readonly y: number; readonly z: number }
 }
 
-export type EnvironmentalContactCell = EnvironmentalContact & {
+type EnvironmentalContactCell = EnvironmentalContact & {
   readonly position: { readonly x: number; readonly y: number; readonly z: number }
 }
 
-export type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest' | 'anvil' | 'enchanting'
+type InventoryMode = 'player' | 'craftingTable' | 'furnace' | 'chest' | 'anvil' | 'enchanting'
 
-export type PortalLayout = {
+type PortalLayout = {
   readonly frame: ReadonlyArray<SessionPosition>
   readonly interior: ReadonlyArray<SessionPosition>
 }
@@ -253,7 +253,7 @@ export type PortalLayout = {
  * flattened. Each field is concrete: no `any`, no `unknown`, no `ReturnType`
  * over a factory. Mutable `let` bindings cross as getter/action closures.
  */
-export type QaSurfaceDeps = {
+type QaSurfaceDeps = {
   readonly render: {
     readonly weather: WeatherServiceApi
     readonly getLightingSnapshot: () => RenderLightingSnapshot
@@ -681,8 +681,8 @@ export const makeQaSurface = (
     // solid ground with QA_IGNITION_FLOOR_BLOCK — this fixture omitted it, so
     // the player fell through unset terrain for the whole encounter, shifting
     // eye height enough that a right-click landed several seconds apart could
-    // miss the lever's raycast (see main.ts's other QA_IGNITION_FLOOR_BLOCK
-    // fixtures for the same bug already fixed once).
+    // miss the lever's raycast (see the sibling QA_IGNITION_FLOOR_BLOCK
+    // fixtures for the same previously fixed bug).
     Effect.runSync(currentChunkStore.setBlock(QA_IGNITION_FLOOR_BLOCK, blockIdOf('stone')))
     Effect.runSync(currentChunkStore.setBlock(QA_PISTON_LEVER, blockIdOf('lever')))
     Effect.runSync(currentChunkStore.setBlock(QA_PISTON, blockIdOf('piston')))
@@ -822,7 +822,7 @@ export const makeQaSurface = (
   // path that spawns a minecart is a real right-click against a rail block,
   // and a fresh session's starter kit holds neither a minecart nor rail. This
   // fixture drives the cart through the SAME vehicleService and frame stage
-  // (gameplayStages, wired at this file's registerModule call) production
+  // (gameplayStages, wired during host module registration) production
   // play uses — it seeds track and a moving cart, not a hand-stepped
   // position, so what the browser observes afterward is the real simulation
   // turning the corners, not a QA-only substitute for it.
@@ -862,7 +862,7 @@ export const makeQaSurface = (
       // Powered directly, the same way seedRedstoneFixtures and
       // seedStickyPistonEncounter pre-seed an already-active circuit rather
       // than requiring the player to build a power source — isPoweredRailAt
-      // (wired at this file's registerModule call) reads this same
+      // (wired during host module registration) reads this same
       // poweredRails set in production.
       poweredRails.add(leverKeyOf({ dimension, position: cell }))
     }
