@@ -34,7 +34,7 @@
           pkgs = pkgsFor system;
         in
         {
-          # Node 24 matches the `engines` field and the CI runner. pnpm comes
+          # Node 26 matches the `engines` field and the CI runner. pnpm comes
           # from corepack rather than nixpkgs so that the version is decided by
           # the `packageManager` field in package.json — one source of truth
           # instead of two that can drift.
@@ -48,7 +48,7 @@
           #
           # No `pkgs.playwright-driver.browsers` / `PLAYWRIGHT_BROWSERS_PATH`
           # here: at this repo's pinned nixpkgs revision that driver ships
-          # 1.61.1, which can never serve @playwright/test's pinned 1.62.1 —
+          # 1.61.1, which can never serve @playwright/test's pinned 1.64.1 —
           # confirmed by `browserType.launch: Executable doesn't exist`
           # against the wrong chromium_headless_shell revision. `npx
           # playwright install --with-deps chromium` (local, and the
@@ -57,8 +57,8 @@
           # exactly — the same pattern mx-ui's flake already uses.
           default = pkgs.mkShell {
             packages = [
-              pkgs.nodejs_24
-              pkgs.corepack_24
+              pkgs.nodejs_26
+              (pkgs.corepack.override { nodejs-slim = pkgs.nodejs-slim_26; })
               pkgs.typescript-language-server
               pkgs.oxlint
               pkgs.ast-grep

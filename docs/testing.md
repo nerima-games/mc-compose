@@ -76,7 +76,7 @@ per-test の判定は [e2e-triage.md](./e2e-triage.md) にある。
   古い名前に固定された E2E が古いビルドに対して黙って通るのを防ぐため
 - ブラウザ本体は Nix ではなく `npx playwright install --with-deps chromium` で取得する。
   固定した nixpkgs revision の `playwright-driver.browsers` は 1.61.1 で、
-  `@playwright/test` の pin(1.62.1)が要求する chromium revision を一致させて
+  `@playwright/test` の pin(1.64.1)が要求する chromium revision を一致させて
   提供できない — 提供できるふりをして `browserType.launch: Executable doesn't exist`
   を実行時まで隠す方が実害が大きいため、`flake.nix` はこのパッケージを一切持たない
   (mx-ui と同じ構成)。ローカルでは `nix develop` に入った後に一度実行すればよく、
