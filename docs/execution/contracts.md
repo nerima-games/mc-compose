@@ -4,19 +4,19 @@ This document records proposed type boundaries for C1–C7. Its TypeScript code 
 
 Effect 4 is the target API. W0 is the preparation wave that records and typechecks the proposals; W1 adopts Effect 4 in `mc-kernel` and `mc-compose` before implementing C1. Each later owning package adopts it in the first wave that implements its contract.
 
-Package implementation waves follow W0: W1 updates `mc-kernel` and `mc-compose`; W2 updates `mc-noise`, `mc-meshing`, `mc-physics`, `mc-save`, and `mc-audio` as an intervening package migration wave with no C1–C7 surface; W3 updates `mc-worldgen`, `mc-sim`, `mc-render`, and `mc-playground-kit`; W4 integrates `mx-gameplay`, `mx-redstone`, `mx-ui`, and `mx-multiplayer`. A contract's wave identifies when its API is fixed or implemented.
+Package implementation waves follow W0: W1 updates `mc-kernel` and `mc-compose`; W2 updates `mc-noise`, `mc-meshing`, `mc-physics`, `mc-save`, and `mc-audio` as an intervening package migration wave with no C1–C7 surface; W3 updates `mc-worldgen`, `mc-sim`, `mc-render`, and `mc-playground-kit`; W4 integrates `mx-gameplay`, `mx-redstone`, `mx-ui`, and `mx-multiplayer`. W5 wires `mc-compose`, `mc-host-web`, and `mc-server`; C1 moves the E2E tests and QA transport in that wave. A contract's wave identifies when its API is fixed or implemented.
 
 ## Contract map
 
 | ID | Owning package and proposed surface | Wave | Consumers |
 |---|---|---:|---|
-| C1 | `mc-kernel`, `GameModule` extensions in `src/domain/time/frame.ts` | W1 | All game modules and compose |
+| C1 | `mc-kernel`, `GameModule` extensions in `src/domain/time/frame.ts`; `QaBridge` in `mc-compose` | W1 types, W2 save envelope support, W3 v3 slice migration, W5 QA transport migration | All game modules, compose, `mc-host-web` E2E |
 | C2 | `mc-sim`, `IntentQueue` in `src/application/intent-queue.ts` | W3 | `mx-gameplay`, `mx-redstone`, `mx-multiplayer`, hosts |
 | C3 | Event vocabulary in `mc-kernel`; `DomainEventBus` in `mc-sim` | W1 vocabulary, W3 bus | Render, UI, gameplay adapters |
-| C4 | Replicated state services in `mc-sim`; codecs in `mx-multiplayer` | W3 | `mx-multiplayer`, `mc-server` |
+| C4 | Replicated state services in `mc-sim`; grouped codecs in `mx-multiplayer` | W3 state, W4 protocol v9 contract | `mx-multiplayer`, `mc-server` |
 | C5 | `mc-sim`, `@nerima-games/mc-sim/testing` | W3 | All `mx-*` packages and `mc-server` |
 | C6 | `mc-render`, particle request service | W3 | Render adapter; gameplay reaches it through C3 events |
-| C7 | Port in `mc-kernel`; public writer alias in `mx-multiplayer` | W1 type, W4 wiring | `mc-server`, `mc-host-web`, redstone host adapter |
+| C7 | Port in `mc-kernel`; public writer alias in `mx-multiplayer` | W1 type, W4 consumer contracts and adapter placement, W5 host wiring | `mc-server`, `mc-host-web`, redstone host adapter |
 
 ## Shared rules
 
@@ -36,14 +36,20 @@ import { Brand, Context, Effect, Layer, Schema, Stream } from "effect";
 export type EntityId = Brand.Branded<string, "EntityId">;
 export const EntityIdSchema = Schema.NonEmptyString.pipe(Schema.brand("EntityId"));
 
-export type DimensionId = Brand.Branded<string, "DimensionId">;
-export const DimensionIdSchema = Schema.NonEmptyString.pipe(Schema.brand("DimensionId"));
+export const DimensionIdSchema = Schema.Literals(["overworld", "nether", "end"])
+  .pipe(Schema.brand("DimensionId"));
+export type DimensionId = Schema.Schema.Type<typeof DimensionIdSchema>;
 
 export type WorldId = Brand.Branded<string, "WorldId">;
 export const WorldIdSchema = Schema.NonEmptyString.pipe(Schema.brand("WorldId"));
 
 export type BlockId = Brand.Branded<string, "BlockId">;
 export const BlockIdSchema = Schema.NonEmptyString.pipe(Schema.brand("BlockId"));
+
+export type ItemId = Brand.Branded<number, "ItemId">;
+export const ItemIdSchema = Schema.Int
+  .check(Schema.isBetween({ minimum: 0, maximum: 65535 }))
+  .pipe(Schema.brand("ItemId"));
 
 export const BlockPositionSchema = Schema.Struct({
   x: Schema.Int,
@@ -84,9 +90,9 @@ export type DimensionRevision = Schema.Schema.Type<typeof DimensionRevisionSchem
 
 ## C1: Module QA and save slices
 
-1. **Placement.** Extend `GameModule` in `mc-kernel/src/domain/time/frame.ts` with optional `qa` and `saveSlices` members. In compose, preserve both fields when registering modules and merge them. Reject composition with `DuplicateModuleContract` when a QA namespace or save-slice ID is duplicated; include its kind and ID and expose no partially merged registry. Keep the QA bridge in compose and expose `QaBridge.run(namespaceName, operationName, inputJson)`. Namespace and operation are separate names, not a dotted lookup path. Operation names must be unique across each namespace's combined observe and command maps; reject a collision with `DuplicateModuleContract` kind `qa-operation` and ID `namespace.operation` before exposing the registry. Unknown names fail with `QaOperationNotFound`. The bridge decodes input, provides each operation's declared `Requirements` from composed module layers, and encodes successful results. Compose's typed `Layer.provide` call for the QA bridge must satisfy every registered operation's `Requirements`; a missing service makes that composition ill-typed. Input decoding and output encoding failures produce `Schema.SchemaError`; operation errors remain typed Effect failures. Success returns the output codec's JSON-encoded value. The host call fails with the operation's typed error or `Schema.SchemaError`; the bridge does not wrap failures in an error value.
+1. **Placement.** Extend `GameModule` in `mc-kernel/src/domain/time/frame.ts` by appending optional `QA` and `SaveSlices` type parameters after its existing `ROut`, `Error`, `RIn`, and `RRegister` parameters. The extension keeps `layers` and `frameStages` and adds optional `qa` and `saveSlices` fields. `registerModule` returns the same module type. `composeGame` accepts a readonly module tuple, merges its registrations, and returns the inferred QA namespaces and save slices. `BrowserRuntimeModule.start`, `startRuntimes`, and `startBrowserSession` preserve those types instead of widening them to `GameModule[]`. Reject composition with `DuplicateModuleContract` when a QA namespace or save-slice ID is duplicated; include its kind and branded ID, and expose no partially merged registry. Compose owns `QaBridge.run(namespaceName, operationName, inputJson)`. `QaBridgeApi<OperationErrors>` describes dispatch errors, and `ComposedGame` specializes that union to its registered operations. Namespace and operation are separate branded names. Operation names must be unique across a namespace's `observe` and `command` maps; reject a collision with `DuplicateModuleContract` kind `qa-operation` and ID `namespace.operation` before exposing the registry. Unknown names fail with `QaOperationNotFound`. The bridge decodes input, runs each operation with its declared `Requirements` from composed module layers, and encodes successful results. `QaRequirementsOfModules` unions the requirements from every registered operation. `composeGame` compares that union with merged layer outputs; `RequireQaServices` makes a missing service a type error. The typed `Layer.provide` call builds the bridge after that check. Input decoding and output encoding failures produce `Schema.SchemaError`; operation errors remain typed Effect failures. Success returns the output codec's JSON value. The host call propagates the operation error or `Schema.SchemaError` without wrapping it.
 2. **Effect 4 types.** An observe or command operation declares input/output codecs and an Effect handler with its typed error and requirements. A slice snapshot is an infallible Effect that may require state services; restore is an Effect with a typed error. A migration is a total synchronous transformation between decoded slice types, with decode or encode failures represented by `Schema.SchemaError`.
-3. **Schema shape.** `qa.observe` and `qa.command` are named maps whose values must be `QaOperation`s. Their inputs and outputs are `Schema.Codec`s, so branded identifiers are validated at the QA boundary. The output codec must encode values in the shared JSON domain. Each save entry is keyed by stable `SaveSliceId`, carries a positive integer version, and stores the encoded value accepted by that slice's codec. The persisted bundle is an object keyed by `SaveSliceId`; each value contains its version and encoded data.
+3. **Schema shape.** `qa.name` is a branded `QaNamespaceName`; `qa.observe` and `qa.command` are named maps whose values are `QaOperation`s with branded `name`, input, and output codecs. Each map key must equal its operation's `name`; compose validates this before publishing the registry. Their inputs and outputs are `Schema.Codec`s, so branded identifiers are validated at the QA boundary. The output codec must encode values in the shared JSON domain. Each save entry is keyed by stable `SaveSliceId`, carries a positive integer version, and stores the encoded value accepted by that slice's codec. The persisted bundle is an object keyed by `SaveSliceId`; each value contains its version and encoded data.
 
 ```ts
 export const SaveSliceIdSchema = Schema.NonEmptyString.pipe(Schema.brand("SaveSliceId"));
@@ -97,12 +103,29 @@ export const SaveVersionSchema = Schema.Int
   .pipe(Schema.brand("SaveVersion"));
 export type SaveVersion = Schema.Schema.Type<typeof SaveVersionSchema>;
 
+export const QaNamespaceNameSchema = Schema.NonEmptyString.pipe(Schema.brand("QaNamespaceName"));
+export type QaNamespaceName = Schema.Schema.Type<typeof QaNamespaceNameSchema>;
+
+export const QaOperationNameSchema = Schema.NonEmptyString.pipe(Schema.brand("QaOperationName"));
+export type QaOperationName = Schema.Schema.Type<typeof QaOperationNameSchema>;
+
+export const ModuleContractIdSchema = Schema.NonEmptyString.pipe(Schema.brand("ModuleContractId"));
+export type ModuleContractId = Schema.Schema.Type<typeof ModuleContractIdSchema>;
+
+export const ModuleContractKindSchema = Schema.Literals([
+  "qa-namespace",
+  "qa-operation",
+  "save-slice"
+]).pipe(Schema.brand("ModuleContractKind"));
+export type ModuleContractKind = Schema.Schema.Type<typeof ModuleContractKindSchema>;
+
 export interface QaOperation<
   Input extends Schema.Codec<unknown>,
   Output extends Schema.Codec<unknown>,
   Error = never,
   Requirements = never
 > {
+  readonly name: QaOperationName;
   readonly input: Input;
   readonly output: Output;
   readonly run: (
@@ -123,10 +146,141 @@ export interface QaNamespace<
   Observe extends Readonly<Record<string, unknown>> = Readonly<Record<string, never>>,
   Command extends Readonly<Record<string, unknown>> = Readonly<Record<string, never>>
 > {
-  readonly name: string;
+  readonly name: QaNamespaceName;
   readonly observe: QaOperationMap<Observe>;
   readonly command: QaOperationMap<Command>;
 }
+
+export interface KernelGameModule<ROut, Error, RIn, RRegister = never> {
+  readonly layers: Layer.Layer<ROut, Error, RIn>;
+  readonly frameStages: Effect.Effect<ReadonlyArray<unknown>, never, RRegister>;
+}
+
+export type GameModuleExtensions<
+  QA extends QaNamespace = never,
+  SaveSlices extends ReadonlyArray<unknown> = readonly []
+> = {
+  readonly qa?: QA;
+  readonly saveSlices?: SaveSlices;
+};
+
+export interface GameModule<
+  ROut,
+  Error,
+  RIn,
+  RRegister = never,
+  QA extends QaNamespace = never,
+  SaveSlices extends ReadonlyArray<unknown> = readonly []
+> extends KernelGameModule<ROut, Error, RIn, RRegister>, GameModuleExtensions<QA, SaveSlices> {}
+
+type RequirementsOf<Operation> = Operation extends QaOperation<
+  infer _Input,
+  infer _Output,
+  infer _Error,
+  infer Requirements
+> ? Requirements : never;
+
+type ErrorsOf<Operation> = Operation extends QaOperation<
+  infer _Input,
+  infer _Output,
+  infer Error,
+  infer _Requirements
+> ? Error : never;
+
+type OperationsRequirements<Operations> = Operations extends Readonly<Record<string, unknown>>
+  ? RequirementsOf<Operations[keyof Operations]>
+  : never;
+
+type NamespaceRequirements<Namespace> = Namespace extends {
+  readonly observe: infer Observe;
+  readonly command: infer Command;
+}
+  ? OperationsRequirements<Observe> | OperationsRequirements<Command>
+  : never;
+
+type NamespaceErrors<Namespace> = Namespace extends {
+  readonly observe: infer Observe;
+  readonly command: infer Command;
+}
+  ? ErrorsOf<Observe[keyof Observe]> | ErrorsOf<Command[keyof Command]>
+  : never;
+
+type ModuleQa<Module> = Module extends { readonly qa?: infer Namespace }
+  ? NonNullable<Namespace>
+  : never;
+
+type QaRequirementsOfModules<Modules extends ReadonlyArray<unknown>> =
+  NamespaceRequirements<ModuleQa<Modules[number]>>;
+
+type QaOperationErrorsOfModules<Modules extends ReadonlyArray<unknown>> =
+  NamespaceErrors<ModuleQa<Modules[number]>>;
+
+type ModuleLayerServicesOf<Module> = Module extends {
+  readonly layers: Layer.Layer<infer Services, infer _Error, infer _Requirements>
+} ? Services : never;
+
+type IsGameModule<Module> = Module extends {
+  readonly layers: Layer.Layer<infer _Services, infer _LayerError, infer _LayerRequirements>;
+  readonly frameStages: Effect.Effect<infer _Stages, infer _StageError, infer _StageRequirements>;
+} ? true : false;
+
+type InvalidGameModules<Modules extends ReadonlyArray<unknown>> =
+  Modules[number] extends infer Module
+    ? Module extends unknown
+      ? IsGameModule<Module> extends true ? never : Module
+      : never
+    : never;
+
+type RequireGameModules<Modules extends ReadonlyArray<unknown>> =
+  [InvalidGameModules<Modules>] extends [never]
+    ? unknown
+    : { readonly invalidGameModules: InvalidGameModules<Modules> };
+
+type ModuleLayerServices<Modules extends ReadonlyArray<unknown>> =
+  ModuleLayerServicesOf<Modules[number]>;
+
+type ModuleSaveSlices<Module> = Module extends { readonly saveSlices?: infer Slices }
+  ? NonNullable<Slices>
+  : readonly [];
+
+type ModuleQaNamespaces<Modules extends ReadonlyArray<unknown>> = ModuleQa<Modules[number]>;
+
+type ModuleSaveSliceEntries<Modules extends ReadonlyArray<unknown>> =
+  ModuleSaveSlices<Modules[number]> extends ReadonlyArray<infer Slice> ? Slice : never;
+
+type ModuleQaRequirements<Modules extends ReadonlyArray<unknown>> =
+  QaRequirementsOfModules<Modules>;
+
+type RequireQaServices<Modules extends ReadonlyArray<unknown>> =
+  [ModuleQaRequirements<Modules>] extends [ModuleLayerServices<Modules>]
+    ? unknown
+    : { readonly missingQaServices: Exclude<ModuleQaRequirements<Modules>, ModuleLayerServices<Modules>> };
+
+export interface ComposedGame<Modules extends ReadonlyArray<unknown>> {
+  readonly modules: Modules;
+  readonly layers: Layer.Layer<ModuleLayerServices<Modules>>;
+  readonly qaNamespaces: ReadonlyArray<ModuleQaNamespaces<Modules>>;
+  readonly saveSlices: ReadonlyArray<ModuleSaveSliceEntries<Modules>>;
+  readonly qaBridge: QaBridgeApi<QaOperationErrorsOfModules<Modules>>;
+}
+
+export const registerModule = <const Module>(module: Module & (IsGameModule<Module> extends true ? unknown : never)): Module => module;
+
+export declare const composeGame: <const Modules extends ReadonlyArray<unknown>>(
+  modules: Modules & RequireGameModules<Modules> & RequireQaServices<Modules>
+) => ComposedGame<Modules>;
+
+export interface QaBridgeApi<OperationErrors> {
+  readonly run: (
+    namespace: QaNamespaceName,
+    operation: QaOperationName,
+    inputJson: unknown
+  ) => Effect.Effect<unknown, Schema.SchemaError | QaOperationNotFound | OperationErrors>;
+}
+
+export class QaBridge extends Context.Service<QaBridge, QaBridgeApi<unknown>>()(
+  "mc-compose/domain/QaBridge"
+) {}
 
 export interface SaveMigration<To extends Schema.Codec<unknown> = Schema.Codec<unknown>> {
   readonly fromVersion: SaveVersion;
@@ -182,24 +336,14 @@ export class SaveMigrationPathAmbiguous extends Schema.TaggedError<SaveMigration
   currentVersion: SaveVersionSchema
 }) {}
 
-export interface GameModuleExtensions<
-  QA extends QaNamespace = QaNamespace,
-  SaveSlices extends ReadonlyArray<unknown> = ReadonlyArray<unknown>
-> {
-  readonly qa?: QA;
-  readonly saveSlices?: SaveSlices;
-}
-
-export type GameModuleWithContracts<Base extends object> = Base & GameModuleExtensions;
-
 export class DuplicateModuleContract extends Schema.TaggedError<DuplicateModuleContract>()("DuplicateModuleContract", {
-  kind: Schema.Literals(["qa-namespace", "qa-operation", "save-slice"]),
-  id: Schema.NonEmptyString
+  kind: ModuleContractKindSchema,
+  id: ModuleContractIdSchema
 }) {}
 
 export class QaOperationNotFound extends Schema.TaggedError<QaOperationNotFound>()("QaOperationNotFound", {
-  namespace: Schema.String,
-  operation: Schema.String
+  namespace: QaNamespaceNameSchema,
+  operation: QaOperationNameSchema
 }) {}
 
 export const QaBlockPositionInput = Schema.Struct({
@@ -210,11 +354,69 @@ export const QaBlockIdOutput = Schema.Struct({
 });
 export type ObserveBlockAtQa = QaOperation<typeof QaBlockPositionInput, typeof QaBlockIdOutput>;
 export type ExampleQaNamespace = QaNamespace<{ readonly blockAt: ObserveBlockAtQa }>;
+
+export const LegacySimulationSaveV3Schema = Schema.Struct({
+  dimension: Schema.Literals(["overworld", "nether", "end"]),
+  tick: SimulationTickSchema,
+  player: Schema.Struct({
+    position: Schema.Struct({ x: Schema.Finite, y: Schema.Finite, z: Schema.Finite }),
+    inventory: Schema.Array(Schema.Unknown),
+    selectedHotbarSlot: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 8 }))
+  }),
+  statistics: Schema.Struct({
+    counters: Schema.Record(Schema.String, Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+    unlocked: Schema.Array(Schema.String)
+  })
+});
+export type LegacySimulationSaveV3 = Schema.Schema.Type<typeof LegacySimulationSaveV3Schema>;
+
+export interface SaveSliceCodec<Slice extends Schema.Codec<unknown>> {
+  readonly id: SaveSliceId;
+  readonly version: SaveVersion;
+  readonly schema: Slice;
+}
+
+export interface InitialSimulationSliceValues<
+  Player extends Schema.Codec<unknown>,
+  Time extends Schema.Codec<unknown>,
+  Inventory extends Schema.Codec<unknown>,
+  Statistics extends Schema.Codec<unknown>
+> {
+  readonly player: Player["Type"];
+  readonly time: Time["Type"];
+  readonly inventory: Inventory["Type"];
+  readonly statistics: Statistics["Type"];
+}
+
+export interface SimulationV3SliceTargets<
+  Player extends Schema.Codec<unknown>,
+  Time extends Schema.Codec<unknown>,
+  Inventory extends Schema.Codec<unknown>,
+  Statistics extends Schema.Codec<unknown>
+> {
+  readonly player: SaveSliceCodec<Player>;
+  readonly time: SaveSliceCodec<Time>;
+  readonly inventory: SaveSliceCodec<Inventory>;
+  readonly statistics: SaveSliceCodec<Statistics>;
+  readonly map: (legacy: LegacySimulationSaveV3) => InitialSimulationSliceValues<Player, Time, Inventory, Statistics>;
+}
+
+export declare const migrateSimulationSaveV3: <
+  Player extends Schema.Codec<unknown>,
+  Time extends Schema.Codec<unknown>,
+  Inventory extends Schema.Codec<unknown>,
+  Statistics extends Schema.Codec<unknown>
+>(
+  encodedV3Payload: unknown,
+  targets: SimulationV3SliceTargets<Player, Time, Inventory, Statistics>
+) => Effect.Effect<EncodedSaveBundle, Schema.SchemaError>;
+
+
 ```
 
-4. **Consumers.** All modules may register observations and commands for their owned services. Compose merges them for end-to-end tests against the fully composed host. Tests read state through owner observe operations rather than DOM attributes.
-5. **Compatibility.** A slice ID remains stable for the lifetime of the saved data. A shape change increments only that slice's version. Treat migrations as a directed version graph whose edges always increase the version; array order does not select a path. Each supported stored version must have one complete path to the current version. Each migration decodes its source's encoded data, transforms the decoded value, and encodes it with the target codec; the next migration receives that encoded result. After the final migration, decode the current version before restore. `mc-sim` gathers registered snapshots; `mc-save` encodes each with its registered codec and stores the bundle. If no complete migration path exists for a stored slice, restore fails with `SaveMigrationPathMissing`; if multiple paths exist, it fails with `SaveMigrationPathAmbiguous`. Both errors carry the slice ID, stored version, and current version, and neither invokes that slice's restore.
-6. **Wave.** Finalize in W1 before module migrations and compose integration.
+4. **Consumers.** All modules may register observations and commands for their owned services. Compose merges them for end-to-end tests against the fully composed host. Tests read state through owner observe operations rather than DOM attributes. Keep `window.__NERIMA_GAMES_QA__` as one transport slot whose only operation is dispatching `(namespace, operation, inputJson)` to `QaBridge.run`; it is not an operation registry. In W5, move the 38 E2E tests to `mc-host-web`, update them to call the schema-validated `name`/`observe`/`command` surface, and remove the legacy flat function registry and its install/read API from `mc-compose`. W5 leaves no parallel QA operation surface.
+5. **Compatibility.** A slice ID remains stable for the lifetime of the saved data. A shape change increments only that slice's version. Treat migrations as a directed version graph whose edges always increase the version; array order does not select a path. Each supported stored version must have one complete path to the current version. Each migration decodes its source's encoded data, transforms the decoded value, and encodes it with the target codec; the next migration receives that encoded result. After the final migration, decode the current version before restore. `mc-sim` gathers registered snapshots; `mc-save` encodes each with its registered codec and stores the bundle. `mc-save` validates the legacy envelope's format, version, and integrity, then passes only its payload to `migrateSimulationSaveV3`. The migration decodes that payload with `LegacySimulationSaveV3Schema` and distributes it into the initial player, time, inventory, and statistics slices at their registered versions. Map v3 player position to `PlayerService`'s `pose.feetPosition`; set `yawRadians` and `pitchRadians` to 0 because v3 stored no orientation; preserve `dimension` in the same player slice. Map `tick` to the time slice with `dayLengthTicks` 24000 because v3 stored no day-length denominator. Map inventory and `selectedHotbarSlot` together into the initial inventory slice; map counters and unlocked achievements into the statistics slice. Encode every target slice before restore. Decode or encode failure invokes no restore. Restore all slices in an unpublished world session; if any restore fails or is interrupted, close that session and expose no partially restored world. The host registers it only after every restore succeeds. `mc-save` adds generic legacy-envelope decoding in W2. `mc-sim` registers the v3 fan-out migration in W3 after the initial slice schemas exist. If no complete per-slice migration path exists for a stored slice, restore fails with `SaveMigrationPathMissing`; if multiple paths exist, it fails with `SaveMigrationPathAmbiguous`. Both errors carry the slice ID, stored version, and current version, and neither invokes that slice's restore.
+6. **Wave.** Fix the module and slice type shape in W1. Add generic legacy-envelope decoding in W2 and the mc-sim v3 fan-out migration in W3. Move E2E calls to `mc-host-web` and remove the old function registry in W5.
 
 ## C2: Simulation intent queue
 
@@ -247,7 +449,7 @@ const PlaceBlockIntentSchema = Schema.TaggedStruct("PlaceBlock", {
 });
 const UseItemIntentSchema = Schema.TaggedStruct("UseItem", {
   actor: EntityIdSchema,
-  item: Schema.NonEmptyString
+  item: ItemIdSchema
 });
 
 export const IntentPayloadSchema = Schema.Union([
@@ -294,14 +496,38 @@ The configured capacity bounds pending entries; `enqueue` fails with `IntentQueu
 
 1. **Placement.** Put event tags and payload vocabulary in `mc-kernel` (proposed `src/domain/event/domain-event.ts`). Put the in-process `DomainEventBus` service in `mc-sim/src/application/domain-event-bus.ts`.
 2. **Effect 4 types.** Producers publish typed events through Effect. Consumers subscribe to a `Stream`; they do not depend on producer services. Publish only after the corresponding state transition succeeds.
-3. **Schema shape.** Payloads carry the originating tick and branded IDs; positions include a dimension. Open: gameplay rules must define units and valid ranges for damage amount and explosion power, plus the valid range for level; the initial schemas only constrain amount and power to finite numbers and level to an integer.
+3. **Schema shape.** Payloads carry the originating tick and branded IDs. `EntityDamaged` and `LevelUp` capture their `WorldPosition` when created, so consumers do not resolve position later. `DamageAmount` is a positive finite number of health points and may be fractional after mitigation. It has no fixed upper bound so events can represent overkill and variable maximum health. `ExplosionPower` is an integer from 1 through 6 in the current game scale; its radius is twice the power in blocks. `ExperienceLevel` is a safe integer from 0 through `Number.MAX_SAFE_INTEGER`; a `LevelUp` event carries a strictly positive level. W1 fixes these bounds.
 
 ```ts
+export const DamageAmountSchema = Schema.Finite
+  .check(Schema.isGreaterThan(0))
+  .pipe(Schema.brand("DamageAmount"));
+export type DamageAmount = Schema.Schema.Type<typeof DamageAmountSchema>;
+
+export const ExplosionPowerSchema = Schema.Int
+  .check(Schema.isBetween({ minimum: 1, maximum: 6 }))
+  .pipe(Schema.brand("ExplosionPower"));
+export type ExplosionPower = Schema.Schema.Type<typeof ExplosionPowerSchema>;
+
+export const ExperienceLevelSchema = Schema.Int
+  .check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))
+  .pipe(Schema.brand("ExperienceLevel"));
+export type ExperienceLevel = Schema.Schema.Type<typeof ExperienceLevelSchema>;
+
+export const LevelUpLevelSchema = Schema.Int
+  .check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }))
+  .pipe(Schema.brand("LevelUpLevel"));
+export type LevelUpLevel = Schema.Schema.Type<typeof LevelUpLevelSchema>;
+
+export const AchievementIdSchema = Schema.NonEmptyString.pipe(Schema.brand("AchievementId"));
+export type AchievementId = Schema.Schema.Type<typeof AchievementIdSchema>;
+
 export const DomainEventSchema = Schema.Union([
   Schema.TaggedStruct("EntityDamaged", {
     tick: SimulationTickSchema,
     entity: EntityIdSchema,
-    amount: Schema.Finite
+    position: WorldPositionSchema,
+    amount: DamageAmountSchema
   }),
   Schema.TaggedStruct("BlockBroken", {
     tick: SimulationTickSchema,
@@ -312,17 +538,18 @@ export const DomainEventSchema = Schema.Union([
   Schema.TaggedStruct("Explosion", {
     tick: SimulationTickSchema,
     position: WorldPositionSchema,
-    power: Schema.Finite
+    power: ExplosionPowerSchema
   }),
   Schema.TaggedStruct("LevelUp", {
     tick: SimulationTickSchema,
     entity: EntityIdSchema,
-    level: Schema.Int
+    position: WorldPositionSchema,
+    level: LevelUpLevelSchema
   }),
   Schema.TaggedStruct("AchievementUnlocked", {
     tick: SimulationTickSchema,
     player: EntityIdSchema,
-    achievement: Schema.NonEmptyString
+    achievement: AchievementIdSchema
   })
 ]);
 export type DomainEvent = Schema.Schema.Type<typeof DomainEventSchema>;
@@ -343,14 +570,14 @@ export declare const DomainEventBusLayer: (
 ```
 
 4. **Consumers.** `mx-ui` maps events to toast state, and a host audio adapter maps them to sound cues. Keep those translations outside the kernel vocabulary and the bus.
-5. **Compatibility.** Each independent consumption of `events` creates a subscriber when stream evaluation begins; completion or interruption closes it. The bus snapshots active subscribers when `publish` begins, so later subscribers do not receive that event. If the set is empty, `publish` completes without buffering for later subscribers. Concurrent publish calls are linearized so every subscriber observes the same order. Compose supplies a finite positive queue capacity per subscriber; there is no default. If any recipient queue is full, `publish` suspends until capacity is available, then enqueues the event for every still-open recipient and completes. A recipient that closes while publication waits is removed from the pending set. If `publish` is interrupted while waiting, no recipient receives that event and the Effect fails by interruption. The stream is transient: do not save, replay, or replicate it as authoritative state. Network synchronization uses C4 state snapshots or an explicitly versioned protocol message. Open: W3 chooses the production capacity value.
+5. **Compatibility.** Each independent consumption of `events` creates a subscriber when stream evaluation begins; completion or interruption closes it. The bus snapshots active subscribers when `publish` begins, so later subscribers do not receive that event. If the set is empty, `publish` completes without buffering for later subscribers. Concurrent publish calls are linearized so every subscriber observes the same order. Compose supplies a positive integer queue capacity per subscriber; there is no default. If any recipient queue is full, `publish` suspends until capacity is available, then enqueues the event for every still-open recipient and completes. A recipient that closes while publication waits is removed from the pending set. If `publish` is interrupted while waiting, no recipient receives that event and the Effect fails by interruption. The stream is transient: do not save, replay, or replicate it as authoritative state. Network synchronization uses C4 state snapshots or an explicitly versioned protocol message. Open: W3 chooses the concrete positive capacity after subscriber fanout and backpressure behavior are integrated.
 6. **Wave.** Freeze vocabulary in W1 so independent streams can target it; implement and export the bus in W3.
 
 ## C4: Replicated state
 
 1. **Placement.** Authoritative state and snapshot services belong to `mc-sim`. `mx-multiplayer` owns wire encoding, validation, and delivery; `mc-server` composes the same simulation services used by the browser host.
-2. **Effect 4 types.** State is exposed as a world-scoped snapshot. Mutations remain in owner services. The `mc-sim` world-session commit coordinator assigns the shared revision once as each authoritative transition commits state; owner snapshot services read that same committed revision with their state. Consumers receive snapshots rather than writing replicated state through a transport service.
-3. **Schema shape.** A snapshot carries a `WorldId`, a monotonically increasing `WorldRevision` within that world, and the owner's state codec. The sample uses player state to show the shape; other services provide their own codecs.
+2. **Effect 4 types.** State is exposed as a world-scoped snapshot. Mutations remain in owner services, and each owner routes replicated writes through the `mc-sim` world-session `WorldCommitCoordinator`. An owner validates and prepares its candidate state, then submits the candidate and owner ID to the coordinator; it does not mutate replicated state directly. The coordinator serializes those writes, assigns the shared revision once, and returns the resulting group delta after commit. C7 uses the same coordinator for block writes. Owner snapshot services read the committed revision with their state. Consumers receive snapshots rather than writing replicated state through a transport service. Clients validate and apply the entire group atomically, then advance the shared world revision once.
+3. **Schema shape.** A snapshot carries a `WorldId`, a monotonically increasing `WorldRevision` within that world, and the owner's state codec. The sample extends the existing `PlayerService` snapshot with its current `pose` and `dimension`; it does not create a second player-state service. Other owner services provide their own codecs.
 
 ```ts
 export const replicatedSnapshotSchema = <State extends Schema.Codec<unknown>>(state: State) =>
@@ -366,19 +593,57 @@ export type ReplicatedSnapshot<State extends Schema.Codec<unknown>> = Readonly<{
   state: State["Type"];
 }>;
 
-export const PlayerStateSchema = Schema.Struct({
-  id: EntityIdSchema,
-  position: WorldPositionSchema
+export const ReplicatedOwnerIdSchema = Schema.NonEmptyString.pipe(Schema.brand("ReplicatedOwnerId"));
+export type ReplicatedOwnerId = Schema.Schema.Type<typeof ReplicatedOwnerIdSchema>;
+
+export const replicatedOwnerChangeSchema = <const Owner extends string, State extends Schema.Codec<unknown>>(
+  owner: Owner,
+  state: State
+) =>
+  Schema.Struct({
+    owner: Schema.Literals([owner] as const).pipe(Schema.brand("ReplicatedOwnerId")),
+    state
+  });
+
+export const replicatedWorldDeltaSchema = <Change extends Schema.Codec<unknown>>(change: Change) =>
+  Schema.Struct({
+    world: WorldIdSchema,
+    revision: WorldRevisionSchema,
+    changes: Schema.Array(change)
+  });
+
+export type ReplicatedWorldDelta<Change> = Readonly<{
+  readonly world: WorldId;
+  readonly revision: WorldRevision;
+  readonly changes: ReadonlyArray<Change>;
+}>;
+
+export const SimulationDimensionSchema = DimensionIdSchema;
+
+export const PlayerPoseSchema = Schema.Struct({
+  feetPosition: Schema.Struct({ x: Schema.Finite, y: Schema.Finite, z: Schema.Finite }),
+  yawRadians: Schema.Finite,
+  pitchRadians: Schema.Finite
 });
 
-export class PlayerStateService extends Context.Service<PlayerStateService, {
-  readonly snapshot: (world: WorldId) => Effect.Effect<ReplicatedSnapshot<typeof PlayerStateSchema>>;
-}>()("mc-sim/application/PlayerStateService") {}
+export const PlayerServiceSnapshotSchema = Schema.Struct({
+  pose: PlayerPoseSchema,
+  dimension: SimulationDimensionSchema
+});
+
+export const PlayerOwnerChangeSchema = replicatedOwnerChangeSchema("player", PlayerServiceSnapshotSchema);
+export const ExampleWorldDeltaSchema = replicatedWorldDeltaSchema(
+  Schema.Union([PlayerOwnerChangeSchema])
+);
+
+export type PlayerServiceApiWithSnapshot<ExistingPlayerServiceApi> = ExistingPlayerServiceApi & {
+  readonly snapshot: Effect.Effect<ReplicatedSnapshot<typeof PlayerServiceSnapshotSchema>>;
+};
 ```
 
 4. **Consumers.** The server supplies owner-service snapshots to `mx-multiplayer`; the multiplayer adapter sends them to clients, which apply deltas according to the revision rule below.
-5. **Compatibility.** Snapshot codecs are protocol data, not save slices. Wire incompatibility is handled by multiplayer protocol versioning. A newly initialized world starts at revision zero, and its initial snapshot is the client's baseline. All replicated owner services in one world share a single revision sequence, incremented once by `mc-sim` for each committed authoritative world-state transition. Group every changed owner snapshot from one transition into one world delta; `mx-multiplayer` delivers that group as a unit, and clients apply it atomically before advancing the revision. A delta's revision identifies the state after applying that transition; apply it only when its world matches and its revision equals the current revision plus one. A duplicate, stale revision, or gap requires a resync snapshot. `mx-multiplayer` owns versioned delta envelopes and payload fields; this contract fixes state ownership and revision semantics.
-6. **Wave.** Finalize service ownership and snapshot shape in W3 before multiplayer and server synchronization work.
+5. **Compatibility.** Snapshot codecs are protocol data, not save slices. Wire incompatibility is handled by multiplayer protocol versioning. A newly initialized world starts at revision zero, and its initial snapshot is the client's baseline. All replicated owner services in one world share a single revision sequence, incremented once by `mc-sim` for each committed authoritative world-state transition. Group every changed owner snapshot from one transition into one world delta; `mx-multiplayer` delivers that group as a unit, and clients validate every owner payload before atomically applying the whole group and advancing `WorldRevision` once. A delta's revision identifies the state after applying that transition; apply it only when its world matches and its revision equals the current revision plus one. A duplicate, stale revision, gap, or invalid member rejects the whole group and requires a resync snapshot. Snapshot reads and delta publication observe the same commit: a C7 batch commits all block edits and owner state, increments its `DimensionRevision` and the world's `WorldRevision` once each, and produces the corresponding C4 snapshot/group delta atomically. A rejected or interrupted batch changes neither revision and publishes no delta. `mx-multiplayer` owns versioned delta envelopes and payload fields; this contract fixes state ownership and revision semantics. `PROTOCOL_VERSION` moves from 8 to 9 because grouped owner deltas and world-revision checks change the wire contract; v8 peers are rejected. This incompatible change is allowed in the 0.x minor release.
+6. **Wave.** Finalize service ownership and snapshot shape in W3. Freeze grouped delta and protocol v9 wire contracts in W4 before W5 host and server wiring.
 
 ## C5: Deterministic headless harness
 
@@ -416,14 +681,14 @@ export declare const HeadlessHarnessTestLayer: Layer.Layer<HeadlessHarness>;
 ```
 
 4. **Consumers.** All `mx-*` packages and `mc-server` use the harness to advance simulation for rule-level and integration tests without a browser or renderer.
-5. **Compatibility.** Keep the testing entry separate from the production package entry. Expected hashes live beside the consuming package's headless tests and their inputs. Hash stability is a test contract; intentional changes to canonical state coverage, ordering, or encoding update those fixtures. Open: the Random algorithm and cross-build sequence compatibility are implementation decisions; this contract guarantees repeatability within one build.
+5. **Compatibility.** Keep the testing entry separate from the production package entry. Expected hashes live beside the consuming package's headless tests and their inputs. Hash stability is a test contract; intentional changes to canonical state coverage, ordering, or encoding update those fixtures. Open: W3 chooses the Random algorithm because repeatability depends on using the simulation's concrete Random service.
 6. **Wave.** Implement in W3 so later package streams can test their rules against a common simulation clock and random source.
 
 ## C6: Particle request API
 
 1. **Placement.** Add the request schema and service to `mc-render` (proposed `src/application/particle-service.ts`). Rendering owns particle allocation and defaults.
 2. **Effect 4 types.** `spawn` accepts one typed request and returns the accepted count (`0` or `1`) as an Effect value. A full pool may reject a spawn without failing simulation state.
-3. **Schema shape.** Requests include a finite set of particle kinds, branded dimension-aware world position, optional RGB channels in `[0, 1]`, optional positive lifetime in ticks, optional direction, and optional followed entity ID. `lifetimeTicks` counts `mc-render` particle update steps, not simulation ticks or wall-clock time. Direction is an unnormalized world-space vector; initial velocity is direction multiplied by the particle kind's configured base speed in world units per render update. The zero vector means no initial directional velocity.
+3. **Schema shape.** Requests include a finite set of particle kinds, branded dimension-aware world position, optional RGB channels in `[0, 1]`, optional positive finite lifetime in seconds, optional branded direction, and optional followed entity ID. `lifetimeSeconds` is measured in render time, not simulation ticks. Direction is an unnormalized world-space vector; initial velocity is direction multiplied by the particle kind's configured base speed in world units per second. The zero vector means no initial directional velocity.
 
 ```ts
 export const ParticleKindSchema = Schema.Literals([
@@ -433,30 +698,34 @@ export const ParticleKindSchema = Schema.Literals([
   "level-up"
 ]);
 
-export const ColorChannelSchema = Schema.Finite
-  .check(Schema.isBetween({ minimum: 0, maximum: 1 }));
+export const ParticleColorChannelSchema = Schema.Finite
+  .check(Schema.isBetween({ minimum: 0, maximum: 1 }))
+  .pipe(Schema.brand("ParticleColorChannel"));
+export type ParticleColorChannel = Schema.Schema.Type<typeof ParticleColorChannelSchema>;
 
 export const ParticleColorSchema = Schema.Struct({
-  red: ColorChannelSchema,
-  green: ColorChannelSchema,
-  blue: ColorChannelSchema
+  red: ParticleColorChannelSchema,
+  green: ParticleColorChannelSchema,
+  blue: ParticleColorChannelSchema
 });
 
 export const ParticleDirectionSchema = Schema.Struct({
   x: Schema.Finite,
   y: Schema.Finite,
   z: Schema.Finite
-});
+}).pipe(Schema.brand("ParticleDirection"));
+export type ParticleDirection = Schema.Schema.Type<typeof ParticleDirectionSchema>;
 
-export const ParticleTicksSchema = Schema.Int
+export const ParticleLifetimeSecondsSchema = Schema.Finite
   .check(Schema.isGreaterThan(0))
-  .pipe(Schema.brand("ParticleTicks"));
+  .pipe(Schema.brand("ParticleLifetimeSeconds"));
+export type ParticleLifetimeSeconds = Schema.Schema.Type<typeof ParticleLifetimeSecondsSchema>;
 
 export const ParticleRequestSchema = Schema.Struct({
   kind: ParticleKindSchema,
   position: WorldPositionSchema,
   color: Schema.optional(ParticleColorSchema),
-  lifetimeTicks: Schema.optional(ParticleTicksSchema),
+  lifetimeSeconds: Schema.optional(ParticleLifetimeSecondsSchema),
   direction: Schema.optional(ParticleDirectionSchema),
   followEntity: Schema.optional(EntityIdSchema)
 });
@@ -469,14 +738,14 @@ export class ParticleService extends Context.Service<ParticleService, {
 ```
 
 4. **Consumers.** The host's render adapter consumes C3 events and calls the particle service. `mx-gameplay` emits semantic events and remains independent of `mc-render`; the C3 adapter supplies the connection.
-5. **Compatibility.** Particle requests are presentation data, not replicated or saved state. Unspecified appearance fields use the kind's render defaults. Open: behavior when a followed entity is removed is assigned to `mc-render` during W3.
+5. **Compatibility.** Particle requests are presentation data, not replicated or saved state. Unspecified appearance fields use the kind's render defaults. Open: W3 decides behavior when a followed entity is removed because the answer depends on render-pool ownership and particle lifetime cleanup.
 6. **Wave.** Finalize and implement in W3 alongside event consumers.
 
 ## C7: Generic world-write port
 
-1. **Placement.** Define `WorldWritePort` and its data vocabulary in `mc-kernel/src/domain/world/world-write-port.ts`. Put the `MultiplayerWorldWriter` alias in `mx-multiplayer/src/domain/world-write.ts` and re-export it from the multiplayer package entry point. The host and dedicated server supply the implementation. Open: the `mc-host-web` adapter file and export are assigned during W4 integration.
-2. **Effect 4 types.** `applyBatch` is an atomic, revision-checked Effect operation. It returns the committed dimension revision or a typed conflict/invalid-batch failure. Validate the entire batch before writing; a successful batch increments the dimension revision once.
-3. **Schema shape.** A batch names its dimension, expected revision, and block edits. Reject empty batches and duplicate positions as `WorldWriteInvalidBatch`; report expected and current revisions as `WorldWriteConflict`. Validate batch structure before checking the expected revision, so an empty or duplicate-position batch fails as invalid even when its expected revision is stale.
+1. **Placement.** Define `WorldWritePort` and its data vocabulary in `mc-kernel/src/domain/world/world-write-port.ts`. Put the `MultiplayerWorldWriter` alias in `mx-multiplayer/src/domain/world-write.ts` and re-export it from the multiplayer package entry point. Open: W4 selects the adapter file and export after `mx-redstone` and `mx-multiplayer` finalize their contracts, because the placement depends on their consumer boundary; W5 wires that adapter in `mc-host-web` and `mc-server`.
+2. **Effect 4 types.** `applyBatch` is an atomic, dual-revision-checked Effect operation. It returns both the committed dimension and world revisions or a typed conflict/invalid-batch failure. Validate the entire batch before checking revisions or writing. The network adapter checks the expected world revision first, then the expected dimension revision. The world-session commit coordinator rechecks both in the same transaction as the writes to prevent a time-of-check/time-of-use race. A successful batch increments each revision once and publishes its C4 grouped delta in that commit; any failure leaves the blocks and both revisions unchanged and publishes no delta.
+3. **Schema shape.** A batch names its world, expected `WorldRevision`, dimension, expected `DimensionRevision`, and block edits. Reject empty batches and duplicate positions as `WorldWriteInvalidBatch`; report expected and current world and dimension revisions as `WorldWriteConflict`. Validate batch structure before checking revisions, so an empty or duplicate-position batch fails as invalid even when either expected revision is stale. `WorldRevision` is checked before `DimensionRevision` at the network boundary.
 
 ```ts
 export const BlockEditSchema = Schema.Struct({
@@ -486,15 +755,25 @@ export const BlockEditSchema = Schema.Struct({
 export type BlockEdit = Schema.Schema.Type<typeof BlockEditSchema>;
 
 export const WorldWriteBatchSchema = Schema.Struct({
+  world: WorldIdSchema,
+  expectedWorldRevision: WorldRevisionSchema,
   dimension: DimensionIdSchema,
-  expectedRevision: DimensionRevisionSchema,
+  expectedDimensionRevision: DimensionRevisionSchema,
   edits: Schema.Array(BlockEditSchema)
 });
 export type WorldWriteBatch = Schema.Schema.Type<typeof WorldWriteBatchSchema>;
 
+export const WorldWriteCommitSchema = Schema.Struct({
+  worldRevision: WorldRevisionSchema,
+  dimensionRevision: DimensionRevisionSchema
+});
+export type WorldWriteCommit = Schema.Schema.Type<typeof WorldWriteCommitSchema>;
+
 export class WorldWriteConflict extends Schema.TaggedError<WorldWriteConflict>()("WorldWriteConflict", {
-  expectedRevision: DimensionRevisionSchema,
-  currentRevision: DimensionRevisionSchema
+  expectedWorldRevision: WorldRevisionSchema,
+  currentWorldRevision: WorldRevisionSchema,
+  expectedDimensionRevision: DimensionRevisionSchema,
+  currentDimensionRevision: DimensionRevisionSchema
 }) {}
 
 export class WorldWriteInvalidBatch extends Schema.TaggedError<WorldWriteInvalidBatch>()("WorldWriteInvalidBatch", {
@@ -504,7 +783,7 @@ export class WorldWriteInvalidBatch extends Schema.TaggedError<WorldWriteInvalid
 export class WorldWritePort extends Context.Service<WorldWritePort, {
   readonly applyBatch: (
     batch: WorldWriteBatch
-  ) => Effect.Effect<DimensionRevision, WorldWriteConflict | WorldWriteInvalidBatch>;
+  ) => Effect.Effect<WorldWriteCommit, WorldWriteConflict | WorldWriteInvalidBatch>;
 }>()("mc-kernel/domain/world/WorldWritePort") {}
 
 export type MultiplayerWorldWriter = WorldWritePort["Service"];
@@ -512,11 +791,11 @@ export type MultiplayerWorldWriter = WorldWritePort["Service"];
 
 4. **Consumers.** The server command adapter authenticates the remote peer; `mx-gameplay` validates game rules before issuing an accepted block write. The port enforces batch validity and revision atomicity, not gameplay authorization. `mx-redstone` is connected through host composition to the same world adapter and does not depend on multiplayer. Browser and server hosts provide equivalent adapters.
 5. **Compatibility.** Dimension revisions are a distinct branded type from C4 world revisions. A stale batch has no partial effects. If the batch itself is put on the wire, its message shape is governed by protocol versioning; it is not a save-slice migration.
-6. **Wave.** Freeze the port type in W1 and wire both host adapters in W4.
+6. **Wave.** Freeze the port type in W1. W4 finalizes the mx consumer contracts and adapter placement only; W5 wires the adapter in `mc-host-web` and `mc-server`.
 
 ## Verification notes
 
-To reproduce the type check, run this from the repository root. It creates its files and installs packages in a temporary directory, which remains afterward so the generated module and installed packages can be inspected.
+The type check requires Node.js, npm, Python 3, and network access to install packages. Run it from the repository root. It creates its files and installs packages in a temporary directory, which remains afterward so the generated module and installed packages can be inspected.
 
 ```sh
 scratch=$(mktemp -d)
