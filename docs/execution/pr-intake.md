@@ -153,3 +153,7 @@ Move the two crafting-grid operations and their four focused tests from mc-compo
 ### W4: mx-gameplay PR #10
 
 Carry shared empty-array reuse in mx-gameplay/src/stages/registration.ts and its idle-frame status-effect regression test in mx-gameplay/test/stage-registration.test.ts as part of the W4 registration split.
+
+### W4: mx-gameplay PR #51
+
+Carry the type-safety, runtime-boundary, and behavior changes into mx-gameplay W4, especially candidate-preserving bow hits in mx-gameplay/src/domain/interactions/bow-shot.ts and mx-gameplay/src/stages/registration.ts, with matching cases in mx-gameplay/test/bow.test.ts and mx-gameplay/test/stage-registration.test.ts. Review the remaining changed implementation and test paths against the W4 plan, and refresh mx-gameplay/package.json and mx-gameplay/pnpm-lock.yaml instead of reusing the PR's older pins.
