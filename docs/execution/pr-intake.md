@@ -157,3 +157,7 @@ Carry shared empty-array reuse in mx-gameplay/src/stages/registration.ts and its
 ### W4: mx-gameplay PR #51
 
 Carry the type-safety, runtime-boundary, and behavior changes into mx-gameplay W4, especially candidate-preserving bow hits in mx-gameplay/src/domain/interactions/bow-shot.ts and mx-gameplay/src/stages/registration.ts, with matching cases in mx-gameplay/test/bow.test.ts and mx-gameplay/test/stage-registration.test.ts. Review the remaining changed implementation and test paths against the W4 plan, and refresh mx-gameplay/package.json and mx-gameplay/pnpm-lock.yaml instead of reusing the PR's older pins.
+
+### W6-5 (inferred): mc-dev-meta PR #40
+
+Carry the Vitest update into mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml, using the planned 5.0.5 target and pairing it with Effect 4.0.5. W6-5 is the only mc-dev-meta wave named in §7; assigning this package migration to W6-5 is inferred.
