@@ -161,3 +161,7 @@ Carry the type-safety, runtime-boundary, and behavior changes into mx-gameplay W
 ### W6-5 (inferred): mc-dev-meta PR #40
 
 Carry the Vitest update into mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml, using the planned 5.0.5 target and pairing it with Effect 4.0.5. W6-5 is the only mc-dev-meta wave named in §7; assigning this package migration to W6-5 is inferred.
+
+### W6-5 (inferred): mc-dev-meta PR #42
+
+Carry the @vitest/coverage-v8 update into mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml, using the planned 5.0.5 target and pairing it with Effect 4.0.5. W6-5 is the only mc-dev-meta wave named in §7; assigning this package migration to W6-5 is inferred.
