@@ -125,3 +125,7 @@ Carry the actions/upload-artifact update from v7.0.1 to v7.0.2 in mc-dev-meta/.g
 ### W0-T: mc-dev-meta PR #41
 
 Carry the @types/node update in mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml. Use the planned current version 26.6.5 rather than this PR's 26.6.3, then apply it in W0-T.
+
+### W0-T: mc-dev-meta PR #37
+
+Carry the tsx update to 4.23.15 in mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml. Apply it in W0-T.
