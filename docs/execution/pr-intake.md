@@ -133,3 +133,7 @@ Carry the tsx update to 4.23.15 in mc-dev-meta/package.json and mc-dev-meta/pnpm
 ### W0-T: mc-dev-meta PR #30
 
 Carry the pnpm/action-setup update to v6.1.0 at SHA ea17c68df8912ef543352723c149a84f56e3d413 in mc-dev-meta/.github/workflows/ci.yaml. Apply it in W0-T.
+
+### W3: mc-sim PR #37
+
+Use the PR's container, furnace, fishing, fluid, and projectile service work as implementation input in mc-sim. The source files are src/domain/container-state.ts, src/application/container-service.ts, src/domain/furnace-state.ts, src/application/furnace-service.ts, src/domain/fishing-state.ts, src/application/fishing-service.ts, src/domain/fluid-state.ts, src/application/fluid-service.ts, src/domain/projectile-state.ts, and src/application/projectile-charge-service.ts; carry relevant cases from test/container-service.test.ts, test/furnace-service.test.ts, and test/r-si3-state-services.test.ts, then update src/index.ts and scripts/verify-package.mjs. Route replicated writes through C4's WorldCommitCoordinator and extend src/application/player-service.ts; do not add the PR's separate player registry. The proposed coordinator file src/application/world-commit-coordinator.ts is inferred because C4 names the coordinator but does not specify its file.
