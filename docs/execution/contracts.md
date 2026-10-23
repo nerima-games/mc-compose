@@ -31,7 +31,8 @@ Package implementation waves follow W0: W1 updates `mc-kernel` and `mc-compose`;
 ### Shared vocabulary
 
 ```ts
-import { Brand, Context, Effect, Layer, Schema, Stream } from "effect";
+import { isItemStack, type ItemStack } from "@nerima-games/mc-kernel";
+import { Brand, Context, Effect, Layer, Schema, SchemaGetter, Stream } from "effect";
 
 export type EntityId = Brand.Branded<string, "EntityId">;
 export const EntityIdSchema = Schema.NonEmptyString.pipe(Schema.brand("EntityId"));
@@ -90,8 +91,14 @@ export type DimensionRevision = Schema.Schema.Type<typeof DimensionRevisionSchem
 
 ## C1: Module QA and save slices
 
-1. **Placement.** Extend `GameModule` in `mc-kernel/src/domain/time/frame.ts` by appending optional `QA` and `SaveSlices` type parameters after its existing `ROut`, `Error`, `RIn`, and `RRegister` parameters. The extension keeps `layers` and `frameStages` and adds optional `qa` and `saveSlices` fields. `registerModule` returns the same module type. `composeGame` accepts a readonly module tuple, merges its registrations, and returns the inferred QA namespaces and save slices. `BrowserRuntimeModule.start`, `startRuntimes`, and `startBrowserSession` preserve those types instead of widening them to `GameModule[]`. Reject composition with `DuplicateModuleContract` when a QA namespace or save-slice ID is duplicated; include its kind and branded ID, and expose no partially merged registry. Compose owns `QaBridge.run(namespaceName, operationName, inputJson)`. `QaBridgeApi<OperationErrors>` describes dispatch errors, and `ComposedGame` specializes that union to its registered operations. Namespace and operation are separate branded names. Operation names must be unique across a namespace's `observe` and `command` maps; reject a collision with `DuplicateModuleContract` kind `qa-operation` and ID `namespace.operation` before exposing the registry. Unknown names fail with `QaOperationNotFound`. The bridge decodes input, runs each operation with its declared `Requirements` from composed module layers, and encodes successful results. `QaRequirementsOfModules` unions the requirements from every registered operation. `composeGame` compares that union with merged layer outputs; `RequireQaServices` makes a missing service a type error. The typed `Layer.provide` call builds the bridge after that check. Input decoding and output encoding failures produce `Schema.SchemaError`; operation errors remain typed Effect failures. Success returns the output codec's JSON value. The host call propagates the operation error or `Schema.SchemaError` without wrapping it.
-2. **Effect 4 types.** An observe or command operation declares input/output codecs and an Effect handler with its typed error and requirements. A slice snapshot is an infallible Effect that may require state services; restore is an Effect with a typed error. A migration is a total synchronous transformation between decoded slice types, with decode or encode failures represented by `Schema.SchemaError`.
+1. **Placement.** Extend `GameModule` in `mc-kernel/src/domain/time/frame.ts` by appending optional `QA` and `SaveSlices` type parameters after its existing `ROut`, `Error`, `RIn`, and `RRegister` parameters. Keep `layers` and `frameStages`, and add optional `qa` and `saveSlices` fields.
+
+   `RRegister` is the Effect requirement of `frameStages`; preserve it through browser startup so the caller supplies it when running `startBrowserSession`. `registerModule` returns the same extended module type. In `src/domain/browser-session.ts`, `BrowserRuntimeModule.start`, `startRuntimes`, and `startBrowserSession` preserve these types instead of widening them to `GameModule[]`.
+
+   `composeGame` accepts a readonly module tuple and returns the inferred QA namespaces and save slices in an Effect. A duplicate namespace or save-slice ID fails with `DuplicateModuleContract`; the composition Effect exposes no partial registry. Each `GameModule` contributes at most one QA namespace. Namespace names are globally unique, so compose merges distinct namespace entries rather than combining operations from multiple modules under one name. `ComposedGame.layers` unions every module's layer error, layer input requirement, and `frameStages` registration requirement. The QA bridge's operation requirements are satisfied only when merged layer outputs provide those services; `RequireQaServices` rejects any missing requirement.
+
+   Compose returns the typed dispatcher as `ComposedGame.qaBridge`. The `QaBridge` context tag is a host lookup key for that API; the host adapter provides the returned dispatcher under the tag, outside `ComposedGame.layers`. `QaBridgeApi<OperationErrors>` describes dispatch errors, and `ComposedGame` specializes that union to its registered operations. Namespace and operation are separate branded names. Operation names must be unique across a namespace's `observe` and `command` maps; reject a collision with `DuplicateModuleContract` kind `qa-operation` and ID `namespace.operation` before exposing the registry. Unknown names fail with `QaOperationNotFound`. The bridge decodes input, runs each operation with its declared `Requirements` from composed module layers, and encodes successful results. `QaRequirementsOfModules` unions the requirements from every registered operation. `composeGame` compares that union with merged layer outputs; the typed `Layer.provide` call builds the bridge after that check. Input decoding and output encoding failures produce `Schema.SchemaError`; operation errors remain typed Effect failures. Success returns the output codec's JSON value. The host call propagates the operation error or `Schema.SchemaError` without wrapping it.
+2. **Effect 4 types.** An observe or command operation declares input/output codecs and an Effect handler with its typed error and requirements. A slice snapshot is an infallible Effect that may require state services; restore is an Effect with a typed error. A per-slice `SaveMigration` is a total synchronous transformation between decoded slice types, with decode or encode failures represented by `Schema.SchemaError`.
 3. **Schema shape.** `qa.name` is a branded `QaNamespaceName`; `qa.observe` and `qa.command` are named maps whose values are `QaOperation`s with branded `name`, input, and output codecs. Each map key must equal its operation's `name`; compose validates this before publishing the registry. Their inputs and outputs are `Schema.Codec`s, so branded identifiers are validated at the QA boundary. The output codec must encode values in the shared JSON domain. Each save entry is keyed by stable `SaveSliceId`, carries a positive integer version, and stores the encoded value accepted by that slice's codec. The persisted bundle is an object keyed by `SaveSliceId`; each value contains its version and encoded data.
 
 ```ts
@@ -219,6 +226,18 @@ type ModuleLayerServicesOf<Module> = Module extends {
   readonly layers: Layer.Layer<infer Services, infer _Error, infer _Requirements>
 } ? Services : never;
 
+type ModuleLayerErrorOf<Module> = Module extends {
+  readonly layers: Layer.Layer<infer _Services, infer Error, infer _Requirements>
+} ? Error : never;
+
+type ModuleLayerRequirementsOf<Module> = Module extends {
+  readonly layers: Layer.Layer<infer _Services, infer _Error, infer Requirements>
+} ? Requirements : never;
+
+type ModuleFrameStageRequirementsOf<Module> = Module extends {
+  readonly frameStages: Effect.Effect<infer _Stages, infer _Error, infer Requirements>
+} ? Requirements : never;
+
 type IsGameModule<Module> = Module extends {
   readonly layers: Layer.Layer<infer _Services, infer _LayerError, infer _LayerRequirements>;
   readonly frameStages: Effect.Effect<infer _Stages, infer _StageError, infer _StageRequirements>;
@@ -239,6 +258,18 @@ type RequireGameModules<Modules extends ReadonlyArray<unknown>> =
 type ModuleLayerServices<Modules extends ReadonlyArray<unknown>> =
   ModuleLayerServicesOf<Modules[number]>;
 
+type ModuleLayerErrors<Modules extends ReadonlyArray<unknown>> =
+  ModuleLayerErrorOf<Modules[number]>;
+
+type ModuleLayerRequirements<Modules extends ReadonlyArray<unknown>> =
+  ModuleLayerRequirementsOf<Modules[number]>;
+
+type ModuleRegistrationRequirements<Modules extends ReadonlyArray<unknown>> =
+  ModuleFrameStageRequirementsOf<Modules[number]>;
+
+type ModuleCompositionRequirements<Modules extends ReadonlyArray<unknown>> =
+  ModuleLayerRequirements<Modules> | ModuleRegistrationRequirements<Modules>;
+
 type ModuleSaveSlices<Module> = Module extends { readonly saveSlices?: infer Slices }
   ? NonNullable<Slices>
   : readonly [];
@@ -258,7 +289,11 @@ type RequireQaServices<Modules extends ReadonlyArray<unknown>> =
 
 export interface ComposedGame<Modules extends ReadonlyArray<unknown>> {
   readonly modules: Modules;
-  readonly layers: Layer.Layer<ModuleLayerServices<Modules>>;
+  readonly layers: Layer.Layer<
+    ModuleLayerServices<Modules>,
+    ModuleLayerErrors<Modules>,
+    ModuleCompositionRequirements<Modules>
+  >;
   readonly qaNamespaces: ReadonlyArray<ModuleQaNamespaces<Modules>>;
   readonly saveSlices: ReadonlyArray<ModuleSaveSliceEntries<Modules>>;
   readonly qaBridge: QaBridgeApi<QaOperationErrorsOfModules<Modules>>;
@@ -268,7 +303,7 @@ export const registerModule = <const Module>(module: Module & (IsGameModule<Modu
 
 export declare const composeGame: <const Modules extends ReadonlyArray<unknown>>(
   modules: Modules & RequireGameModules<Modules> & RequireQaServices<Modules>
-) => ComposedGame<Modules>;
+) => Effect.Effect<ComposedGame<Modules>, DuplicateModuleContract>;
 
 export interface QaBridgeApi<OperationErrors> {
   readonly run: (
@@ -355,12 +390,50 @@ export const QaBlockIdOutput = Schema.Struct({
 export type ObserveBlockAtQa = QaOperation<typeof QaBlockPositionInput, typeof QaBlockIdOutput>;
 export type ExampleQaNamespace = QaNamespace<{ readonly blockAt: ObserveBlockAtQa }>;
 
+const componentsWithUndefined = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(componentsWithUndefined);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+    key,
+    entry === null ? undefined : componentsWithUndefined(entry)
+  ]));
+};
+
+const componentsWithNull = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(componentsWithNull);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+    key,
+    entry === undefined ? null : componentsWithNull(entry)
+  ]));
+};
+
+const LegacyItemStackWireSchema = Schema.Struct({
+  item: Schema.String,
+  count: Schema.Number,
+  components: Schema.Unknown
+});
+
+const LegacyItemStackSchema = LegacyItemStackWireSchema.pipe(
+  Schema.decode({
+    decode: SchemaGetter.transform((stack) => ({
+      ...stack,
+      components: componentsWithUndefined(stack.components)
+    })),
+    encode: SchemaGetter.transform((stack) => ({
+      ...stack,
+      components: componentsWithNull(stack.components)
+    }))
+  }),
+  Schema.refine((stack): stack is ItemStack => isItemStack(stack))
+);
+
 export const LegacySimulationSaveV3Schema = Schema.Struct({
   dimension: Schema.Literals(["overworld", "nether", "end"]),
   tick: SimulationTickSchema,
   player: Schema.Struct({
     position: Schema.Struct({ x: Schema.Finite, y: Schema.Finite, z: Schema.Finite }),
-    inventory: Schema.Array(Schema.Unknown),
+    inventory: Schema.Array(Schema.Union([Schema.Null, LegacyItemStackSchema])),
     selectedHotbarSlot: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 8 }))
   }),
   statistics: Schema.Struct({
@@ -388,6 +461,13 @@ export interface InitialSimulationSliceValues<
   readonly statistics: Statistics["Type"];
 }
 
+export interface SimulationV3SliceInputs {
+  readonly player: unknown;
+  readonly time: unknown;
+  readonly inventory: unknown;
+  readonly statistics: unknown;
+}
+
 export interface SimulationV3SliceTargets<
   Player extends Schema.Codec<unknown>,
   Time extends Schema.Codec<unknown>,
@@ -398,8 +478,20 @@ export interface SimulationV3SliceTargets<
   readonly time: SaveSliceCodec<Time>;
   readonly inventory: SaveSliceCodec<Inventory>;
   readonly statistics: SaveSliceCodec<Statistics>;
-  readonly map: (legacy: LegacySimulationSaveV3) => InitialSimulationSliceValues<Player, Time, Inventory, Statistics>;
+  readonly map: (
+    legacy: LegacySimulationSaveV3
+  ) => Effect.Effect<SimulationV3SliceInputs, Schema.SchemaError>;
 }
+
+export declare const decodeSimulationV3SliceInputs: <
+  Player extends Schema.Codec<unknown>,
+  Time extends Schema.Codec<unknown>,
+  Inventory extends Schema.Codec<unknown>,
+  Statistics extends Schema.Codec<unknown>
+>(
+  inputs: SimulationV3SliceInputs,
+  targets: SimulationV3SliceTargets<Player, Time, Inventory, Statistics>
+) => Effect.Effect<InitialSimulationSliceValues<Player, Time, Inventory, Statistics>, Schema.SchemaError>;
 
 export declare const migrateSimulationSaveV3: <
   Player extends Schema.Codec<unknown>,
@@ -414,15 +506,15 @@ export declare const migrateSimulationSaveV3: <
 
 ```
 
-4. **Consumers.** All modules may register observations and commands for their owned services. Compose merges them for end-to-end tests against the fully composed host. Tests read state through owner observe operations rather than DOM attributes. Keep `window.__NERIMA_GAMES_QA__` as one transport slot whose only operation is dispatching `(namespace, operation, inputJson)` to `QaBridge.run`; it is not an operation registry. In W5, move the 38 E2E tests to `mc-host-web`, update them to call the schema-validated `name`/`observe`/`command` surface, and remove the legacy flat function registry and its install/read API from `mc-compose`. W5 leaves no parallel QA operation surface.
-5. **Compatibility.** A slice ID remains stable for the lifetime of the saved data. A shape change increments only that slice's version. Treat migrations as a directed version graph whose edges always increase the version; array order does not select a path. Each supported stored version must have one complete path to the current version. Each migration decodes its source's encoded data, transforms the decoded value, and encodes it with the target codec; the next migration receives that encoded result. After the final migration, decode the current version before restore. `mc-sim` gathers registered snapshots; `mc-save` encodes each with its registered codec and stores the bundle. W2 validates the legacy envelope's format, version, and integrity. The initial migration supports the existing v3 envelope only; other legacy versions are rejected before any slice restore. For v3, `mc-save` passes only the validated payload to `migrateSimulationSaveV3`. The migration decodes that payload with `LegacySimulationSaveV3Schema` and distributes it into the initial player, time, inventory, and statistics slices at their registered versions. Map v3 player position to `PlayerService`'s `pose.feetPosition`; set `yawRadians` and `pitchRadians` to 0 because v3 stored no orientation; preserve `dimension` in the same player slice. Map `tick` to the time slice with `dayLengthTicks` 24000 because v3 stored no day-length denominator. Map inventory and `selectedHotbarSlot` together into the initial inventory slice; map counters and unlocked achievements into the statistics slice. Encode every target slice before restore. Decode or encode failure invokes no restore. Restore all slices in an unpublished world session; if any restore fails or is interrupted, close that session and expose no partially restored world. The host registers it only after every restore succeeds. `mc-save` adds generic legacy-envelope decoding in W2. `mc-sim` registers the v3 fan-out migration in W3 after the initial slice schemas exist. If no complete per-slice migration path exists for a stored slice, restore fails with `SaveMigrationPathMissing`; if multiple paths exist, it fails with `SaveMigrationPathAmbiguous`. Both errors carry the slice ID, stored version, and current version, and neither invokes that slice's restore.
+4. **Consumers.** All modules may register observations and commands for their owned services. Compose merges them for end-to-end tests against the fully composed host. Tests read state through owner observe operations rather than DOM attributes. Keep `window.__NERIMA_GAMES_QA__` as one transport slot whose only operation is dispatching `(namespace, operation, inputJson)` to `QaBridge.run`; it is not an operation registry. In W5, move `e2e/render-preview.e2e.ts` and `e2e/shader-probe.e2e.ts` to render-side tests, then move the remaining 37 host E2E tests from `e2e/` to `mc-host-web`. Update the host tests to call the schema-validated `name`/`observe`/`command` surface, and remove the legacy flat function registry and its install/read API from `mc-compose`. W5 leaves no parallel QA operation surface.
+5. **Compatibility.** A slice ID remains stable for the lifetime of the saved data. A shape change increments only that slice's version. Treat migrations as a directed version graph whose edges always increase the version; array order does not select a path. Each supported stored version must have one complete path to the current version. Each migration decodes its source's encoded data, transforms the decoded value, and encodes it with the target codec; the next migration receives that encoded result. After the final migration, decode the current version before restore. `mc-sim` gathers registered snapshots; `mc-save` encodes each with its registered codec and stores the bundle. W2 validates the legacy envelope's format, version, and integrity. The initial migration supports the existing v3 envelope only; other legacy versions are rejected before any slice restore. For v3, `mc-save` passes only the validated payload to `migrateSimulationSaveV3`. `LegacySimulationSaveV3Schema` validates inventory as an array of `null` or an item stack accepted by `isItemStack`, matching the v3 save format. `LegacyItemStackSchema` maps the v3 component `null` placeholders to the current `ItemStack` representation while decoding and reverses that mapping when encoding. The migration decodes that payload, maps its fields to raw slice inputs in an Effect, then decodes each input with its registered slice codec before encoding the initial player, time, inventory, and statistics slices at their registered versions. The mapper and slice decoders report `Schema.SchemaError`; they use no casts or thrown exceptions. Map v3 player position to `PlayerService`'s `pose.feetPosition`; set `yawRadians` and `pitchRadians` to 0 because v3 stored no orientation; preserve `dimension` in the same player slice. Map `tick` to the time slice with `dayLengthTicks` 24000 because v3 stored no day-length denominator. Map inventory and `selectedHotbarSlot` together into the initial inventory slice; map counters and unlocked achievements into the statistics slice. These four registered slices receive the v3 data; additional registered slices are initialized by normal world startup, not restored from the legacy payload. Encode every v3 target slice before restore. Decode or encode failure invokes no restore. Restore the four migrated slices in an unpublished world session; if any restore fails or is interrupted, close that session and expose no partially restored world. The host registers it only after every restore succeeds. `mc-save` adds generic legacy-envelope decoding in W2. `mc-sim` registers the v3 fan-out migration in W3 after the initial slice schemas exist. If no complete per-slice migration path exists for a stored slice, restore fails with `SaveMigrationPathMissing`; if multiple paths exist, it fails with `SaveMigrationPathAmbiguous`. Both errors carry the slice ID, stored version, and current version, and neither invokes that slice's restore.
 6. **Wave.** Fix the module and slice type shape in W1. Add generic legacy-envelope decoding in W2 and the mc-sim v3 fan-out migration in W3. Move E2E calls to `mc-host-web` and remove the old function registry in W5.
 
 ## C2: Simulation intent queue
 
 1. **Placement.** Add the intent vocabulary and queue service to `mc-sim/src/application/intent-queue.ts`. `mc-sim` creates one queue layer when a world session starts, scopes it to that session's Effect layer, and disposes it when the session closes. The host's world-session registry maps each `WorldId` to that session's scope; ingress resolves the ID there and runs the queue service from that scope. `enqueue` receives no world identifier. Gameplay stages consume ready intents; local input, network receive, and host adapters submit through the same queue.
-2. **Effect 4 types.** `enqueue` returns the queue sequence or a typed `IntentQueueFull` failure. Queue admission is serialized; it assigns the next sequence in admission order, starting at zero for a world session. `takeReady(tick)` removes and returns entries with `targetTick <= tick`. Replaying the same accepted intents with the same assigned sequences preserves processing order; differing network arrival timing can produce a different accepted order.
-3. **Schema shape.** The initial tagged union covers block break, block place, and item use. Each intent has a correlation ID that ingress adapters keep unique within its world session and preserve through processing, a target simulation tick, source tag, and actor; block-changing payloads also carry a dimension-qualified address. Decode local and network payloads before enqueueing. Order ready work by target tick and then assigned sequence.
+2. **Effect 4 types.** `enqueue` returns the queue sequence or a typed `IntentQueueFull` failure. Queue admission is serialized; it assigns the next sequence in admission order, starting at zero for a world session. `takeReady(tick)` removes and returns entries with `targetTick <= tick`. Replaying the same accepted intents with the same assigned sequences preserves processing order; differing network arrival timing can produce a different accepted order. Commit each processed intent separately. At commit time, check its expected world and dimension revisions; enqueue does not check either revision. One successful intent creates one C4 group delta, while a failed intent creates none.
+3. **Schema shape.** The initial tagged union covers block break, block place, and item use. Each intent's `id` is its correlation ID; ingress adapters keep it unique within its world session and preserve it through processing. Intents also carry a target simulation tick, source tag, and actor; block-changing payloads carry a dimension-qualified address. Network commands carry both expected revisions on the wire, and the `Intent` retains them until commit. `expectedRevision` is a `WorldRevision`; C7 calls the same world revision `expectedWorldRevision`. Both revision fields are optional so local inputs omit them; decoded network intents must include them. Decode local and network payloads before enqueueing. Order ready work by target tick and then assigned sequence.
 
 ```ts
 export const IntentSequenceSchema = Schema.Int
@@ -462,8 +554,17 @@ export const IntentSchema = Schema.Struct({
   id: IntentIdSchema,
   targetTick: SimulationTickSchema,
   source: Schema.Literals(["local", "network"]),
-  payload: IntentPayloadSchema
-});
+  payload: IntentPayloadSchema,
+  expectedRevision: Schema.optional(WorldRevisionSchema),
+  expectedDimensionRevision: Schema.optional(DimensionRevisionSchema)
+}).pipe(
+  Schema.check(Schema.makeFilter((intent) =>
+    intent.source === "local" ||
+    (intent.expectedRevision !== undefined && intent.expectedDimensionRevision !== undefined)
+      ? undefined
+      : "network intents require both expected revisions"
+  ))
+);
 export type Intent = Schema.Schema.Type<typeof IntentSchema>;
 
 export const QueuedIntentSchema = Schema.Struct({
@@ -577,7 +678,7 @@ export declare const DomainEventBusLayer: (
 
 1. **Placement.** Authoritative state and snapshot services belong to `mc-sim`. `mx-multiplayer` owns wire encoding, validation, and delivery; `mc-server` composes the same simulation services used by the browser host.
 2. **Effect 4 types.** State is exposed as a world-scoped snapshot. Mutations remain in owner services, and each owner routes replicated writes through the `mc-sim` world-session `WorldCommitCoordinator`. An owner validates and prepares its candidate state, then submits the candidate and owner ID to the coordinator; it does not mutate replicated state directly. The coordinator serializes candidates into one local world-session commit, assigns the shared revision once, and creates the resulting group delta as part of that commit. C7 submits accepted block edits through the world-block owner to this same coordinator. Owner snapshot services read state and revision from the committed version. The network adapter sends the committed group as one message after the local commit; transport delivery is outside that transaction. Clients validate and apply the entire group atomically, then advance the shared world revision once.
-3. **Schema shape.** A snapshot carries a `WorldId`, a monotonically increasing `WorldRevision` within that world, and the owner's state codec. The sample extends the existing `PlayerService` snapshot with its current `pose` and `dimension`; it does not create a second player-state service. Other owner services provide their own codecs.
+3. **Schema shape.** A snapshot carries a `WorldId`, a monotonically increasing `WorldRevision` within that world, and the owner's state codec. The player example extends the existing `PlayerService` API with a snapshot that combines the service's coordinate-only `pose.feetPosition` and `dimension` into the `WorldPosition` used in the snapshot. It does not create another player-state service. Other owner services provide their own codecs.
 
 ```ts
 export const replicatedSnapshotSchema = <State extends Schema.Codec<unknown>>(state: State) =>
@@ -618,17 +719,20 @@ export type ReplicatedWorldDelta<Change> = Readonly<{
   readonly changes: ReadonlyArray<Change>;
 }>;
 
-export const SimulationDimensionSchema = DimensionIdSchema;
+export const YawRadiansSchema = Schema.Finite.pipe(Schema.brand("YawRadians"));
+export type YawRadians = Schema.Schema.Type<typeof YawRadiansSchema>;
+
+export const PitchRadiansSchema = Schema.Finite.pipe(Schema.brand("PitchRadians"));
+export type PitchRadians = Schema.Schema.Type<typeof PitchRadiansSchema>;
 
 export const PlayerPoseSchema = Schema.Struct({
-  feetPosition: Schema.Struct({ x: Schema.Finite, y: Schema.Finite, z: Schema.Finite }),
-  yawRadians: Schema.Finite,
-  pitchRadians: Schema.Finite
+  feetPosition: WorldPositionSchema,
+  yawRadians: YawRadiansSchema,
+  pitchRadians: PitchRadiansSchema
 });
 
 export const PlayerServiceSnapshotSchema = Schema.Struct({
-  pose: PlayerPoseSchema,
-  dimension: SimulationDimensionSchema
+  pose: PlayerPoseSchema
 });
 
 export const PlayerOwnerChangeSchema = replicatedOwnerChangeSchema("player", PlayerServiceSnapshotSchema);
@@ -642,7 +746,7 @@ export type PlayerServiceApiWithSnapshot<ExistingPlayerServiceApi> = ExistingPla
 ```
 
 4. **Consumers.** The server supplies owner-service snapshots to `mx-multiplayer`; the multiplayer adapter sends them to clients, which apply deltas according to the revision rule below.
-5. **Compatibility.** Snapshot codecs are protocol data, not save slices. Wire incompatibility is handled by multiplayer protocol versioning. A newly initialized world starts at revision zero, and its initial snapshot is the client's baseline. All replicated owner services in one world share a single revision sequence, incremented once by `mc-sim` for each committed authoritative world-state transition. Group every changed owner snapshot from one transition into one world delta; `mx-multiplayer` delivers that group as a unit, and clients validate every owner payload before atomically applying the whole group and advancing `WorldRevision` once. A delta's revision identifies the state after applying that transition; apply it only when its world matches and its revision equals the current revision plus one. A duplicate, stale revision, gap, or invalid member rejects the whole group and requires a resync snapshot. A C7 batch changes the world-block owner's state; the corresponding C4 group delta contains that owner's resulting snapshot and any other owner snapshots changed by the same transition. The local commit updates those snapshots, the `DimensionRevision`, and the world's `WorldRevision` atomically, and creates the group delta in that same commit. Network delivery follows the local commit; a failed or interrupted batch changes neither revision nor owner state and creates no delta. `mx-multiplayer` owns versioned delta envelopes and payload fields; this contract fixes state ownership and revision semantics. `PROTOCOL_VERSION` moves from 8 to 9 because grouped owner deltas and world-revision checks change the wire contract; v8 peers are rejected. This incompatible change is allowed in the 0.x minor release.
+5. **Compatibility.** Snapshot codecs are protocol data, not save slices. Wire incompatibility is handled by multiplayer protocol versioning. A newly initialized world starts at revision zero, and its initial snapshot is the client's baseline. All replicated owner services in one world share a single revision sequence, incremented once by `mc-sim` for each committed authoritative world-state transition. A failed intent commit changes neither owner state nor `WorldRevision`. Group every changed owner snapshot from one transition into one world delta; `mx-multiplayer` delivers that group as a unit, and clients validate every owner payload before atomically applying the whole group and advancing `WorldRevision` once. A delta's revision identifies the state after applying that transition; apply it only when its world matches and its revision equals the current revision plus one. A duplicate, stale revision, gap, or invalid member rejects the whole group and requires a resync snapshot. A C7 batch changes the world-block owner's state; the corresponding C4 group delta contains that owner's resulting snapshot and any other owner snapshots changed by the same transition. The local commit updates those snapshots, the `DimensionRevision`, and the world's `WorldRevision` atomically, and creates the group delta in that same commit. Network delivery follows the local commit; a failed or interrupted batch changes neither revision nor owner state and creates no delta. `mx-multiplayer` owns versioned delta envelopes and payload fields; this contract fixes state ownership and revision semantics. `PROTOCOL_VERSION` moves from 8 to 9 because grouped owner deltas and world-revision checks change the wire contract; v8 peers are rejected. This incompatible change is allowed in the 0.x minor release.
 6. **Wave.** Finalize service ownership and snapshot shape in W3. Freeze grouped delta and protocol v9 wire contracts in W4 before W5 host and server wiring.
 
 ## C5: Deterministic headless harness
@@ -808,6 +912,11 @@ from pathlib import Path
 document = Path("docs/execution/contracts.md").read_text()
 blocks = re.findall(r"```ts\n(.*?)\n```", document, flags=re.S)
 Path(os.environ["SCRATCH"], "contracts.ts").write_text("\n\n".join(blocks) + "\n")
+Path(os.environ["SCRATCH"], "mc-kernel.d.ts").write_text('''declare module "@nerima-games/mc-kernel" {
+  export type ItemStack = Readonly<{ item: string; count: number; components: unknown }>;
+  export const isItemStack: (value: unknown) => value is ItemStack;
+}
+''')
 PY
 cat > "$SCRATCH/tsconfig.json" <<'JSON'
 {
@@ -819,13 +928,13 @@ cat > "$SCRATCH/tsconfig.json" <<'JSON'
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["contracts.ts"]
+  "include": ["contracts.ts", "mc-kernel.d.ts"]
 }
 JSON
 npm install --prefix "$SCRATCH" --no-save effect@4.0.5 typescript@7.0.2
 "$SCRATCH/node_modules/.bin/tsc" --noEmit -p "$SCRATCH/tsconfig.json"
 ```
 
-The probe checks signatures and Schema APIs only; runtime ordering, migration completeness, event delivery, revision policy, atomic writes, and package integration remain implementation and test obligations for their listed waves.
+The probe stubs the kernel item-stack guard and checks signatures and Schema APIs only; runtime ordering, migration completeness, event delivery, revision policy, atomic writes, and package integration remain implementation and test obligations for their listed waves.
 
 Effect 4 service and layer conventions follow the [official Effect v4 layer guide](https://effect.website/docs/v4/requirements-management/layers).
