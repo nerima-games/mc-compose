@@ -93,11 +93,9 @@ export type DimensionRevision = Schema.Schema.Type<typeof DimensionRevisionSchem
 
 1. **Placement.** Extend `GameModule` in `mc-kernel/src/domain/time/frame.ts` by appending optional `QA` and `SaveSlices` type parameters after its existing `ROut`, `Error`, `RIn`, and `RRegister` parameters. Keep `layers` and `frameStages`, and add optional `qa` and `saveSlices` fields.
 
-   `RRegister` is the Effect requirement of `frameStages`; preserve it through browser startup so the caller supplies it when running `startBrowserSession`. `registerModule` returns the same extended module type. `BrowserRuntimeModule.start` retains its module, error, and requirement types. The internal `startRuntimes` helper returns the module tuple, keeps the started-runtime accumulator and rollback callback, and wraps startup failures in `BrowserSessionStartError`. `startBrowserSession` retains the `BrowserSessionStartError` and `BrowserSessionStopError` wrappers and exposes runtime-start requirements and `RRegister` in its Effect requirement type. Its composed `game.layers` retains module layer requirements.
+   `composeGame` accepts a readonly module tuple and returns the inferred QA namespaces and save slices in an Effect. A duplicate namespace or save-slice ID fails with `DuplicateModuleContract`; the composition Effect exposes no partial registry. Namespace names are globally unique, so compose merges distinct namespace entries rather than combining operations from multiple modules under one name. `ComposedGame.layers` unions every module's layer error, layer input requirement, and `frameStages` registration requirement.
 
-   `composeGame` accepts a readonly module tuple and returns the inferred QA namespaces and save slices in an Effect. A duplicate namespace or save-slice ID fails with `DuplicateModuleContract`; the composition Effect exposes no partial registry. Each `GameModule` contributes at most one QA namespace. Namespace names are globally unique, so compose merges distinct namespace entries rather than combining operations from multiple modules under one name. `ComposedGame.layers` unions every module's layer error, layer input requirement, and `frameStages` registration requirement. The QA bridge's operation requirements are satisfied only when merged layer outputs provide those services; `RequireQaServices` rejects any missing requirement.
-
-   Compose returns the typed dispatcher as `ComposedGame.qaBridge`. The `QaBridge` context tag is a host lookup key for that API; the host adapter provides the returned dispatcher under the tag, outside `ComposedGame.layers`. `QaBridgeApi<OperationErrors>` describes dispatch errors, and `ComposedGame` specializes that union to its registered operations. Namespace and operation are separate branded names. Operation names must be unique across a namespace's `observe` and `command` maps; reject a collision with `DuplicateModuleContract` kind `qa-operation` and ID `namespace.operation` before exposing the registry. Unknown names fail with `QaOperationNotFound`. The bridge decodes input, runs each operation with its declared `Requirements` from composed module layers, and encodes successful results. `QaRequirementsOfModules` unions the requirements from every registered operation. `composeGame` compares that union with merged layer outputs; the typed `Layer.provide` call builds the bridge after that check. Input decoding and output encoding failures produce `Schema.SchemaError`; operation errors remain typed Effect failures. Success returns the output codec's JSON value. The host call propagates the operation error or `Schema.SchemaError` without wrapping it.
+   `ComposedGame.qaBridge` retains the registered operations' error union. `QaBridge` is the host lookup context tag, whose `QaBridgeApi<unknown>` type intentionally widens that union; `QaBridgeApi<OperationErrors>` describes dispatch errors, and `ComposedGame` specializes that union to its registered operations. Operation names must be unique across a namespace's `observe` and `command` maps; reject a collision with `DuplicateModuleContract` kind `qa-operation` and ID `namespace.operation` before exposing the registry. Unknown names fail with `QaOperationNotFound`. The bridge decodes input, runs each operation with its declared `Requirements` from composed module layers, and encodes successful results. `QaRequirementsOfModules` unions the requirements from every registered operation; composition requires those services from the merged module layers. Input decoding and output encoding failures produce `Schema.SchemaError`; operation errors remain typed Effect failures. Success returns the output codec's JSON value. The host call propagates the operation error or `Schema.SchemaError` without wrapping it.
 2. **Effect 4 types.** An observe or command operation declares input/output codecs and an Effect handler with its typed error and requirements. A slice snapshot is an infallible Effect that may require state services; restore is an Effect with a typed error. A per-slice `SaveMigration` is a total synchronous transformation between decoded slice types, with decode or encode failures represented by `Schema.SchemaError`.
 3. **Schema shape.** `qa.name` is a branded `QaNamespaceName`; `qa.observe` and `qa.command` are named maps whose values are `QaOperation`s with branded `name`, input, and output codecs. Each map key must equal its operation's `name`; compose validates this before publishing the registry. Their inputs and outputs are `Schema.Codec`s, so branded identifiers are validated at the QA boundary. The output codec must encode values in the shared JSON domain. Each save entry is keyed by stable `SaveSliceId`, carries a positive integer version, and stores the encoded value accepted by that slice's codec. The persisted bundle is an object keyed by `SaveSliceId`; each value contains its version and encoded data.
 
@@ -299,104 +297,9 @@ export interface ComposedGame<Modules extends ReadonlyArray<unknown>> {
   readonly qaBridge: QaBridgeApi<QaOperationErrorsOfModules<Modules>>;
 }
 
-export const registerModule = <const Module>(module: Module & (IsGameModule<Module> extends true ? unknown : never)): Module => module;
-
 export declare const composeGame: <const Modules extends ReadonlyArray<unknown>>(
   modules: Modules & RequireGameModules<Modules> & RequireQaServices<Modules>
 ) => Effect.Effect<ComposedGame<Modules>, DuplicateModuleContract>;
-
-export interface BrowserRuntimeModule<Module, StartError = unknown, StartRequirements = never> {
-  readonly name: string;
-  readonly start: Effect.Effect<Module, StartError, StartRequirements>;
-  readonly stop: Effect.Effect<void, unknown>;
-}
-
-type BrowserRuntimeModuleOf<Runtime> = Runtime extends {
-  readonly name: string;
-  readonly start: Effect.Effect<infer Module, infer _Error, infer _Requirements>;
-  readonly stop: Effect.Effect<infer _Value, infer _StopError, infer _StopRequirements>;
-} ? Module : never;
-
-type IsBrowserRuntime<Runtime> = Runtime extends {
-  readonly name: string;
-  readonly start: Effect.Effect<infer _Module, infer _Error, infer _Requirements>;
-  readonly stop: Effect.Effect<infer _Value, infer _StopError, infer _StopRequirements>;
-} ? true : false;
-
-type InvalidBrowserRuntimeModules<Runtimes extends ReadonlyArray<unknown>> =
-  Runtimes[number] extends infer Runtime
-    ? Runtime extends unknown
-      ? IsBrowserRuntime<Runtime> extends true ? never : Runtime
-      : never
-    : never;
-
-type RequireBrowserRuntimeModules<Runtimes extends ReadonlyArray<unknown>> =
-  [InvalidBrowserRuntimeModules<Runtimes>] extends [never]
-    ? unknown
-    : { readonly invalidBrowserRuntimeModules: InvalidBrowserRuntimeModules<Runtimes> };
-
-type StartedModules<Runtimes extends ReadonlyArray<unknown>> = {
-  readonly [Index in keyof Runtimes]: BrowserRuntimeModuleOf<Runtimes[Index]>;
-};
-
-type BrowserRuntimeStartRequirementsOf<Runtime> = Runtime extends {
-  readonly start: Effect.Effect<infer _Module, infer _Error, infer Requirements>
-} ? Requirements : never;
-
-type BrowserRuntimeStartRequirements<Runtimes extends ReadonlyArray<unknown>> =
-  BrowserRuntimeStartRequirementsOf<Runtimes[number]>;
-
-export interface BrowserRuntimeStopFailure {
-  readonly moduleName: string;
-  readonly cause: unknown;
-}
-
-export interface BrowserSessionStartError {
-  readonly _tag: "BrowserSessionStartError";
-  readonly phase: "start" | "compose";
-  readonly moduleName: string | undefined;
-  readonly cause: unknown;
-  readonly rollbackFailures: ReadonlyArray<BrowserRuntimeStopFailure>;
-}
-
-export interface BrowserSessionStopError {
-  readonly _tag: "BrowserSessionStopError";
-  readonly failures: ReadonlyArray<BrowserRuntimeStopFailure>;
-}
-
-export interface BrowserSession<Modules extends ReadonlyArray<unknown>> {
-  readonly game: ComposedGame<Modules>;
-  readonly stop: Effect.Effect<void, BrowserSessionStopError>;
-}
-
-type StartedRuntimes<Runtimes extends ReadonlyArray<unknown>> = {
-  readonly modules: StartedModules<Runtimes>;
-};
-
-type RollbackAndFail = (
-  error: Omit<BrowserSessionStartError, "rollbackFailures">
-) => Effect.Effect<never, BrowserSessionStartError>;
-
-declare const startRuntimes: <const Runtimes extends ReadonlyArray<unknown>>(
-  runtimes: Runtimes & RequireBrowserRuntimeModules<Runtimes>,
-  started: Array<Runtimes[number]>,
-  rollbackAndFail: RollbackAndFail
-) => Effect.Effect<
-  StartedRuntimes<Runtimes>,
-  BrowserSessionStartError,
-  BrowserRuntimeStartRequirements<Runtimes>
->;
-
-export declare const startBrowserSession: <const Runtimes extends ReadonlyArray<unknown>>(
-  runtimes: Runtimes
-    & RequireBrowserRuntimeModules<Runtimes>
-    & RequireGameModules<StartedModules<Runtimes>>
-    & RequireQaServices<StartedModules<Runtimes>>
-) => Effect.Effect<
-  BrowserSession<StartedModules<Runtimes>>,
-  BrowserSessionStartError,
-  BrowserRuntimeStartRequirements<Runtimes> | ModuleRegistrationRequirements<StartedModules<Runtimes>>
->;
 
 export interface QaBridgeApi<OperationErrors> {
   readonly run: (
@@ -601,13 +504,13 @@ export declare const migrateSimulationSaveV3: <
 
 4. **Consumers.** All modules may register observations and commands for their owned services. Compose merges them for end-to-end tests against the fully composed host. Tests read state through owner observe operations rather than DOM attributes. Keep `window.__NERIMA_GAMES_QA__` as one transport slot whose only operation is dispatching `(namespace, operation, inputJson)` to `QaBridge.run`; it is not an operation registry. In W5, move `e2e/render-preview.e2e.ts` and `e2e/shader-probe.e2e.ts` to render-side tests, then move the remaining 37 host E2E tests from `e2e/` to `mc-host-web`. Update the host tests to call the schema-validated `name`/`observe`/`command` surface, and remove the legacy flat function registry and its install/read API from `mc-compose`. W5 leaves no parallel QA operation surface.
 5. **Compatibility.** A slice ID remains stable for the lifetime of the saved data. A shape change increments only that slice's version. Treat migrations as a directed version graph whose edges always increase the version; array order does not select a path. Each supported stored version must have one complete path to the current version. Each migration decodes its source's encoded data, transforms the decoded value, and encodes it with the target codec; the next migration receives that encoded result. After the final migration, decode the current version before restore. `mc-sim` gathers registered snapshots; `mc-save` encodes each with its registered codec and stores the bundle. W2 validates the legacy envelope's format, version, and integrity. The initial migration supports the existing v3 envelope only; other legacy versions are rejected before any slice restore. For v3, `mc-save` passes only the validated payload to `migrateSimulationSaveV3`. `LegacySimulationSaveV3Schema` validates inventory as an array of `null` or an item stack accepted by `isItemStack`, matching the v3 save format. `LegacyItemStackSchema` maps the v3 component `null` placeholders to the current `ItemStack` representation while decoding and reverses that mapping when encoding. The migration decodes that payload, maps its fields to raw slice inputs in an Effect, then decodes each input with its registered slice codec before encoding the initial player, time, inventory, and statistics slices at their registered versions. The mapper and slice decoders report `Schema.SchemaError`; they use no casts or thrown exceptions. Map v3 player position to `PlayerService`'s `pose.feetPosition`; set `yawRadians` and `pitchRadians` to 0 because v3 stored no orientation; preserve `dimension` in the same player slice. Map `tick` to the time slice with `dayLengthTicks` 24000 because v3 stored no day-length denominator. Map inventory and `selectedHotbarSlot` together into the initial inventory slice; map counters and unlocked achievements into the statistics slice. These four registered slices receive the v3 data; additional registered slices are initialized by normal world startup, not restored from the legacy payload. Encode every v3 target slice before restore. Decode or encode failure invokes no restore. Restore the four migrated slices in an unpublished world session; if any restore fails or is interrupted, close that session and expose no partially restored world. The host registers it only after every restore succeeds. `mc-save` adds generic legacy-envelope decoding in W2. `mc-sim` registers the v3 fan-out migration in W3 after the initial slice schemas exist. If no complete per-slice migration path exists for a stored slice, restore fails with `SaveMigrationPathMissing`; if multiple paths exist, it fails with `SaveMigrationPathAmbiguous`. Both errors carry the slice ID, stored version, and current version, and neither invokes that slice's restore.
-6. **Wave.** Fix the module and slice type shape in W1. Add generic legacy-envelope decoding in W2 and the mc-sim v3 fan-out migration in W3. Move E2E calls to `mc-host-web` and remove the old function registry in W5.
+6. **Wave.** Fix the module and slice type shape in W1. Add generic legacy-envelope decoding in W2 and the mc-sim v3 fan-out migration in W3. In W5, move the 37 host E2E tests to `mc-host-web`, remove the old function registry and install/read API from `mc-compose`, and have `mc-host-web` decide the browser startup and rollback design.
 
 ## C2: Simulation intent queue
 
 1. **Placement.** Add the intent vocabulary and queue service to `mc-sim/src/application/intent-queue.ts`. `mc-sim` creates one queue layer when a world session starts, scopes it to that session's Effect layer, and disposes it when the session closes. The host's world-session registry maps each `WorldId` to that session's scope; ingress resolves the ID there and runs the queue service from that scope. `enqueue` receives no world identifier. Gameplay stages consume ready intents; local input, network receive, and host adapters submit through the same queue.
-2. **Effect 4 types.** `enqueue` returns the queue sequence or a typed `IntentQueueFull` failure. Queue admission is serialized; it assigns the next sequence in admission order, starting at zero for a world session. `takeReady(tick)` removes and returns entries with `targetTick <= tick`. Replaying the same accepted intents with the same assigned sequences preserves processing order; differing network arrival timing can produce a different accepted order. Commit each processed intent separately. At commit time, check its expected world and dimension revisions; enqueue does not check either revision. One successful intent creates one C4 group delta, while a failed intent creates none.
-3. **Schema shape.** The initial tagged union covers block break, block place, and item use. Each intent's `id` is its correlation ID; ingress adapters keep it unique within its world session and preserve it through processing. Intents also carry a target simulation tick, source tag, and actor; block-changing payloads carry a dimension-qualified address. Network commands carry both expected revisions on the wire, and the `Intent` retains them until commit. `expectedRevision` is a `WorldRevision`; C7 calls the same world revision `expectedWorldRevision`. Both revision fields are optional so local inputs omit them; decoded network intents must include them. Decode local and network payloads before enqueueing. Order ready work by target tick and then assigned sequence.
+2. **Effect 4 types.** `enqueue` returns the queue sequence or a typed `IntentQueueFull` failure. Queue admission is serialized; it assigns the next sequence in admission order, starting at zero for a world session. `takeReady(tick)` removes and returns entries with `targetTick <= tick`. Replaying the same accepted intents with the same assigned sequences preserves processing order; differing network arrival timing can produce a different accepted order. Commit each processed intent separately. At commit time, check the expected revisions on network intents; enqueue does not check either revision. One successful intent creates one C4 group delta, while a failed intent creates none.
+3. **Schema shape.** The initial tagged union covers block break, block place, and item use. Each intent's `id` is its correlation ID; ingress adapters keep it unique within its world session and preserve it through processing. Intents also carry a target simulation tick, source tag, and actor; block-changing payloads carry a dimension-qualified address. Network commands carry both expected revisions on the wire, and network intents retain them until commit. `expectedRevision` is the expected current world revision; it maps to C7's wire field `expectedWorldRevision`. At commit, compare it with the current world revision, and compare `expectedDimensionRevision` with the current revision of the addressed block's dimension for block intents or the current revision of the actor's dimension for `UseItem`. Decode local and network payloads before enqueueing. Order ready work by target tick and then assigned sequence.
 
 ```ts
 export const IntentSequenceSchema = Schema.Int
@@ -643,21 +546,23 @@ export const IntentPayloadSchema = Schema.Union([
   UseItemIntentSchema
 ]);
 
-export const IntentSchema = Schema.Struct({
+const LocalIntentSchema = Schema.Struct({
   id: IntentIdSchema,
   targetTick: SimulationTickSchema,
-  source: Schema.Literals(["local", "network"]),
+  source: Schema.Literals(["local"]),
+  payload: IntentPayloadSchema
+});
+
+const NetworkIntentSchema = Schema.Struct({
+  id: IntentIdSchema,
+  targetTick: SimulationTickSchema,
+  source: Schema.Literals(["network"]),
   payload: IntentPayloadSchema,
-  expectedRevision: Schema.optional(WorldRevisionSchema),
-  expectedDimensionRevision: Schema.optional(DimensionRevisionSchema)
-}).pipe(
-  Schema.check(Schema.makeFilter((intent) =>
-    intent.source === "local" ||
-    (intent.expectedRevision !== undefined && intent.expectedDimensionRevision !== undefined)
-      ? undefined
-      : "network intents require both expected revisions"
-  ))
-);
+  expectedRevision: WorldRevisionSchema,
+  expectedDimensionRevision: DimensionRevisionSchema
+});
+
+export const IntentSchema = Schema.Union([LocalIntentSchema, NetworkIntentSchema]);
 export type Intent = Schema.Schema.Type<typeof IntentSchema>;
 
 export const QueuedIntentSchema = Schema.Struct({
