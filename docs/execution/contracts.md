@@ -93,7 +93,7 @@ export type DimensionRevision = Schema.Schema.Type<typeof DimensionRevisionSchem
 
 1. **Placement.** Extend `GameModule` in `mc-kernel/src/domain/time/frame.ts` by appending optional `QA` and `SaveSlices` type parameters after its existing `ROut`, `Error`, `RIn`, and `RRegister` parameters. Keep `layers` and `frameStages`, and add optional `qa` and `saveSlices` fields.
 
-   `RRegister` is the Effect requirement of `frameStages`; preserve it through browser startup so the caller supplies it when running `startBrowserSession`. `registerModule` returns the same extended module type. In `src/domain/browser-session.ts`, `BrowserRuntimeModule.start`, `startRuntimes`, and `startBrowserSession` preserve these types instead of widening them to `GameModule[]`.
+   `RRegister` is the Effect requirement of `frameStages`; preserve it through browser startup so the caller supplies it when running `startBrowserSession`. `registerModule` returns the same extended module type. `BrowserRuntimeModule.start` retains its module, error, and requirement types. The internal `startRuntimes` helper returns the module tuple, keeps the started-runtime accumulator and rollback callback, and wraps startup failures in `BrowserSessionStartError`. `startBrowserSession` retains the `BrowserSessionStartError` and `BrowserSessionStopError` wrappers and exposes runtime-start requirements and `RRegister` in its Effect requirement type. Its composed `game.layers` retains module layer requirements.
 
    `composeGame` accepts a readonly module tuple and returns the inferred QA namespaces and save slices in an Effect. A duplicate namespace or save-slice ID fails with `DuplicateModuleContract`; the composition Effect exposes no partial registry. Each `GameModule` contributes at most one QA namespace. Namespace names are globally unique, so compose merges distinct namespace entries rather than combining operations from multiple modules under one name. `ComposedGame.layers` unions every module's layer error, layer input requirement, and `frameStages` registration requirement. The QA bridge's operation requirements are satisfied only when merged layer outputs provide those services; `RequireQaServices` rejects any missing requirement.
 
@@ -304,6 +304,99 @@ export const registerModule = <const Module>(module: Module & (IsGameModule<Modu
 export declare const composeGame: <const Modules extends ReadonlyArray<unknown>>(
   modules: Modules & RequireGameModules<Modules> & RequireQaServices<Modules>
 ) => Effect.Effect<ComposedGame<Modules>, DuplicateModuleContract>;
+
+export interface BrowserRuntimeModule<Module, StartError = unknown, StartRequirements = never> {
+  readonly name: string;
+  readonly start: Effect.Effect<Module, StartError, StartRequirements>;
+  readonly stop: Effect.Effect<void, unknown>;
+}
+
+type BrowserRuntimeModuleOf<Runtime> = Runtime extends {
+  readonly name: string;
+  readonly start: Effect.Effect<infer Module, infer _Error, infer _Requirements>;
+  readonly stop: Effect.Effect<infer _Value, infer _StopError, infer _StopRequirements>;
+} ? Module : never;
+
+type IsBrowserRuntime<Runtime> = Runtime extends {
+  readonly name: string;
+  readonly start: Effect.Effect<infer _Module, infer _Error, infer _Requirements>;
+  readonly stop: Effect.Effect<infer _Value, infer _StopError, infer _StopRequirements>;
+} ? true : false;
+
+type InvalidBrowserRuntimeModules<Runtimes extends ReadonlyArray<unknown>> =
+  Runtimes[number] extends infer Runtime
+    ? Runtime extends unknown
+      ? IsBrowserRuntime<Runtime> extends true ? never : Runtime
+      : never
+    : never;
+
+type RequireBrowserRuntimeModules<Runtimes extends ReadonlyArray<unknown>> =
+  [InvalidBrowserRuntimeModules<Runtimes>] extends [never]
+    ? unknown
+    : { readonly invalidBrowserRuntimeModules: InvalidBrowserRuntimeModules<Runtimes> };
+
+type StartedModules<Runtimes extends ReadonlyArray<unknown>> = {
+  readonly [Index in keyof Runtimes]: BrowserRuntimeModuleOf<Runtimes[Index]>;
+};
+
+type BrowserRuntimeStartRequirementsOf<Runtime> = Runtime extends {
+  readonly start: Effect.Effect<infer _Module, infer _Error, infer Requirements>
+} ? Requirements : never;
+
+type BrowserRuntimeStartRequirements<Runtimes extends ReadonlyArray<unknown>> =
+  BrowserRuntimeStartRequirementsOf<Runtimes[number]>;
+
+export interface BrowserRuntimeStopFailure {
+  readonly moduleName: string;
+  readonly cause: unknown;
+}
+
+export interface BrowserSessionStartError {
+  readonly _tag: "BrowserSessionStartError";
+  readonly phase: "start" | "compose";
+  readonly moduleName: string | undefined;
+  readonly cause: unknown;
+  readonly rollbackFailures: ReadonlyArray<BrowserRuntimeStopFailure>;
+}
+
+export interface BrowserSessionStopError {
+  readonly _tag: "BrowserSessionStopError";
+  readonly failures: ReadonlyArray<BrowserRuntimeStopFailure>;
+}
+
+export interface BrowserSession<Modules extends ReadonlyArray<unknown>> {
+  readonly game: ComposedGame<Modules>;
+  readonly stop: Effect.Effect<void, BrowserSessionStopError>;
+}
+
+type StartedRuntimes<Runtimes extends ReadonlyArray<unknown>> = {
+  readonly modules: StartedModules<Runtimes>;
+};
+
+type RollbackAndFail = (
+  error: Omit<BrowserSessionStartError, "rollbackFailures">
+) => Effect.Effect<never, BrowserSessionStartError>;
+
+declare const startRuntimes: <const Runtimes extends ReadonlyArray<unknown>>(
+  runtimes: Runtimes & RequireBrowserRuntimeModules<Runtimes>,
+  started: Array<Runtimes[number]>,
+  rollbackAndFail: RollbackAndFail
+) => Effect.Effect<
+  StartedRuntimes<Runtimes>,
+  BrowserSessionStartError,
+  BrowserRuntimeStartRequirements<Runtimes>
+>;
+
+export declare const startBrowserSession: <const Runtimes extends ReadonlyArray<unknown>>(
+  runtimes: Runtimes
+    & RequireBrowserRuntimeModules<Runtimes>
+    & RequireGameModules<StartedModules<Runtimes>>
+    & RequireQaServices<StartedModules<Runtimes>>
+) => Effect.Effect<
+  BrowserSession<StartedModules<Runtimes>>,
+  BrowserSessionStartError,
+  BrowserRuntimeStartRequirements<Runtimes> | ModuleRegistrationRequirements<StartedModules<Runtimes>>
+>;
 
 export interface QaBridgeApi<OperationErrors> {
   readonly run: (
