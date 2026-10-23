@@ -91,11 +91,11 @@ export type DimensionRevision = Schema.Schema.Type<typeof DimensionRevisionSchem
 
 ## C1: Module QA and save slices
 
-1. **Placement.** Extend `GameModule` in `mc-kernel/src/domain/time/frame.ts` by appending optional `QA` and `SaveSlices` type parameters after its existing `ROut`, `Error`, `RIn`, and `RRegister` parameters. Keep `layers` and `frameStages`, and add optional `qa` and `saveSlices` fields.
+1. **Placement.** Extend `GameModule` in `mc-kernel/src/domain/time/frame.ts` while keeping its existing type parameters, `layers`, and `frameStages` fields. Add optional `qa: QaNamespace` and `saveSlices: ReadonlyArray<SaveSliceRegistration>` fields.
 
-   `composeGame` accepts a readonly module tuple and returns the inferred QA namespaces and save slices in an Effect. A duplicate namespace or save-slice ID fails with `DuplicateModuleContract`; the composition Effect exposes no partial registry. Namespace names are globally unique, so compose merges distinct namespace entries rather than combining operations from multiple modules under one name. `ComposedGame.layers` unions every module's layer error, layer input requirement, and `frameStages` registration requirement.
+   `composeGame` accepts a readonly tuple of `GameModule` values and returns `Effect<ComposedGame<Modules>, DuplicateModuleContract>` with no service requirements. The successful `ComposedGame` contains the tuple's QA namespaces and save slices. Modules that register QA contribute distinct namespaces. Duplicate namespace names and slice IDs fail with `DuplicateModuleContract`: namespace errors use kind `qa-namespace` and the namespace name as the error ID; slice errors use kind `save-slice` and the slice ID. A failure returns no partial registry. `ComposedGame.layers` unions module layer errors; its service requirements include module layer requirements, QA operation requirements, and the requirements of each module's `frameStages` Effect, which the host runs to register frame stages.
 
-   `ComposedGame.qaBridge` retains the registered operations' error union. `QaBridge` is the host lookup context tag, whose `QaBridgeApi<unknown>` type intentionally widens that union; `QaBridgeApi<OperationErrors>` describes dispatch errors, and `ComposedGame` specializes that union to its registered operations. Operation names must be unique across a namespace's `observe` and `command` maps; reject a collision with `DuplicateModuleContract` kind `qa-operation` and ID `namespace.operation` before exposing the registry. Unknown names fail with `QaOperationNotFound`. The bridge decodes input, runs each operation with its declared `Requirements` from composed module layers, and encodes successful results. `QaRequirementsOfModules` unions the requirements from every registered operation; composition requires those services from the merged module layers. Input decoding and output encoding failures produce `Schema.SchemaError`; operation errors remain typed Effect failures. Success returns the output codec's JSON value. The host call propagates the operation error or `Schema.SchemaError` without wrapping it.
+   `ComposedGame.qaBridge` is the runtime dispatcher typed as `QaBridgeApi<OperationErrors>` for the registered operation error union. The host installs this value as the `QaBridge` context service. The host's QA dispatcher retrieves the service instance and calls `run(namespace, operation, inputJson)`. The host uses `QaBridgeApi<unknown>` for dynamic dispatch. `composeGame` rejects operation-name collisions across a namespace's `observe` and `command` maps with `DuplicateModuleContract` kind `qa-operation` and ID `namespace.operation` before exposing the registry. The dispatch Effect fails with `QaOperationNotFound` for unknown namespace or operation names. The bridge decodes input, invokes the selected handler, and encodes success with the output codec as JSON. The host provides that dispatch Effect with `ComposedGame.layers` using `Effect.provide`, which supplies the services declared by QA operations; the resulting Effect retains the composed layer's input service requirements. Input decoding and output encoding failures produce `Schema.SchemaError`. Registered operation errors remain typed, and the host propagates them or `Schema.SchemaError` without wrapping.
 2. **Effect 4 types.** An observe or command operation declares input/output codecs and an Effect handler with its typed error and requirements. A slice snapshot is an infallible Effect that may require state services; restore is an Effect with a typed error. A per-slice `SaveMigration` is a total synchronous transformation between decoded slice types, with decode or encode failures represented by `Schema.SchemaError`.
 3. **Schema shape.** `qa.name` is a branded `QaNamespaceName`; `qa.observe` and `qa.command` are named maps whose values are `QaOperation`s with branded `name`, input, and output codecs. Each map key must equal its operation's `name`; compose validates this before publishing the registry. Their inputs and outputs are `Schema.Codec`s, so branded identifiers are validated at the QA boundary. The output codec must encode values in the shared JSON domain. Each save entry is keyed by stable `SaveSliceId`, carries a positive integer version, and stores the encoded value accepted by that slice's codec. The persisted bundle is an object keyed by `SaveSliceId`; each value contains its version and encoded data.
 
@@ -138,22 +138,13 @@ export interface QaOperation<
   ) => Effect.Effect<Output["Type"], Error, Requirements>;
 }
 
-export type QaOperationMap<Operations extends Readonly<Record<string, unknown>>> = {
-  readonly [Key in keyof Operations]: Operations[Key] extends QaOperation<
-    infer Input,
-    infer Output,
-    infer Error,
-    infer Requirements
-  > ? QaOperation<Input, Output, Error, Requirements> : never;
-};
-
 export interface QaNamespace<
-  Observe extends Readonly<Record<string, unknown>> = Readonly<Record<string, never>>,
-  Command extends Readonly<Record<string, unknown>> = Readonly<Record<string, never>>
+  Observe extends object = object,
+  Command extends object = object
 > {
   readonly name: QaNamespaceName;
-  readonly observe: QaOperationMap<Observe>;
-  readonly command: QaOperationMap<Command>;
+  readonly observe: Observe;
+  readonly command: Command;
 }
 
 export interface KernelGameModule<ROut, Error, RIn, RRegister = never> {
@@ -161,22 +152,15 @@ export interface KernelGameModule<ROut, Error, RIn, RRegister = never> {
   readonly frameStages: Effect.Effect<ReadonlyArray<unknown>, never, RRegister>;
 }
 
-export type GameModuleExtensions<
-  QA extends QaNamespace = never,
-  SaveSlices extends ReadonlyArray<unknown> = readonly []
-> = {
-  readonly qa?: QA;
-  readonly saveSlices?: SaveSlices;
-};
-
 export interface GameModule<
   ROut,
   Error,
   RIn,
-  RRegister = never,
-  QA extends QaNamespace = never,
-  SaveSlices extends ReadonlyArray<unknown> = readonly []
-> extends KernelGameModule<ROut, Error, RIn, RRegister>, GameModuleExtensions<QA, SaveSlices> {}
+  RRegister = never
+> extends KernelGameModule<ROut, Error, RIn, RRegister> {
+  readonly qa?: QaNamespace;
+  readonly saveSlices?: ReadonlyArray<SaveSliceRegistration>;
+}
 
 type RequirementsOf<Operation> = Operation extends QaOperation<
   infer _Input,
@@ -192,8 +176,12 @@ type ErrorsOf<Operation> = Operation extends QaOperation<
   infer _Requirements
 > ? Error : never;
 
-type OperationsRequirements<Operations> = Operations extends Readonly<Record<string, unknown>>
+type OperationsRequirements<Operations> = Operations extends object
   ? RequirementsOf<Operations[keyof Operations]>
+  : never;
+
+type OperationsErrors<Operations> = Operations extends object
+  ? ErrorsOf<Operations[keyof Operations]>
   : never;
 
 type NamespaceRequirements<Namespace> = Namespace extends {
@@ -207,15 +195,12 @@ type NamespaceErrors<Namespace> = Namespace extends {
   readonly observe: infer Observe;
   readonly command: infer Command;
 }
-  ? ErrorsOf<Observe[keyof Observe]> | ErrorsOf<Command[keyof Command]>
+  ? OperationsErrors<Observe> | OperationsErrors<Command>
   : never;
 
 type ModuleQa<Module> = Module extends { readonly qa?: infer Namespace }
   ? NonNullable<Namespace>
   : never;
-
-type QaRequirementsOfModules<Modules extends ReadonlyArray<unknown>> =
-  NamespaceRequirements<ModuleQa<Modules[number]>>;
 
 type QaOperationErrorsOfModules<Modules extends ReadonlyArray<unknown>> =
   NamespaceErrors<ModuleQa<Modules[number]>>;
@@ -230,32 +215,11 @@ type ModuleLayerErrorOf<Module> = Module extends {
 
 type ModuleLayerRequirementsOf<Module> = Module extends {
   readonly layers: Layer.Layer<infer _Services, infer _Error, infer Requirements>
-} ? Requirements : never;
+} ? Requirements | NamespaceRequirements<ModuleQa<Module>> : NamespaceRequirements<ModuleQa<Module>>;
 
 type ModuleFrameStageRequirementsOf<Module> = Module extends {
   readonly frameStages: Effect.Effect<infer _Stages, infer _Error, infer Requirements>
 } ? Requirements : never;
-
-type IsGameModule<Module> = Module extends {
-  readonly layers: Layer.Layer<infer _Services, infer _LayerError, infer _LayerRequirements>;
-  readonly frameStages: Effect.Effect<infer _Stages, infer _StageError, infer _StageRequirements>;
-  readonly qa?: QaNamespace<infer _Observe, infer _Command>;
-  readonly saveSlices?: ReadonlyArray<
-    SaveSliceRegistration<infer _Schema, infer _RestoreError, infer _Requirements>
-  >;
-} ? true : false;
-
-type InvalidGameModules<Modules extends ReadonlyArray<unknown>> =
-  Modules[number] extends infer Module
-    ? Module extends unknown
-      ? IsGameModule<Module> extends true ? never : Module
-      : never
-    : never;
-
-type RequireGameModules<Modules extends ReadonlyArray<unknown>> =
-  [InvalidGameModules<Modules>] extends [never]
-    ? unknown
-    : { readonly invalidGameModules: InvalidGameModules<Modules> };
 
 type ModuleLayerServices<Modules extends ReadonlyArray<unknown>> =
   ModuleLayerServicesOf<Modules[number]>;
@@ -270,7 +234,8 @@ type ModuleRegistrationRequirements<Modules extends ReadonlyArray<unknown>> =
   ModuleFrameStageRequirementsOf<Modules[number]>;
 
 type ModuleCompositionRequirements<Modules extends ReadonlyArray<unknown>> =
-  ModuleLayerRequirements<Modules> | ModuleRegistrationRequirements<Modules>;
+  ModuleLayerRequirements<Modules>
+  | ModuleRegistrationRequirements<Modules>;
 
 type ModuleSaveSlices<Module> = Module extends { readonly saveSlices?: infer Slices }
   ? NonNullable<Slices>
@@ -280,14 +245,6 @@ type ModuleQaNamespaces<Modules extends ReadonlyArray<unknown>> = ModuleQa<Modul
 
 type ModuleSaveSliceEntries<Modules extends ReadonlyArray<unknown>> =
   ModuleSaveSlices<Modules[number]> extends ReadonlyArray<infer Slice> ? Slice : never;
-
-type ModuleQaRequirements<Modules extends ReadonlyArray<unknown>> =
-  QaRequirementsOfModules<Modules>;
-
-type RequireQaServices<Modules extends ReadonlyArray<unknown>> =
-  [ModuleQaRequirements<Modules>] extends [ModuleLayerServices<Modules>]
-    ? unknown
-    : { readonly missingQaServices: Exclude<ModuleQaRequirements<Modules>, ModuleLayerServices<Modules>> };
 
 export interface ComposedGame<Modules extends ReadonlyArray<unknown>> {
   readonly modules: Modules;
@@ -301,8 +258,10 @@ export interface ComposedGame<Modules extends ReadonlyArray<unknown>> {
   readonly qaBridge: QaBridgeApi<QaOperationErrorsOfModules<Modules>>;
 }
 
-export declare const composeGame: <const Modules extends ReadonlyArray<unknown>>(
-  modules: Modules & RequireGameModules<Modules> & RequireQaServices<Modules>
+export declare const composeGame: <const Modules extends ReadonlyArray<
+  GameModule<never, unknown, unknown, unknown>
+>>(
+  modules: Modules
 ) => Effect.Effect<ComposedGame<Modules>, DuplicateModuleContract>;
 
 export interface QaBridgeApi<OperationErrors> {
@@ -342,15 +301,15 @@ export const defineSaveMigration = <
 });
 
 export interface SaveSliceRegistration<
-  Slice extends Schema.Codec<unknown>,
-  RestoreError = never,
-  Requirements = never
+  Slice extends Schema.Codec<unknown> = Schema.Codec<unknown>,
+  RestoreError = unknown,
+  Requirements = unknown
 > {
   readonly id: SaveSliceId;
   readonly version: SaveVersion;
   readonly schema: Slice;
   readonly snapshot: Effect.Effect<Slice["Type"], never, Requirements>;
-  readonly restore: (state: Slice["Type"]) => Effect.Effect<void, RestoreError, Requirements>;
+  restore(state: Slice["Type"]): Effect.Effect<void, RestoreError, Requirements>;
   readonly migrations: ReadonlyArray<SaveMigration>;
 }
 
@@ -388,7 +347,9 @@ export const QaBlockIdOutput = Schema.Struct({
   blockId: BlockIdSchema
 });
 export type ObserveBlockAtQa = QaOperation<typeof QaBlockPositionInput, typeof QaBlockIdOutput>;
-export type ExampleQaNamespace = QaNamespace<{ readonly blockAt: ObserveBlockAtQa }>;
+export type ExampleQaNamespace = QaNamespace<{
+  readonly blockAt: ObserveBlockAtQa;
+}>;
 
 const componentsWithUndefined = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(componentsWithUndefined);
@@ -506,9 +467,93 @@ export declare const migrateSimulationSaveV3: <
 
 ```
 
-4. **Consumers.** All modules may register observations and commands for their owned services. Compose merges them for end-to-end tests against the fully composed host. Tests read state through owner observe operations rather than DOM attributes. Keep `window.__NERIMA_GAMES_QA__` as one transport slot whose only operation is dispatching `(namespace, operation, inputJson)` to `QaBridge.run`; it is not an operation registry. In W5, move `e2e/render-preview.e2e.ts` and `e2e/shader-probe.e2e.ts` to render-side tests, then move the remaining 37 host E2E tests from `e2e/` to `mc-host-web`. Update the host tests to call the schema-validated `name`/`observe`/`command` surface, and remove the legacy flat function registry and its install/read API from `mc-compose`. W5 leaves no parallel QA operation surface.
+**Contract probes** verify at compile time that `composeGame` accepts valid modules, rejects invalid QA and save-slice fields, retains `DuplicateModuleContract` in its failure type, and tracks QA service requirements in `ComposedGame.layers` and the resulting dispatch Effect.
+
+```ts
+declare const probeNamespaceName: QaNamespaceName;
+declare const probeOperationName: QaOperationName;
+
+const noRequirementLayer: Layer.Layer<never, never, never> = Layer.empty;
+const moduleWithoutQa = {
+  layers: noRequirementLayer,
+  frameStages: Effect.succeed([] as const)
+};
+composeGame([moduleWithoutQa]);
+
+declare const probeConcreteQaNamespace: ExampleQaNamespace;
+const moduleWithQa: GameModule<never, never, never> = {
+  ...moduleWithoutQa,
+  qa: probeConcreteQaNamespace
+};
+const composedWithQaProbe = composeGame([moduleWithQa]);
+
+const invalidQaModule = { ...moduleWithoutQa, qa: "invalid" };
+// @ts-expect-error qa must be a QaNamespace.
+composeGame([invalidQaModule]);
+
+const invalidSaveSlicesModule = { ...moduleWithoutQa, saveSlices: "invalid" };
+// @ts-expect-error saveSlices must be a readonly array of SaveSliceRegistration values.
+composeGame([invalidSaveSlicesModule]);
+
+type ContractProbeAssert<Value extends true> = Value;
+type ContractProbeSuccess<Value> = Value extends Effect.Effect<infer Success, infer _Error, infer _Requirements>
+  ? Success
+  : never;
+type ContractProbeError<Value> = Value extends Effect.Effect<infer _Success, infer Error, infer _Requirements>
+  ? Error
+  : never;
+type ContractProbeEffectRequirements<Value> = Value extends Effect.Effect<infer _Success, infer _Error, infer Requirements>
+  ? Requirements
+  : never;
+type ContractProbeLayerRequirements<Value> = ContractProbeSuccess<Value> extends {
+  readonly layers: Layer.Layer<infer _Services, infer _Error, infer Requirements>
+} ? Requirements : never;
+type QaRequirementsRemainNever = ContractProbeAssert<
+  [ContractProbeLayerRequirements<typeof composedWithQaProbe>] extends [never] ? true : false
+>;
+
+type ProbeQaService = { readonly _tag: "ProbeQaService" };
+declare const operationWithRequirement: QaOperation<
+  typeof Schema.Unknown,
+  typeof Schema.Unknown,
+  never,
+  ProbeQaService
+>;
+const namespaceWithRequiredQa: QaNamespace<{
+  readonly read: typeof operationWithRequirement;
+}> = {
+  name: probeNamespaceName,
+  observe: { read: operationWithRequirement },
+  command: {}
+};
+const moduleWithRequiredQa = {
+  ...moduleWithoutQa,
+  qa: namespaceWithRequiredQa
+};
+const composedWithRequiredQaEffect = composeGame([moduleWithRequiredQa]);
+declare const composedWithRequiredQa: ContractProbeSuccess<typeof composedWithRequiredQaEffect>;
+type QaRequirementIsOnComposedLayer = ContractProbeAssert<
+  ProbeQaService extends ContractProbeLayerRequirements<typeof composedWithRequiredQaEffect> ? true : false
+>;
+const dispatchWithUnresolvedRequirement = Effect.provide(
+  composedWithRequiredQa.qaBridge.run(probeNamespaceName, probeOperationName, null),
+  composedWithRequiredQa.layers
+);
+type UnresolvedQaRequirementRemains = ContractProbeAssert<
+  ProbeQaService extends ContractProbeEffectRequirements<typeof dispatchWithUnresolvedRequirement>
+    ? true
+    : false
+>;
+
+const duplicateFailureProbe = composeGame([moduleWithoutQa]);
+type DuplicateModuleContractIsReturned = ContractProbeAssert<
+  DuplicateModuleContract extends ContractProbeError<typeof duplicateFailureProbe> ? true : false
+>;
+```
+
+4. **Consumers.** Each owning module registers observations and commands under its QA namespace. Compose merges distinct namespaces for end-to-end tests against the fully composed host. Tests read state through owner observe operations rather than DOM attributes. Keep `window.__NERIMA_GAMES_QA__` as one transport slot whose only operation is dispatching `(namespace, operation, inputJson)` to `QaBridge.run`; it is not an operation registry. Host tests call the retrieved `QaBridge` service's `run` method with the QA namespace's `name`, an operation key from `observe` or `command`, and JSON input.
 5. **Compatibility.** A slice ID remains stable for the lifetime of the saved data. A shape change increments only that slice's version. Treat migrations as a directed version graph whose edges always increase the version; array order does not select a path. Each supported stored version must have one complete path to the current version. Each migration decodes its source's encoded data, transforms the decoded value, and encodes it with the target codec; the next migration receives that encoded result. After the final migration, decode the current version before restore. `mc-sim` gathers registered snapshots; `mc-save` encodes each with its registered codec and stores the bundle. W2 validates the legacy envelope's format, version, and integrity. The initial migration supports the existing v3 envelope only; other legacy versions are rejected before any slice restore. For v3, `mc-save` passes only the validated payload to `migrateSimulationSaveV3`. `LegacySimulationSaveV3Schema` validates inventory as an array of `null` or an item stack accepted by `isItemStack`, matching the v3 save format. `LegacyItemStackSchema` maps the v3 component `null` placeholders to the current `ItemStack` representation while decoding and reverses that mapping when encoding. The migration decodes that payload, maps its fields to raw slice inputs in an Effect, then decodes each input with its registered slice codec before encoding the initial player, time, inventory, and statistics slices at their registered versions. The mapper and slice decoders report `Schema.SchemaError`; they use no casts or thrown exceptions. Map v3 player position to `PlayerService`'s `pose.feetPosition`; set `yawRadians` and `pitchRadians` to 0 because v3 stored no orientation; preserve `dimension` in the same player slice. Map `tick` to the time slice with `dayLengthTicks` 24000 because v3 stored no day-length denominator. Map inventory and `selectedHotbarSlot` together into the initial inventory slice; map counters and unlocked achievements into the statistics slice. These four registered slices receive the v3 data; additional registered slices are initialized by normal world startup, not restored from the legacy payload. Encode every v3 target slice before restore. Decode or encode failure invokes no restore. Restore the four migrated slices in an unpublished world session; if any restore fails or is interrupted, close that session and expose no partially restored world. The host registers it only after every restore succeeds. `mc-save` adds generic legacy-envelope decoding in W2. `mc-sim` registers the v3 fan-out migration in W3 after the initial slice schemas exist. If no complete per-slice migration path exists for a stored slice, restore fails with `SaveMigrationPathMissing`; if multiple paths exist, it fails with `SaveMigrationPathAmbiguous`. Both errors carry the slice ID, stored version, and current version, and neither invokes that slice's restore.
-6. **Wave.** Fix the module and slice type shape in W1. Add generic legacy-envelope decoding in W2 and the mc-sim v3 fan-out migration in W3. In W5, move the 37 host E2E tests to `mc-host-web`, remove the old function registry and install/read API from `mc-compose`, and have `mc-host-web` decide the browser startup and rollback design.
+6. **Wave.** Fix the module and slice type shape in W1. In W2, decode the legacy save envelope. In W3, map the existing v3 payload into the initial player, time, inventory, and statistics slices. In W5, move the 37 host E2E tests to `mc-host-web`, remove the old function registry and install/read API from `mc-compose`, and have `mc-host-web` decide the browser startup wiring and which resources to roll back on startup failure.
 
 ## C2: Simulation intent queue
 
