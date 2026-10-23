@@ -117,3 +117,7 @@ This record covers the 85 open pull requests found across the 16 repositories du
 ### W0-T: mc-dev-meta PR #45
 
 Carry the actions/setup-node update from v7.0.0 to v7.1.0 in mc-dev-meta/.github/workflows/ci.yaml, using the PR's updated action SHA. Apply it in W0-T.
+
+### W0-T: mc-dev-meta PR #44
+
+Carry the actions/upload-artifact update from v7.0.1 to v7.0.2 in mc-dev-meta/.github/workflows/ci.yaml, using the PR's updated action SHA. Apply it in W0-T.
