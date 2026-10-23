@@ -113,3 +113,7 @@ This record covers the 85 open pull requests found across the 16 repositories du
 | mc-compose | 9 | 8 | 1 | 0 |
 | mc-dev-meta | 9 | 0 | 7 | 2 |
 | **Total** | **85** | **58** | **13** | **14** |
+
+### W0-T: mc-dev-meta PR #45
+
+Carry the actions/setup-node update from v7.0.0 to v7.1.0 in mc-dev-meta/.github/workflows/ci.yaml, using the PR's updated action SHA. Apply it in W0-T.
