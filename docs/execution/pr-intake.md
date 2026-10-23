@@ -149,3 +149,7 @@ Carry kernel-owned Dimension imports in mc-playground-kit/src/application/genera
 ### W3: mc-compose PR #13 to mc-sim
 
 Move the two crafting-grid operations and their four focused tests from mc-compose/apps/web/inventory-interaction.ts and mc-compose/test/inventory-interaction.test.ts to mc-sim. The ownership map assigns the source logic to mc-sim:src/ in W3; proposed destination files are mc-sim/src/application/inventory-interaction.ts and mc-sim/test/inventory-interaction.test.ts. The destination filenames are inferred from the ownership map's directory-level assignment.
+
+### W4: mx-gameplay PR #10
+
+Carry shared empty-array reuse in mx-gameplay/src/stages/registration.ts and its idle-frame status-effect regression test in mx-gameplay/test/stage-registration.test.ts as part of the W4 registration split.
