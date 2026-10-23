@@ -44,19 +44,24 @@ export type DimensionId = Schema.Schema.Type<typeof DimensionIdSchema>;
 export type WorldId = Brand.Branded<string, "WorldId">;
 export const WorldIdSchema = Schema.NonEmptyString.pipe(Schema.brand("WorldId"));
 
-export type BlockId = Brand.Branded<string, "BlockId">;
-export const BlockIdSchema = Schema.NonEmptyString.pipe(Schema.brand("BlockId"));
+export type BlockId = Brand.Branded<number, "BlockId">;
+export const BlockIdSchema = Schema.Int
+  .check(Schema.isBetween({ minimum: 0, maximum: 65535 }))
+  .pipe(Schema.brand("BlockId"));
 
 export type ItemId = Brand.Branded<number, "ItemId">;
 export const ItemIdSchema = Schema.Int
   .check(Schema.isBetween({ minimum: 0, maximum: 65535 }))
   .pipe(Schema.brand("ItemId"));
 
+export type BlockAxis = Brand.Branded<number, "BlockAxis">;
+export const BlockAxisSchema = Schema.Int.pipe(Schema.brand("BlockAxis"));
+
 export const BlockPositionSchema = Schema.Struct({
-  x: Schema.Int,
-  y: Schema.Int,
-  z: Schema.Int
-}).pipe(Schema.brand("BlockPosition"));
+  x: BlockAxisSchema,
+  y: BlockAxisSchema,
+  z: BlockAxisSchema
+});
 export type BlockPosition = Schema.Schema.Type<typeof BlockPositionSchema>;
 
 export const BlockAddressSchema = Schema.Struct({
@@ -147,9 +152,34 @@ export interface QaNamespace<
   readonly command: Command;
 }
 
+export type StageId = string & Brand.Brand<"StageId">;
+export declare const StageId: Brand.Constructor<StageId>;
+export type DeltaTimeSecs = number & Brand.Brand<"DeltaTimeSecs">;
+export declare const DeltaTimeSecs: Brand.Constructor<DeltaTimeSecs>;
+export type MonotonicTimeSecs = number & Brand.Brand<"MonotonicTimeSecs">;
+export declare const MonotonicTimeSecs: Brand.Constructor<MonotonicTimeSecs>;
+export type EpochMillis = number & Brand.Brand<"EpochMillis">;
+export declare const EpochMillis: Brand.Constructor<EpochMillis>;
+export type ClockService = {
+  readonly monotonicSecs: Effect.Effect<MonotonicTimeSecs>;
+  readonly wallClockEpochMillis: Effect.Effect<EpochMillis>;
+};
+const ClockPortBase: Context.ServiceClass<ClockPort, "@nerima-games/mc-kernel/ClockPort", ClockService> =
+  Context.Service<ClockPort, ClockService>()("@nerima-games/mc-kernel/ClockPort");
+export class ClockPort extends ClockPortBase {}
+export type FrameServices = ClockPort;
+
+/** Ordering edges only; missing targets are dropped and reported by the host. */
+export interface StageRegistration {
+  readonly id: StageId;
+  readonly after?: ReadonlyArray<StageId>;
+  readonly run: (dt: DeltaTimeSecs) => Effect.Effect<void, never, FrameServices>;
+}
+
+/** RIn builds layers; RRegister is the separate environment for evaluating frameStages. */
 export interface KernelGameModule<ROut, Error, RIn, RRegister = never> {
   readonly layers: Layer.Layer<ROut, Error, RIn>;
-  readonly frameStages: Effect.Effect<ReadonlyArray<unknown>, never, RRegister>;
+  readonly frameStages: Effect.Effect<ReadonlyArray<StageRegistration>, never, RRegister>;
 }
 
 export interface GameModule<
@@ -668,7 +698,7 @@ export const LevelUpLevelSchema = Schema.Int
 export type LevelUpLevel = Schema.Schema.Type<typeof LevelUpLevelSchema>;
 
 export const AchievementIdSchema = Schema.NonEmptyString.pipe(Schema.brand("AchievementId"));
-export type AchievementId = Schema.Schema.Type<typeof AchievementIdSchema>;
+export type DomainEventAchievementId = Schema.Schema.Type<typeof AchievementIdSchema>;
 
 export const DomainEventSchema = Schema.Union([
   Schema.TaggedStruct("EntityDamaged", {
@@ -903,7 +933,7 @@ export const BlockEditSchema = Schema.Struct({
   position: BlockPositionSchema,
   block: BlockIdSchema
 });
-export type BlockEdit = Schema.Schema.Type<typeof BlockEditSchema>;
+export type WorldWriteBlockEdit = Schema.Schema.Type<typeof BlockEditSchema>;
 
 export const WorldWriteBatchSchema = Schema.Struct({
   world: WorldIdSchema,
