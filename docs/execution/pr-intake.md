@@ -1,6 +1,10 @@
 # Open PR Intake
 
-This record covers the 85 open pull requests found across the 16 repositories during W0-8 review. Class 1 means main already contains the same or a newer dependency version, or equivalent work. Class 2 means the change should be carried into the listed wave. Class 3 means the current plan has no change to retain. The reason text is the English comment posted before each pull request is closed.
+This record documents W0-8, the execution-plan-v2 task to review open pull requests and record follow-up intake before closing them. The review inventory contains 85 PRs across 16 repositories.
+
+Class 1 means main already contains the same or a newer dependency version, or equivalent work. Class 2 means the change should be carried into the listed wave. Class 3 means the current plan has no change to retain. The reason text is the English comment posted before each PR is closed.
+
+Wave assignments follow .mediator/spec/execution-plan-v2.md §§5 and 7. Source-file ownership is mapped in docs/execution/ownership-map.md, and contract C4 is in docs/execution/contracts.md. W0-T is the independent toolchain-update track in plan §5. W6-5 is plan §7.9's task to add mc-host-web and mc-server to mc-dev-meta and update repos.json. The two class 2 Vitest updates are assigned to W6-5 by inference because §7 defines no separate mc-dev-meta package wave.
 
 ## Pull request decisions
 
@@ -85,9 +89,9 @@ This record covers the 85 open pull requests found across the 16 repositories du
 | mc-dev-meta | 45 | chore(deps): bump actions/setup-node from 7.0.0 to 7.1.0 | app/dependabot | 2: later intake | Main still pins setup-node v7.0.0, while this diff updates it to v7.1.0. This matches the planned Actions refresh; carry .github/workflows/ci.yaml into mc-dev-meta in W0-T. | W0-T |
 | mc-dev-meta | 44 | chore(deps): bump actions/upload-artifact from 7.0.1 to 7.0.2 | app/dependabot | 2: later intake | Main still pins upload-artifact v7.0.1, while this diff updates it to v7.0.2. Carry the workflow update into mc-dev-meta in W0-T. | W0-T |
 | mc-dev-meta | 43 | chore(deps-dev): bump effect from 3.22.1 to 3.22.2 | app/dependabot | 3: unnecessary | The planned target is Effect 4.0.5, upgraded with the Vitest 5 toolchain. This intermediate Effect 3.22.2 bump is not part of that target and can close. | none |
-| mc-dev-meta | 42 | chore(deps-dev): bump @vitest/coverage-v8 from 4.1.11 to 5.0.3 | app/dependabot | 2: later intake | The plan moves the Vitest toolchain to 5.0.5 alongside Effect 4.0.5. Carry the coverage upgrade and refreshed lockfile into mc-dev-meta during W6-5, then close this older 5.0.3 snapshot. | W6-5 (inferred) |
+| mc-dev-meta | 42 | chore(deps-dev): bump @vitest/coverage-v8 from 4.1.11 to 5.0.3 | app/dependabot | 2: later intake | The plan targets Vitest 5.0.5 with Effect 4.0.5; this PR stops at 5.0.3. I am recording the planned target for mc-dev-meta's W6-5 update and closing this older snapshot. | W6-5 (inferred) |
 | mc-dev-meta | 41 | chore(deps-dev): bump @types/node from 26.4.0 to 26.6.3 | app/dependabot | 2: later intake | The planned W0-T update includes @types/node; main is still on 26.4.0, while the PR proposes 26.6.3. Carry the update and lockfile refresh into mc-dev-meta in W0-T, using the current planned latest version. | W0-T |
-| mc-dev-meta | 40 | chore(deps-dev): bump vitest from 4.1.11 to 5.0.3 | app/dependabot | 2: later intake | The plan moves the Vitest toolchain to 5.0.5 alongside Effect 4.0.5. Carry the Vitest upgrade and refreshed lockfile into mc-dev-meta during W6-5, then close this older 5.0.3 snapshot. | W6-5 (inferred) |
+| mc-dev-meta | 40 | chore(deps-dev): bump vitest from 4.1.11 to 5.0.3 | app/dependabot | 2: later intake | The plan targets Vitest 5.0.5 with Effect 4.0.5; this PR stops at 5.0.3. I am recording the planned target for mc-dev-meta's W6-5 update and closing this older snapshot. | W6-5 (inferred) |
 | mc-dev-meta | 37 | chore(deps-dev): bump tsx from 4.23.12 to 4.23.15 | app/dependabot | 2: later intake | The planned W0-T update includes tsx; main is still on 4.23.12, while the PR proposes 4.23.15. Carry the package and lockfile updates into mc-dev-meta in W0-T. | W0-T |
 | mc-dev-meta | 30 | chore(deps): bump pnpm/action-setup from 6.0.10 to 6.1.0 | app/dependabot | 2: later intake | Main still pins pnpm/action-setup v6.0.10, while this diff updates it to v6.1.0 at the planned SHA. Carry the workflow update into mc-dev-meta in W0-T. | W0-T |
 | mc-dev-meta | 16 | WIP: 20260820T143121-d7ed761 | takeokunn | 3: unnecessary | Main has moved mc-dev-meta to a mirror-free registry model and added the 26.3 conformance catalog and generator. This WIP's proposed runtime kernel, mirror layer, and audio implementation do not fit the planned role for mc-dev-meta, so there is no intake. | none |
@@ -116,23 +120,23 @@ This record covers the 85 open pull requests found across the 16 repositories du
 
 ### W0-T: mc-dev-meta PR #45
 
-Carry the actions/setup-node update from v7.0.0 to v7.1.0 in mc-dev-meta/.github/workflows/ci.yaml, using the PR's updated action SHA. Apply it in W0-T.
+Carry actions/setup-node v7.1.0 at SHA 949feb2413d6458794dcd2491c4babbbce0c15c1 into mc-dev-meta/.github/workflows/ci.yaml.
 
 ### W0-T: mc-dev-meta PR #44
 
-Carry the actions/upload-artifact update from v7.0.1 to v7.0.2 in mc-dev-meta/.github/workflows/ci.yaml, using the PR's updated action SHA. Apply it in W0-T.
+Carry actions/upload-artifact v7.0.2 at SHA cf430e030ddbb5b0abf93d22962f4752f3646cd9 into mc-dev-meta/.github/workflows/ci.yaml.
 
 ### W0-T: mc-dev-meta PR #41
 
-Carry the @types/node update in mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml. Use the planned current version 26.6.5 rather than this PR's 26.6.3, then apply it in W0-T.
+Update @types/node in mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml to the planned current version 26.6.5 instead of this PR's 26.6.3.
 
 ### W0-T: mc-dev-meta PR #37
 
-Carry the tsx update to 4.23.15 in mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml. Apply it in W0-T.
+Update tsx to 4.23.15 in mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml.
 
 ### W0-T: mc-dev-meta PR #30
 
-Carry the pnpm/action-setup update to v6.1.0 at SHA ea17c68df8912ef543352723c149a84f56e3d413 in mc-dev-meta/.github/workflows/ci.yaml. Apply it in W0-T.
+Update mc-dev-meta/.github/workflows/ci.yaml to pnpm/action-setup v6.1.0 at SHA ea17c68df8912ef543352723c149a84f56e3d413.
 
 ### W3: mc-sim PR #37
 
@@ -144,11 +148,11 @@ Carry the fluid-quad tile resolver from mc-render/src/domain/chunk-geometry.ts a
 
 ### W3: mc-playground-kit PR #29
 
-Carry kernel-owned Dimension imports in mc-playground-kit/src/application/generated-gameplay.ts and mc-playground-kit/src/application/generated-world-provider.ts, and the retained runtime work in mc-playground-kit/src/domain/flat-chunk.ts. Carry the brand-boundary and runtime tests in mc-playground-kit/test/brand-boundaries.compile.ts, mc-playground-kit/test/browser-preview.test.ts, mc-playground-kit/test/gameplay-services.test.ts, mc-playground-kit/test/generated-gameplay.test.ts, and mc-playground-kit/test/playground.test.ts. Refresh mc-playground-kit/package.json and mc-playground-kit/pnpm-lock.yaml for W3; do not carry the end-portal interaction implementation scheduled for removal.
+Use Dimension from mc-kernel in mc-playground-kit/src/application/generated-gameplay.ts and mc-playground-kit/src/application/generated-world-provider.ts. Carry the brand-boundary fixes for retained runtime paths in mc-playground-kit/src/domain/flat-chunk.ts, with tests in mc-playground-kit/test/brand-boundaries.compile.ts, mc-playground-kit/test/browser-preview.test.ts, mc-playground-kit/test/gameplay-services.test.ts, mc-playground-kit/test/generated-gameplay.test.ts, and mc-playground-kit/test/playground.test.ts. Refresh mc-playground-kit/package.json and mc-playground-kit/pnpm-lock.yaml for W3; exclude the end-portal interaction implementation that plan §4.3 removes.
 
 ### W3: mc-compose PR #13 to mc-sim
 
-Move the two crafting-grid operations and their four focused tests from mc-compose/apps/web/inventory-interaction.ts and mc-compose/test/inventory-interaction.test.ts to mc-sim. The ownership map assigns the source logic to mc-sim:src/ in W3; proposed destination files are mc-sim/src/application/inventory-interaction.ts and mc-sim/test/inventory-interaction.test.ts. The destination filenames are inferred from the ownership map's directory-level assignment.
+Move the two crafting-grid operations and their four focused tests from mc-compose/apps/web/inventory-interaction.ts and mc-compose/test/inventory-interaction.test.ts to mc-sim. docs/execution/ownership-map.md assigns the logic to mc-sim:src/ in W3. Proposed destination files are mc-sim/src/application/inventory-interaction.ts and mc-sim/test/inventory-interaction.test.ts; these filenames are inferred from the map's directory-level assignment.
 
 ### W4: mx-gameplay PR #10
 
@@ -160,8 +164,8 @@ Carry the type-safety, runtime-boundary, and behavior changes into mx-gameplay W
 
 ### W6-5 (inferred): mc-dev-meta PR #40
 
-Carry the Vitest update into mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml, using the planned 5.0.5 target and pairing it with Effect 4.0.5. W6-5 is the only mc-dev-meta wave named in §7; assigning this package migration to W6-5 is inferred.
+Update Vitest from 5.0.3 to the planned 5.0.5 target in mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml, paired with Effect 4.0.5. Assigning this package migration to W6-5 is inferred because §7.9 names no separate mc-dev-meta package wave.
 
 ### W6-5 (inferred): mc-dev-meta PR #42
 
-Carry the @vitest/coverage-v8 update into mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml, using the planned 5.0.5 target and pairing it with Effect 4.0.5. W6-5 is the only mc-dev-meta wave named in §7; assigning this package migration to W6-5 is inferred.
+Update @vitest/coverage-v8 from 5.0.3 to the planned 5.0.5 target in mc-dev-meta/package.json and mc-dev-meta/pnpm-lock.yaml, paired with Effect 4.0.5. Assigning this package migration to W6-5 is inferred because §7.9 names no separate mc-dev-meta package wave.
