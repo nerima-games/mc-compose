@@ -145,3 +145,7 @@ Carry the fluid-quad tile resolver from mc-render/src/domain/chunk-geometry.ts a
 ### W3: mc-playground-kit PR #29
 
 Carry kernel-owned Dimension imports in mc-playground-kit/src/application/generated-gameplay.ts and mc-playground-kit/src/application/generated-world-provider.ts, and the retained runtime work in mc-playground-kit/src/domain/flat-chunk.ts. Carry the brand-boundary and runtime tests in mc-playground-kit/test/brand-boundaries.compile.ts, mc-playground-kit/test/browser-preview.test.ts, mc-playground-kit/test/gameplay-services.test.ts, mc-playground-kit/test/generated-gameplay.test.ts, and mc-playground-kit/test/playground.test.ts. Refresh mc-playground-kit/package.json and mc-playground-kit/pnpm-lock.yaml for W3; do not carry the end-portal interaction implementation scheduled for removal.
+
+### W3: mc-compose PR #13 to mc-sim
+
+Move the two crafting-grid operations and their four focused tests from mc-compose/apps/web/inventory-interaction.ts and mc-compose/test/inventory-interaction.test.ts to mc-sim. The ownership map assigns the source logic to mc-sim:src/ in W3; proposed destination files are mc-sim/src/application/inventory-interaction.ts and mc-sim/test/inventory-interaction.test.ts. The destination filenames are inferred from the ownership map's directory-level assignment.
