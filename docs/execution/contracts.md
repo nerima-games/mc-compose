@@ -239,6 +239,10 @@ type ModuleFrameStageRequirementsOf<Module> = Module extends {
 type IsGameModule<Module> = Module extends {
   readonly layers: Layer.Layer<infer _Services, infer _LayerError, infer _LayerRequirements>;
   readonly frameStages: Effect.Effect<infer _Stages, infer _StageError, infer _StageRequirements>;
+  readonly qa?: QaNamespace<infer _Observe, infer _Command>;
+  readonly saveSlices?: ReadonlyArray<
+    SaveSliceRegistration<infer _Schema, infer _RestoreError, infer _Requirements>
+  >;
 } ? true : false;
 
 type InvalidGameModules<Modules extends ReadonlyArray<unknown>> =
