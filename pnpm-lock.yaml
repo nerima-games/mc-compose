@@ -192,8 +192,8 @@ importers:
         specifier: 0.2.2
         version: 0.2.2
       '@nerima-games/mc-playground-kit':
-        specifier: 0.3.1
-        version: 0.3.1
+        specifier: 0.4.0
+        version: 0.4.0
       '@nerima-games/mc-render':
         specifier: 0.7.0
         version: 0.7.0
@@ -591,8 +591,8 @@ packages:
     resolution: {integrity: sha512-CZbH77ozqHMpYJ/VKmkLSFo7eu2efGxFVYx27TyG248ghE/e4nDYVSgUiHQar4+4vYAJ2yOd7JDWbS5OxyqirA==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-physics/0.2.2/09571bc32a9f9a6b923e565ec91c8ce16492ad88}
     engines: {node: '>=24.0.0', pnpm: '>=11.24.0'}
 
-  '@nerima-games/mc-playground-kit@0.3.1':
-    resolution: {integrity: sha512-n2KK94by6UFKabowRjhzkpgrkDQ64cDysxT/kzSTHGCfPqDme/TnwhaLYOTAuYHvjHRvlNEWt0RDVWq6QpDZtQ==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-playground-kit/0.3.1/f49d474902ae0783c590e76b793557b66f4fe4ec}
+  '@nerima-games/mc-playground-kit@0.4.0':
+    resolution: {integrity: sha512-VXhXT9L/PUZDnrFOeWmMC+MItLcC0DEb9TG9HEIdsxDp3FrkhAbQCfAqMwTlKpSfBx3oKURUYIm9M92z9ybnIQ==, tarball: https://npm.pkg.github.com/download/@nerima-games/mc-playground-kit/0.4.0/0b17c2697bb6083749b1f7c20bd84118d3a70063}
     engines: {node: '>=24.0.0', pnpm: '>=11.24.0'}
 
   '@nerima-games/mc-render@0.7.0':
@@ -1932,7 +1932,7 @@ snapshots:
       '@nerima-games/mc-kernel': 0.7.1
       effect: 3.22.1
 
-  '@nerima-games/mc-playground-kit@0.3.1':
+  '@nerima-games/mc-playground-kit@0.4.0':
     dependencies:
       '@nerima-games/mc-kernel': 0.7.1
       '@nerima-games/mc-physics': 0.2.2
