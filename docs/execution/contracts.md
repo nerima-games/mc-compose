@@ -13,7 +13,7 @@ Package implementation waves follow W0: W1 updates `mc-kernel` and `mc-compose`;
 | C1 | `mc-kernel`, `GameModule` extensions in `src/domain/time/frame.ts`; `QaBridge` in `mc-compose` | W1 types, W2 save envelope support, W3 v3 slice migration, W5 QA transport migration | All game modules, compose, `mc-host-web` E2E |
 | C2 | `mc-sim`, `IntentQueue` in `src/application/intent-queue.ts` | W3 | `mx-gameplay`, `mx-redstone`, `mx-multiplayer`, hosts |
 | C3 | Event vocabulary in `mc-kernel`; `DomainEventBus` in `mc-sim` | W1 vocabulary, W3 bus | Render, UI, gameplay adapters |
-| C4 | Replicated state services in `mc-sim`; grouped codecs in `mx-multiplayer` | W3 state, W4 protocol v9 contract | `mx-multiplayer`, `mc-server` |
+| C4 | Replicated state services in `mc-sim`; grouped codecs in `mx-multiplayer` | W3 state, W4 protocol v10 contract | `mx-multiplayer`, `mc-server` |
 | C5 | `mc-sim`, `@nerima-games/mc-sim/testing` | W3 | All `mx-*` packages and `mc-server` |
 | C6 | `mc-render` particle request service; `mc-playground-kit` host adapter | W3 service and adapter | Gameplay reaches the render adapter through C3 events |
 | C7 | Port in `mc-kernel`; public writer alias in `mx-multiplayer` | W1 type, W4 consumer contracts and adapter placement, W5 host wiring | `mc-server`, `mc-host-web`, redstone host adapter |
@@ -31,7 +31,7 @@ Package implementation waves follow W0: W1 updates `mc-kernel` and `mc-compose`;
 ### Shared vocabulary
 
 ```ts
-import { isItemStack, type ItemStack } from "@nerima-games/mc-kernel";
+import { isItemStack, DIMENSIONS, type Dimension, type ItemStack, type WorldWriteChunkUnavailable } from "@nerima-games/mc-kernel";
 import { Brand, Context, Effect, Layer, Schema, SchemaGetter, Stream } from "effect";
 
 export type EntityId = Brand.Branded<string, "EntityId">;
@@ -754,8 +754,8 @@ export declare const DomainEventBusLayer: (
 ## C4: Replicated state
 
 1. **Placement.** Authoritative state and snapshot services belong to `mc-sim`. `mx-multiplayer` owns wire encoding, validation, and delivery; `mc-server` composes the same simulation services used by the browser host.
-2. **Effect 4 types.** State is exposed as a world-scoped snapshot. Mutations remain in owner services, and each owner routes replicated writes through the `mc-sim` world-session `WorldCommitCoordinator`. An owner validates and prepares its candidate state, then submits the candidate and owner ID to the coordinator; it does not mutate replicated state directly. The coordinator serializes candidates into one local world-session commit, assigns the shared revision once, and creates the resulting group delta as part of that commit. C7 submits accepted block edits through the world-block owner to this same coordinator. Owner snapshot services read state and revision from the committed version. The network adapter sends the committed group as one message after the local commit; transport delivery is outside that transaction. Clients validate and apply the entire group atomically, then advance the shared world revision once.
-3. **Schema shape.** A snapshot carries a `WorldId`, a monotonically increasing `WorldRevision` within that world, and the owner's state codec. The player example extends the existing `PlayerService` API with a snapshot that combines the service's coordinate-only `pose.feetPosition` and `dimension` into the `WorldPosition` used in the snapshot. It does not create another player-state service. Other owner services provide their own codecs.
+2. **Effect 4 types.** State is exposed as a world-scoped snapshot. Mutations remain in owner services, and each owner routes replicated writes through the `mc-sim` world-session `WorldCommitCoordinator`. An owner validates its candidate and submits it in `WorldCommitRequest.changes`, with `expectedRevision` and `expectedDimensions`; it does not mutate replicated state directly. The request may also include `blockWrite?: WorldWriteBatch`. The coordinator serializes each accepted request into one local world-session commit and increments the shared world revision once. Under that gate, it validates the candidates and batch, then requires `blockWrite.world` to match its world, `blockWrite.expectedWorldRevision` to match request `expectedRevision`, and every `{ dimension, expectedRevision }` entry for `blockWrite.dimension` in `expectedDimensions` to match `blockWrite.expectedDimensionRevision` (at least one matching entry is required). A mismatch fails as `WorldCommitBlockWriteMismatch` with reason `world`, `world-revision`, or `dimension-revision`. It then compares request expectations with current revisions and prepares the ChunkStore write. It prepares the next owner state, revisions, and `ReplicatedWorldDelta`, publishes the ChunkStore write, then exposes the committed owner state and revisions and returns the delta. No fallible work follows publication. ChunkStore (`mc-worldgen`) owns block state, which is not part of a C4 owner snapshot. The coordinator's `observe` API reads owner state and block values under the same gate and revision. Callers that read through ChunkStore `load` or `peek` directly reread after commit when they need current values. Owner snapshot services read state and revision from the committed version. The network adapter sends the committed group as one message after the local commit; transport delivery is outside that transaction. Clients validate and apply the entire group atomically, then advance the shared world revision once.
+3. **Schema shape.** A snapshot carries a `WorldId`, a monotonically increasing `WorldRevision` within that world, and the owner's state codec; it does not contain chunks. The player example extends the existing `PlayerService` API with a snapshot that combines the service's coordinate-only `pose.feetPosition` and `dimension` into the `WorldPosition` used in the snapshot. It does not create another player-state service. Other owner services provide their own codecs.
 
 ```ts
 export const replicatedSnapshotSchema = <State extends Schema.Codec<unknown>>(state: State) =>
@@ -783,17 +783,51 @@ export const replicatedOwnerChangeSchema = <const Owner extends string, State ex
     state
   });
 
+export type ReplicatedBlockChange = Readonly<{
+  dimension: Dimension;
+  position: BlockPosition;
+  before: BlockId;
+  after: BlockId;
+}>;
+
+const SafeBlockAxisSchema: Schema.Codec<BlockPosition["x"], number> = Schema.Int
+  .check(Schema.isBetween({ minimum: -Number.MAX_SAFE_INTEGER, maximum: Number.MAX_SAFE_INTEGER }))
+  .pipe(Schema.brand("BlockAxis"));
+
+export const WorldBlockPositionSchema: Schema.Codec<
+  BlockPosition,
+  Readonly<{ x: number; y: number; z: number }>
+> = Schema.Struct({
+  x: SafeBlockAxisSchema,
+  y: SafeBlockAxisSchema,
+  z: SafeBlockAxisSchema
+});
+
+export const ReplicatedBlockChangeSchema: Schema.Codec<ReplicatedBlockChange, Readonly<{
+  dimension: Dimension;
+  position: Schema.Codec.Encoded<typeof WorldBlockPositionSchema>;
+  before: Schema.Codec.Encoded<typeof BlockIdSchema>;
+  after: Schema.Codec.Encoded<typeof BlockIdSchema>;
+}>> = Schema.Struct({
+  dimension: Schema.Literals(DIMENSIONS),
+  position: WorldBlockPositionSchema,
+  before: BlockIdSchema,
+  after: BlockIdSchema
+});
+
 export const replicatedWorldDeltaSchema = <Change extends Schema.Codec<unknown>>(change: Change) =>
   Schema.Struct({
     world: WorldIdSchema,
     revision: WorldRevisionSchema,
-    changes: Schema.Array(change)
+    changes: Schema.Array(change),
+    blockChanges: Schema.Array(ReplicatedBlockChangeSchema)
   });
 
 export type ReplicatedWorldDelta<Change> = Readonly<{
   readonly world: WorldId;
   readonly revision: WorldRevision;
   readonly changes: ReadonlyArray<Change>;
+  readonly blockChanges: ReadonlyArray<ReplicatedBlockChange>;
 }>;
 
 export const YawRadiansSchema = Schema.Finite.pipe(Schema.brand("YawRadians"));
@@ -823,8 +857,8 @@ export type PlayerServiceApiWithSnapshot<ExistingPlayerServiceApi> = ExistingPla
 ```
 
 4. **Consumers.** The server supplies owner-service snapshots to `mx-multiplayer`; the multiplayer adapter sends them to clients, which apply deltas according to the revision rule below.
-5. **Compatibility.** Snapshot codecs are protocol data, not save slices. Wire incompatibility is handled by multiplayer protocol versioning. A newly initialized world starts at revision zero, and its initial snapshot is the client's baseline. All replicated owner services in one world share a single revision sequence, incremented once by `mc-sim` for each committed authoritative world-state transition. A failed intent commit changes neither owner state nor `WorldRevision`. Group every changed owner snapshot from one transition into one world delta; `mx-multiplayer` delivers that group as a unit, and clients validate every owner payload before atomically applying the whole group and advancing `WorldRevision` once. A delta's revision identifies the state after applying that transition; apply it only when its world matches and its revision equals the current revision plus one. A duplicate, stale revision, gap, or invalid member rejects the whole group and requires a resync snapshot. A C7 batch changes the world-block owner's state; the corresponding C4 group delta contains that owner's resulting snapshot and any other owner snapshots changed by the same transition. The local commit updates those snapshots, the `DimensionRevision`, and the world's `WorldRevision` atomically, and creates the group delta in that same commit. Network delivery follows the local commit; a failed or interrupted batch changes neither revision nor owner state and creates no delta. `mx-multiplayer` owns versioned delta envelopes and payload fields; this contract fixes state ownership and revision semantics. `PROTOCOL_VERSION` moves from 8 to 9 because grouped owner deltas and world-revision checks change the wire contract; v8 peers are rejected. This incompatible change is allowed in the 0.x minor release.
-6. **Wave.** Finalize service ownership and snapshot shape in W3. Freeze grouped delta and protocol v9 wire contracts in W4 before W5 host and server wiring.
+5. **Compatibility.** Snapshot codecs are protocol data, not save slices. Wire incompatibility is handled by multiplayer protocol versioning. A newly initialized world starts at revision zero, and its initial snapshot is the client's baseline. All replicated owner services in one world share a single revision sequence, incremented once by `mc-sim` for each successful coordinator commit. A failed intent commit changes neither owner state nor `WorldRevision`. Group every changed owner snapshot from one transition into one world delta; `mx-multiplayer` delivers that group as a unit, and clients validate every owner payload before atomically applying the whole group and advancing `WorldRevision` once. A delta's revision identifies the state after applying that transition; apply it only when its world matches and its revision equals the current revision plus one. A duplicate, stale revision, gap, or invalid member rejects the whole group and requires a resync snapshot. A C7 batch contributes dimension-scoped, sparse `blockChanges` to the same C4 group delta and `WorldRevision` as any owner changes in that commit; it does not produce a world-block owner snapshot. The local commit updates the owner state, the `DimensionRevision`, and the world's `WorldRevision` atomically, and creates the group delta in that same commit. Network delivery follows the local commit; a failed or interrupted batch changes neither block state, owner state, nor revisions and creates no delta. `mx-multiplayer` owns versioned delta envelopes and payload fields; this contract fixes state ownership and revision semantics. The addition of same-revision block changes changes the grouped-delta wire contract. W4 assigns `PROTOCOL_VERSION`'s move from v9 to v10 to `mx-multiplayer`; v9 peers are rejected, and this contract does not define the v10 shape. This incompatible change is allowed in the 0.x minor release.
+6. **Wave.** Finalize service ownership and snapshot shape in W3. Freeze the grouped-delta wire contract in W4 before W5 host and server wiring.
 
 ## C5: Deterministic headless harness
 
@@ -925,8 +959,8 @@ export class ParticleService extends Context.Service<ParticleService, {
 ## C7: Generic world-write port
 
 1. **Placement.** Define `WorldWritePort` and its data vocabulary in `mc-kernel/src/domain/world/world-write-port.ts`. Put the `MultiplayerWorldWriter` alias in `mx-multiplayer/src/domain/world-write.ts` and re-export it from the multiplayer package entry point. Open: W4 selects the adapter file and export after `mx-redstone` and `mx-multiplayer` finalize their contracts, because the placement depends on their consumer boundary; W5 wires that adapter in `mc-host-web` and `mc-server`.
-2. **Effect 4 types.** `applyBatch` is an atomic, dual-revision-checked Effect operation. It returns both the committed dimension and world revisions or a typed conflict/invalid-batch failure. Validate the entire batch before checking revisions or writing. The network adapter checks the expected world revision first, then the expected dimension revision. The world-session commit coordinator rechecks both in the same transaction as the writes to prevent a time-of-check/time-of-use race. The world-block owner applies the edits and contributes its resulting C4 snapshot to the grouped delta in that commit. A successful batch increments each revision once; any failure leaves the blocks, owner state, and both revisions unchanged and creates no delta.
-3. **Schema shape.** A batch names its world, expected `WorldRevision`, dimension, expected `DimensionRevision`, and block edits. Reject empty batches and duplicate positions as `WorldWriteInvalidBatch`; report expected and current world and dimension revisions as `WorldWriteConflict`. Validate batch structure before checking revisions, so an empty or duplicate-position batch fails as invalid even when either expected revision is stale. `WorldRevision` is checked before `DimensionRevision` at the network boundary.
+2. **Effect 4 types.** `applyBatch` is an atomic, dual-revision-checked Effect operation. It returns both the committed dimension and world revisions or a typed conflict, invalid-batch, or unavailable-chunk failure. Validate the entire batch before checking revisions or writing. The network adapter checks the expected world revision first, then the expected dimension revision. The world-session commit coordinator rechecks both in the same transaction as the writes to prevent a time-of-check/time-of-use race. The coordinator accepts the C7 batch as optional `blockWrite` on `WorldCommitRequest`, together with any owner candidate changes for that action. It prepares and publishes the ChunkStore write in the same commit, then advances the world revision once and the batch dimension revision once. The delta contains dimension-scoped, sparse `blockChanges` at that same world revision rather than a world-block owner snapshot. A missing chunk keeps the kernel's typed `WorldWriteChunkUnavailable` failure. When the batch is submitted through `WorldCommitRequest.blockWrite`, a batch/request mismatch returns `WorldCommitBlockWriteMismatch`; once aligned, stale request revisions use the C4 `WorldRevisionConflict` or `DimensionRevisionConflict`. Out-of-range positions return `WorldCommitBlockWriteInvalidPosition`, ChunkStore stale publication returns `WorldWriteStale`, and an invalid prepared token returns the typed internal `WorldWriteTokenInvalid` failure. Other ChunkStore prepare validation failures return `WorldCommitBlockWritePrepareInvalid` with reason `not-array`, `invalid-edit`, `invalid-position`, `invalid-block-id`, or `out-of-world`. The batch-related members of `WorldCommitCoordinatorError` are `WorldCommitBlockWriteMismatch`, `WorldCommitChunkStoreUnavailable`, `WorldWriteChunkUnavailable`, `WorldWriteInvalidBatch`, `WorldCommitBlockWriteInvalidPosition`, `WorldCommitBlockWritePrepareInvalid`, `WorldWriteStale`, and `WorldWriteTokenInvalid`; existing C4 request, schema, owner, and revision failures also remain in that union. The kernel `WorldWritePort.applyBatch` error union remains `WorldWriteConflict | WorldWriteInvalidBatch | WorldWriteChunkUnavailable`. `WorldWriteStale` remains a typed ChunkStore stale failure and is not mapped to C4 `WorldRevisionConflict` with invented revision values. Any failure leaves block state, owner state, and both revisions unchanged and creates no delta.
+3. **Schema shape.** A batch names its world, expected `WorldRevision`, dimension, expected `DimensionRevision`, and block edits. `WorldWritePort.applyBatch` rejects empty batches and duplicate positions as `WorldWriteInvalidBatch`; stale expected world or dimension revisions return `WorldWriteConflict` with the expected and current revisions. The coordinator decodes the batch and its edit list, then checks the vertical world bounds and returns `WorldCommitBlockWriteInvalidPosition` for positions with `y < 0` or `y >= CHUNK_HEIGHT`, not `WorldWriteInvalidBatch`. `WorldBlockPositionSchema`, used for replicated block changes and typed invalid-position payloads, requires safe integer axes. Validate batch structure before checking revisions, so an empty or duplicate-position batch fails as invalid even when either expected revision is stale. `WorldRevision` is checked before `DimensionRevision` at the network boundary.
 
 ```ts
 export const BlockEditSchema = Schema.Struct({
@@ -964,7 +998,7 @@ export class WorldWriteInvalidBatch extends Schema.TaggedError<WorldWriteInvalid
 export class WorldWritePort extends Context.Service<WorldWritePort, {
   readonly applyBatch: (
     batch: WorldWriteBatch
-  ) => Effect.Effect<WorldWriteCommit, WorldWriteConflict | WorldWriteInvalidBatch>;
+  ) => Effect.Effect<WorldWriteCommit, WorldWriteConflict | WorldWriteInvalidBatch | WorldWriteChunkUnavailable>;
 }>()("mc-kernel/domain/world/WorldWritePort") {}
 
 export type MultiplayerWorldWriter = WorldWritePort["Service"];
@@ -990,8 +1024,11 @@ document = Path("docs/execution/contracts.md").read_text()
 blocks = re.findall(r"```ts\n(.*?)\n```", document, flags=re.S)
 Path(os.environ["SCRATCH"], "contracts.ts").write_text("\n\n".join(blocks) + "\n")
 Path(os.environ["SCRATCH"], "mc-kernel.d.ts").write_text('''declare module "@nerima-games/mc-kernel" {
+  export const DIMENSIONS: readonly ["overworld", "nether", "end"];
+  export type Dimension = typeof DIMENSIONS[number];
   export type ItemStack = Readonly<{ item: string; count: number; components: unknown }>;
   export const isItemStack: (value: unknown) => value is ItemStack;
+  export type WorldWriteChunkUnavailable = Readonly<{ _tag: "WorldWriteChunkUnavailable" }>;
 }
 ''')
 PY
@@ -1012,6 +1049,6 @@ npm install --prefix "$SCRATCH" --no-save effect@4.0.5 typescript@7.0.2
 "$SCRATCH/node_modules/.bin/tsc" --noEmit -p "$SCRATCH/tsconfig.json"
 ```
 
-The probe stubs the kernel item-stack guard and checks signatures and Schema APIs only; runtime ordering, migration completeness, event delivery, revision policy, atomic writes, and package integration remain implementation and test obligations for their listed waves.
+The probe stubs the kernel item-stack guard, dimension union, and unavailable-chunk error tag, and checks signatures and Schema APIs only; runtime ordering, migration completeness, event delivery, revision policy, atomic writes, and package integration remain implementation and test obligations for their listed waves.
 
 Effect 4 service and layer conventions follow the [official Effect v4 layer guide](https://effect.website/docs/v4/requirements-management/layers).
