@@ -138,19 +138,12 @@ import {
   type Vehicle,
 } from '@nerima-games/mc-sim'
 import {
-  biomeFor,
-  chunkSnapshotOf,
-  DEFAULT_TERRAIN_LEVELS,
   detectCompletedEndPortal,
   END_PORTAL_BLOCK,
   END_PORTAL_FRAME_OFFSETS,
   endArrivalDescriptor,
   endPortalCenterForStronghold,
-  generatedChunkSource,
   nearestStrongholdSite,
-  surfaceHeightAt,
-  villageVillagerSpawnsForChunk,
-  type ChunkSource,
 } from '@nerima-games/mc-worldgen'
 import {
   ESCAPE_KEY_CODE,
@@ -166,12 +159,17 @@ import {
 } from '@nerima-games/mc-render'
 import { makeBudgetedDirtySource } from './chunk-sync-budget'
 import {
+  clearRenderedChunks,
+  makeChunkStreaming,
+  type DimensionChunkContext,
+} from './chunk-streaming'
+import {
   NETHER_PORTAL_BLOCK_ID,
   OBSIDIAN_BLOCK_ID,
   POTATO_CROP_BLOCK_ID,
   REDSTONE_PLACEMENT_ITEMS,
 } from './qa-fixtures'
-import { trackChunkLightColor, type RenderLightingSnapshot } from './render-lighting'
+import { trackChunkLightColor } from './render-lighting'
 import {
   applyAnvilOperation,
   enchantedItemFromAnvilOutput,
@@ -224,7 +222,6 @@ import {
   type RedstoneComponentSnapshot,
 } from '@nerima-games/mx-redstone'
 import {
-  addVillager,
   advanceFishing,
   advanceMiningProgress,
   boardVehicle,
@@ -260,7 +257,6 @@ import {
   insertBrewingIngredient,
   INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
   makeGameplayFrameState,
-  makeVillager,
   makeGeneratedWorld,
   meleeDamageForItem,
   meleeDamageWithEnchantments,
@@ -480,19 +476,21 @@ import {
   makeSessionChunkSource,
   saveSession,
   EMPTY_ENTITY_ROSTER,
-  normalizePersistedEntityRosters,
-  persistedItemDropLifetime,
   snapshotResidentChunks,
   type DimensionChunk,
   type PersistedFurnaceState,
   type PersistedLeverState,
   type PersistedPortalState,
   type PersistedEndPortalFrameState,
-  type PersistedEntityRoster,
   type PersistedVillager,
   type SessionPosition,
   type SessionState,
 } from './session-persistence'
+import {
+  restoreInitialWorld,
+  restoreLoadedSessionServices,
+} from './session-restoration'
+import { initializeSessionWorld } from './session-world'
 import {
   readSessionRoute,
   type SessionRoute,
@@ -961,7 +959,6 @@ const bootGame = async (
   // ONE CONSTRUCTION. The gameplay adapter and the renderer-facing worldgen
   // store returned here wrap the same store instance, so a mined block cannot
   // disappear from collision while remaining visible (or vice versa).
-  let activeSeed = WORLD_SEED
   const restoredWorkstations = Option.isSome(loadedSession)
     ? loadedSession.value.state.workstations
     : undefined
@@ -1012,143 +1009,66 @@ const bootGame = async (
           z: Math.floor(restoredRespawn.position.z),
         },
       }
-  let initialKnownChunks: ReadonlyArray<DimensionChunk> = []
-
-  const generatedSource = generatedChunkSource(
-    Option.isSome(loadedSession) ? loadedSession.value.state.seed : WORLD_SEED,
-  )
-  const restored = Option.isSome(loadedSession)
-    ? await runStorage(
-        Effect.provide(
-          makeSessionChunkSource(loadedSession.value, initialDimension, generatedSource),
-          storageContext,
-        ),
-      )
-    : undefined
-  if (Option.isSome(loadedSession)) {
-    activeSeed = loadedSession.value.state.seed
-    initialKnownChunks = (restored?.chunks ?? []).map(({ dimension, chunk }) => ({
-      dimension,
-      chunk: chunkSnapshotOf(chunk),
-    }))
-  }
-  enchantmentSeed = restoredWorkstations?.enchantmentSeed ?? activeSeed
-
-  const persistedChunks = new Map(
-    (restored?.chunks ?? []).map(({ dimension, chunk }) => [
-      `${dimension}:${String(chunk.coord.cx)},${String(chunk.coord.cz)}`,
-      chunk,
-    ]),
-  )
-  const chunkSourceFor = (dimension: Dimension): ChunkSource => (coord) => {
-    const persisted = persistedChunks.get(
-      `${dimension}:${String(coord.cx)},${String(coord.cz)}`,
-    )
-    return persisted === undefined
-      ? generatedSource(coord)
-      : Effect.sync(() => chunkSnapshotOf(persisted))
-  }
-
-  const world = await Effect.runPromise(
-    makeGeneratedWorld<MobBehaviour>({
-      seed: activeSeed,
-      chunkSource: chunkSourceFor(initialDimension),
-      dimension: initialDimension,
-    }),
-  )
-  const restoredEntityRosters = normalizePersistedEntityRosters(
-    Option.isSome(loadedSession) ? loadedSession.value.state.entities : undefined,
-  )
-  const entityRosters = new Map<Dimension, PersistedEntityRoster>([
-    ['overworld', restoredEntityRosters.overworld],
-    ['nether', restoredEntityRosters.nether],
-    ['end', restoredEntityRosters.end],
-  ])
-  for (const [dimension, roster] of entityRosters) {
-    Effect.runSync(
-      world.entities.restore(
-        roster as Parameters<typeof world.entities.restore>[0],
-      ),
-    )
-    const canonicalRoster = Effect.runSync(world.entities.snapshot)
-    entityRosters.set(dimension, canonicalRoster)
-    droppedItemLifetime.restore(
-      dimension,
-      canonicalRoster.entities
-        .filter((entity) => isDroppedItemBehaviour(entity.behaviour))
-        .map((entity) => ({
-          entityId: entity.id,
-          elapsedSecs: persistedItemDropLifetime(entity.behaviour).elapsedSecs,
-        })),
-    )
-    for (const entity of canonicalRoster.entities) {
-      if (!isDroppedItemBehaviour(entity.behaviour)) continue
-      droppedItemMetadata.set(
-        droppedItemMetadataKey(dimension, entity.id),
-        droppedItemMetadataFromBehaviour(entity.behaviour),
-      )
-    }
-  }
-  const rosterWithDroppedItemLifetimes = (
-    dimension: Dimension,
-    roster: PersistedEntityRoster,
-  ): PersistedEntityRoster => ({
-    ...roster,
-    entities: roster.entities.map((entity) => {
-      if (!isDroppedItemBehaviour(entity.behaviour)) return entity
-      const metadata = droppedItemMetadata.get(droppedItemMetadataKey(dimension, entity.id))
-      return {
-          ...entity,
-          behaviour: {
-            ...entity.behaviour,
-            elapsedSecs: droppedItemLifetime.elapsed(dimension, entity.id),
-            ...(metadata?.customName === undefined ? {} : { customName: metadata.customName }),
-            ...(metadata?.enchantedItem === undefined
-              ? {}
-              : { enchantments: metadata.enchantedItem.enchantments }),
-          },
-        }
-    }),
+  const sessionWorld = await initializeSessionWorld({
+    loadedSession,
+    initialDimension,
+    worldSeed: WORLD_SEED,
+    loadSavedChunks: (session, dimension, fallback) => runStorage(
+      Effect.provide(makeSessionChunkSource(session, dimension, fallback), storageContext),
+    ),
+    makeWorld: ({ seed, chunkSource, dimension }) => Effect.runPromise(
+      makeGeneratedWorld<MobBehaviour>({ seed, chunkSource, dimension }),
+    ),
+    restoreEntities: (targetWorld, roster) => Effect.runSync(
+      targetWorld.entities.restore(roster as Parameters<typeof targetWorld.entities.restore>[0]),
+    ),
+    snapshotEntities: (targetWorld) => Effect.runSync(targetWorld.entities.snapshot),
+    droppedItemLifetime,
+    droppedItemMetadata,
+    droppedItemMetadataKey,
+    droppedItemMetadataFromBehaviour,
   })
-  const snapshotEntityRosters = (): SessionState['entities'] => {
-    entityRosters.set(
+  const {
+    activeSeed,
+    initialKnownChunks,
+    restored,
+    world,
+    chunkSourceFor,
+    entityRosters,
+    rosterWithDroppedItemLifetimes,
+    snapshotEntityRosters: snapshotEntityRostersFor,
+  } = sessionWorld
+  enchantmentSeed = restoredWorkstations?.enchantmentSeed ?? activeSeed
+  const snapshotEntityRosters = (): SessionState['entities'] =>
+    snapshotEntityRostersFor(
       currentChunkContext.dimension,
-      rosterWithDroppedItemLifetimes(
-        currentChunkContext.dimension,
-        Effect.runSync(world.entities.snapshot),
-      ),
+      Effect.runSync(world.entities.snapshot),
     )
-    return {
-      overworld: entityRosters.get('overworld') ?? EMPTY_ENTITY_ROSTER,
-      nether: entityRosters.get('nether') ?? EMPTY_ENTITY_ROSTER,
-      end: entityRosters.get('end') ?? EMPTY_ENTITY_ROSTER,
-    }
-  }
   const survivalHunger = makeSurvivalHungerCoordinator(world.vitals)
   const initialSpawnPose = await Effect.runPromise(world.player.pose)
   const initialSpawnDimension = await Effect.runPromise(world.player.dimension)
-  if (Option.isSome(loadedSession)) {
-    await Effect.runPromise(
+  const loadedSessionState = Option.isSome(loadedSession) ? loadedSession.value.state : undefined
+  await restoreInitialWorld(loadedSessionState, isCreativeMode, {
+    restoreEntities: () => Effect.runPromise(
       world.entities.restore(
         (entityRosters.get(initialDimension) ?? EMPTY_ENTITY_ROSTER) as Parameters<
           typeof world.entities.restore
         >[0],
       ),
-    )
-    await Effect.runPromise(world.inventory.restoreStorage(loadedSession.value.state.storage))
-    await Effect.runPromise(
-      world.inventory.restoreContainerStorage(loadedSession.value.state.containerStorage),
-    )
-    await Effect.runPromise(
-      world.player.restore(loadedSession.value.state.player, loadedSession.value.state.dimension),
-    )
-    await Effect.runPromise(world.vitals.restore(loadedSession.value.state.vitals))
-  } else if (isCreativeMode) {
-    await Effect.runPromise(world.inventory.add('redstone_dust', 16))
-    await Effect.runPromise(world.inventory.add('lever', 4))
-    await Effect.runPromise(world.inventory.add('redstone_lamp', 8))
-    await Effect.runPromise(world.inventory.add('piston', 4))
-  }
+    ),
+    restoreStorage: (state) => Effect.runPromise(world.inventory.restoreStorage(state.storage)),
+    restoreContainerStorage: (state) =>
+      Effect.runPromise(world.inventory.restoreContainerStorage(state.containerStorage)),
+    restorePlayer: (state) =>
+      Effect.runPromise(world.player.restore(state.player, state.dimension)),
+    restoreVitals: (state) => Effect.runPromise(world.vitals.restore(state.vitals)),
+    addCreativeStartingItems: async () => {
+      await Effect.runPromise(world.inventory.add('redstone_dust', 16))
+      await Effect.runPromise(world.inventory.add('lever', 4))
+      await Effect.runPromise(world.inventory.add('redstone_lamp', 8))
+      await Effect.runPromise(world.inventory.add('piston', 4))
+    },
+  })
   const time = await Effect.runPromise(makeTimeService())
   const weather = await Effect.runPromise(makeWeatherService())
   const crops = await Effect.runPromise(makeCropService())
@@ -1157,18 +1077,19 @@ const bootGame = async (
     (Option.isSome(loadedSession) ? loadedSession.value.state.villagers.residents : [])
       .map((villager) => [villager.id, villager]),
   )
-  if (Option.isSome(loadedSession)) {
-    await Effect.runPromise(time.restore(loadedSession.value.state.time))
-    await Effect.runPromise(weather.restore(loadedSession.value.state.weather))
-    await Effect.runPromise(crops.restore(loadedSession.value.state.crops))
-    await Effect.runPromise(restoreVillagerTrades(
-      gameplayState,
-      loadedSession.value.state.villagers.trades,
-    ))
-    await Effect.runPromise(restoreBrewingStand(gameplayState, loadedSession.value.state.brewing))
-    await Effect.runPromise(restoreStatusEffects(gameplayState, loadedSession.value.state.statusEffects))
-    await Effect.runPromise(gameplayState.enderDragonEncounter.restore(loadedSession.value.state.end.dragon))
-  }
+  await restoreLoadedSessionServices(loadedSessionState, {
+    restoreTime: (state) => Effect.runPromise(time.restore(state.time)),
+    restoreWeather: (state) => Effect.runPromise(weather.restore(state.weather)),
+    restoreCrops: (state) => Effect.runPromise(crops.restore(state.crops)),
+    restoreVillagerTrades: (state) =>
+      Effect.runPromise(restoreVillagerTrades(gameplayState, state.villagers.trades)),
+    restoreBrewingStand: (state) =>
+      Effect.runPromise(restoreBrewingStand(gameplayState, state.brewing)),
+    restoreStatusEffects: (state) =>
+      Effect.runPromise(restoreStatusEffects(gameplayState, state.statusEffects)),
+    restoreEnderDragon: (state) =>
+      Effect.runPromise(gameplayState.enderDragonEncounter.restore(state.end.dragon)),
+  })
   const loadedEndState = Option.isSome(loadedSession) ? loadedSession.value.state.end : undefined
   const endPortalFrameKey = (position: SessionPosition): string =>
     `${String(position.x)},${String(position.y)},${String(position.z)}`
@@ -1261,21 +1182,7 @@ const bootGame = async (
     canvas.setAttribute('data-weather-audio-mode', weatherAudio.state().mode)
   }
 
-  type ChunkColorFor = NonNullable<
-    NonNullable<Parameters<typeof syncWorld>[3]>['colorForChunk']
-  >
   const MAX_CHUNK_UPDATES_PER_FRAME = 4
-  type DimensionChunkContext = {
-    readonly dimension: Dimension
-    readonly chunkStore: typeof world.chunkStore
-    readonly worldgenChunkStore: typeof world.worldgenChunkStore
-    readonly dirtyChunks: Parameters<typeof syncWorld>[1]
-    readonly queueLoadedChunk: (chunk: { cx: number; cz: number }) => void
-    readonly meshChunkFromStore: Parameters<typeof syncWorld>[2]
-    readonly colorForChunk: ChunkColorFor
-    readonly lightingSnapshot: () => RenderLightingSnapshot
-    readonly streamLoaded: Set<string>
-  }
   const makeDimensionChunkContext = (
     dimension: Dimension,
     dimensionWorld: typeof world,
@@ -1591,111 +1498,19 @@ const bootGame = async (
   canvas.setAttribute('data-stream-radius', String(STREAM_RADIUS_CHUNKS))
   let chunksStreamedIn = 0
   let chunksDropped = 0
-
-  /**
-   * Which chunks should be resident around a world position.
-   *
-   * The world is unbounded horizontally, so every coordinate in the radius is
-   * loadable and no fixture-edge filtering is needed.
-   */
-  const desiredAround = (x: number, z: number): ReadonlyArray<ChunkRef> => {
-    const cx0 = Math.floor(x / 16)
-    const cz0 = Math.floor(z / 16)
-    const wanted: Array<ChunkRef> = []
-    for (let cx = cx0 - STREAM_RADIUS_CHUNKS; cx <= cx0 + STREAM_RADIUS_CHUNKS; cx += 1) {
-      for (let cz = cz0 - STREAM_RADIUS_CHUNKS; cz <= cz0 + STREAM_RADIUS_CHUNKS; cz += 1) {
-        wanted.push({ cx, cz })
-      }
-    }
-    return wanted
-  }
-
-  const streamAround = (
-    context: DimensionChunkContext,
-    x: number,
-    z: number,
-  ): Effect.Effect<void> =>
-    Effect.gen(function* () {
-      const wanted = desiredAround(x, z)
-      const wantedKeys = new Set(wanted.map(chunkKeyOf))
-      const changed = wanted.filter((chunk) => !context.streamLoaded.has(chunkKeyOf(chunk)))
-      const removed = [...context.streamLoaded]
-        .filter((key) => !wantedKeys.has(key))
-        .map((key) => {
-          const [cx, cz] = key.split(',')
-          return { cx: Number(cx), cz: Number(cz) }
-      })
-
-      for (const chunk of changed) {
-        yield* context.chunkStore.load(chunkCoord(chunk.cx, chunk.cz)).pipe(Effect.catchAll(() => Effect.void))
-        context.queueLoadedChunk(chunk)
-        context.streamLoaded.add(chunkKeyOf(chunk))
-        if (context.dimension === 'overworld') {
-          let trades = yield* snapshotVillagerTrades(gameplayState)
-          let discovered = false
-          for (const spawn of villageVillagerSpawnsForChunk(
-            activeSeed,
-            chunk.cx,
-            chunk.cz,
-            (x, z) => {
-              const surfaceY = surfaceHeightAt(activeSeed, x, z)
-              return {
-                biome: biomeFor(activeSeed, x, z, surfaceY, DEFAULT_TERRAIN_LEVELS),
-                surfaceY,
-                seaLevel: DEFAULT_TERRAIN_LEVELS.seaLevel,
-              }
-            },
-          )) {
-            if (!villagerResidents.has(spawn.id)) {
-              villagerResidents.set(spawn.id, {
-                id: spawn.id,
-                profession: spawn.profession,
-                dimension: 'overworld',
-                feetPosition: { x: spawn.x + 0.5, y: spawn.y, z: spawn.z + 0.5 },
-              })
-              discovered = true
-            }
-            if (!trades.villagers.some((villager) => villager.id === spawn.id)) {
-              trades = addVillager(trades, makeVillager(spawn.id, spawn.profession))
-              discovered = true
-            }
-          }
-          if (discovered) {
-            yield* restoreVillagerTrades(gameplayState, trades)
-            markSessionDirty()
-          }
-        }
-      }
-      for (const chunk of removed) {
-        const snapshot = yield* context.worldgenChunkStore.snapshot(chunkCoord(chunk.cx, chunk.cz))
-        if (snapshot !== undefined) {
-          saveCoordinator.retainChunk({ dimension: context.dimension, chunk: snapshot })
-          markSessionDirty()
-        }
-        yield* context.chunkStore.unload(chunkCoord(chunk.cx, chunk.cz)).pipe(Effect.catchAll(() => Effect.void))
-        context.streamLoaded.delete(chunkKeyOf(chunk))
-      }
-
-      if (changed.length > 0 || removed.length > 0) redstoneDirty = true
-
-      chunksStreamedIn += changed.length
-      chunksDropped += removed.length
-      canvas.setAttribute('data-chunks-meshed', String(context.streamLoaded.size))
-      canvas.setAttribute('data-chunks-streamed-in', String(chunksStreamedIn))
-      canvas.setAttribute('data-chunks-dropped', String(chunksDropped))
-    })
-
-  const retainDimensionResidents = (context: DimensionChunkContext): Effect.Effect<void> =>
-    Effect.gen(function* () {
-      const residents = yield* snapshotResidentChunks(context.worldgenChunkStore)
-      for (const chunk of residents) {
-        saveCoordinator.retainChunk({ dimension: context.dimension, chunk })
-      }
-    })
-
-  const clearRenderedChunks: Effect.Effect<void> = Effect.gen(function* () {
-    const rendered = yield* worldRenderer.chunkKeys
-    for (const key of rendered) yield* worldRenderer.removeChunk(key)
+  const { streamAround, retainDimensionResidents } = makeChunkStreaming({
+    streamRadiusChunks: STREAM_RADIUS_CHUNKS,
+    activeSeed,
+    canvas,
+    gameplayState,
+    villagerResidents,
+    saveCoordinator,
+    getMarkSessionDirty: () => markSessionDirty,
+    markRedstoneDirty: () => { redstoneDirty = true },
+    getChunksStreamedIn: () => chunksStreamedIn,
+    setChunksStreamedIn: (count) => { chunksStreamedIn = count },
+    getChunksDropped: () => chunksDropped,
+    setChunksDropped: (count) => { chunksDropped = count },
   })
 
   const syncRedstoneSnapshot = (context: DimensionChunkContext): void => {
@@ -2343,7 +2158,7 @@ const bootGame = async (
     )
     entityRosters.set(dimension, Effect.runSync(world.entities.snapshot))
     currentChunkContext = getOrCreateDimensionChunkContext(dimension)
-    Effect.runSync(clearRenderedChunks)
+    Effect.runSync(clearRenderedChunks(worldRenderer))
     redstoneDirty = true
     return true
   }
