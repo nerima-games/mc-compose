@@ -82,7 +82,7 @@
  * block edits and mc-render meshing all observe the same mc-worldgen store;
  * dirty chunk notifications are the only render synchronization path.
  */
-import { Context, Effect, Either, Exit, Option, Ref } from 'effect'
+import { Context, Effect, Either, Option, Ref } from 'effect'
 import {
   BLOCK_PROPERTY_DEFAULTS,
   BlockId,
@@ -127,7 +127,6 @@ import {
 } from '@nerima-games/mc-sim'
 import { END_PORTAL_BLOCK } from '@nerima-games/mc-worldgen'
 import {
-  ESCAPE_KEY_CODE,
   InputService,
   chunkKeyOf,
   makeChunkStoreLightColor,
@@ -417,6 +416,9 @@ import {
   installPlayerLifecycle,
   installPlayerQaSurface,
 } from './player-session-runtime'
+import { runTickFrameInput } from './tick/frame-input'
+import { mutableState, type H5aTickContext } from './tick/h5a-context'
+import { runTickPlayerMovement } from './tick/player-movement'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -3147,349 +3149,131 @@ const bootGame = async (
 
   document.body.setAttribute('data-mc-compose-boot', 'running')
 
-  const tick = (): void => {
+  const tick = (() => {
+    const h5aTickContext: H5aTickContext = {
+      firstFrameSecs: FIRST_FRAME_SECS,
+      clampDelta,
+      inputApi,
+      state: {
+        touchLookState: mutableState(() => touchLookState, (value) => { touchLookState = value }),
+        previousSecs: mutableState(() => previousSecs, (value) => { previousSecs = value }),
+        simulationElapsedSecs: mutableState(() => simulationElapsedSecs, (value) => { simulationElapsedSecs = value }),
+        redstoneDirty: mutableState(() => redstoneDirty, (value) => { redstoneDirty = value }),
+        inventoryOpen: mutableState(() => inventoryOpen, (value) => { inventoryOpen = value }),
+        tradeOpen: mutableState(() => tradeOpen, (value) => { tradeOpen = value }),
+        brewingOpen: mutableState(() => brewingOpen, (value) => { brewingOpen = value }),
+        selectedHotbarIndex: mutableState(() => selectedHotbarIndex, (value) => { selectedHotbarIndex = value }),
+        vehicleControls: mutableState(() => vehicleControls, (value) => { vehicleControls = value }),
+        nativeInputQueue: mutableState(() => nativeInputQueue, (value) => { nativeInputQueue = value }),
+        swimmingState: mutableState(() => swimmingState, (value) => { swimmingState = value }),
+        fishingSession: mutableState(() => fishingSession, (value) => { fishingSession = value }),
+        fishingWater: mutableState(() => fishingWater, (value) => { fishingWater = value }),
+        multiplayerHandshakeComplete: mutableState(() => multiplayerHandshakeComplete, (value) => { multiplayerHandshakeComplete = value }),
+        multiplayerClosed: mutableState(() => multiplayerClosed, (value) => { multiplayerClosed = value }),
+        lastPlayerMoveSent: mutableState(() => lastPlayerMoveSent, (value) => { lastPlayerMoveSent = value }),
+        lastPlayerMoveSentAt: mutableState(() => lastPlayerMoveSentAt, (value) => { lastPlayerMoveSentAt = value }),
+        nextItemUseRequestId: mutableState(() => nextItemUseRequestId, (value) => { nextItemUseRequestId = value }),
+      },
+      touchLook: { consume: consumeTouchLook },
+      handlePauseRequest,
+      renderCrosshair,
+      pointerLock: {
+        isLockedToCanvas: () => document.pointerLockElement === canvas,
+        exit: () => document.exitPointerLock(),
+      },
+      paused: () => paused,
+      observerPulses,
+      multiplayer,
+      syncRedstoneSnapshot: () => syncRedstoneSnapshot(currentChunkContext),
+      currentChunkContext: () => currentChunkContext,
+      world,
+      isCreativeMode,
+      survivalHunger,
+      playerIsDead,
+      handleLocalPlayerDeath,
+      markSessionDirty,
+      syncTouchControls,
+      setInventoryOpen,
+      setBrewingOpen,
+      canvas,
+      bowInteractionLocked,
+      selectedHotbarAfterInput,
+      wrapHotbarSelection,
+      sendInventorySelection,
+      resetPrimaryAttackGesture,
+      sendVitalsCommand,
+      consumeNativeInput,
+      playerSettings,
+      lookSensitivity: LOOK_SENSITIVITY,
+      playerApi,
+      simState,
+      currentChunkStore,
+      blockPosition,
+      eyeLevelOffset: EYE_LEVEL_OFFSET,
+      blockTypeOfId,
+      mountedVehicleId: () => mountedVehicleId,
+      vehicleById,
+      advanceSwimming: advancePlayerSwimmingRuntime,
+      presentSwimmingState,
+      simPhysicsConfig,
+      sprintSpeedMPerSec: SPRINT_SPEED_M_PER_S,
+      getPlayerMovementSpeedMultiplier,
+      gameplayState,
+      time,
+      weather,
+      syncPortalCandidateSnapshots,
+      setFishingResult,
+      getOrCreateDimensionChunkContext,
+      advanceFishing,
+      cancelFishing,
+      multiplayerStatus,
+      pumpPlayerDamage,
+      furnaceStates,
+      deferredFurnaceAdvanceSecs,
+      pendingFurnaceAdvances,
+      requestFurnaceAdvance,
+      drainMultiplayerInbound,
+      drainCraftingInbound,
+      drainBrewingInbound,
+      drainAnvilInbound,
+      drainEnchantingInbound,
+      drainPlayerDamageInbound,
+      runFrame,
+      applyPlayerDamage,
+      failBoot,
+      droppedItemLifetime,
+      droppedItemMetadata,
+      droppedItemMetadataKey,
+      isDroppedItemBehaviour,
+    }
+
+    return (): void => {
     const nowSecs = readNow()
     const frameInput = Effect.runSync(inputApi.snapshot)
     try {
-      const consumedTouchLook = consumeTouchLook(touchLookState)
-      touchLookState = consumedTouchLook.state
-      if (frameInput.justPressed.has(ESCAPE_KEY_CODE)) {
-        handlePauseRequest()
-        renderCrosshair(nowSecs)
-        previousSecs = nowSecs
-        return
-      }
-      if (paused) {
-        renderCrosshair(nowSecs)
-        previousSecs = nowSecs
-        return
-      }
-      const raw = previousSecs === undefined ? FIRST_FRAME_SECS : nowSecs - previousSecs
-      previousSecs = nowSecs
-      const deltaSecs = clampDelta(raw)
-      if (multiplayer === undefined) {
-        for (const [key, expiresAt] of observerPulses) {
-          if (expiresAt <= simulationElapsedSecs) {
-            observerPulses.delete(key)
-            redstoneDirty = true
-          }
-        }
-        if (redstoneDirty) syncRedstoneSnapshot(currentChunkContext)
-      }
-
-      // -----------------------------------------------------------------------
-      // The player, moved and stopped by the world
-      // -----------------------------------------------------------------------
-      //
-      // WIRING, NOT A RULE. mx-gameplay owns vehicle motion and collision; this
-      // loop supplies input intent before the frame and mirrors its authoritative state after.
-      //
-      // THE DELTA IS ALREADY CLAMPED to `MAX_FRAME_SECS` above, which keeps a
-      // backgrounded tab from returning with a multi-second physics step.
-      const walk = frameInput
-      const healthBeforeHungerTick = Effect.runSync(world.vitals.view).healthPoints
-      const hungerOutcome = isCreativeMode || multiplayer !== undefined
-        ? undefined
-        : survivalHunger.tick(deltaSecs)
-      if (healthBeforeHungerTick > 0 && playerIsDead() && multiplayer === undefined) {
-        handleLocalPlayerDeath()
-      }
-      if (
-        hungerOutcome !== undefined && (
-          hungerOutcome.exhaustionAdded > 0 ||
-          hungerOutcome.foodTicks > 0 ||
-          hungerOutcome.regeneratedHealth > 0 ||
-          hungerOutcome.starvationDamage > 0
-        )
-      ) markSessionDirty()
-      simulationElapsedSecs += deltaSecs
-
-      const dead = playerIsDead()
-      let deadAfterFrame = dead
-      syncTouchControls()
-      if (dead) {
-        if (inventoryOpen) setInventoryOpen(false)
-        if (brewingOpen) setBrewingOpen(false)
-        if (document.pointerLockElement === canvas) document.exitPointerLock()
-      }
-
-      if (
-        !dead &&
-        !bowInteractionLocked() &&
-        Effect.runSync(inputApi.wasActionJustTriggered('openInventory'))
-      ) {
-        setInventoryOpen(!inventoryOpen, 'player')
-      }
-
-      if (!dead && !inventoryOpen && !tradeOpen) {
-        const nextHotbarIndex = selectedHotbarAfterInput(
-          selectedHotbarIndex,
-          walk.wheelSteps,
-          (action) => Effect.runSync(inputApi.wasActionJustTriggered(action)),
-          wrapHotbarSelection,
-        )
-        if (nextHotbarIndex !== selectedHotbarIndex) {
-          // Optimistic: the selection is purely local UI focus (which slot
-          // this client is pointing at), not authoritative game state, so it
-          // updates immediately regardless of connection mode — matching
-          // single-player exactly — while the network command still carries
-          // it to the server for reconciliation. Without this, a right-click
-          // or "use" landing before the server's echo (`applyNetworkInventory`
-          // at `selectedHotbarIndex = state.selectedSlot`) read the OLD
-          // slot for the whole round trip.
-          selectedHotbarIndex = nextHotbarIndex
-          if (multiplayer !== undefined) sendInventorySelection(nextHotbarIndex)
-        }
-      }
-
-      const held = (action: Parameters<typeof inputApi.isActionActive>[0]): number =>
-        !dead && !inventoryOpen && !tradeOpen && !brewingOpen
-          && Effect.runSync(inputApi.isActionActive(action)) ? 1 : 0
-      vehicleControls = {
-        throttle: held('moveForward') - held('moveBackward'),
-        steering: held('moveRight') - held('moveLeft'),
-      }
-
-      const queuedNativeAttack = nativeInputQueue.attack > 0
-      if (queuedNativeAttack) resetPrimaryAttackGesture()
-      const attackTriggered =
-        !dead && !inventoryOpen && !tradeOpen && !brewingOpen
-        && (Effect.runSync(inputApi.wasActionJustTriggered('attack')) || queuedNativeAttack)
-      if (attackTriggered && !isCreativeMode) {
-        if (multiplayer === undefined) survivalHunger.submit({ _tag: 'attack', count: 1 })
-        else sendVitalsCommand({ _tag: 'activity', activity: 'attack', amount: 1 })
-      }
-      const attackHeld = held('attack') > 0 || queuedNativeAttack
-      if (queuedNativeAttack) {
-        nativeInputQueue = consumeNativeInput(nativeInputQueue, 'attack').state
-      }
-      if (!attackHeld) resetPrimaryAttackGesture()
-      const canUse = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
-      const nativeUse = canUse
-        ? consumeNativeInput(nativeInputQueue, 'use')
-        : { triggered: false, state: nativeInputQueue }
-      nativeInputQueue = nativeUse.state
-      const useTriggered = canUse
-        && (Effect.runSync(inputApi.wasActionJustTriggered('use')) || nativeUse.triggered)
-      const useHeld = held('use') > 0
-      const lookDelta = {
-        x: walk.pointerDelta.x + consumedTouchLook.delta.positionX,
-        y: walk.pointerDelta.y + consumedTouchLook.delta.positionY,
-      }
-      const looked = !dead && !inventoryOpen && !tradeOpen && !brewingOpen
-        && (lookDelta.x !== 0 || lookDelta.y !== 0)
-      if (!dead && !inventoryOpen && !tradeOpen && !brewingOpen) {
-        Effect.runSync(playerApi.look(
-          -lookDelta.x * LOOK_SENSITIVITY * playerSettings.sensitivity,
-          -lookDelta.y * LOOK_SENSITIVITY * playerSettings.sensitivity,
-        ))
-      }
-      const poseBeforeFrame = Effect.runSync(playerApi.pose)
-      const groundedBeforeFrame = Effect.runSync(Ref.get(simState.isGrounded))
-      const dimensionBeforeFrame = Effect.runSync(playerApi.dimension)
-      const mountedVehicle = mountedVehicleId === undefined ? undefined : vehicleById(mountedVehicleId)
-      const movementForward = mountedVehicle === undefined
-        ? held('moveForward') - held('moveBackward')
-        : 0
-      const movementStrafe = mountedVehicle === undefined
-        ? held('moveRight') - held('moveLeft')
-        : 0
-      const feetReading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
-        Math.floor(poseBeforeFrame.feetPosition.x),
-        Math.floor(poseBeforeFrame.feetPosition.y + 0.1),
-        Math.floor(poseBeforeFrame.feetPosition.z),
-      )))
-      const eyesReading = Effect.runSync(currentChunkStore.getBlock(blockPosition(
-        Math.floor(poseBeforeFrame.feetPosition.x),
-        Math.floor(poseBeforeFrame.feetPosition.y + EYE_LEVEL_OFFSET),
-        Math.floor(poseBeforeFrame.feetPosition.z),
-      )))
-      const canSwim = mountedVehicle === undefined && !dead
-      const feetInWater = canSwim
-        && feetReading._tag === 'Block'
-        && blockTypeOfId(feetReading.block) === 'water'
-      const eyesInWater = canSwim
-        && eyesReading._tag === 'Block'
-        && blockTypeOfId(eyesReading.block) === 'water'
-      const sinYaw = Math.sin(poseBeforeFrame.yawRadians)
-      const cosYaw = Math.cos(poseBeforeFrame.yawRadians)
-      const wasSwimming = swimmingState.active
-      const swimmingTick = advancePlayerSwimmingRuntime(swimmingState, {
-        feetInWater,
-        eyesInWater,
-        dead,
-        horizontalInput: {
-          x: -sinYaw * movementForward + cosYaw * movementStrafe,
-          z: -cosYaw * movementForward - sinYaw * movementStrafe,
-        },
-        verticalInput: held('jump') - held('sneak'),
+      const frame = runTickFrameInput(h5aTickContext, nowSecs, frameInput)
+      if (frame === undefined) return
+      const movement = runTickPlayerMovement(h5aTickContext, frame)
+      if (movement === undefined) return
+      const {
+        raw,
         deltaSecs,
-      })
-      swimmingState = swimmingTick.state
-      presentSwimmingState()
-      Effect.runSync(Ref.set(simState.movementIntent, {
-        forward: swimmingState.active ? 0 : movementForward,
-        strafe: swimmingState.active ? 0 : movementStrafe,
-      }))
-      Effect.runSync(Ref.set(simState.jumpIntent, mountedVehicle === undefined && held('jump') > 0))
-      // Vanilla only sprints moving forward — not backward, not strafe-only —
-      // which is the same gate mc-physics's own (unused-by-mc-sim)
-      // applyMovementInput encodes for `input.sprint && forward > 0`.
-      const sprinting = mountedVehicle === undefined && !swimmingState.active
-        && movementForward > 0 && held('sprint') > 0
-      Effect.runSync(
-        Ref.set(simState.physicsConfig, dead || mountedVehicle !== undefined || swimmingState.active
-          ? Option.none()
-          : Option.some({
-              ...simPhysicsConfig,
-              walkSpeed: (sprinting ? SPRINT_SPEED_M_PER_S : simPhysicsConfig.walkSpeed)
-                * Effect.runSync(getPlayerMovementSpeedMultiplier(gameplayState)),
-            })),
-      )
-      Effect.runSync(Ref.set(gameplayState.timeOfDay, Effect.runSync(time.timeOfDay)))
-      const weatherBeforeFrame = Effect.runSync(weather.snapshot)
-      Effect.runSync(Ref.set(gameplayState.weather, weatherBeforeFrame))
-      Effect.runSync(Ref.set(gameplayState.weatherAdvanced, undefined))
-      Effect.runSync(syncPortalCandidateSnapshots())
-
-      if (multiplayer === undefined && fishingSession !== undefined && fishingWater !== undefined) {
-        const storage = Effect.runSync(world.inventory.storageSnapshot)
-        const held = storage.inventory.slots[selectedHotbarIndex]
-        if (held?.item !== 'fishing_rod') {
-          cancelFishing(fishingSession)
-          fishingSession = undefined
-          fishingWater = undefined
-          setFishingResult('cancelled')
-        } else {
-          const fishingContext = getOrCreateDimensionChunkContext(fishingWater.dimension)
-          const water = Effect.runSync(fishingContext.chunkStore.getBlock(blockPosition(fishingWater.position.x, fishingWater.position.y, fishingWater.position.z)))
-          const advanced = advanceFishing(fishingSession, deltaSecs, {
-            hasWater: water._tag === 'Block' && blockTypeOfId(water.block) === 'water',
-          })
-          if (advanced._tag === 'Cancelled') {
-            fishingSession = undefined
-            fishingWater = undefined
-            setFishingResult('lost-water')
-          } else if (advanced._tag !== 'InvalidDuration') {
-            fishingSession = advanced.session
-            setFishingResult(advanced._tag.toLowerCase())
-          }
-        }
-      }
-
-      if (
-        multiplayer !== undefined &&
-        !multiplayerHandshakeComplete &&
-        multiplayer.transport.state() === 'open' &&
-        multiplayer.transport.isAuthenticated()
-      ) {
-        const pose = Effect.runSync(playerApi.pose)
-        const worldId = WorldId.make(Effect.runSync(playerApi.dimension))
-        Effect.runSync(multiplayer.host.transitionConnection({
-          _tag: 'HandshakeSucceeded',
-          player: multiplayer.query.player,
-          world: worldId,
-        }))
-        Effect.runSync(multiplayer.host.enqueueOutbound({
-          _tag: 'PlayerJoin',
-          player: multiplayer.query.player,
-          name: multiplayer.query.name,
-          at: pose.feetPosition,
-        }))
-        multiplayerHandshakeComplete = true
-        pumpPlayerDamage()
-        lastPlayerMoveSent = {
-          world: worldId,
-          at: pose.feetPosition,
-          facing: { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians },
-        }
-        lastPlayerMoveSentAt = nowSecs
-        canvas.setAttribute('data-multiplayer-connection', 'connected')
-        canvas.setAttribute('data-multiplayer-player-count', String(multiplayer.players.size + 1))
-        multiplayerStatus.textContent = `Connected as ${String(multiplayer.query.name)}`
-        multiplayerStatus.hidden = false
-      } else if (
-        multiplayer !== undefined &&
-        !multiplayerClosed &&
-        multiplayer.transport.state() === 'closed'
-      ) {
-        Effect.runSync(multiplayer.host.transitionConnection({ _tag: 'PeerClosed' }))
-        multiplayerClosed = true
-        canvas.setAttribute('data-multiplayer-connection', 'closed')
-        multiplayerStatus.textContent = 'Multiplayer connection closed.'
-        multiplayerStatus.hidden = false
-      }
-
-      if (multiplayer === undefined) {
-        for (const [key, furnace] of furnaceStates) {
-          nextItemUseRequestId += 1
-          const requestId = `furnace-advance-${String(nextItemUseRequestId)}`
-          pendingFurnaceAdvances.set(requestId, key)
-          const deferredSecs = deferredFurnaceAdvanceSecs.get(key) ?? 0
-          deferredFurnaceAdvanceSecs.delete(key)
-          Effect.runSync(requestFurnaceAdvance(
-            gameplayState,
-            requestId,
-            furnace.state,
-            deltaSecs + deferredSecs,
-          ))
-        }
-      }
-
-      if (multiplayer !== undefined) drainMultiplayerInbound()
-      drainCraftingInbound()
-      drainBrewingInbound()
-      drainAnvilInbound()
-      drainEnchantingInbound()
-      drainPlayerDamageInbound()
-      const outcome = Effect.runSyncExit(runFrame(deltaSecs))
-      if (swimmingState.active && mountedVehicle === undefined) {
-        Effect.runSync(Ref.set(simState.velocity, swimmingState.velocity))
-        Effect.runSync(playerApi.moveTo({
-          x: poseBeforeFrame.feetPosition.x + swimmingState.velocity.x * deltaSecs,
-          y: poseBeforeFrame.feetPosition.y + swimmingState.velocity.y * deltaSecs,
-          z: poseBeforeFrame.feetPosition.z + swimmingState.velocity.z * deltaSecs,
-        }))
-      } else if (wasSwimming) {
-        Effect.runSync(Ref.set(simState.velocity, { x: 0, y: 0, z: 0 }))
-      }
-      if (swimmingTick.drowningDamagePoints > 0) {
-        applyPlayerDamage({ amount: swimmingTick.drowningDamagePoints, cause: 'generic' })
-        markSessionDirty()
-      }
-      if (mountedVehicle !== undefined) {
-        const moved = vehicleById(String(mountedVehicle.id))
-        if (moved !== undefined) Effect.runSync(playerApi.moveTo(moved.position))
-      }
-
-      if (Exit.isFailure(outcome)) {
-        // A stage's error channel is `never`, so reaching here means a DEFECT.
-        // Stopping the loop is deliberate: a defect that repeats sixty times a
-        // second buries its own first occurrence in the console.
-        failBoot('a frame stage defected', outcome.cause)
-        return
-      }
-
-      const activeEntities = Effect.runSync(world.entities.entities)
-      const droppedEntitiesById = new Map(
-        activeEntities
-          .filter((entity) => isDroppedItemBehaviour(entity.behaviour))
-          .map((entity) => [String(entity.id), entity]),
-      )
-      if (multiplayer === undefined) {
-        const expiredDroppedItemIds = droppedItemLifetime.advance(
-          currentChunkContext.dimension,
-          deltaSecs,
-          [...droppedEntitiesById.keys()],
-        )
-        for (const entityId of expiredDroppedItemIds) {
-          const entity = droppedEntitiesById.get(entityId)
-          if (entity === undefined) continue
-          Effect.runSync(world.entities.despawn(entity.id))
-          droppedItemMetadata.delete(droppedItemMetadataKey(currentChunkContext.dimension, entityId))
-        }
-        if (expiredDroppedItemIds.length > 0) markSessionDirty()
-      }
+        dead,
+        held,
+        attackTriggered,
+        attackHeld,
+        useTriggered,
+        useHeld,
+        looked,
+      } = frame
+      let deadAfterFrame = dead
+      const {
+        poseBeforeFrame,
+        groundedBeforeFrame,
+        dimensionBeforeFrame,
+        weatherBeforeFrame,
+        sprinting,
+      } = movement
 
       const playerPosition = Effect.runSync(playerApi.pose).feetPosition
       const playerDimension = Effect.runSync(playerApi.dimension)
@@ -5460,7 +5244,8 @@ const bootGame = async (
     } finally {
       Effect.runSync(inputApi.endFrame(frameInput))
     }
-  }
+    }
+  })()
 
   const preview = Effect.runSync(makeBrowserPreview({
     container: gameShell,
