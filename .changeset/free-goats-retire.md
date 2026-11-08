@@ -2,4 +2,4 @@
 "@nerima-games/mc-compose": patch
 ---
 
-Only `apps/` files changed.
+Move redstone and container processing from `apps/web/main.ts` into `apps/web/redstone-container-runtime.ts` without changing behavior, and add runtime state tests.
