@@ -108,7 +108,6 @@ import {
   emptyFurnaceState,
   emptyPlayerStorage,
   equipmentDefinitionFor,
-  EQUIPMENT_SLOTS,
   itemStack,
   makeCropService,
   makeSimFrameState,
@@ -179,7 +178,6 @@ import {
   initialPlayerSwimmingRuntimeState,
   MAX_SWIMMING_OXYGEN_SECS,
 } from './player-swimming-runtime'
-import { deathDropsFromPlayerStorage } from './player-death'
 import {
   chestStorageCloseIntent,
   chestStorageSlotClickIntent,
@@ -191,11 +189,9 @@ import {
   createFurnaceView,
   createHudView,
   createInventoryView,
-  crosshairViewModel,
   furnaceViewModel,
   anvilViewModel,
   enchantingTableViewModel,
-  hudViewModel,
   inventoryViewModel,
   inventoryActionTarget,
   makeUiFrameState,
@@ -290,7 +286,6 @@ import {
   useBrewingPotion,
   useBucket,
   miningLootContextForItem,
-  miningProgressFraction,
   type IgnitionItemType,
   type EnvironmentalContact,
   type HoeItemType,
@@ -456,6 +451,13 @@ import {
 import { makeHostModules } from './host-modules'
 import { makeQaSurface } from './qa-surface'
 import { bootTitleMenu } from './title-menu'
+import {
+  handleLocalPlayerDeath as handleLocalPlayerDeathUi,
+  installPauseControls,
+  renderCrosshair as renderCrosshairUi,
+  renderPlayerHud,
+  respawnPlayer as respawnPlayerUi,
+} from './player-ui-h4a'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -2605,15 +2607,18 @@ const bootGame = async (
     miningProgress = null
     primaryAttackGestureConsumed = false
   }
+  const crosshairContext = {
+    crosshair,
+    getPaused: () => paused,
+    isInventoryOpen: () => inventoryOpen,
+    isTradeOpen: () => tradeOpen,
+    isBrewingOpen: () => brewingOpen,
+    getMiningProgress: () => miningProgress,
+  }
   const renderCrosshair = (
     nowSecs = Effect.runSync(browserClock.monotonicSecs),
   ): void => {
-    crosshair.render(crosshairViewModel({
-      modals: paused ? ['pause'] : inventoryOpen || tradeOpen || brewingOpen ? ['inventory'] : [],
-      lastHitAtSecs: undefined,
-      breakProgress:
-        miningProgress === null ? undefined : miningProgressFraction(miningProgress),
-    }, nowSecs))
+    renderCrosshairUi(crosshairContext, nowSecs)
   }
   let inventoryFocus: InventoryInteractionTarget = {
     kind: 'slot',
@@ -3051,53 +3056,25 @@ const bootGame = async (
 
   let deathDropDimension: SessionState['dimension'] | undefined =
     restoredWorkstations?.deathDropDimension
-  const handleLocalPlayerDeath = (): void => {
-    const deathPosition = Effect.runSync(world.player.pose).feetPosition
-    const storage = Effect.runSync(world.inventory.storageSnapshot)
-    const drops = deathDropsFromPlayerStorage(storage, deathPosition, {
-      customNames: Object.fromEntries(customNames),
-      enchantedItems: Object.fromEntries(enchantedItems),
-    })
-    if (drops.length > 0) {
-      const dropped = Effect.runSync(spawnDroppedItems(
-        world.entities,
-        drops.map(({ customName: _customName, enchantments: _enchantments, ...drop }) => ({
-          ...drop,
-          eligibleFromFrame: framesTotal + 1,
-        })),
-      ))
-      const dimension = Effect.runSync(world.player.dimension)
-      dropped.forEach((entity, index) => {
-        const drop = drops[index]
-        if (drop === undefined) return
-        droppedItemMetadata.set(droppedItemMetadataKey(dimension, String(entity.id)), {
-          ...(drop.customName === undefined ? {} : { customName: drop.customName }),
-          ...(drop.enchantments === undefined
-            ? {}
-            : {
-                enchantedItem: {
-                  item: drop.item,
-                  durability: drop.durability ?? null,
-                  enchantments: drop.enchantments,
-                },
-              }),
-        })
-      })
-    }
-    storage.inventory.slots.forEach((_stack, index) => {
-      customNames.delete(String(index))
-      enchantedItems.delete(String(index))
-    })
-    for (const slot of EQUIPMENT_SLOTS) {
-      customNames.delete(equipmentMetadataKey(slot))
-      enchantedItems.delete(equipmentMetadataKey(slot))
-    }
-    Effect.runSync(world.inventory.restoreStorage(emptyPlayerStorage()))
-    const vitals = Effect.runSync(world.vitals.snapshot)
-    Effect.runSync(world.vitals.restore(addVitalsExperience(vitals, -vitals.totalExperience)))
-    deathDropDimension = Effect.runSync(world.player.dimension)
-    markSessionDirty()
-  }
+  const handleLocalPlayerDeath = (): void => handleLocalPlayerDeathUi({
+    getPlayerPosition: () => Effect.runSync(world.player.pose).feetPosition,
+    getStorageSnapshot: () => Effect.runSync(world.inventory.storageSnapshot),
+    customNames,
+    enchantedItems,
+    getFramesTotal: () => framesTotal,
+    spawnDroppedItems: (drops) => Effect.runSync(spawnDroppedItems(world.entities, drops)),
+    getPlayerDimension: () => Effect.runSync(world.player.dimension),
+    droppedItemMetadataKey,
+    droppedItemMetadata,
+    equipmentMetadataKey,
+    restoreEmptyStorage: () => Effect.runSync(world.inventory.restoreStorage(emptyPlayerStorage())),
+    getVitalsSnapshot: () => Effect.runSync(world.vitals.snapshot),
+    restoreVitals: (vitals) => Effect.runSync(world.vitals.restore(vitals)),
+    setDeathDropDimension: (dimension) => {
+      deathDropDimension = dimension
+    },
+    markSessionDirty,
+  })
 
   const applyWorldExplosion = (
     center: Readonly<{ x: number; y: number; z: number }>,
@@ -3183,21 +3160,19 @@ const bootGame = async (
           : slot.durability.current / slot.durability.max,
       }
     const draft = inventoryInteraction.state()
-    hud.render(hudViewModel({
-      ...Effect.runSync(world.vitals.view),
-      hotbar: storage.inventory.slots
-        .slice(0, 9)
-        .map((slot, slotIndex) => slotSnapshotOf(slot, durabilityBySlot.get(slotIndex))),
-      selectedHotbarIndex,
-    }))
-    const activeEffects = Effect.runSync(snapshotStatusEffects(gameplayState)).effects
-    statusEffectsHud.hidden = activeEffects.length === 0
-    statusEffectsHud.textContent = activeEffects
-      .map((effect) => `${effect.type}: ${Math.ceil(effect.remainingSecs)}s`)
-      .join(' | ')
-    document.body.setAttribute('data-status-effects', activeEffects
-      .map((effect) => `${effect.type}:${Math.ceil(effect.remainingSecs)}`)
-      .join(','))
+    renderPlayerHud({
+      render: (viewModel) => hud.render(viewModel),
+      getHudInput: () => ({
+        ...Effect.runSync(world.vitals.view),
+        hotbar: storage.inventory.slots
+          .slice(0, 9)
+          .map((slot, slotIndex) => slotSnapshotOf(slot, durabilityBySlot.get(slotIndex))),
+        selectedHotbarIndex,
+      }),
+      getActiveEffects: () => Effect.runSync(snapshotStatusEffects(gameplayState)).effects,
+      statusEffectsHud,
+      documentBody: document.body,
+    })
     inventoryView.root.style.setProperty(
       'display', ['furnace', 'chest', 'anvil', 'enchanting'].includes(inventoryMode) ? 'none' : '',
     )
@@ -4269,49 +4244,69 @@ const bootGame = async (
     }
   }
 
-  const respawnPlayer = (): void => {
-    resetPrimaryAttackGesture()
-    resetBowUse()
-    projectileRuntimeState = initialProjectileRuntimeState()
-    eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
-    if (mountedVehicleId !== undefined) {
-      const vehicle = vehicleById(mountedVehicleId)
-      if (vehicle !== undefined) Effect.runSync(vehicleService.dismount(vehicle.id, localVehicleOccupant))
-      mountedVehicleId = undefined
-    }
-    if (fishingSession !== undefined) cancelFishing(fishingSession)
-    fishingSession = undefined
-    fishingWater = undefined
-    setFishingResult('idle')
-    swimmingState = initialPlayerSwimmingRuntimeState()
-    presentSwimmingState()
-    if (multiplayer === undefined) survivalHunger.respawn()
-    else sendVitalsCommand('respawn')
-    Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
-    Effect.runSync(Ref.set(gameplayState.playerDamages, []))
-    Effect.runSync(Ref.set(gameplayState.spawnAttempts, []))
-    Effect.runSync(Ref.set(gameplayState.mobDrops, []))
-    observedMobDrops.splice(0)
-    const validRespawn = validRespawnLocation(respawnLocation, (location) => {
+  const respawnPlayer = (): void => respawnPlayerUi({
+    resetPrimaryAttackGesture,
+    resetBowUse,
+    resetProjectileStates: () => {
+      projectileRuntimeState = initialProjectileRuntimeState()
+      eyeOfEnderRuntimeState = initialEyeOfEnderRuntimeState()
+    },
+    unmountVehicle: () => {
+      if (mountedVehicleId !== undefined) {
+        const vehicle = vehicleById(mountedVehicleId)
+        if (vehicle !== undefined) Effect.runSync(vehicleService.dismount(vehicle.id, localVehicleOccupant))
+        mountedVehicleId = undefined
+      }
+    },
+    cancelFishing: () => {
+      if (fishingSession !== undefined) cancelFishing(fishingSession)
+      fishingSession = undefined
+      fishingWater = undefined
+      setFishingResult('idle')
+    },
+    resetSwimming: () => {
+      swimmingState = initialPlayerSwimmingRuntimeState()
+      presentSwimmingState()
+    },
+    respawnVitals: () => {
+      if (multiplayer === undefined) survivalHunger.respawn()
+      else sendVitalsCommand('respawn')
+    },
+    clearGameplayDeathState: () => {
+      Effect.runSync(Ref.set(gameplayState.hostileContactCooldowns, new Map()))
+      Effect.runSync(Ref.set(gameplayState.playerDamages, []))
+      Effect.runSync(Ref.set(gameplayState.spawnAttempts, []))
+      Effect.runSync(Ref.set(gameplayState.mobDrops, []))
+      observedMobDrops.splice(0)
+    },
+    validRespawnLocation: () => validRespawnLocation(respawnLocation, (location) => {
       const context = getOrCreateDimensionChunkContext(location.dimension)
       const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(location.bedPosition.x, location.bedPosition.y, location.bedPosition.z)))
       return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'bed'
-    })
-    if (validRespawn === null) respawnLocation = null
-    sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
-    const respawnDimension = validRespawn?.dimension ?? initialSpawnDimension
-    const respawnPose = validRespawn === null
-      ? initialSpawnPose
-      : { ...initialSpawnPose, feetPosition: validRespawn.position }
-    Effect.runSync(world.player.restore(respawnPose, respawnDimension))
-    alignActiveDimension(respawnDimension)
-    deathDropDimension = undefined
-    resetSimState(true)
-	setInventoryOpen(false)
-	syncTouchControls()
-	renderPlayerUi()
-	markSessionDirty()
-}
+    }),
+    clearRespawnLocation: () => {
+      respawnLocation = null
+    },
+    leaveSleep: () => {
+      sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
+    },
+    restorePlayerForRespawn: (validRespawn) => {
+      const respawnDimension = validRespawn?.dimension ?? initialSpawnDimension
+      const respawnPose = validRespawn === null
+        ? initialSpawnPose
+        : { ...initialSpawnPose, feetPosition: validRespawn.position }
+      Effect.runSync(world.player.restore(respawnPose, respawnDimension))
+      alignActiveDimension(respawnDimension)
+    },
+    clearDeathDropDimension: () => {
+      deathDropDimension = undefined
+    },
+    resetSimState,
+    setInventoryOpen: (open) => setInventoryOpen(open),
+    syncTouchControls,
+    renderPlayerUi,
+    markSessionDirty,
+  })
 
   hudParent.addEventListener('click', (event) => {
     if (!(event.target instanceof Element)) return
@@ -4398,90 +4393,34 @@ const bootGame = async (
     },
   })
 
-  const setPaused = (next: boolean): void => {
-    resetPrimaryAttackGesture()
-    if (next) resetBowUse()
-    paused = next
-    gameShell.inert = next
-    pauseOverlay.hidden = !next
-    document.body.setAttribute('data-session-paused', String(next))
-    renderCrosshair()
-    syncTouchControls()
-    if (next) {
-      if (document.pointerLockElement === canvas) document.exitPointerLock()
-      resumeButton.focus()
-      return
-    }
-    pauseError.textContent = ''
-    canvas.focus()
-  }
-
-  const handlePauseRequest = (): void => {
-    if (brewingOpen) {
-      setBrewingOpen(false)
-      return
-    }
-    if (tradeOpen) {
-      setTradeOpen(false)
-      return
-    }
-    if (inventoryOpen) {
-      setInventoryOpen(false)
-      return
-    }
-    setPaused(!paused)
-  }
-
-  document.addEventListener('keydown', (event) => {
-    if (settingsView.isOpen()) return
-    if (event.code === 'Escape' && !event.repeat) {
-      event.preventDefault()
-      event.stopPropagation()
-      handlePauseRequest()
-      return
-    }
-
-    if (!paused || event.code !== 'Tab') return
-    const pauseActions = [resumeButton, settingsButton, saveQuitButton].filter(
-      (button) => !button.hasAttribute('disabled'),
-    )
-    const firstAction = pauseActions[0]
-    const lastAction = pauseActions.at(-1)
-    if (firstAction === undefined || lastAction === undefined) return
-
-    const activeElement = document.activeElement
-    const activeIsPauseAction = pauseActions.some((button) => button === activeElement)
-    const allowsNativeFocusMove = event.shiftKey
-      ? activeElement !== firstAction && activeIsPauseAction
-      : activeElement !== lastAction && activeIsPauseAction
-    if (allowsNativeFocusMove) {
-      return
-    }
-
-    event.preventDefault()
-    event.stopPropagation()
-    ;(event.shiftKey ? lastAction : firstAction).focus()
-  })
-  resumeButton.addEventListener('click', () => setPaused(false))
-  settingsButton.addEventListener('click', () => {
-    pauseOverlay.inert = true
-    settingsView.open(playerSettings, settingsButton)
-  })
-  saveQuitButton.addEventListener('click', () => {
-    if (saveQuitButton.getAttribute('aria-busy') === 'true') return
-    saveQuitButton.setAttribute('aria-busy', 'true')
-    saveQuitButton.setAttribute('disabled', '')
-    pauseError.textContent = ''
-    void Promise.all([requestFlush(), drainSettingsWrites(settingsWrites)])
-      .then(() => window.location.assign('/'))
-      .catch((error: unknown) => {
-        pauseError.textContent = 'Save failed. Your world is still open; please try again.'
-        console.error('[mc-compose] Save & Quit failed', error)
-      })
-      .finally(() => {
-        saveQuitButton.removeAttribute('aria-busy')
-        saveQuitButton.removeAttribute('disabled')
-      })
+  const handlePauseRequest = installPauseControls({
+    document,
+    window,
+    canvas,
+    gameShell,
+    pauseOverlay,
+    resumeButton,
+    settingsButton,
+    saveQuitButton,
+    pauseError,
+    settingsView,
+    getPlayerSettings: () => playerSettings,
+    getPaused: () => paused,
+    setPaused: (next) => {
+      paused = next
+    },
+    isBrewingOpen: () => brewingOpen,
+    closeBrewing: () => setBrewingOpen(false),
+    isTradeOpen: () => tradeOpen,
+    closeTrade: () => setTradeOpen(false),
+    isInventoryOpen: () => inventoryOpen,
+    closeInventory: () => setInventoryOpen(false),
+    resetPrimaryAttackGesture,
+    resetBowUse,
+    renderCrosshair: () => renderCrosshair(),
+    syncTouchControls,
+    requestFlush,
+    drainSettingsWrites: () => drainSettingsWrites(settingsWrites),
   })
 
   // -------------------------------------------------------------------------
