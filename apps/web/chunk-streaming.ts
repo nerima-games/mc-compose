@@ -66,6 +66,12 @@ export type ChunkStreamingRuntime = {
   readonly retainDimensionResidents: (context: ChunkStreamingContext) => Effect.Effect<void>
 }
 
+/**
+ * Which chunks should be resident around a world position.
+ *
+ * The world is unbounded horizontally, so every coordinate in the radius is
+ * loadable and no fixture-edge filtering is needed.
+ */
 export const desiredChunksAround = (
   radius: number,
   x: number,
