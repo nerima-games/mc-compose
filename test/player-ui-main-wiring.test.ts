@@ -43,6 +43,20 @@ describe('H4b main.ts wiring', () => {
     expect(multiplayerClientContext).toContain('get multiplayerHandshakeComplete() { return multiplayerHandshakeComplete }')
 
     const runtimeSetup = mainSource.slice(runtimeCreation, runtimeDestructure)
+    for (const callback of [
+      'getInventoryOpen: () => inventoryOpen,',
+      'setInventoryOpenState: (open) => { inventoryOpen = open },',
+      'getInventoryMode: () => inventoryMode,',
+      'setInventoryMode: (mode) => { inventoryMode = mode },',
+      'getSelectedHotbarIndex: () => selectedHotbarIndex,',
+      'getActiveChestId: () => activeChestId,',
+      'setActiveChestId: (id) => { activeChestId = id },',
+      'getActiveFurnaceKey: () => activeFurnaceKey,',
+      'getMultiplayerInventorySelection: () => multiplayerInventorySelection,',
+      'setMultiplayerInventorySelection: (selection) => { multiplayerInventorySelection = selection },',
+    ]) {
+      expect(runtimeSetup).toContain(callback)
+    }
     expect(runtimeSetup).toContain('sendInventoryCommand,')
     expect(runtimeSetup).toContain('requestCrafting,')
     expect(runtimeSetup).toContain('sendFacilityCommand,')

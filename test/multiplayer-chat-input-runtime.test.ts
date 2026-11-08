@@ -98,9 +98,11 @@ describe('H4b multiplayer chat input path', () => {
       'installMultiplayerChatInputListeners(clientContext)',
       clientFactory,
     )
+    const factoryReturn = multiplayerClientSource.indexOf('\n  return {', installListeners)
 
     expect(clientFactory).toBeGreaterThanOrEqual(0)
     expect(setVisibility).toBeGreaterThan(clientFactory)
     expect(installListeners).toBeGreaterThan(setVisibility)
+    expect(factoryReturn).toBeGreaterThan(installListeners)
   })
 })
