@@ -107,39 +107,25 @@ import {
   containerIdAt,
   emptyFurnaceState,
   emptyPlayerStorage,
-  equipmentDefinitionFor,
   itemStack,
   makeCropService,
   makeSimFrameState,
   makeTimeService,
   makeWeatherService,
   makeVehicleService,
-  planExplosion,
   maxStackCountForItem,
-  totalExperienceAtLevel,
   resetLandingImpact,
   changed,
   UNCHANGED,
-  STARTER_FUEL_RULES,
-  STARTER_SMELTING_RECIPES,
-  targetBlockFromPlayerPose,
   OccupantId,
   EntityId as SimEntityId,
-  type FurnaceState,
   type CropLocation,
   type ItemStack,
   type SimPhysicsConfig,
   type WeatherState,
   type Vehicle,
 } from '@nerima-games/mc-sim'
-import {
-  detectCompletedEndPortal,
-  END_PORTAL_BLOCK,
-  END_PORTAL_FRAME_OFFSETS,
-  endArrivalDescriptor,
-  endPortalCenterForStronghold,
-  nearestStrongholdSite,
-} from '@nerima-games/mc-worldgen'
+import { END_PORTAL_BLOCK } from '@nerima-games/mc-worldgen'
 import {
   ESCAPE_KEY_CODE,
   InputService,
@@ -150,10 +136,9 @@ import {
   syncWorld,
   wrapHotbarSelection,
   type ChunkRef,
-  type RenderEntity,
 } from '@nerima-games/mc-render'
 import { makeBudgetedDirtySource } from './chunk-sync-budget'
-import { chestStorageSlotCount, makeRedstoneContainerRuntime } from './redstone-container-runtime'
+import { makeRedstoneContainerRuntime } from './redstone-container-runtime'
 import {
   clearRenderedChunks,
   makeChunkStreaming,
@@ -166,22 +151,12 @@ import {
   REDSTONE_PLACEMENT_ITEMS,
 } from './qa-fixtures'
 import { trackChunkLightColor } from './render-lighting'
-import {
-  applyAnvilOperation,
-  enchantedItemFromAnvilOutput,
-  planAnvilOperation,
-  spendExperienceLevels,
-} from '../multiplayer-shared/anvil-repair'
 import { excludeReservedPlacementConsumptions } from './placement-consumption'
 import {
   advancePlayerSwimmingRuntime,
   initialPlayerSwimmingRuntimeState,
-  MAX_SWIMMING_OXYGEN_SECS,
 } from './player-swimming-runtime'
 import {
-  chestStorageCloseIntent,
-  chestStorageSlotClickIntent,
-  chestStorageViewModel,
   createAnvilView,
   createChestStorageView,
   createEnchantingTableView,
@@ -189,19 +164,11 @@ import {
   createFurnaceView,
   createHudView,
   createInventoryView,
-  furnaceViewModel,
-  anvilViewModel,
-  enchantingTableViewModel,
-  inventoryViewModel,
-  inventoryActionTarget,
   makeUiFrameState,
   slotSnapshotOf,
   type ChestStorageSlotTarget,
   type FurnaceSlotId,
-  type FurnaceSnapshot,
   type InventoryInteractionTarget,
-  type InventoryAction,
-  type InventoryActionTarget,
   type InventoryDragTarget,
   type EquipmentSlotId,
 } from '@nerima-games/mx-ui'
@@ -215,10 +182,6 @@ import {
   canFireBow,
   cancelFishing,
   castFishing,
-  applyEnchantmentOffer,
-  armorDamageWithEnchantments,
-  armorPointsForEquipment,
-  armorDurabilityWearFromPreMitigationDamage,
   durabilityWearWithEnchantments,
   drainBlockUseResults,
   drainBowKnockbacks,
@@ -230,7 +193,6 @@ import {
   drainPlayerDamages,
   drainPlayerHeals,
   drainVillagerTradeResults,
-  enchantmentOffers,
   enchantmentLevel,
   DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
@@ -242,8 +204,6 @@ import {
   INITIAL_ENVIRONMENTAL_CONTACT_DAMAGE_STATE,
   makeGameplayFrameState,
   makeGeneratedWorld,
-  meleeDamageForItem,
-  meleeDamageWithEnchantments,
   isDroppedItemBehaviour,
   isHoeItem,
   isIgnitionItem,
@@ -297,7 +257,6 @@ import {
   type VillagerTradeResult,
   type BrewingBottle,
   type BrewingIngredient,
-  type EnchantedItem,
   type FishingRod,
   type FishingSession,
 } from '@nerima-games/mx-gameplay'
@@ -330,7 +289,6 @@ import {
   advanceEyeOfEnderRuntime,
   eyeOfEnderRenderDescriptors,
   initialEyeOfEnderRuntimeState,
-  launchRuntimeEyeOfEnder,
 } from './eye-of-ender-runtime'
 import {
   advanceWitherRuntime,
@@ -348,7 +306,6 @@ import {
 
 const COMPOSE_CHUNK_SYNC_STAGE = StageId('compose:chunk-sync')
 import {
-  describeQaApiError,
   QA_GLOBAL_KEY,
 } from '../../src/domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
@@ -359,11 +316,9 @@ import {
   type MultiplayerClientContext,
 } from './multiplayer-client'
 import {
-  announceInventoryTransition,
   captionRenderSignature,
   horizontalListenerForward,
 } from './audio-runtime'
-import { createInventoryInteraction } from './inventory-interaction'
 import {
   EMPTY_BLOCK_BREAK_COUNTERS,
   observeBlockBreakCompletion,
@@ -414,10 +369,8 @@ import {
   advanceTouchLook,
   consumeTouchLook,
   createTouchControlRoster,
-  resetTouchLook,
   TOUCH_CONTROL_ACTIONS,
   TOUCH_LOOK_CONTROLLER_IDLE,
-  touchControlsPresentation,
   type TouchControlAction,
 } from './touch-input'
 import {
@@ -449,7 +402,6 @@ import {
   type SettingsWriteQueue,
 } from './platform-adapters'
 import { makeHostModules } from './host-modules'
-import { makeQaSurface } from './qa-surface'
 import { bootTitleMenu } from './title-menu'
 import {
   handleLocalPlayerDeath as handleLocalPlayerDeathUi,
@@ -458,6 +410,13 @@ import {
   renderPlayerHud,
   respawnPlayer as respawnPlayerUi,
 } from './player-ui-h4a'
+import { createPlayerUiRuntime } from './player-ui-runtime'
+import {
+  createPlayerFramePreparation,
+  createPlayerSessionRuntime,
+  installPlayerLifecycle,
+  installPlayerQaSurface,
+} from './player-session-runtime'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -2632,428 +2591,206 @@ const bootGame = async (
   let chestFocus: ChestStorageSlotTarget = { region: 'chest', slot: 0 }
   let chestSelected: ChestStorageSlotTarget | undefined
   let chestStatus = ''
-  let carriedEnchantedItem: EnchantedItem | undefined
-  let carriedCustomName: string | undefined
-  const metadataMatches = (slotIndex: number): boolean => {
-    const slotKey = String(slotIndex)
-    return JSON.stringify(enchantedItems.get(slotKey)) === JSON.stringify(carriedEnchantedItem)
-      && customNames.get(slotKey) === carriedCustomName
-  }
-  const inventoryInteraction = createInventoryInteraction(world.inventory, {
-    canInventoryClick: ({ slotIndex, slotBefore, carriedBefore }) =>
-      carriedBefore === undefined || slotBefore === undefined || carriedBefore.item !== slotBefore.item
-      || metadataMatches(slotIndex),
-    consumeCraftingGrid: true,
-    onCrafted: () => markSessionDirty(),
-    onInventoryChanged: () => markSessionDirty(),
-    onInventoryReset: () => {
-      carriedEnchantedItem = undefined
-      carriedCustomName = undefined
+  const inventoryRuntime = createPlayerUiRuntime({
+    document,
+    window,
+    canvas,
+    inventoryParent,
+    touchControlsParent,
+    swimmingHud,
+    documentBody: document.body,
+    touchAvailable,
+    inventoryPresentations: INVENTORY_PRESENTATIONS,
+    inventoryView,
+    furnaceView,
+    chestView,
+    anvilView,
+    enchantingView,
+    inventoryService: world.inventory,
+    worldInventory: world.inventory,
+    inventoryStorageSnapshot: world.inventory.storageSnapshot,
+    getPlayerPose: () => playerApi.pose,
+    getPlayerDimension: () => playerApi.dimension,
+    restorePlayerForDimension: (pose, dimension) => playerApi.restore(pose, dimension),
+    getOrCreateDimensionChunkContext,
+    readBlockAt: (position) => Effect.map(currentChunkStore.getBlock(position), (reading) =>
+      reading._tag === 'Block'
+        ? { _tag: 'Block', block: reading.block }
+        : { _tag: 'Unavailable' }),
+    customNames,
+    enchantedItems,
+    audio,
+    getMultiplayer: () => multiplayer !== undefined,
+    getPlayerHealthPoints: () => Effect.runSync(world.vitals.view).healthPoints,
+    getVitalsDamageSnapshot: () => Effect.runSync(world.vitals.snapshot),
+    applyVitalsDamage: (damage) => { Effect.runSync(world.vitals.damage(damage)) },
+    restoreVitalsDamage: (vitals) => { Effect.runSync(world.vitals.restore(vitals)) },
+    isCreativeMode,
+    queuePlayerDamage: (amount, minimumHealthPoints) => {
+      queuedPlayerDamages = [...queuedPlayerDamages, { amount, minimumHealthPoints }]
+      pumpPlayerDamage()
     },
-    onInventoryTransition: ({ slotIndex, slotBefore, carriedBefore, result }) => {
-      const slotKey = String(slotIndex)
-      const slotEnchantment = enchantedItems.get(slotKey)
-      const slotCustomName = customNames.get(slotKey)
-      if (result._tag === 'PickedUp') {
-        carriedEnchantedItem = slotEnchantment
-        carriedCustomName = slotCustomName
-        if (slotBefore === undefined || result.carried === undefined
-          || result.carried.count >= slotBefore.count) {
-          enchantedItems.delete(slotKey)
-          customNames.delete(slotKey)
-        }
-        return
-      }
-      if (result._tag === 'Placed' || result._tag === 'Merged') {
-        if (carriedEnchantedItem === undefined) enchantedItems.delete(slotKey)
-        else enchantedItems.set(slotKey, carriedEnchantedItem)
-        if (carriedCustomName === undefined) customNames.delete(slotKey)
-        else customNames.set(slotKey, carriedCustomName)
-        if (result.carried === undefined) {
-          carriedEnchantedItem = undefined
-          carriedCustomName = undefined
-        }
-        return
-      }
-      if (result._tag === 'Swapped' && carriedBefore !== undefined) {
-        if (carriedEnchantedItem === undefined) enchantedItems.delete(slotKey)
-        else enchantedItems.set(slotKey, carriedEnchantedItem)
-        if (carriedCustomName === undefined) customNames.delete(slotKey)
-        else customNames.set(slotKey, carriedCustomName)
-        carriedEnchantedItem = slotEnchantment
-        carriedCustomName = slotCustomName
+    handleLocalPlayerDeath: () => handleLocalPlayerDeath(),
+    setSwimmingState: (state) => { swimmingState = state },
+    resetSimState,
+    getEntitiesForExplosion: () => Effect.runSync(world.entities.entities),
+    setBlockAt: (position, block) => { Effect.runSync(currentChunkStore.setBlock(position, block)) },
+    setBlockEffect: (position, block) => currentChunkStore.setBlock(position, block),
+    resolveExplosionEffects: (effects) => {
+      for (const effect of effects) {
+        Effect.runSync(resolveBowHits(world.entities, [{
+          id: SimEntityId(effect.id),
+          damage: effect.damage,
+        }]))
       }
     },
-  })
-  const projectedInventoryEnchantedItem = (slotIndex: number): EnchantedItem | null => {
-    const storage = Effect.runSync(world.inventory.storageSnapshot)
-    return projectEnchantedItem(
-      storage.inventory.slots[slotIndex],
-      storage.inventoryDurability[slotIndex],
-      enchantedItems.get(String(slotIndex)),
-    )
-  }
-  const inventoryMeleeDamage = (slotIndex: number): number => {
-    const storage = Effect.runSync(world.inventory.storageSnapshot)
-    const selectedItem = storage.inventory.slots[slotIndex]?.item ?? null
-    const baseDamage = meleeDamageForItem(selectedItem)
-    const enchantedItem = projectEnchantedItem(
-      storage.inventory.slots[slotIndex],
-      storage.inventoryDurability[slotIndex],
-      enchantedItems.get(String(slotIndex)),
-    )
-    return enchantedItem === null
-      ? baseDamage
-      : meleeDamageWithEnchantments(baseDamage, enchantedItem)
-  }
-  const playerIsDead = (): boolean => Effect.runSync(world.vitals.view).healthPoints <= 0
-  const coordinateKey = (x: number, y: number, z: number): string => `${x},${y},${z}`
-  const targetedBlock = (): Effect.Effect<{
-    readonly position: SessionPosition
-    readonly adjacentPosition: SessionPosition
-    readonly block: number
-  } | undefined> => Effect.gen(function* () {
-    const pose = yield* playerApi.pose
-    const candidates: SessionPosition[] = []
-    const visited = new Set<string>()
-    targetBlockFromPlayerPose(pose, DEFAULT_BLOCK_REACH, (x, y, z) => {
-      const key = `${String(x)},${String(y)},${String(z)}`
-      if (!visited.has(key)) {
-        visited.add(key)
-        candidates.push({ x, y, z })
-      }
-      return false
-    })
-    const targetable = new Set<string>()
-    for (const position of candidates) {
-      const reading = yield* currentChunkStore.getBlock(blockPosition(position.x, position.y, position.z))
-      if (reading._tag === 'Block' && reading.block !== 0) {
-        targetable.add(coordinateKey(position.x, position.y, position.z))
-        break
-      }
-    }
-    const target = targetBlockFromPlayerPose(
-      pose,
-      DEFAULT_BLOCK_REACH,
-      (x, y, z) => targetable.has(coordinateKey(x, y, z)),
-    )
-    if (Option.isNone(target)) return undefined
-    const reading = yield* currentChunkStore.getBlock(blockPosition(target.value.position.x, target.value.position.y, target.value.position.z))
-    return reading._tag === 'Block'
-      ? { ...target.value, block: reading.block }
-      : undefined
-  })
-
-  const fishingEnvironmentAt = (
-    position: SessionPosition,
-    isRaining: boolean,
-  ): Effect.Effect<{
-    readonly hasWater: boolean
-    readonly hasSkyAccess: boolean
-    readonly isRaining: boolean
-    readonly isOpenWater: boolean
-  }> => Effect.gen(function* () {
-    const center = yield* currentChunkStore.getBlock(blockPosition(position.x, position.y, position.z))
-    const hasWater = center._tag === 'Block' && blockTypeOfId(center.block) === 'water'
-    if (!hasWater) return { hasWater: false, hasSkyAccess: false, isRaining, isOpenWater: false }
-
-    let hasSkyAccess = true
-    for (let y = position.y + 1; y <= 127; y += 1) {
-      const reading = yield* currentChunkStore.getBlock(blockPosition(position.x, y, position.z))
-      if (reading._tag === 'Block' && reading.block !== 0) {
-        hasSkyAccess = false
-        break
-      }
-    }
-
-    let isOpenWater = true
-    for (let x = position.x - 2; x <= position.x + 2 && isOpenWater; x += 1) {
-      for (let z = position.z - 2; z <= position.z + 2; z += 1) {
-        const water = yield* currentChunkStore.getBlock(blockPosition(x, position.y, z))
-        const above = yield* currentChunkStore.getBlock(blockPosition(x, position.y + 1, z))
-        if (
-          water._tag !== 'Block' || blockTypeOfId(water.block) !== 'water'
-          || above._tag !== 'Block' || above.block !== 0
-        ) {
-          isOpenWater = false
-          break
-        }
-      }
-    }
-    return { hasWater, hasSkyAccess, isRaining, isOpenWater }
-  })
-
-  const setFishingResult = (result: string): void => {
-    fishingResult = result
-    document.body.setAttribute('data-fishing-result', result)
-    document.body.setAttribute(
-      'data-fishing-phase',
-      fishingSession === undefined ? 'idle' : fishingPhase(fishingSession),
-    )
-  }
-
-  const materializeEndArrival = (): Effect.Effect<void> => Effect.gen(function* () {
-    const arrival = endArrivalDescriptor(blockPosition(0, 64, 0))
-    const context = getOrCreateDimensionChunkContext('end')
-    const mutations = [...arrival.platform, ...arrival.clear.map((at) => ({ at, block: blockIdOf('air') }))]
-    const chunks = new Map<string, ChunkRef>()
-    for (const mutation of mutations) {
-      const chunk = { cx: Math.floor(mutation.at.x / 16), cz: Math.floor(mutation.at.z / 16) }
-      chunks.set(chunkKeyOf(chunk), chunk)
-    }
-    for (const [key, chunk] of chunks) {
-      if (!context.streamLoaded.has(key)) {
-        yield* context.chunkStore.load(chunkCoord(chunk.cx, chunk.cz)).pipe(Effect.catchAll(() => Effect.void))
-        context.streamLoaded.add(key)
-      }
-    }
-    for (const mutation of mutations) yield* context.chunkStore.setBlock(mutation.at, mutation.block)
-    const pose = yield* playerApi.pose
-    yield* playerApi.restore({ ...pose, feetPosition: arrival.spawn, yawRadians: Math.PI }, 'end')
-    alignActiveDimension('end')
-    resetSimState(true)
-    markSessionDirty()
-  })
-
-  const useEndFeature = (): Effect.Effect<boolean> => Effect.gen(function* () {
-    if (multiplayer !== undefined) {
-      const dimension = yield* playerApi.dimension
-      const inventory = yield* world.inventory.snapshot
-      const selected = inventory.slots[selectedHotbarIndex]
-      if (dimension !== 'overworld' || selected?.item !== 'eye_of_ender') return false
-      const target = yield* targetedBlock()
-      if (target?.block === END_PORTAL_BLOCK.FRAME_EMPTY) {
-        const pose = yield* playerApi.pose
-        const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
-        if (Option.isSome(site)) {
-          const center = endPortalCenterForStronghold(site.value)
-          const offset = END_PORTAL_FRAME_OFFSETS.find((candidate) =>
-            center.x + candidate.dx === target.position.x
-            && center.y === target.position.y
-            && center.z + candidate.dz === target.position.z)
-          if (offset !== undefined) {
-            return sendEndProgressCommand({
-              _tag: 'InsertEyeIntoEndPortalFrameCommand',
-              frame: target.position,
-            })
-          }
-        }
-      }
-      return sendEndProgressCommand({ _tag: 'ThrowEyeOfEnderCommand' })
-    }
-    const dimension = yield* playerApi.dimension
-    const pose = yield* playerApi.pose
-    if (dimension === 'end' && exitPortalMaterialized) {
-      const target = yield* targetedBlock()
-      if (target?.block === END_PORTAL_BLOCK.PORTAL) {
-        yield* playerApi.restore({ ...pose, feetPosition: { x: 0.5, y: 80, z: 0.5 } }, 'overworld')
-        alignActiveDimension('overworld')
-        resetSimState(true)
-        queueEndAudio('exitPortal', pose.feetPosition)
-        markSessionDirty()
-        return true
-      }
-    }
-    if (dimension === 'overworld' && endPortalComplete) {
-      const target = yield* targetedBlock()
-      if (target?.block === END_PORTAL_BLOCK.PORTAL) {
-        yield* materializeEndArrival()
-        queueEndAudio('portalActivate', target.position)
-        return true
-      }
-    }
-    const inventory = yield* world.inventory.snapshot
-    const selected = inventory.slots[selectedHotbarIndex]
-    if (dimension !== 'overworld' || selected?.item !== 'eye_of_ender') return false
-    const site = nearestStrongholdSite(activeSeed, pose.feetPosition.x, pose.feetPosition.z)
-    if (Option.isNone(site)) return false
-    const center = endPortalCenterForStronghold(site.value)
-    const isNearPortal = Math.hypot(
-      center.x - pose.feetPosition.x,
-      center.y - pose.feetPosition.y,
-      center.z - pose.feetPosition.z,
-    ) <= DEFAULT_BLOCK_REACH + 4
-    const target = isNearPortal ? yield* targetedBlock() : undefined
-    if (isNearPortal) {
-      for (const frameOffset of END_PORTAL_FRAME_OFFSETS) {
-        const position = blockPosition(center.x + frameOffset.dx, center.y, center.z + frameOffset.dz)
-        const reading = yield* currentChunkStore.getBlock(position)
-        if (reading._tag === 'Block'
-          && (reading.block === END_PORTAL_BLOCK.FRAME_EMPTY || reading.block === END_PORTAL_BLOCK.FRAME_FILLED)) {
-          endPortalFrames.set(endPortalFrameKey(position), {
-            position,
-            facing: frameOffset.facing,
-            eye: reading.block === END_PORTAL_BLOCK.FRAME_FILLED,
-          })
-        }
-      }
-    }
-    const offset = target === undefined ? undefined : END_PORTAL_FRAME_OFFSETS.find((candidate) =>
-      center.x + candidate.dx === target.position.x
-      && center.y === target.position.y
-      && center.z + candidate.dz === target.position.z)
-    if (target?.block === END_PORTAL_BLOCK.FRAME_EMPTY && offset !== undefined) {
-      yield* currentChunkStore.setBlock(blockPosition(target.position.x, target.position.y, target.position.z), END_PORTAL_BLOCK.FRAME_FILLED)
-      endPortalFrames.set(endPortalFrameKey(target.position), {
-        position: target.position,
-        facing: offset.facing,
-        eye: true,
-      })
-      if (!isCreativeMode) yield* world.inventory.removeAt(selectedHotbarIndex, 'eye_of_ender', 1)
-      queueEndAudio('frameInsert', target.position)
-      canvas.setAttribute('data-end-portal-progress', String(
-        [...endPortalFrames.values()].filter((frame) => frame.eye).length,
-      ))
-      const completed = detectCompletedEndPortal((x, y, z) => {
-        const frame = endPortalFrames.get(endPortalFrameKey({ x, y, z }))
-        return frame === undefined
-          ? undefined
-          : {
-              block: frame.eye ? END_PORTAL_BLOCK.FRAME_FILLED : END_PORTAL_BLOCK.FRAME_EMPTY,
-              facing: frame.facing,
-            }
-      }, dimension, center)
-      if (Option.isSome(completed)) {
-        for (const mutation of completed.value.materialization) {
-          yield* currentChunkStore.setBlock(mutation.at, mutation.block)
-        }
-        endPortalComplete = true
-        queueEndAudio('portalActivate', center)
-      }
-      markSessionDirty()
+    getActiveSeed: () => activeSeed,
+    endPortalFrames,
+    endPortalFrameKey,
+    getEndPortalComplete: () => endPortalComplete,
+    setEndPortalComplete: (complete) => { endPortalComplete = complete },
+    getExitPortalMaterialized: () => exitPortalMaterialized,
+    getEyeOfEnderRuntimeState: () => eyeOfEnderRuntimeState,
+    setEyeOfEnderRuntimeState: (state) => { eyeOfEnderRuntimeState = state },
+    getNextEyeOfEnderBreaks: () => nextEyeOfEnderBreaks,
+    setNextEyeOfEnderBreaks: (breaks) => { nextEyeOfEnderBreaks = breaks },
+    sendEndProgressCommand,
+    alignActiveDimension: (dimension) => { alignActiveDimension(dimension) },
+    queueEndAudio,
+    getBowInteractionLocked: () => bowInteractionLocked(),
+    getPaused: () => paused,
+    getTouchLookState: () => touchLookState,
+    setTouchLookState: (state) => { touchLookState = state },
+    clearHeldInput: () => Effect.runSync(inputApi.clearHeld),
+    getSwimmingState: () => swimmingState,
+    getFishingSession: () => fishingSession,
+    setFishingResultState: (result) => { fishingResult = result },
+    getInventoryOpen: () => inventoryOpen,
+    setInventoryOpenState: (open) => { inventoryOpen = open },
+    getInventoryMode: () => inventoryMode,
+    setInventoryMode: (mode) => { inventoryMode = mode },
+    getActiveChestId: () => activeChestId,
+    setActiveChestId: (id) => { activeChestId = id },
+    setChestSelected: (target) => { chestSelected = target },
+    setChestFocus: (target) => { chestFocus = target },
+    setChestStatus: (status) => { chestStatus = status },
+    setCloseChestOnFacilityIdle: (close) => { closeChestOnFacilityIdle = close },
+    setInventoryFocus: (target) => { inventoryFocus = target },
+    setFurnaceFocus: (slot) => { furnaceFocus = slot },
+    setFurnaceStatus: (status) => { furnaceStatus = status },
+    getEquipmentActionStatus: () => equipmentActionStatus,
+    setEquipmentActionStatus: (status) => { equipmentActionStatus = status },
+    getInventoryDragSource: () => inventoryDragSource,
+    setInventoryDragSource: (source) => { inventoryDragSource = source },
+    getMultiplayerInventorySelection: () => multiplayerInventorySelection,
+    setMultiplayerInventorySelection: (selection) => { multiplayerInventorySelection = selection },
+    hasPendingCrafting: () => pendingCrafting !== null,
+    sendInventoryCommand,
+    requestCrafting,
+    requestAnvil,
+    requestEnchanting,
+    moveItemMetadata,
+    equipmentMetadataKey,
+    setEnchantmentSeed: (seed) => { enchantmentSeed = seed },
+    getVitalsSnapshot: () => ({ totalExperience: Effect.runSync(world.vitals.snapshot).totalExperience }),
+    getInventorySnapshot: () => world.inventory.snapshot,
+    restoreVitalsAtExperience: (totalExperience) => {
+      const vitals = Effect.runSync(world.vitals.snapshot)
+      Effect.runSync(world.vitals.restore(addVitalsExperience(
+        vitals,
+        totalExperience - vitals.totalExperience,
+      )))
+    },
+    setAnvilName: (name) => { anvilName = name },
+    setAnvilStatus: (status) => { anvilStatus = status },
+    setEnchantingStatus: (status) => { enchantingStatus = status },
+    getSelectedHotbarIndex: () => selectedHotbarIndex,
+    renderHud: (storage, durabilityBySlot) => renderPlayerHud({
+      render: (viewModel) => hud.render(viewModel),
+      getHudInput: () => ({
+        ...Effect.runSync(world.vitals.view),
+        hotbar: storage.inventory.slots
+          .slice(0, 9)
+          .map((slot, slotIndex) => slotSnapshotOf(slot, durabilityBySlot.get(slotIndex))),
+        selectedHotbarIndex,
+      }),
+      getActiveEffects: () => Effect.runSync(snapshotStatusEffects(gameplayState)).effects,
+      statusEffectsHud,
+      documentBody: document.body,
+    }),
+    getTotalExperience: () => Effect.runSync(world.vitals.snapshot).totalExperience,
+    getExperienceLevel: () => Effect.runSync(world.vitals.view).experienceLevel,
+    getEnchantmentSeed: () => enchantmentSeed,
+    getAnvilName: () => anvilName,
+    getAnvilStatus: () => anvilStatus,
+    getEnchantingStatus: () => enchantingStatus,
+    getChestSelected: () => chestSelected,
+    getChestFocus: () => chestFocus,
+    getChestStatus: () => chestStatus,
+    getFurnaceFocus: () => furnaceFocus,
+    getFurnaceStatus: () => furnaceStatus,
+    getInventoryFocus: () => inventoryFocus,
+    getActiveChestContainer: (containerId) => Effect.runSync(world.inventory.containerSnapshot(containerId)),
+    transferContainerItem: (request) => world.inventory.transferContainerItem(request),
+    containerMetadataKey,
+    sameItemMetadata,
+    copyItemMetadata,
+    deleteItemMetadata,
+    getActiveFurnaceState: () => activeFurnaceKey === undefined
+      ? undefined
+      : furnaceStates.get(activeFurnaceKey)?.state,
+    getActiveFurnaceKey: () => activeFurnaceKey,
+    removeInventoryAt: (slot, item, count) => Effect.map(
+      world.inventory.removeAt(slot, item, count),
+      (result) => result._tag === 'Removed'
+        ? { _tag: 'Removed', removed: result.removed }
+        : { _tag: 'Unavailable' },
+    ),
+    addInventoryItem: (item, count) => world.inventory.add(item, count),
+    updateActiveFurnaceState: (state) => {
+      if (activeFurnaceKey === undefined) return false
+      const current = furnaceStates.get(activeFurnaceKey)
+      if (current === undefined) return false
+      furnaceStates.set(activeFurnaceKey, { ...current, state })
       return true
-    }
-    const dx = site.value.x - pose.feetPosition.x
-    const dz = site.value.z - pose.feetPosition.z
-    canvas.setAttribute('data-stronghold-direction', String(Math.atan2(dx, -dz)))
-    canvas.setAttribute('data-stronghold-distance', String(Math.round(Math.hypot(dx, dz))))
-    if (!isCreativeMode) yield* world.inventory.removeAt(selectedHotbarIndex, 'eye_of_ender', 1)
-    const breaks = nextEyeOfEnderBreaks ?? Math.random() < 0.2
-    nextEyeOfEnderBreaks = undefined
-    eyeOfEnderRuntimeState = launchRuntimeEyeOfEnder(eyeOfEnderRuntimeState, {
-      dimension,
-      position: { ...pose.feetPosition, y: pose.feetPosition.y + EYE_LEVEL_OFFSET },
-      target: { x: site.value.x, y: pose.feetPosition.y, z: site.value.z },
-      breaks,
-    })
-    queueEndAudio('eyeThrow', pose.feetPosition)
-    markSessionDirty()
-    return true
+    },
+    sendFacilityCommand,
+    closeTrade: () => setTradeOpen(false),
+    isTradeOpen: () => tradeOpen,
+    closeBrewing: () => setBrewingOpen(false),
+    isBrewingOpen: () => brewingOpen,
+    resetPrimaryAttackGesture,
+    clearMultiplayerInventorySelection: () => { multiplayerInventorySelection = null },
+    markSessionDirty: () => markSessionDirty(),
+    getDirtyGeneration: () => dirtyGeneration,
+    setDirtyGeneration: (generation) => { dirtyGeneration = generation },
+    getSavedGeneration: () => savedGeneration,
+    getDebounceTimer: () => debounceTimer,
+    setDebounceTimer: (timer) => { debounceTimer = timer },
+    scheduleDebounce: (callback, delayMs) => window.setTimeout(callback, delayMs),
+    clearDebounce: (timer) => window.clearTimeout(timer),
+    saveSession: () => saveCoordinator.requestSave(),
+    saveDebounceMs: SAVE_DEBOUNCE_MS,
+    renderCrosshair: () => renderCrosshair(),
   })
-  let touchControlsVisible = false
-  const resetTouchInput = (
-    reason: Parameters<typeof resetTouchLook>[1],
-  ): void => {
-    resetPrimaryAttackGesture()
-    touchLookState = resetTouchLook(touchLookState, reason)
-    Effect.runSync(inputApi.clearHeld)
-  }
-  const syncTouchControls = (): void => {
-    const presentation = touchControlsPresentation({
-      touchAvailable,
-      playing: true,
-      dead: playerIsDead(),
-      inventoryOpen: inventoryOpen || tradeOpen || brewingOpen,
-      paused,
-    })
-    const wasVisible = touchControlsVisible
-    touchControlsVisible = presentation.visible
-    touchControlsParent.hidden = !presentation.visible
-    touchControlsParent.inert = presentation.inert
-    touchControlsParent.setAttribute('aria-hidden', String(!presentation.visible))
-    if (wasVisible && !presentation.visible) resetTouchInput('state-transition')
-  }
-  const presentSwimmingState = (): void => {
-    const oxygen = Math.max(0, Math.ceil(swimmingState.oxygenSecs))
-    swimmingHud.hidden = !swimmingState.fullySubmerged
-    swimmingHud.textContent = `Oxygen ${String(oxygen)}/${String(MAX_SWIMMING_OXYGEN_SECS)}`
-    document.body.setAttribute('data-swimming', String(swimmingState.active))
-    document.body.setAttribute('data-swimming-pose', swimmingState.active ? 'swimming' : 'standing')
-    document.body.setAttribute('data-fully-submerged', String(swimmingState.fullySubmerged))
-    document.body.setAttribute('data-oxygen-seconds', String(swimmingState.oxygenSecs))
-  }
-
-  const applyPlayerDamage = (
-    damage: Parameters<typeof world.vitals.damage>[0],
-    minimumHealthPoints = 0,
-  ): void => {
-    if (isCreativeMode) return
-    const equipment = Effect.runSync(world.inventory.equipmentSnapshot)
-    const enchantedArmor = (['head', 'chest', 'legs', 'feet'] as const).flatMap((slot) => {
-      const equippedItem = equipment.slots[slot]
-      if (equippedItem === null) return []
-      const projected = projectEnchantedItem(
-        itemStack(equippedItem.item, equippedItem.count),
-        equippedItem.durability ?? undefined,
-        enchantedItems.get(equipmentMetadataKey(slot)),
-      )
-      return projected === null ? [] : [projected]
-    })
-    const reducedDamage = armorDamageWithEnchantments(
-      damage,
-      armorPointsForEquipment(equipment),
-      enchantedArmor,
-    )
-    if (multiplayer !== undefined) {
-      if (reducedDamage.amount > 0) {
-        queuedPlayerDamages = [...queuedPlayerDamages, {
-          amount: reducedDamage.amount,
-          minimumHealthPoints,
-        }]
-        pumpPlayerDamage()
-      }
-      return
-    }
-    const healthBefore = Effect.runSync(world.vitals.view).healthPoints
-    Effect.runSync(world.vitals.damage(reducedDamage))
-    const damagedVitals = Effect.runSync(world.vitals.snapshot)
-    if (damagedVitals.healthPoints < minimumHealthPoints) {
-      Effect.runSync(world.vitals.restore({
-        ...damagedVitals,
-        healthPoints: minimumHealthPoints,
-      }))
-    }
-    const healthAfter = Effect.runSync(world.vitals.view).healthPoints
-    if (healthAfter < healthBefore) {
-      const wear = armorDurabilityWearFromPreMitigationDamage(damage)
-      if (wear > 0) {
-        for (const slot of ['head', 'chest', 'legs', 'feet'] as const) {
-          if (equipment.slots[slot] !== null) {
-            const enchantedItem = enchantedArmor.find(
-              (item) => item.item === equipment.slots[slot]?.item,
-            )
-            const appliedWear = enchantedItem === undefined
-              ? wear
-              : durabilityWearWithEnchantments(
-                  wear,
-                  enchantedItem,
-                  Array.from({ length: wear }, () => Math.random()),
-                )
-            if (appliedWear === 0) continue
-            const result = Effect.runSync(
-              world.inventory.damageAt({ _tag: 'Equipment', slot }, appliedWear),
-            )
-            if (result._tag === 'Broken') {
-              enchantedItems.delete(equipmentMetadataKey(slot))
-              customNames.delete(equipmentMetadataKey(slot))
-            }
-          }
-        }
-      }
-      audio.play('playerHurt')
-    }
-    if (healthBefore > 0 && playerIsDead() && multiplayer === undefined) {
-      handleLocalPlayerDeath()
-    }
-    if (playerIsDead()) {
-      swimmingState = initialPlayerSwimmingRuntimeState()
-      presentSwimmingState()
-      resetPrimaryAttackGesture()
-      resetSimState(false)
-    }
-    syncTouchControls()
-  }
-
+  const {
+    inventoryInteraction,
+    setInventoryOpen,
+    projectedInventoryEnchantedItem,
+    inventoryMeleeDamage,
+    playerIsDead,
+    resetTouchInput,
+    syncTouchControls,
+    presentSwimmingState,
+    setFishingResult,
+    targetedBlock,
+    fishingEnvironmentAt,
+    useEndFeature,
+    installInventoryListeners,
+    applyPlayerDamage,
+    applyWorldExplosion,
+  } = inventoryRuntime
+  const renderPlayerUi = inventoryRuntime.renderPlayerUi
   let deathDropDimension: SessionState['dimension'] | undefined =
     restoredWorkstations?.deathDropDimension
   const handleLocalPlayerDeath = (): void => handleLocalPlayerDeathUi({
@@ -3076,1173 +2813,7 @@ const bootGame = async (
     markSessionDirty,
   })
 
-  const applyWorldExplosion = (
-    center: Readonly<{ x: number; y: number; z: number }>,
-    radius: number,
-    seed: number,
-    destroysResistantBlocks: boolean,
-  ): void => {
-    const entities = Effect.runSync(world.entities.entities)
-    const plan = planExplosion({
-      center,
-      radius,
-      seed,
-      blocks: (position) => {
-        const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(position.x, position.y, position.z)))
-        if (reading._tag !== 'Block') return undefined
-        const type = blockTypeOfId(reading.block)
-        if (type === 'air') return { resistance: 0, destructible: false }
-        const hardness = propertyOfBlockId(reading.block, 'hardness')
-        return {
-          resistance: destroysResistantBlocks ? 0 : hardness,
-          destructible: type !== 'bedrock',
-        }
-      },
-      entities,
-    })
-    for (const position of plan.destroyedBlocks) {
-      Effect.runSync(currentChunkStore.setBlock(blockPosition(position.x, position.y, position.z), blockIdOf('air')))
-    }
-    for (const effect of plan.entityEffects) {
-      // mc-kernel's `ExplosionEntityEffect.id` is a bare `string` (the
-      // explosion-physics layer does not own the `EntityId` brand);
-      // `resolveBowHits` requires mc-sim's brand; the mx-multiplayer schema brand
-      // is not directly callable.
-      Effect.runSync(resolveBowHits(world.entities, [{ id: SimEntityId(effect.id), damage: effect.damage }]))
-    }
-    const playerPosition = Effect.runSync(playerApi.pose).feetPosition
-    const playerDistance = Math.hypot(
-      playerPosition.x - center.x,
-      playerPosition.y + 0.9 - center.y,
-      playerPosition.z - center.z,
-    )
-    if (playerDistance < radius) {
-      const exposure = 1 - playerDistance / radius
-      applyPlayerDamage({
-        amount: ((exposure * exposure + exposure) / 2) * 7 * radius + 1,
-        cause: 'generic',
-      })
-    }
-    markSessionDirty()
-  }
-
-  const interactionStatus = (): string => {
-    if (equipmentActionStatus !== '') return equipmentActionStatus
-    const status = inventoryInteraction.state().status
-    if (status === undefined) return ''
-    switch (status._tag) {
-      case 'Crafted':
-        return `Crafted ${String(status.output.count)} ${status.output.item}`
-      case 'MissingIngredients':
-        return 'Missing ingredients'
-      case 'NoRoom':
-        return 'Inventory is full'
-      case 'NoMatch':
-        return 'No matching recipe'
-    }
-  }
-
-  const renderPlayerUi = (): void => {
-    const storage = Effect.runSync(world.inventory.storageSnapshot)
-    const durabilityBySlot = new Map<number, number>()
-    storage.inventoryDurability.forEach((durability, slotIndex) => {
-      if (durability !== null) {
-        durabilityBySlot.set(slotIndex, durability.current / durability.max)
-      }
-    })
-    const equipment = storage.equipment.slots
-    const equipmentSlot = (slot: typeof equipment.head) =>
-      slot === null ? undefined : {
-        item: slot.item,
-        count: slot.count,
-        durability: slot.durability === null
-          ? undefined
-          : slot.durability.current / slot.durability.max,
-      }
-    const draft = inventoryInteraction.state()
-    renderPlayerHud({
-      render: (viewModel) => hud.render(viewModel),
-      getHudInput: () => ({
-        ...Effect.runSync(world.vitals.view),
-        hotbar: storage.inventory.slots
-          .slice(0, 9)
-          .map((slot, slotIndex) => slotSnapshotOf(slot, durabilityBySlot.get(slotIndex))),
-        selectedHotbarIndex,
-      }),
-      getActiveEffects: () => Effect.runSync(snapshotStatusEffects(gameplayState)).effects,
-      statusEffectsHud,
-      documentBody: document.body,
-    })
-    inventoryView.root.style.setProperty(
-      'display', ['furnace', 'chest', 'anvil', 'enchanting'].includes(inventoryMode) ? 'none' : '',
-    )
-    furnaceView.root.style.setProperty('display', inventoryMode === 'furnace' ? '' : 'none')
-    chestView.root.style.setProperty('display', inventoryMode === 'chest' ? '' : 'none')
-    anvilView.root.style.setProperty('display', inventoryMode === 'anvil' ? '' : 'none')
-    enchantingView.root.style.setProperty('display', inventoryMode === 'enchanting' ? '' : 'none')
-    const selectedStack = storage.inventory.slots[selectedHotbarIndex]
-    const selectedSlotKey = String(selectedHotbarIndex)
-    const selectedSlot = selectedStack == null
-      ? undefined
-      : { itemId: selectedStack.item, count: selectedStack.count }
-    if (inventoryMode === 'anvil') {
-      const selectedDurability = storage.inventoryDurability[selectedHotbarIndex] ?? null
-      const currentName = customNames.get(selectedSlotKey) ?? null
-      const enchantedItem = enchantedItems.get(selectedSlotKey)
-      const needsRepair = selectedDurability !== null && selectedDurability.current < selectedDurability.max
-      const iron = needsRepair
-        ? storage.inventory.slots.find((candidate, index) =>
-            index !== selectedHotbarIndex && candidate?.item === 'iron_ingot' && candidate.count > 0,
-          )
-        : undefined
-      const anvilPlan = selectedStack == null
-        ? undefined
-        : planAnvilOperation({
-            item: selectedStack.item,
-            durability: selectedDurability,
-            name: anvilName,
-            currentName,
-            ...(enchantedItem === undefined ? {} : { enchantedItem }),
-            ...(iron === undefined ? {} : { material: { item: iron.item, count: iron.count } }),
-          })
-      const levelCost = anvilPlan?.ok === true ? anvilPlan.levelCost : 0
-      const materialCost = anvilPlan?.ok === true ? anvilPlan.materialCost : 0
-      const hasEnoughExperience = anvilPlan?.ok === true
-        && spendExperienceLevels(
-          Effect.runSync(world.vitals.snapshot).totalExperience,
-          anvilPlan.levelCost,
-        ) !== undefined
-      const rejectionReason = selectedStack == null
-        ? 'Select an item in the hotbar'
-        : anvilPlan === undefined
-          ? 'Anvil operation is invalid'
-          : !anvilPlan.ok
-            ? anvilPlan.reason === 'incompatible-input' && needsRepair && iron === undefined
-              ? 'Requires one iron ingot'
-              : anvilPlan.reason === 'nothing-to-do'
-                ? 'Change the name or repair a damaged item'
-                : anvilPlan.reason === 'too-expensive'
-                  ? 'Anvil operation is too expensive'
-                  : 'Anvil operation is invalid'
-            : !hasEnoughExperience
-              ? `Requires level ${levelCost}`
-              : undefined
-      anvilView.render(anvilViewModel({
-        primaryInput: selectedSlot,
-        secondaryInput: anvilPlan?.ok === true && materialCost > 0 && iron !== undefined
-          ? { itemId: iron.item, count: materialCost }
-          : undefined,
-        output: anvilPlan?.ok === true && hasEnoughExperience
-          ? selectedSlot
-          : undefined,
-        name: anvilName,
-        levelCost,
-        rejectionReason,
-      }), { focusedTarget: 'name', status: anvilStatus })
-      return
-    }
-    if (inventoryMode === 'enchanting') {
-      const lapis = storage.inventory.slots.reduce(
-        (count, slot) => count + (slot?.item === 'lapis_lazuli' ? slot.count : 0),
-        0,
-      )
-      const item = projectEnchantedItem(
-        selectedStack,
-        storage.inventoryDurability[selectedHotbarIndex],
-        enchantedItems.get(selectedSlotKey),
-      )
-      const playerLevel = Effect.runSync(world.vitals.view).experienceLevel
-      const offers = enchantmentOffers(enchantmentSeed, 15)
-      enchantingView.render(enchantingTableViewModel({
-        item: selectedSlot,
-        lapis: lapis > 0 ? { itemId: 'lapis_lazuli', count: lapis } : undefined,
-        offers: offers.map((offer) => {
-          const result = applyEnchantmentOffer({
-            seed: enchantmentSeed,
-            bookshelfCount: 15,
-            playerLevel,
-            lapis,
-            item,
-          }, offer)
-          return {
-            enchantmentId: offer.enchantment.id,
-            enchantmentLevel: offer.enchantment.level,
-            levelCost: offer.requiredPlayerLevel,
-            lapisCost: offer.lapisCost,
-            rejectionReason: result.ok ? undefined : result.reason,
-          }
-        }) as [NonNullable<Parameters<typeof enchantingTableViewModel>[0]['offers'][0]>, NonNullable<Parameters<typeof enchantingTableViewModel>[0]['offers'][1]>, NonNullable<Parameters<typeof enchantingTableViewModel>[0]['offers'][2]>],
-      }), { focusedTarget: 'offer-1', status: enchantingStatus })
-      return
-    }
-    if (inventoryMode === 'chest') {
-      const container = activeChestId === undefined
-        ? null
-        : Effect.runSync(world.inventory.containerSnapshot(activeChestId))
-      const slotSnapshot = (
-        stack: ItemStack | null | undefined,
-        durability: { readonly current: number; readonly max: number } | null | undefined,
-      ) => stack == null
-        ? undefined
-        : {
-            item: stack.item,
-            count: stack.count,
-            durability: durability == null ? undefined : durability.current / durability.max,
-          }
-      const chestSlots = container?.slots.map((slot) =>
-        slotSnapshot(slot, slot?.durability)) ?? Array.from({ length: 27 }, () => undefined)
-      const playerSlots = storage.inventory.slots.map((slot, index) =>
-        slotSnapshot(slot, storage.inventoryDurability[index]))
-      const selectedStack = chestSelected === undefined
-        ? undefined
-        : chestSelected.region === 'chest'
-          ? chestSlots[chestSelected.slot]
-          : playerSlots[chestSelected.slot]
-      chestView.render(chestStorageViewModel({
-        chest: chestSlots,
-        chestSlotCount: chestStorageSlotCount(container?.slots.length),
-        playerInventory: playerSlots,
-        cursor: selectedStack,
-        selectedSlot: chestSelected,
-      }), { focusedSlot: chestFocus, status: chestStatus })
-      return
-    }
-    if (inventoryMode === 'furnace') {
-      const furnace = activeFurnaceKey === undefined
-        ? undefined
-        : furnaceStates.get(activeFurnaceKey)
-      const state = furnace?.state ?? emptyFurnaceState()
-      const recipe = STARTER_SMELTING_RECIPES.find(
-        (candidate) => candidate.input === state.input?.item,
-      )
-      const fuelRule = STARTER_FUEL_RULES.find(
-        (candidate) => candidate.item === state.fuel?.item,
-      ) ?? STARTER_FUEL_RULES[0]
-      const canCook = recipe !== undefined && (
-        state.burnRemainingSecs > 0
-        || STARTER_FUEL_RULES.some((candidate) => candidate.item === state.fuel?.item)
-      )
-      const slot = (stack: ItemStack | null): FurnaceSnapshot['input'] =>
-        stack === null ? undefined : { itemId: stack.item, count: stack.count }
-      furnaceView.render(furnaceViewModel({
-        input: slot(state.input),
-        fuel: slot(state.fuel),
-        output: slot(state.output),
-        cookProgress: canCook && recipe !== undefined
-          ? state.cookElapsedSecs / recipe.cookDurationSecs
-          : 0,
-        burnProgress: state.burnRemainingSecs > 0 && fuelRule !== undefined
-          ? state.burnRemainingSecs / fuelRule.burnDurationSecs
-          : 0,
-      }), { focusedSlot: furnaceFocus, status: furnaceStatus })
-      return
-    }
-    inventoryView.render(inventoryViewModel({
-      inventory: storage.inventory,
-      selectedHotbarIndex,
-      durabilityBySlot,
-      carried: draft.inventoryCarried ?? draft.carried,
-      armour: [
-        equipmentSlot(equipment.head),
-        equipmentSlot(equipment.chest),
-        equipmentSlot(equipment.legs),
-        equipmentSlot(equipment.feet),
-      ],
-      offhand: equipmentSlot(equipment.offhand) ?? null,
-      crafting: {
-        gridWidth: draft.grid.width,
-        grid: draft.grid.cells,
-        result: draft.preview,
-      },
-      mergeableSlotIndices: undefined,
-    }), {
-      focused: inventoryFocus,
-      status: interactionStatus(),
-    })
-    inventoryParent.querySelectorAll<HTMLElement>('[data-mx-ui="slot"][role="button"]')
-      .forEach((slot) => slot.setAttribute('draggable', 'true'))
-  }
-
-  const furnaceTargetOf = (source: EventTarget | null): FurnaceSlotId | undefined => {
-    if (!(source instanceof Element)) return undefined
-    const interactive = source.closest<HTMLElement>(
-      '[data-interaction-target="furnace-slot"]',
-    )
-    if (interactive === null || !inventoryParent.contains(interactive)) return undefined
-    const slot = interactive.dataset['interactionSlot']
-    return slot === 'input' || slot === 'fuel' || slot === 'output' ? slot : undefined
-  }
-
-  const chestTargetOf = (source: EventTarget | null): ChestStorageSlotTarget | undefined => {
-    if (!(source instanceof Element)) return undefined
-    const interactive = source.closest<HTMLElement>(
-      '[data-interaction-target="chest-storage-slot"]',
-    )
-    if (interactive === null || !inventoryParent.contains(interactive)) return undefined
-    const region = interactive.dataset['interactionRegion']
-    const slot = Number(interactive.dataset['interactionSlot'])
-    if ((region !== 'chest' && region !== 'player') || !Number.isInteger(slot)) return undefined
-    const container = activeChestId === undefined
-      ? null
-      : Effect.runSync(world.inventory.containerSnapshot(activeChestId))
-    const intent = chestStorageSlotClickIntent(
-      { region, slot },
-      chestStorageSlotCount(container?.slots.length),
-    )
-    return intent?._tag === 'SlotClicked' ? intent.target : undefined
-  }
-
-  const sameChestTarget = (
-    left: ChestStorageSlotTarget,
-    right: ChestStorageSlotTarget,
-  ): boolean => left.region === right.region && left.slot === right.slot
-
-  const activateChestSlot = (target: ChestStorageSlotTarget): void => {
-    if (playerIsDead() || bowInteractionLocked() || activeChestId === undefined) return
-    chestFocus = target
-    if (chestSelected === undefined) {
-      const container = Effect.runSync(world.inventory.containerSnapshot(activeChestId))
-      const stack = target.region === 'chest'
-        ? container?.slots[target.slot]
-        : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[target.slot]
-      if (stack == null) {
-        chestStatus = 'Slot is empty'
-      } else {
-        chestSelected = target
-        chestStatus = `Selected ${stack.item}`
-      }
-      renderPlayerUi()
-      return
-    }
-    if (sameChestTarget(chestSelected, target)) {
-      chestSelected = undefined
-      chestStatus = 'Selection cleared'
-      renderPlayerUi()
-      return
-    }
-    if (chestSelected.region === target.region) {
-      chestStatus = 'Choose a slot in the other inventory'
-      renderPlayerUi()
-      return
-    }
-    const source = chestSelected
-    const container = Effect.runSync(world.inventory.containerSnapshot(activeChestId))
-    const sourceStack = source.region === 'chest'
-      ? container?.slots[source.slot]
-      : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[source.slot]
-    if (sourceStack == null) {
-      chestSelected = undefined
-      chestStatus = 'Source slot is empty'
-      renderPlayerUi()
-      return
-    }
-    const destinationStack = target.region === 'chest'
-      ? container?.slots[target.slot]
-      : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[target.slot]
-    const sourceMetadataKey = source.region === 'chest'
-      ? containerMetadataKey(activeChestId, source.slot)
-      : String(source.slot)
-    const destinationMetadataKey = target.region === 'chest'
-      ? containerMetadataKey(activeChestId, target.slot)
-      : String(target.slot)
-    if (
-      destinationStack?.item === sourceStack.item
-      && !sameItemMetadata(sourceMetadataKey, destinationMetadataKey)
-    ) {
-      chestStatus = 'Destination contains different item metadata'
-      renderPlayerUi()
-      return
-    }
-    if (multiplayer !== undefined && source.region !== target.region) {
-      const action = source.region === 'player'
-        ? {
-            _tag: 'move-item' as const,
-            source: { _tag: 'player-slot' as const, slot: source.slot },
-            destination: { _tag: 'container-slot' as const, slot: target.slot },
-            count: sourceStack.count,
-          }
-        : {
-            _tag: 'move-item' as const,
-            source: { _tag: 'container-slot' as const, slot: source.slot },
-            destination: { _tag: 'player-slot' as const, slot: target.slot },
-            count: sourceStack.count,
-          }
-      const sent = sendFacilityCommand({
-        _tag: 'ContainerCommand',
-        containerId: activeChestId,
-        action,
-      })
-      chestStatus = sent ? 'Move pending server approval' : 'Another facility action is pending'
-      if (sent) chestSelected = undefined
-      renderPlayerUi()
-      return
-    }
-    const result = Effect.runSync(world.inventory.transferContainerItem({
-      direction: source.region === 'chest' ? 'ContainerToPlayer' : 'PlayerToContainer',
-      containerId: activeChestId,
-      playerSlot: source.region === 'player' ? source.slot : target.slot,
-      containerSlot: source.region === 'chest' ? source.slot : target.slot,
-      count: sourceStack.count,
-    }))
-    if (result._tag === 'Transferred') {
-      const remainingSource = source.region === 'chest'
-        ? Effect.runSync(world.inventory.containerSnapshot(activeChestId))?.slots[source.slot]
-        : Effect.runSync(world.inventory.storageSnapshot).inventory.slots[source.slot]
-      copyItemMetadata(sourceMetadataKey, destinationMetadataKey)
-      if (remainingSource == null) deleteItemMetadata(sourceMetadataKey)
-      chestSelected = undefined
-      chestStatus = `Moved ${String(result.count)} ${result.item}`
-      markSessionDirty()
-    } else if (result._tag === 'ContainerNotFound') {
-      activeChestId = undefined
-      chestSelected = undefined
-      setInventoryOpen(false)
-      return
-    } else {
-      chestStatus = result._tag === 'DestinationFull'
-        ? 'Destination slot is full'
-        : result._tag === 'DestinationMismatch'
-          ? 'Destination contains another item'
-          : 'Transfer unavailable'
-    }
-    renderPlayerUi()
-  }
-
-  const updateActiveFurnace = (state: FurnaceState): void => {
-    if (activeFurnaceKey === undefined) return
-    const current = furnaceStates.get(activeFurnaceKey)
-    if (current === undefined) return
-    furnaceStates.set(activeFurnaceKey, { ...current, state })
-    markSessionDirty()
-  }
-
-  const activateFurnaceSlot = (slot: FurnaceSlotId): void => {
-    if (playerIsDead() || bowInteractionLocked() || activeFurnaceKey === undefined) return
-    furnaceFocus = slot
-    furnaceStatus = ''
-    const furnace = furnaceStates.get(activeFurnaceKey)
-    if (furnace === undefined) return
-    if (multiplayer !== undefined) {
-      const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
-      const stack = slot === 'output' ? furnace.state.output : selected
-      if (stack === null || stack === undefined) {
-        furnaceStatus = 'Slot is empty'
-        renderPlayerUi()
-        return
-      }
-      const sent = sendFacilityCommand(slot === 'output'
-        ? {
-            _tag: 'FurnaceCommand',
-            furnaceId: activeFurnaceKey,
-            action: {
-              _tag: 'take-output',
-              source: { _tag: 'furnace-slot', slot: 'output' },
-              destination: { _tag: 'player-slot', slot: selectedHotbarIndex },
-              count: stack.count,
-            },
-          }
-        : {
-            _tag: 'FurnaceCommand',
-            furnaceId: activeFurnaceKey,
-            action: {
-              _tag: 'move-item',
-              source: { _tag: 'player-slot', slot: selectedHotbarIndex },
-              destination: { _tag: 'furnace-slot', slot },
-              count: 1,
-            },
-          })
-      furnaceStatus = sent ? 'Transfer pending server approval' : 'Another facility action is pending'
-      renderPlayerUi()
-      return
-    }
-    if (slot === 'output') {
-      const output = furnace.state.output
-      if (output !== null) {
-        const leftover = Effect.runSync(world.inventory.add(output.item, output.count))
-        const accepted = output.count - leftover
-        if (accepted > 0) {
-          updateActiveFurnace({
-            ...furnace.state,
-            output: accepted === output.count
-              ? null
-              : itemStack(output.item, output.count - accepted),
-          })
-        } else {
-          furnaceStatus = 'Inventory is full'
-        }
-      }
-      renderPlayerUi()
-      return
-    }
-
-    const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
-    const expected = slot === 'input' ? 'raw_iron' : 'coal'
-    const current = furnace.state[slot]
-    if (selected?.item !== expected) {
-      furnaceStatus = slot === 'input' ? 'Requires raw iron' : 'Requires coal'
-      renderPlayerUi()
-      return
-    }
-    if (current !== null && (current.item !== selected.item
-      || current.count >= maxStackCountForItem(current.item))) {
-      furnaceStatus = 'Furnace slot is full'
-      renderPlayerUi()
-      return
-    }
-    const removal = Effect.runSync(
-      world.inventory.removeAt(selectedHotbarIndex, selected.item, 1),
-    )
-    if (removal._tag === 'Removed' && removal.removed > 0) {
-      updateActiveFurnace({
-        ...furnace.state,
-        [slot]: { item: selected.item, count: (current?.count ?? 0) + removal.removed },
-      })
-    }
-    renderPlayerUi()
-  }
-
-  const targetOf = (source: EventTarget | null): InventoryInteractionTarget | undefined => {
-    if (!(source instanceof Element)) return undefined
-    const interactive = source.closest<HTMLElement>('[role="button"]')
-    if (interactive === null || !inventoryParent.contains(interactive)) return undefined
-    if (interactive.matches('[data-mx-ui="crafting-output"]')) {
-      return { kind: 'crafting-output' }
-    }
-    if (!interactive.matches('[data-mx-ui="slot"]')) return undefined
-    const region = interactive.closest<HTMLElement>('[data-region]')?.dataset['region']
-    const index = Number(interactive.dataset['slotIndex'])
-    if (
-      !Number.isInteger(index) ||
-      (region !== 'hotbar' && region !== 'main' && region !== 'crafting-grid'
-        && region !== 'armour' && region !== 'offhand')
-    ) {
-      return undefined
-    }
-    return { kind: 'slot', region, index }
-  }
-
-  const focusRenderedTarget = (): void => {
-    const activeScreen = inventoryMode === 'furnace'
-      ? 'furnace'
-      : inventoryMode === 'chest'
-        ? 'chest-storage'
-        : 'inventory'
-    inventoryParent.querySelector<HTMLElement>(
-      `[data-mx-ui="${activeScreen}"] [role="button"][tabindex="0"]`,
-    )?.focus()
-  }
-
-  const activateInventoryTarget = (
-    target: InventoryInteractionTarget,
-    button: 'left' | 'right' = 'left',
-  ): void => {
-    if (playerIsDead() || bowInteractionLocked()) return
-    inventoryFocus = target
-    const inventorySlot = target.kind !== 'slot'
-      ? undefined
-      : target.region === 'hotbar'
-      ? target.index
-      : target.region === 'main'
-        ? 9 + target.index
-        : undefined
-    const actionTarget = inventoryActionTarget(target)
-    if (multiplayer !== undefined && inventorySlot !== undefined && actionTarget !== null) {
-      const selection = multiplayerInventorySelection
-      const sourceStack = Effect.runSync(world.inventory.snapshot).slots[inventorySlot]
-      if (selection === null) {
-        if (sourceStack === undefined) {
-          equipmentActionStatus = 'Source slot is empty'
-          document.body.setAttribute('data-equipment-action', 'rejected:source-empty')
-        } else {
-          multiplayerInventorySelection = {
-            source: inventorySlot,
-            remaining: button === 'right' ? Math.ceil(sourceStack.count / 2) : sourceStack.count,
-            mode: button === 'right' ? 'split' : 'all',
-          }
-          equipmentActionStatus = button === 'right'
-            ? 'Select destinations to place one item each'
-            : 'Select an inventory destination'
-          document.body.setAttribute('data-equipment-action', 'selecting')
-        }
-      } else {
-        if (selection.source === inventorySlot) {
-          multiplayerInventorySelection = null
-          equipmentActionStatus = ''
-          document.body.setAttribute('data-equipment-action', 'accepted')
-        } else {
-          const moved = selection.mode === 'split'
-            ? button === 'right' ? 1 : selection.remaining
-            : undefined
-          if (moveInventoryItem({ kind: 'click', target: actionTarget }, selection.source, inventorySlot, moved)) {
-            const remaining = moved === undefined ? 0 : selection.remaining - moved
-            multiplayerInventorySelection = remaining > 0 ? { ...selection, remaining } : null
-          }
-        }
-      }
-      renderPlayerUi()
-      return
-    }
-    if (target.kind === 'crafting-output') {
-      if (multiplayer === undefined) Effect.runSync(inventoryInteraction.craftOnce())
-      else requestCrafting()
-    } else if (target.region === 'crafting-grid') {
-      if (pendingCrafting !== null) return
-      // Multiplayer never populates `inventoryCarried` (that would mutate the
-      // server-mirrored `world.inventory` locally via `clickInventoryItem`).
-      // Stage a read-only copy of the selected slot's item into the grid via
-      // `carried` instead: the grid stays client-local staging, real inventory
-      // items are only ever consumed by the server when `requestCrafting` submits.
-      if (
-        multiplayer !== undefined
-        && multiplayerInventorySelection !== null
-        && inventoryInteraction.state().carried === undefined
-      ) {
-        const selection = multiplayerInventorySelection
-        Effect.runSync(inventoryInteraction.pickupInventoryItem(selection.source))
-        Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
-        const remaining = selection.remaining - 1
-        multiplayerInventorySelection = remaining > 0 ? { ...selection, remaining } : null
-        equipmentActionStatus = ''
-        document.body.setAttribute('data-equipment-action', 'accepted')
-      } else {
-        Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(target.index))
-      }
-      Effect.runSync(inventoryInteraction.preview())
-    } else if (target.region === 'hotbar') {
-      Effect.runSync(inventoryInteraction.clickInventoryItem(target.index, button))
-    } else if (target.region === 'main') {
-      Effect.runSync(inventoryInteraction.clickInventoryItem(9 + target.index, button))
-    }
-    renderPlayerUi()
-  }
-
-  const inventorySlotOf = (target: InventoryActionTarget): number | undefined => {
-    if (target.kind !== 'slot') return undefined
-    if (target.region === 'hotbar') return target.index
-    if (target.region === 'main') return 9 + target.index
-    return undefined
-  }
-
-  const rejectInventoryAction = (_action: InventoryAction, reason: string): void => {
-    equipmentActionStatus = reason
-    document.body.setAttribute('data-equipment-action', `rejected:${reason}`)
-    renderPlayerUi()
-  }
-
-  const completeInventoryAction = (): void => {
-    equipmentActionStatus = ''
-    document.body.setAttribute('data-equipment-action', 'accepted')
-    markSessionDirty()
-    renderPlayerUi()
-  }
-
-  const unequip = (
-    action: InventoryAction,
-    slot: EquipmentSlotId,
-    inventorySlot?: number,
-  ): void => {
-    if (multiplayer !== undefined) {
-      const command = inventorySlot === undefined
-        ? { _tag: 'unequip-item' as const, equipmentSlot: slot }
-        : { _tag: 'unequip-item' as const, equipmentSlot: slot, destination: inventorySlot }
-      if (!sendInventoryCommand(command)) {
-        rejectInventoryAction(action, 'Inventory update is pending')
-        return
-      }
-      equipmentActionStatus = ''
-      document.body.setAttribute('data-equipment-action', 'pending')
-      renderPlayerUi()
-      return
-    }
-    const result = Effect.runSync(world.inventory.unequipToInventory(slot, inventorySlot))
-    if (result._tag === 'Unequipped') {
-      moveItemMetadata(equipmentMetadataKey(slot), String(result.slotIndex))
-      completeInventoryAction()
-    }
-    else rejectInventoryAction(action, result._tag === 'Empty'
-      ? 'Equipment slot is empty'
-      : result._tag === 'OccupiedInventorySlot'
-        ? 'Inventory slot is occupied'
-        : result._tag === 'InventoryFull'
-          ? 'Inventory is full'
-          : 'Invalid equipment action')
-  }
-
-  const equip = (
-    action: InventoryAction,
-    inventorySlot: number,
-    equipmentSlot: EquipmentSlotId,
-  ): void => {
-    if (multiplayer !== undefined) {
-      if (!sendInventoryCommand({ _tag: 'equip-item', source: inventorySlot, equipmentSlot })) {
-        rejectInventoryAction(action, 'Inventory update is pending')
-        return
-      }
-      equipmentActionStatus = ''
-      document.body.setAttribute('data-equipment-action', 'pending')
-      renderPlayerUi()
-      return
-    }
-    const result = Effect.runSync(world.inventory.equipFromInventory(inventorySlot, equipmentSlot))
-    if (result._tag === 'Equipped') {
-      moveItemMetadata(String(inventorySlot), equipmentMetadataKey(equipmentSlot))
-      completeInventoryAction()
-    }
-    else rejectInventoryAction(action, result._tag === 'Empty'
-      ? 'Inventory slot is empty'
-      : result._tag === 'Occupied'
-        ? 'Equipment slot is occupied'
-        : result._tag === 'Incompatible'
-          ? `Item cannot be equipped in ${equipmentSlot}`
-          : 'Invalid equipment action')
-  }
-
-  const moveInventoryItem = (
-    action: InventoryAction,
-    source: number,
-    destination: number,
-    requestedCount?: number,
-  ): boolean => {
-    if (source === destination) {
-      rejectInventoryAction(action, 'Source and destination are the same slot')
-      return false
-    }
-    const inventory = Effect.runSync(world.inventory.snapshot)
-    const sourceStack = inventory.slots[source]
-    const destinationStack = inventory.slots[destination]
-    if (sourceStack === undefined) {
-      rejectInventoryAction(action, 'Source slot is empty')
-      return false
-    }
-    if (multiplayer !== undefined) {
-      if (requestedCount !== undefined && destinationStack !== undefined && destinationStack.item !== sourceStack.item) {
-        rejectInventoryAction(action, 'Destination contains another item')
-        return false
-      }
-      const count = Math.min(
-        requestedCount ?? sourceStack.count,
-        sourceStack.count,
-        destinationStack === undefined
-          ? sourceStack.count
-          : maxStackCountForItem(sourceStack.item) - destinationStack.count,
-      )
-      const command = requestedCount === undefined && destinationStack !== undefined && destinationStack.item !== sourceStack.item
-        ? { _tag: 'swap-items' as const, source, destination }
-        : {
-          _tag: 'move-item' as const,
-          source,
-          destination,
-          count,
-        }
-      if ('count' in command && command.count <= 0) {
-        rejectInventoryAction(action, 'Destination stack is full')
-        return false
-      }
-      if (!sendInventoryCommand(command)) {
-        rejectInventoryAction(action, 'Inventory update is pending')
-        return false
-      }
-      equipmentActionStatus = ''
-      document.body.setAttribute('data-equipment-action', 'pending')
-      renderPlayerUi()
-      return true
-    }
-    if (inventoryInteraction.state().inventoryCarried !== undefined) {
-      rejectInventoryAction(action, 'Place the carried stack first')
-      return false
-    }
-    Effect.runSync(inventoryInteraction.clickInventoryItem(source, 'left'))
-    Effect.runSync(inventoryInteraction.clickInventoryItem(destination, 'left'))
-    completeInventoryAction()
-    return true
-  }
-
-  const dispatchInventoryAction = (action: InventoryAction): void => {
-    if (action.kind === 'drag') {
-      if (action.source.kind === 'slot' && action.target.kind === 'equipment-slot') {
-        const sourceSlot = inventorySlotOf(action.source)
-        if (sourceSlot !== undefined) equip(action, sourceSlot, action.target.slot)
-        else rejectInventoryAction(action, 'Crafting slots cannot equip items')
-        return
-      }
-      if (action.source.kind === 'equipment-slot' && action.target.kind === 'slot') {
-        const targetSlot = inventorySlotOf(action.target)
-        if (targetSlot !== undefined) unequip(action, action.source.slot, targetSlot)
-        else rejectInventoryAction(action, 'Equipment cannot move to crafting slots')
-        return
-      }
-        if (action.source.kind === 'slot' && action.target.kind === 'slot') {
-          const sourceSlot = inventorySlotOf(action.source)
-          const targetSlot = inventorySlotOf(action.target)
-          if (sourceSlot !== undefined && action.target.region === 'crafting-grid') {
-            if (multiplayer !== undefined) {
-              rejectInventoryAction(action, 'Crafting drag is unavailable in multiplayer')
-            } else if (pendingCrafting !== null) {
-              rejectInventoryAction(action, 'Crafting update is pending')
-            } else if (inventoryInteraction.state().inventoryCarried !== undefined) {
-              rejectInventoryAction(action, 'Place the carried stack first')
-            } else {
-              Effect.runSync(inventoryInteraction.clickInventoryItem(sourceSlot, 'left'))
-              Effect.runSync(inventoryInteraction.interactCraftingCellFromInventory(action.target.index))
-              Effect.runSync(inventoryInteraction.preview())
-              completeInventoryAction()
-            }
-            return
-          }
-          if (sourceSlot === undefined || targetSlot === undefined) {
-            rejectInventoryAction(action, 'Crafting slots cannot move inventory items')
-          } else {
-            moveInventoryItem(action, sourceSlot, targetSlot)
-          }
-          return
-        }
-      rejectInventoryAction(action, 'Drag between these slots is not supported')
-      return
-    }
-    if (action.target.kind === 'equipment-slot') {
-      unequip(action, action.target.slot)
-      return
-    }
-    if (action.kind === 'shift-click') {
-      const inventorySlot = inventorySlotOf(action.target)
-      const stack = inventorySlot === undefined
-        ? undefined
-        : Effect.runSync(world.inventory.snapshot).slots[inventorySlot]
-      const equipmentSlot = stack === undefined ? undefined : equipmentDefinitionFor(stack.item)?.slot
-      if (inventorySlot === undefined || equipmentSlot === undefined) {
-        rejectInventoryAction(action, 'Item cannot be equipped')
-      } else {
-        equip(action, inventorySlot, equipmentSlot)
-      }
-      return
-    }
-    equipmentActionStatus = ''
-    activateInventoryTarget(action.target)
-  }
-
-  const removeInventoryItem = (item: ItemStack['item'], count: number): boolean => {
-    if (!Number.isSafeInteger(count) || count < 0) return false
-    if (count === 0) return true
-    let remaining = count
-    const slots = Effect.runSync(world.inventory.snapshot).slots
-    const available = slots.reduce(
-      (total, stack) => total + (stack?.item === item ? stack.count : 0),
-      0,
-    )
-    if (available < count) return false
-    for (let index = 0; index < slots.length && remaining > 0; index += 1) {
-      const stack = slots[index]
-      if (stack?.item !== item) continue
-      const removed = Math.min(stack.count, remaining)
-      Effect.runSync(world.inventory.removeAt(index, item, removed))
-      remaining -= removed
-    }
-    return remaining === 0
-  }
-
-  const activateAnvilOutput = (): void => {
-    if (multiplayer !== undefined) {
-      anvilStatus = requestAnvil()
-        ? 'Applying anvil operation...'
-        : 'Anvil operation is unavailable'
-      renderPlayerUi()
-      return
-    }
-    const storage = Effect.runSync(world.inventory.storageSnapshot)
-    const selected = storage.inventory.slots[selectedHotbarIndex]
-    const vitals = Effect.runSync(world.vitals.snapshot)
-    const normalizedName = anvilName.trim()
-    const itemKey = String(selectedHotbarIndex)
-    const currentName = customNames.get(itemKey) ?? null
-    const existingEnchantment = enchantedItems.get(itemKey)
-    const anvilResult = selected == null
-      ? undefined
-      : applyAnvilOperation(storage, selectedHotbarIndex, {
-          name: normalizedName,
-          currentName,
-          ...(existingEnchantment === undefined ? {} : { enchantedItem: existingEnchantment }),
-        })
-    const remainingExperience = anvilResult === undefined
-      ? undefined
-      : spendExperienceLevels(vitals.totalExperience, anvilResult.levelCost)
-    if (selected == null || anvilResult === undefined || remainingExperience === undefined) {
-      anvilStatus = 'Repair or rename requirements are not met'
-      renderPlayerUi()
-      return
-    }
-    const outputName = anvilResult.output.customName === null
-      ? null
-      : String(anvilResult.output.customName)
-    const outputEnchantment = enchantedItemFromAnvilOutput(anvilResult.output)
-    if (anvilResult.output.enchantments.length > 0 && outputEnchantment === undefined) {
-      anvilStatus = 'Anvil operation is invalid'
-      renderPlayerUi()
-      return
-    }
-    Effect.runSync(world.inventory.restoreStorage(anvilResult.storage))
-    Effect.runSync(world.vitals.restore(
-      addVitalsExperience(vitals, remainingExperience - vitals.totalExperience),
-    ))
-    if (outputEnchantment === undefined) enchantedItems.delete(itemKey)
-    else enchantedItems.set(itemKey, outputEnchantment)
-    if (outputName === null) customNames.delete(itemKey)
-    else customNames.set(itemKey, outputName)
-    anvilStatus = outputName === null ? 'Item repaired' : `Renamed to ${outputName}`
-    document.body.setAttribute('data-anvil-result', anvilStatus)
-    markSessionDirty()
-    renderPlayerUi()
-  }
-
-  const activateEnchantingOffer = (slot: 0 | 1 | 2): void => {
-    if (multiplayer !== undefined) {
-      enchantingStatus = requestEnchanting(slot)
-        ? 'Applying enchantment...'
-        : 'Enchanting is unavailable'
-      renderPlayerUi()
-      return
-    }
-    const storage = Effect.runSync(world.inventory.storageSnapshot)
-    const selected = storage.inventory.slots[selectedHotbarIndex]
-    if (selected === undefined) return
-    const lapis = storage.inventory.slots.reduce(
-      (count, stack) => count + (stack?.item === 'lapis_lazuli' ? stack.count : 0),
-      0,
-    )
-    const vitals = Effect.runSync(world.vitals.snapshot)
-    const playerLevel = Effect.runSync(world.vitals.view).experienceLevel
-    const key = String(selectedHotbarIndex)
-    const result = applyEnchantmentOffer({
-      seed: enchantmentSeed,
-      bookshelfCount: 15,
-      playerLevel,
-      lapis,
-      item: projectEnchantedItem(
-        selected,
-        storage.inventoryDurability[selectedHotbarIndex],
-        enchantedItems.get(key),
-      ),
-    }, enchantmentOffers(enchantmentSeed, 15)[slot])
-    if (!result.ok || result.state.item === null) {
-      enchantingStatus = result.ok ? 'No item selected' : result.reason
-      renderPlayerUi()
-      return
-    }
-    if (!removeInventoryItem('lapis_lazuli', lapis - result.state.lapis)) {
-      enchantingStatus = 'Lapis cost could not be consumed'
-      renderPlayerUi()
-      return
-    }
-    enchantedItems.set(key, result.state.item)
-    enchantmentSeed = result.state.seed
-    Effect.runSync(world.vitals.restore(addVitalsExperience(
-      vitals,
-      totalExperienceAtLevel(result.state.playerLevel) - vitals.totalExperience,
-    )))
-    enchantingStatus = `Applied ${result.state.item.enchantments.at(-1)?.id ?? 'enchantment'}`
-    document.body.setAttribute('data-enchanting-result', enchantingStatus)
-    markSessionDirty()
-    renderPlayerUi()
-  }
-
-  inventoryParent.addEventListener('input', (event) => {
-    if (inventoryMode !== 'anvil' || !(event.target instanceof HTMLInputElement)) return
-    if (event.target.matches('[data-operation-target="name"]')) {
-      anvilName = event.target.value.slice(0, 50)
-      renderPlayerUi()
-    }
-  })
-
-  inventoryParent.addEventListener('click', (event) => {
-    if (playerIsDead()) return
-    if (inventoryMode === 'anvil') {
-      const target = event.target instanceof Element
-        ? event.target.closest('[data-operation-target]')?.getAttribute('data-operation-target')
-        : null
-      if (target === 'output') activateAnvilOutput()
-      return
-    }
-    if (inventoryMode === 'enchanting') {
-      const target = event.target instanceof Element
-        ? event.target.closest('[data-operation-target]')?.getAttribute('data-operation-target')
-        : null
-      const slot = target === 'offer-1' ? 0 : target === 'offer-2' ? 1 : target === 'offer-3' ? 2 : undefined
-      if (slot !== undefined) activateEnchantingOffer(slot)
-      return
-    }
-    if (inventoryMode === 'chest') {
-      if (event.target instanceof Element && event.target.closest(
-        '[data-interaction-target="chest-storage-close"]',
-      ) !== null) {
-        if (chestStorageCloseIntent()._tag === 'CloseRequested') setInventoryOpen(false)
-        return
-      }
-      const chestTarget = chestTargetOf(event.target)
-      if (chestTarget !== undefined) activateChestSlot(chestTarget)
-      return
-    }
-    if (inventoryMode === 'furnace') {
-      const furnaceTarget = furnaceTargetOf(event.target)
-      if (furnaceTarget !== undefined) activateFurnaceSlot(furnaceTarget)
-      return
-    }
-    const target = targetOf(event.target)
-    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
-    if (actionTarget !== null) {
-      dispatchInventoryAction({
-        kind: event.shiftKey ? 'shift-click' : 'click',
-        target: actionTarget,
-      })
-    }
-  })
-  inventoryParent.addEventListener('contextmenu', (event) => {
-    if (playerIsDead()) return
-    if (['furnace', 'chest', 'anvil', 'enchanting'].includes(inventoryMode)) return
-    const target = targetOf(event.target)
-    if (target === undefined) return
-    event.preventDefault()
-    if (target.kind !== 'slot' || target.region === 'crafting-grid') return
-    if (target.region === 'armour' || target.region === 'offhand') {
-      const actionTarget = inventoryActionTarget(target)
-      if (actionTarget !== null) dispatchInventoryAction({ kind: 'click', target: actionTarget })
-    } else {
-      activateInventoryTarget(target, 'right')
-    }
-  })
-  inventoryParent.addEventListener('dragstart', (event) => {
-    if (inventoryMode !== 'player' && inventoryMode !== 'craftingTable') return
-    const target = targetOf(event.target)
-    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
-    if (actionTarget === null || actionTarget.kind === 'crafting-output') return
-    inventoryDragSource = actionTarget
-    event.dataTransfer?.setData('text/plain', 'inventory-action')
-    if (event.dataTransfer !== null) event.dataTransfer.effectAllowed = 'move'
-  })
-  inventoryParent.addEventListener('dragover', (event) => {
-    if (inventoryDragSource === undefined) return
-    const target = targetOf(event.target)
-    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
-    if (actionTarget === null || actionTarget.kind === 'crafting-output') return
-    event.preventDefault()
-    if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'move'
-  })
-  inventoryParent.addEventListener('drop', (event) => {
-    const source = inventoryDragSource
-    inventoryDragSource = undefined
-    const target = targetOf(event.target)
-    const actionTarget = target === undefined ? null : inventoryActionTarget(target)
-    if (source === undefined || actionTarget === null || actionTarget.kind === 'crafting-output') return
-    event.preventDefault()
-    dispatchInventoryAction({ kind: 'drag', source, target: actionTarget })
-  })
-  inventoryParent.addEventListener('dragend', () => {
-    inventoryDragSource = undefined
-  })
-  inventoryParent.addEventListener('keydown', (event) => {
-    if (playerIsDead()) return
-    if (event.key !== 'Enter' && event.key !== ' ') return
-    if (inventoryMode === 'anvil' || inventoryMode === 'enchanting') return
-    if (inventoryMode === 'chest') {
-      if (event.target instanceof Element && event.target.closest(
-        '[data-interaction-target="chest-storage-close"]',
-      ) !== null) {
-        event.preventDefault()
-        if (chestStorageCloseIntent()._tag === 'CloseRequested') setInventoryOpen(false)
-        return
-      }
-      const chestTarget = chestTargetOf(event.target)
-      if (chestTarget === undefined) return
-      event.preventDefault()
-      activateChestSlot(chestTarget)
-      focusRenderedTarget()
-      return
-    }
-    if (inventoryMode === 'furnace') {
-      const furnaceTarget = furnaceTargetOf(event.target)
-      if (furnaceTarget === undefined) return
-      event.preventDefault()
-      activateFurnaceSlot(furnaceTarget)
-      focusRenderedTarget()
-      return
-    }
-    const target = targetOf(event.target)
-    if (target === undefined) return
-    event.preventDefault()
-    activateInventoryTarget(target)
-    focusRenderedTarget()
-  })
-
-  const setInventoryOpen = (open: boolean, mode: InventoryMode = 'player'): void => {
-    if (open && playerIsDead()) return
-    if (open && bowInteractionLocked()) return
-    if (!open && multiplayer !== undefined && inventoryOpen && inventoryMode === 'chest' && activeChestId !== undefined) {
-      if (!sendFacilityCommand({
-        _tag: 'ContainerCommand',
-        containerId: activeChestId,
-        action: { _tag: 'close' },
-      })) {
-        chestStatus = 'Wait for the pending facility action before closing'
-        closeChestOnFacilityIdle = true
-        renderPlayerUi()
-        return
-      }
-    }
-    if (open && tradeOpen) setTradeOpen(false)
-    if (open && brewingOpen) setBrewingOpen(false)
-    const previousOpen = inventoryOpen
-    const switchingMode = open && previousOpen && inventoryMode !== mode
-    if (previousOpen === open && !switchingMode) return
-    resetPrimaryAttackGesture()
-    if (!open) multiplayerInventorySelection = null
-
-    if (
-      previousOpen
-      && (inventoryMode === 'player' || inventoryMode === 'craftingTable')
-      && (!open || switchingMode)
-    ) {
-      Effect.runSync(inventoryInteraction.close())
-    }
-
-    inventoryOpen = open
-    if (previousOpen !== open) announceInventoryTransition(audio, previousOpen, open)
-    inventoryParent.hidden = !open
-    inventoryParent.setAttribute('aria-hidden', String(!open))
-    document.body.setAttribute('data-inventory-open', String(open))
-    if (open) {
-      inventoryMode = mode
-      const presentation = INVENTORY_PRESENTATIONS[mode]
-      if (mode === 'player' || mode === 'craftingTable') {
-        inventoryInteraction.configureGrid(presentation.width, presentation.height)
-      }
-      inventoryParent.setAttribute('aria-label', presentation.label)
-      if (mode === 'furnace') {
-        furnaceFocus = 'input'
-        furnaceStatus = ''
-      } else if (mode === 'chest') {
-        chestFocus = { region: 'chest', slot: 0 }
-        chestSelected = undefined
-        chestStatus = ''
-      } else if (mode === 'anvil') {
-        anvilName = customNames.get(String(selectedHotbarIndex)) ?? ''
-        anvilStatus = ''
-      } else if (mode === 'enchanting') {
-        enchantingStatus = ''
-      } else {
-        inventoryFocus = { kind: 'slot', region: 'hotbar', index: selectedHotbarIndex }
-      }
-    }
-    if (!open && inventoryMode === 'chest') {
-      activeChestId = undefined
-      chestSelected = undefined
-      chestStatus = ''
-    }
-    renderPlayerUi()
-    renderCrosshair()
-    syncTouchControls()
-    if (open) window.requestAnimationFrame(focusRenderedTarget)
-    if (open && document.pointerLockElement === canvas) {
-      document.exitPointerLock()
-    }
-  }
+  installInventoryListeners()
 
   const respawnPlayer = (): void => respawnPlayerUi({
     resetPrimaryAttackGesture,
@@ -4308,12 +2879,7 @@ const bootGame = async (
     markSessionDirty,
   })
 
-  hudParent.addEventListener('click', (event) => {
-    if (!(event.target instanceof Element)) return
-    const control = event.target.closest('[data-mx-ui="respawn"]')
-    if (control === null || !hudParent.contains(control)) return
-    respawnPlayer()
-  })
+  inventoryRuntime.installRespawnListener(hudParent, respawnPlayer)
 
   renderPlayerUi()
   renderCrosshair()
@@ -4323,44 +2889,8 @@ const bootGame = async (
   // 4a. Durable session publication
   // -------------------------------------------------------------------------
 
-  const requestFlush = async (): Promise<void> => {
-    const targetGeneration = dirtyGeneration
-    do {
-      await saveCoordinator.requestSave()
-    } while (savedGeneration < targetGeneration)
-    // Compare against the generation captured above, at the moment this flush
-    // was initiated — not the live `dirtyGeneration`, which may have advanced
-    // while the save was in flight. Reading the live one is what starved this
-    // indicator: a player drifting in water dirties a new generation every
-    // frame, so the equality it used to require essentially never held and the
-    // attribute stuck on `dirty` forever while saves were in fact succeeding.
-    //
-    // The trade-off, stated plainly because this line overwrites whatever
-    // markSessionDirty wrote during the flight: if a newer generation arrived
-    // mid-save, this briefly claims `saved` while that newer one is genuinely
-    // unsaved. That window is bounded — the same drift re-arms the debounce,
-    // and the autosave interval is a hard backstop — and it is the deliberate
-    // choice over the alternative, which is an indicator that never once says
-    // `saved` to a player whose world is being saved every few seconds.
-    document.body.setAttribute('data-session-persistence', 'saved')
-  }
-
-  const requestBackgroundFlush = (): void => {
-    void requestFlush().catch(() => {
-      // The coordinator already made the failure visible; background callers consume it.
-    })
-  }
-
-  const flushDirty = (): void => {
-    if (dirtyGeneration !== savedGeneration) requestBackgroundFlush()
-  }
-
-  markSessionDirty = () => {
-    dirtyGeneration += 1
-    document.body.setAttribute('data-session-persistence', 'dirty')
-    if (debounceTimer !== undefined) window.clearTimeout(debounceTimer)
-    debounceTimer = window.setTimeout(flushDirty, SAVE_DEBOUNCE_MS)
-  }
+  const { requestFlush, requestBackgroundFlush, markSessionDirty: runtimeMarkSessionDirty } = inventoryRuntime
+  markSessionDirty = runtimeMarkSessionDirty
 
   let settingsView: ReturnType<typeof createSettingsView>
   settingsView = createSettingsView(document, settingsRoot, {
@@ -4427,96 +2957,28 @@ const bootGame = async (
   // 5. QA surface
   // -------------------------------------------------------------------------
 
-  const entityRenderProjection = (): ReadonlyArray<RenderEntity> => [
-    ...Effect.runSync(world.entities.snapshot).entities.map((entity) => ({
-      id: entity.id,
-      kind: entity.kind,
-      feetPosition: entity.feetPosition,
-      category: entity.kind === 'dropped_item' ? 'item' : 'hostile',
-    } satisfies RenderEntity)),
-    ...[...multiplayerEntities.values()].map((entity) => ({
-      id: `authoritative:${String(entity.entityId)}`,
-      kind: entity._tag === 'living'
-        ? entity.entityType
-        : entity._tag === 'vehicle'
-          ? entity.vehicleType
-          : entity._tag === 'arrow'
-            ? 'arrow'
-            : entity._tag === 'primed-tnt'
-              ? 'primed_tnt'
-            : 'dropped_item',
-      feetPosition: entity.at,
-      category: entity._tag === 'item-drop' || entity._tag === 'arrow' ? 'item' as const : 'hostile' as const,
-    } satisfies RenderEntity)),
-    ...projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
-    ...eyeOfEnderRenderDescriptors(eyeOfEnderRuntimeState, currentChunkContext.dimension),
-    ...witherRenderDescriptors(witherRuntimeState, currentChunkContext.dimension),
-    ...[...(multiplayer?.players.entries() ?? [])]
-      .filter(([, player]) => player.world === currentChunkContext.dimension)
-      .map(([playerId, player]) => ({
-        id: `multiplayer:${String(playerId)}`,
-        kind: 'remote_player',
-        feetPosition: player.at,
-      } satisfies RenderEntity)),
-    ...[...villagerResidents.values()]
-      .filter((villager) => villager.dimension === currentChunkContext.dimension)
-      .filter((villager) => currentChunkContext.streamLoaded.has(chunkKeyOf({
-        cx: Math.floor(villager.feetPosition.x / 16),
-        cz: Math.floor(villager.feetPosition.z / 16),
-      })))
-      .map((villager) => ({
-        id: villager.id,
-        kind: 'villager',
-        feetPosition: villager.feetPosition,
-      } satisfies RenderEntity)),
-    ...(currentChunkContext.dimension === 'end'
-      && endDragonSnapshot().phase !== 'dead'
-      ? [{
-          id: 'ender-dragon',
-          kind: 'ender_dragon',
-          category: 'hostile' as const,
-          feetPosition: endDragonPosition(),
-        } satisfies RenderEntity]
-      : []),
-    ...vehicleList()
-      .filter((vehicle) => vehicle.dimension === currentChunkContext.dimension)
-      .map((vehicle) => ({
-        id: String(vehicle.id),
-        kind: vehicle.type,
-        feetPosition: vehicle.position,
-        facingRadians: vehicle.yawRadians,
-      } satisfies RenderEntity)),
-  ]
-
-  const syncRenderedEntities = (): void => {
-    Effect.runSync(worldRenderer.syncEntities(entityRenderProjection()))
-  }
-
-  const nearestVillagerForTrade = (
-    position: SessionPosition,
-    dimension: Dimension,
-  ): PersistedVillager | undefined => {
-    let nearest: PersistedVillager | undefined
-    let nearestDistanceSquared = 16
-    for (const villager of villagerResidents.values()) {
-      if (villager.dimension !== dimension) continue
-      const dx = villager.feetPosition.x - position.x
-      const dy = villager.feetPosition.y - position.y
-      const dz = villager.feetPosition.z - position.z
-      const distanceSquared = dx * dx + dy * dy + dz * dz
-      if (
-        distanceSquared < nearestDistanceSquared
-        || (distanceSquared === nearestDistanceSquared && villager.id < (nearest?.id ?? ''))
-      ) {
-        nearest = villager
-        nearestDistanceSquared = distanceSquared
-      }
-    }
-    return nearest
-  }
+  const playerSessionRuntime = createPlayerSessionRuntime({
+    getCurrentDimension: () => currentChunkContext.dimension,
+    getLocalEntities: () => Effect.runSync(world.entities.snapshot).entities,
+    getAuthoritativeEntities: () => [...multiplayerEntities.entries()],
+    getProjectileEntities: () => projectileRenderDescriptors(projectileRuntimeState, currentChunkContext.dimension),
+    getEyeOfEnderEntities: () => eyeOfEnderRenderDescriptors(eyeOfEnderRuntimeState, currentChunkContext.dimension),
+    getWitherEntities: () => witherRenderDescriptors(witherRuntimeState, currentChunkContext.dimension),
+    getRemotePlayers: () => [...(multiplayer?.players.entries() ?? [])],
+    getVillagerResidents: () => [...villagerResidents.values()],
+    isCurrentChunkLoaded: (position) => currentChunkContext.streamLoaded.has(chunkKeyOf({
+      cx: Math.floor(position.x / 16),
+      cz: Math.floor(position.z / 16),
+    })),
+    getEndDragonPhase: () => endDragonSnapshot().phase,
+    getEndDragonPosition: endDragonPosition,
+    getVehicles: vehicleList,
+    syncEntities: (entities) => worldRenderer.syncEntities(entities),
+  })
+  const { syncRenderedEntities, nearestVillagerForTrade } = playerSessionRuntime
 
   let stopBrowserPreview: (() => Promise<void>) | undefined
-  const qaSurface = makeQaSurface({
+  const qaInstalled = installPlayerQaSurface({
     render: {
       weather,
       getLightingSnapshot: () => currentChunkContext.lightingSnapshot(),
@@ -4629,78 +3091,55 @@ const bootGame = async (
     lifecycle: {
       getStopBrowserPreview: () => stopBrowserPreview,
     },
-  })
-  if (Either.isLeft(qaSurface)) {
-    failBoot('QA registry rejected', describeQaApiError(qaSurface.left))
-    return
-  }
-  qaSurface.right.install()
+  }, failBoot)
+  if (!qaInstalled) return
 
-  window.setInterval(requestBackgroundFlush, AUTOSAVE_INTERVAL_MS)
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') {
-      resetTouchInput('visibility-hidden')
-      requestBackgroundFlush()
-    }
-  })
-  window.addEventListener('blur', () => resetTouchInput('blur'))
-  let multiplayerDisposeStarted = false
-  const disposeMultiplayer = (): void => {
-    if (multiplayer === undefined || multiplayerDisposeStarted) return
-    multiplayerDisposeStarted = true
-    const leave = encodeFrame({
-      _tag: 'PlayerLeave',
-      player: multiplayer.query.player,
-    })
-    const close = multiplayer.transport.state() === 'open' && Either.isRight(leave)
-      ? multiplayer.transport.send(leave.right).pipe(
-          Effect.catchAll(() => Effect.void),
-          Effect.zipRight(multiplayer.transport.close),
-        )
-      : multiplayer.transport.close
-    void Effect.runPromise(close)
-  }
-  let runtimeDisposed = false
-  const disposeRuntime = (): void => {
-    if (runtimeDisposed) return
-    runtimeDisposed = true
-    settingsView.dispose()
-    endAudio.dispose()
-    weatherAudio.dispose()
-    adapters.clearPendingThunder()
-    window.removeEventListener('mousedown', handleNativeMouseDown, true)
-    Effect.runSync(worldRenderer.dispose)
-    atlasTexture.dispose()
-    audio.close()
-  }
-  // IndexedDB cannot be made synchronous during pagehide; this is best-effort.
-  // Periodic publication persists advancing time and weather without gameplay mutations.
-  window.addEventListener('pagehide', (event) => {
-    requestBackgroundFlush()
-    void stopBrowserPreview?.()
-    disposeMultiplayer()
-    if (!event.persisted) {
-      disposeRuntime()
-    }
-  })
-  const hot = (import.meta as ImportMeta & {
-    readonly hot?: { readonly dispose: (handler: () => void) => void }
-  }).hot
-  hot?.dispose(() => {
-    void stopBrowserPreview?.()
-    disposeMultiplayer()
-    disposeRuntime()
+  const { disposeMultiplayer, disposeRuntime } = installPlayerLifecycle({
+    document,
+    window,
+    autosaveIntervalMs: AUTOSAVE_INTERVAL_MS,
+    requestBackgroundFlush,
+    resetTouchInput,
+    getStopBrowserPreview: () => stopBrowserPreview,
+    hasMultiplayer: () => multiplayer !== undefined,
+    leaveMultiplayer: () => {
+      if (multiplayer === undefined) return
+      const leave = encodeFrame({
+        _tag: 'PlayerLeave',
+        player: multiplayer.query.player,
+      })
+      const close = multiplayer.transport.state() === 'open' && Either.isRight(leave)
+        ? multiplayer.transport.send(leave.right).pipe(
+            Effect.catchAll(() => Effect.void),
+            Effect.zipRight(multiplayer.transport.close),
+          )
+        : multiplayer.transport.close
+      void Effect.runPromise(close)
+    },
+    settingsView,
+    endAudio,
+    weatherAudio,
+    clearPendingThunder: adapters.clearPendingThunder,
+    removeNativeMouseDown: () => window.removeEventListener('mousedown', handleNativeMouseDown, true),
+    disposeWorldRenderer: () => { Effect.runSync(worldRenderer.dispose) },
+    disposeAtlasTexture: () => { atlasTexture.dispose() },
+    closeAudio: () => { audio.close() },
+    registerHotDispose: (callback) => {
+      const hot = (import.meta as ImportMeta & {
+        readonly hot?: { readonly dispose: (handler: () => void) => void }
+      }).hot
+      hot?.dispose(callback)
+    },
   })
 
   // -------------------------------------------------------------------------
   // 6. The frame
   // -------------------------------------------------------------------------
 
-  const runFrame = game.runFrameWith(BrowserClockLayer)
-
-  // Time is read through the Port, not from `performance`. `apps/web/clock.ts`
-  // is the only file allowed the raw reading and the lint boundary enforces it.
-  const readNow = (): MonotonicTimeSecs => Effect.runSync(browserClock.monotonicSecs)
+  const { runFrame, readNow } = createPlayerFramePreparation({
+    makeRunFrame: () => game.runFrameWith(BrowserClockLayer),
+    readNow: () => Effect.runSync(browserClock.monotonicSecs),
+  })
 
   let previousSecs: MonotonicTimeSecs | undefined
   let framesTotal = 0
