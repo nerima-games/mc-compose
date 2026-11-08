@@ -170,6 +170,37 @@ export const makeMultiplayerChatCommand = (
   }
 }
 
+export type MultiplayerChatInputContext = {
+  readonly multiplayer: Pick<MultiplayerRuntime, 'query' | 'host'> | undefined
+  readonly ui: Pick<MultiplayerClientContext['ui'], 'multiplayerChat' | 'multiplayerChatForm' | 'multiplayerChatInput'>
+  readonly state: Pick<MultiplayerClientContext['state'], 'multiplayerHandshakeComplete'>
+}
+
+export const setMultiplayerChatVisibility = (
+  multiplayerChat: Pick<HTMLElement, 'hidden'>,
+  multiplayer: Pick<MultiplayerRuntime, 'query' | 'host'> | undefined,
+): void => {
+  multiplayerChat.hidden = multiplayer === undefined
+}
+
+export const installMultiplayerChatInputListeners = (clientContext: MultiplayerChatInputContext): void => {
+  clientContext.ui.multiplayerChatForm.addEventListener('submit', (event) => {
+    event.preventDefault()
+    const currentMultiplayer = clientContext.multiplayer
+    const command = makeMultiplayerChatCommand(
+      currentMultiplayer,
+      clientContext.state.multiplayerHandshakeComplete,
+      clientContext.ui.multiplayerChatInput.value,
+    )
+    if (command === undefined || currentMultiplayer === undefined) return
+    Effect.runSync(currentMultiplayer.host.enqueueOutbound(command))
+    clientContext.ui.multiplayerChatInput.value = ''
+  })
+  for (const eventName of ['keydown', 'keyup'] as const) {
+    clientContext.ui.multiplayerChatInput.addEventListener(eventName, (event) => event.stopPropagation())
+  }
+}
+
 type EffectValue<T> = T extends Effect.Effect<infer A, infer _E, infer _R> ? A : never
 type Dimension = SessionState['dimension']
 type World = GeneratedWorld<MobBehaviour>
@@ -559,7 +590,7 @@ export const createMultiplayerClient = (clientContext: MultiplayerClientContext)
   }
   clientContext.ui.multiplayerStatus.hidden = clientContext.multiplayer === undefined
   clientContext.ui.multiplayerStatus.textContent = clientContext.multiplayer === undefined ? '' : 'Connecting to multiplayer server...'
-  clientContext.ui.multiplayerChat.hidden = clientContext.multiplayer === undefined
+  setMultiplayerChatVisibility(clientContext.ui.multiplayerChat, clientContext.multiplayer)
   clientContext.ui.canvas.setAttribute('data-multiplayer-connection', clientContext.multiplayer === undefined ? 'disabled' : 'connecting')
   clientContext.ui.canvas.setAttribute('data-multiplayer-player-count', '0')
   clientContext.ui.canvas.setAttribute('data-multiplayer-revision', '0')
@@ -1668,21 +1699,7 @@ export const createMultiplayerClient = (clientContext: MultiplayerClientContext)
     clientContext.ui.canvas.setAttribute('data-multiplayer-rejection', clientContext.state.multiplayerRejection)
   }
 
-  clientContext.ui.multiplayerChatForm.addEventListener('submit', (event) => {
-    event.preventDefault()
-    const currentMultiplayer = clientContext.multiplayer
-    const command = makeMultiplayerChatCommand(
-      currentMultiplayer,
-      clientContext.state.multiplayerHandshakeComplete,
-      clientContext.ui.multiplayerChatInput.value,
-    )
-    if (command === undefined || currentMultiplayer === undefined) return
-    Effect.runSync(currentMultiplayer.host.enqueueOutbound(command))
-    clientContext.ui.multiplayerChatInput.value = ''
-  })
-  for (const eventName of ['keydown', 'keyup'] as const) {
-    clientContext.ui.multiplayerChatInput.addEventListener(eventName, (event) => event.stopPropagation())
-  }
+  installMultiplayerChatInputListeners(clientContext)
   return {
     enqueueMultiplayerPlayerMove,
     drainMultiplayerInbound,
