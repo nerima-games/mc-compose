@@ -190,7 +190,7 @@ export type H5aTickContext = {
   }
   readonly droppedItemMetadata: { readonly delete: (key: string) => boolean }
   readonly droppedItemMetadataKey: (dimension: Dimension, entityId: string) => string
-  readonly isDroppedItemBehaviour: (behaviour: unknown) => boolean
+  readonly isDroppedItemBehaviour: typeof import('@nerima-games/mx-gameplay').isDroppedItemBehaviour
 }
 
 type H5aHungerOutcome = Pick<
