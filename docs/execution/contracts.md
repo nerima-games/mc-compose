@@ -959,13 +959,16 @@ export class ParticleService extends Context.Service<ParticleService, {
 ## C7: Generic world-write port
 
 1. **Placement.** Define `WorldWritePort` and its data vocabulary in `mc-kernel/src/domain/world/world-write-port.ts`. Put the `MultiplayerWorldWriter` alias in `mx-multiplayer/src/domain/world-write.ts` and re-export it from the multiplayer package entry point. Open: W4 selects the adapter file and export after `mx-redstone` and `mx-multiplayer` finalize their contracts, because the placement depends on their consumer boundary; W5 wires that adapter in `mc-host-web` and `mc-server`.
-2. **Effect 4 types.** `applyBatch` is an atomic, dual-revision-checked Effect operation. It returns both the committed dimension and world revisions or a typed conflict, invalid-batch, or unavailable-chunk failure. Validate the entire batch before checking revisions or writing. The network adapter checks the expected world revision first, then the expected dimension revision. The world-session commit coordinator rechecks both in the same transaction as the writes to prevent a time-of-check/time-of-use race. The coordinator accepts the C7 batch as optional `blockWrite` on `WorldCommitRequest`, together with any owner candidate changes for that action. It prepares and publishes the ChunkStore write in the same commit, then advances the world revision once and the batch dimension revision once. The delta contains dimension-scoped, sparse `blockChanges` at that same world revision rather than a world-block owner snapshot. A missing chunk keeps the kernel's typed `WorldWriteChunkUnavailable` failure. When the batch is submitted through `WorldCommitRequest.blockWrite`, a batch/request mismatch returns `WorldCommitBlockWriteMismatch`; once aligned, stale request revisions use the C4 `WorldRevisionConflict` or `DimensionRevisionConflict`. Out-of-range positions return `WorldCommitBlockWriteInvalidPosition`, ChunkStore stale publication returns `WorldWriteStale`, and an invalid prepared token returns the typed internal `WorldWriteTokenInvalid` failure. Other ChunkStore prepare validation failures return `WorldCommitBlockWritePrepareInvalid` with reason `not-array`, `invalid-edit`, `invalid-position`, `invalid-block-id`, or `out-of-world`. The batch-related members of `WorldCommitCoordinatorError` are `WorldCommitBlockWriteMismatch`, `WorldCommitChunkStoreUnavailable`, `WorldWriteChunkUnavailable`, `WorldWriteInvalidBatch`, `WorldCommitBlockWriteInvalidPosition`, `WorldCommitBlockWritePrepareInvalid`, `WorldWriteStale`, and `WorldWriteTokenInvalid`; existing C4 request, schema, owner, and revision failures also remain in that union. The kernel `WorldWritePort.applyBatch` error union remains `WorldWriteConflict | WorldWriteInvalidBatch | WorldWriteChunkUnavailable`. `WorldWriteStale` remains a typed ChunkStore stale failure and is not mapped to C4 `WorldRevisionConflict` with invented revision values. Any failure leaves block state, owner state, and both revisions unchanged and creates no delta.
-3. **Schema shape.** A batch names its world, expected `WorldRevision`, dimension, expected `DimensionRevision`, and block edits. `WorldWritePort.applyBatch` rejects empty batches and duplicate positions as `WorldWriteInvalidBatch`; stale expected world or dimension revisions return `WorldWriteConflict` with the expected and current revisions. The coordinator decodes the batch and its edit list, then checks the vertical world bounds and returns `WorldCommitBlockWriteInvalidPosition` for positions with `y < 0` or `y >= CHUNK_HEIGHT`, not `WorldWriteInvalidBatch`. `WorldBlockPositionSchema`, used for replicated block changes and typed invalid-position payloads, requires safe integer axes. Validate batch structure before checking revisions, so an empty or duplicate-position batch fails as invalid even when either expected revision is stale. `WorldRevision` is checked before `DimensionRevision` at the network boundary.
+2. **Effect 4 types.** `applyBatch` is an atomic, dual-revision-checked Effect operation. It returns both the committed dimension and world revisions or a typed conflict, invalid-batch, or unavailable-chunk failure. Validate the entire batch, including every present block state, before checking revisions or writing. The network adapter checks the expected world revision first, then the expected dimension revision. The world-session commit coordinator rechecks both in the same transaction as the writes to prevent a time-of-check/time-of-use race. The coordinator accepts the C7 batch as optional `blockWrite` on `WorldCommitRequest`, together with any owner candidate changes for that action. It prepares and publishes the ChunkStore write in the same commit, then advances the world revision once and the batch dimension revision once. A missing chunk keeps the kernel's typed `WorldWriteChunkUnavailable` failure. When the batch is submitted through `WorldCommitRequest.blockWrite`, a batch/request mismatch returns `WorldCommitBlockWriteMismatch`; once aligned, stale request revisions use the C4 `WorldRevisionConflict` or `DimensionRevisionConflict`. Out-of-range positions return `WorldCommitBlockWriteInvalidPosition`, ChunkStore stale publication returns `WorldWriteStale`, and an invalid prepared token returns the typed internal `WorldWriteTokenInvalid` failure. Other ChunkStore prepare validation failures return `WorldCommitBlockWritePrepareInvalid` with reason `not-array`, `invalid-edit`, `invalid-position`, `invalid-block-id`, or `out-of-world`. The batch-related members of `WorldCommitCoordinatorError` are `WorldCommitBlockWriteMismatch`, `WorldCommitChunkStoreUnavailable`, `WorldWriteChunkUnavailable`, `WorldWriteInvalidBatch`, `WorldCommitBlockWriteInvalidPosition`, `WorldCommitBlockWritePrepareInvalid`, `WorldWriteStale`, and `WorldWriteTokenInvalid`; existing C4 request, schema, owner, and revision failures also remain in that union. The kernel `WorldWritePort.applyBatch` error union remains `WorldWriteConflict | WorldWriteInvalidBatch | WorldWriteChunkUnavailable`. `WorldWriteStale` remains a typed ChunkStore stale failure and is not mapped to C4 `WorldRevisionConflict` with invented revision values. Any failure leaves block state, owner state, and both revisions unchanged and creates no delta.
+3. **Schema shape.** A batch names its world, expected `WorldRevision`, dimension, expected `DimensionRevision`, and block edits. `WorldWritePort.applyBatch` rejects empty batches and duplicate positions as `WorldWriteInvalidBatch`; stale expected world or dimension revisions return `WorldWriteConflict` with the expected and current revisions. The coordinator decodes the batch and its edit list, then checks the vertical world bounds and returns `WorldCommitBlockWriteInvalidPosition` for positions with `y < 0` or `y >= CHUNK_HEIGHT`, not `WorldWriteInvalidBatch`. `WorldBlockPositionSchema`, used for replicated block changes and typed invalid-position payloads, requires safe integer axes. Validate batch structure before checking revisions, so an empty or duplicate-position batch fails as invalid even when either expected revision is stale. `WorldRevision` is checked before `DimensionRevision` at the network boundary. `BlockEditSchema.state` is optional; omitting it selects the block's default state, which the kernel codec encodes as `0`. Malformed or globally invalid states rejected during batch schema decoding use the coordinator's existing C4 schema failure. After the batch is decoded and the existing empty-batch and duplicate-position checks pass, validate each present decoded state against its edit's block with `encodeBlockState(edit.block, edit.state)`. If the codec rejects a property or value unsupported for that block, reject the entire batch as `WorldWriteInvalidBatch` with reason `invalid-block-state` and write no edits.
 
 ```ts
+import { BlockStateValuesSchema, encodeBlockState } from "@nerima-games/mc-kernel/domain/block-state";
+
 export const BlockEditSchema = Schema.Struct({
   position: BlockPositionSchema,
-  block: BlockIdSchema
+  block: BlockIdSchema,
+  state: Schema.optionalKey(BlockStateValuesSchema)
 });
 export type WorldWriteBlockEdit = Schema.Schema.Type<typeof BlockEditSchema>;
 
@@ -992,7 +995,7 @@ export class WorldWriteConflict extends Schema.TaggedError<WorldWriteConflict>()
 }) {}
 
 export class WorldWriteInvalidBatch extends Schema.TaggedError<WorldWriteInvalidBatch>()("WorldWriteInvalidBatch", {
-  reason: Schema.Literals(["empty", "duplicate-position"])
+  reason: Schema.Literals(["empty", "duplicate-position", "invalid-block-state"])
 }) {}
 
 export class WorldWritePort extends Context.Service<WorldWritePort, {
@@ -1005,7 +1008,7 @@ export type MultiplayerWorldWriter = WorldWritePort["Service"];
 ```
 
 4. **Consumers.** The server command adapter authenticates the remote peer; `mx-gameplay` validates game rules before issuing an accepted block write. The port enforces batch validity and revision atomicity, not gameplay authorization. `mx-redstone` is connected through host composition to the same world adapter and does not depend on multiplayer. Browser and server hosts provide equivalent adapters.
-5. **Compatibility.** Dimension revisions are a distinct branded type from C4 world revisions. A stale batch has no partial effects. If the batch itself is put on the wire, its message shape is governed by protocol versioning; it is not a save-slice migration.
+5. **Compatibility.** Dimension revisions are a distinct branded type from C4 world revisions. `BlockEditSchema.state` uses `BlockStateValuesSchema`, and batch validation uses `encodeBlockState`; both APIs require mc-kernel 0.15.0 or later. The state vocabulary is defined by mc-kernel's [block-state contract](https://github.com/nerima-games/mc-kernel/blob/c38b9020fa6d24655d92124cb716961a56f46fd2/docs/block-state.md), and its encoding is implemented by the [block-state codec](https://github.com/nerima-games/mc-kernel/blob/c38b9020fa6d24655d92124cb716961a56f46fd2/src/domain/block/block-state-codec.ts#L276). Replicated and saved representations may carry the encoded value under their own versioned schemas. If the batch itself is put on the wire, its message shape is governed by protocol versioning; it is not a save-slice migration.
 6. **Wave.** Freeze the port type in W1. W4 finalizes the mx consumer contracts and adapter placement only; W5 wires the adapter in `mc-host-web` and `mc-server`.
 
 ## Verification notes
@@ -1030,6 +1033,29 @@ Path(os.environ["SCRATCH"], "mc-kernel.d.ts").write_text('''declare module "@ner
   export const isItemStack: (value: unknown) => value is ItemStack;
   export type WorldWriteChunkUnavailable = Readonly<{ _tag: "WorldWriteChunkUnavailable" }>;
 }
+declare module "@nerima-games/mc-kernel/domain/block-state" {
+  import type { Brand, Result, Schema } from "effect";
+
+  type BlockId = number & Brand.Brand<"BlockId">;
+  export type BlockStateValues = Readonly<Record<string, unknown>>;
+  export const BlockStateValuesSchema: Schema.Codec<BlockStateValues, BlockStateValues>;
+  export type EncodedBlockState = number & Brand.Brand<"EncodedBlockState">;
+  export type BlockStateCodecFailure = Readonly<{
+    _tag: "BlockStateCodecFailure";
+    reason:
+      | "invalid-block-id"
+      | "unknown-block-id"
+      | "invalid-state"
+      | "unsupported-property"
+      | "invalid-property-value"
+      | "invalid-encoded-value"
+      | "reserved-code";
+  }>;
+  export const encodeBlockState: (
+    blockId: BlockId,
+    values: unknown
+  ) => Result.Result<EncodedBlockState, BlockStateCodecFailure>;
+}
 ''')
 PY
 cat > "$SCRATCH/tsconfig.json" <<'JSON'
@@ -1049,6 +1075,6 @@ npm install --prefix "$SCRATCH" --no-save effect@4.0.5 typescript@7.0.2
 "$SCRATCH/node_modules/.bin/tsc" --noEmit -p "$SCRATCH/tsconfig.json"
 ```
 
-The probe stubs the kernel item-stack guard, dimension union, and unavailable-chunk error tag, and checks signatures and Schema APIs only; runtime ordering, migration completeness, event delivery, revision policy, atomic writes, and package integration remain implementation and test obligations for their listed waves.
+The probe stubs the kernel item-stack guard, dimension union, unavailable-chunk error tag, and block-state schema/codec types, and checks signatures and Schema APIs only; runtime ordering, migration completeness, event delivery, revision policy, atomic writes, and package integration remain implementation and test obligations for their listed waves.
 
 Effect 4 service and layer conventions follow the [official Effect v4 layer guide](https://effect.website/docs/v4/requirements-management/layers).
