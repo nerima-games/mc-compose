@@ -91,10 +91,13 @@ describe('H4b main.ts wiring', () => {
     const furnaceStart = positionOf(postFrameGameplaySource, "route?.kind === 'furnace'")
     const furnaceEnd = positionOf(postFrameGameplaySource, "route?.kind === 'storage'", furnaceStart)
     const furnaceRoute = postFrameGameplaySource.slice(furnaceStart, furnaceEnd)
+    const activeFurnaceUpdate = furnaceRoute.includes('h5bState.activeFurnaceKey.set(key)')
+      ? 'h5bState.activeFurnaceKey.set(key)'
+      : 'activeFurnaceKey = key'
     expect(positionOf(furnaceRoute, 'furnaceStates.set(key,')).toBeLessThan(
-      positionOf(furnaceRoute, 'activeFurnaceKey = key'),
+      positionOf(furnaceRoute, activeFurnaceUpdate),
     )
-    expect(positionOf(furnaceRoute, 'activeFurnaceKey = key')).toBeLessThan(
+    expect(positionOf(furnaceRoute, activeFurnaceUpdate)).toBeLessThan(
       positionOf(furnaceRoute, "setInventoryOpen(true, 'furnace')"),
     )
 
@@ -102,16 +105,18 @@ describe('H4b main.ts wiring', () => {
       furnaceEnd,
       positionOf(postFrameGameplaySource, 'const inventoryBeforeUse', furnaceEnd),
     )
-    expect(storageRoute).toContain([
-      'if (container !== undefined && sendFacilityCommand({',
-      "              _tag: 'ContainerCommand',",
-      '              containerId: id,',
-      "              action: { _tag: 'open' },",
-      '            })) {',
-    ].join('\n'))
-    expect(positionOf(storageRoute, "action: { _tag: 'open' }"))
-      .toBeLessThan(positionOf(storageRoute, 'activeChestId = id'))
-    expect(positionOf(storageRoute, 'activeChestId = id'))
+    const containerCommandStart = positionOf(storageRoute, 'if (container !== undefined && sendFacilityCommand({')
+    const containerCommandOpen = positionOf(storageRoute, "action: { _tag: 'open' }")
+    const containerCommandEnd = positionOf(storageRoute, '})) {', containerCommandOpen)
+    expect(storageRoute).toContain("_tag: 'ContainerCommand'")
+    expect(storageRoute).toContain('containerId: id,')
+    expect(containerCommandStart).toBeLessThan(containerCommandOpen)
+    const activeChestUpdate = storageRoute.includes('h5bState.activeChestId.set(id)')
+      ? 'h5bState.activeChestId.set(id)'
+      : 'activeChestId = id'
+    expect(containerCommandOpen).toBeLessThan(containerCommandEnd)
+    expect(containerCommandEnd).toBeLessThan(positionOf(storageRoute, activeChestUpdate))
+    expect(positionOf(storageRoute, activeChestUpdate))
       .toBeLessThan(positionOf(storageRoute, "setInventoryOpen(true, 'chest')"))
   })
 })
