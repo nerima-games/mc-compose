@@ -82,7 +82,7 @@
  * block edits and mc-render meshing all observe the same mc-worldgen store;
  * dirty chunk notifications are the only render synchronization path.
  */
-import { Context, Effect, Either, Exit, Option, Queue, Ref } from 'effect'
+import { Context, Effect, Either, Exit, Option, Ref } from 'effect'
 import {
   BLOCK_PROPERTY_DEFAULTS,
   BlockId,
@@ -105,8 +105,6 @@ import { aabbOfCollisionShape } from '@nerima-games/mc-physics'
 import {
   addExperience as addVitalsExperience,
   containerIdAt,
-  durabilityForItem,
-  equipmentItem,
   emptyFurnaceState,
   emptyPlayerStorage,
   equipmentDefinitionFor,
@@ -310,15 +308,7 @@ import {
 } from '@nerima-games/mx-gameplay'
 import {
   encodeFrame,
-  CommandId,
-  EntityId,
-  makeMultiplayerHost,
-  PlayerId,
-  PlayerName,
-  TransportPort,
   WorldId,
-  type MultiplayerHost,
-  type NetworkMessage,
   type AuthoritativeEntityState,
 } from '@nerima-games/mx-multiplayer'
 import { makeBrowserPreview } from '@nerima-games/mc-playground-kit'
@@ -342,26 +332,6 @@ import {
   recoverProjectile,
 } from './projectile-runtime'
 import {
-  type PlayerDamageCommand,
-  type PlayerDamageCommandResult,
-} from '../multiplayer-shared/player-damage-network'
-import {
-  type CraftingCommand,
-  type CraftingCommandResult,
-} from '../multiplayer-shared/crafting-network'
-import {
-  type BrewingCommand,
-  type BrewingCommandResult,
-} from '../multiplayer-shared/brewing-network'
-import {
-  type AnvilCommand,
-  type AnvilCommandResult,
-} from '../multiplayer-shared/anvil-network'
-import {
-  type EnchantingCommand,
-  type EnchantingCommandResult,
-} from '../multiplayer-shared/enchanting-network'
-import {
   advanceEyeOfEnderRuntime,
   eyeOfEnderRenderDescriptors,
   initialEyeOfEnderRuntimeState,
@@ -382,20 +352,17 @@ import {
 } from '../../src/domain/composition'
 
 const COMPOSE_CHUNK_SYNC_STAGE = StageId('compose:chunk-sync')
-
-type WithoutAuthority<T> = T extends unknown
-  ? Omit<T, 'commandId' | 'player' | 'world' | 'expectedRevision'>
-  : never
 import {
   describeQaApiError,
   QA_GLOBAL_KEY,
 } from '../../src/domain/qa-api'
 import { BrowserClockLayer, browserClock } from './clock'
 import {
-  makeBrowserWebSocketTransport,
-  type BrowserWebSocketTransport,
-} from './multiplayer-websocket'
-import { validateMultiplayerUrl } from './multiplayer-url'
+  connectMultiplayer,
+  createMultiplayerClient,
+  multiplayerRegistrationTokenKey,
+  type MultiplayerClientContext,
+} from './multiplayer-client'
 import {
   announceInventoryTransition,
   captionRenderSignature,
@@ -432,16 +399,12 @@ import {
   leaveSleep,
   reconcileSleepers,
   requiredSleeperCount,
-  sleepRatioFromPercentage,
   validRespawnLocation,
   type SleepLocation,
 } from './sleep-runtime'
 import {
-  applySleepCommandResult,
-  applySleepEvents,
   initialSleepClientState,
   queueSleepCommand,
-  sleepClientFromSnapshot,
   type SleepClientState,
   type SleepCommand,
 } from '../multiplayer-shared/sleep-network'
@@ -742,55 +705,6 @@ const bootTitle = async (): Promise<void> => bootTitleMenu({
     readonly hot?: { readonly dispose: (handler: () => void) => void }
   }).hot,
 })
-
-type MultiplayerQuery = {
-  readonly url: string
-  readonly player: PlayerId
-  readonly name: PlayerName
-}
-
-const readMultiplayerQuery = (search: string): MultiplayerQuery | undefined => {
-  const query = new URLSearchParams(search)
-  const url = query.get('multiplayer')
-  const player = query.get('player')
-  const name = query.get('multiplayerName')
-  if (url === null || player === null || name === null || player.length === 0 || name.length === 0) {
-    return undefined
-  }
-  try {
-    const parsed = new URL(url)
-    if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') return undefined
-  } catch {
-    return undefined
-  }
-  return { url, player: PlayerId.make(player), name: PlayerName.make(name) }
-}
-
-const multiplayerReconnectTokenKey = (
-  url: string,
-  worldId: string,
-  player: PlayerId,
-): string => `mc-compose:multiplayer-reconnect:${JSON.stringify([url, worldId, String(player)])}`
-
-const multiplayerRegistrationTokenKey = (
-  url: string,
-  worldId: string,
-  player: string,
-): string => `mc-compose:multiplayer-registration:${JSON.stringify([url, worldId, player])}`
-
-type RemotePlayer = {
-  readonly name: PlayerName
-  readonly world: WorldId
-  readonly at: { readonly x: number; readonly y: number; readonly z: number }
-  readonly facing: { readonly yawRadians: number; readonly pitchRadians: number }
-}
-
-type MultiplayerRuntime = {
-  readonly query: MultiplayerQuery
-  readonly host: MultiplayerHost
-  readonly transport: BrowserWebSocketTransport
-  readonly players: Map<PlayerId, RemotePlayer>
-}
 
 const bootGame = async (
   route: SessionRoute,
@@ -2117,170 +2031,43 @@ const bootGame = async (
     readonly blockId: number
   }> = []
 
-  const multiplayerQuery = readMultiplayerQuery(window.location.search)
-  const multiplayerUrlValidation = multiplayerQuery === undefined
-    ? undefined
-    : validateMultiplayerUrl(multiplayerQuery.url, window.location.href)
-  if (multiplayerUrlValidation?.ok === false) {
-    failBoot(multiplayerUrlValidation.message)
-    return
-  }
-  let registrationToken: string | undefined
-  if (multiplayerQuery !== undefined && multiplayerUrlValidation?.ok === true) {
-    const registrationTokenKey = multiplayerRegistrationTokenKey(
-      multiplayerUrlValidation.url.href,
-      sessionId,
-      String(multiplayerQuery.player),
-    )
-    try {
-      registrationToken = window.sessionStorage.getItem(registrationTokenKey) ?? undefined
-      window.sessionStorage.removeItem(registrationTokenKey)
-    } catch (error: unknown) {
-      failBoot('Legacy registration token could not be read securely. Return to the title screen and try again.')
-      console.error('[mc-compose] multiplayer registration token retrieval failed', error)
-      return
-    }
-  }
-  const requiredSleepRatio = sleepRatioFromPercentage(
-    new URLSearchParams(window.location.search).get('sleepPercentage'),
-  )
-  const multiplayer = multiplayerQuery === undefined
-    ? undefined
-    : await Effect.runPromise(
-        Effect.gen(function* () {
-          const reconnectTokenKey = multiplayerReconnectTokenKey(
-            multiplayerQuery.url,
-            sessionId,
-            multiplayerQuery.player,
-          )
-          let reconnectToken: string | undefined
-          const transport = yield* makeBrowserWebSocketTransport({
-            url: multiplayerUrlValidation?.url.href ?? multiplayerQuery.url,
-            reconnectAuth: {
-              playerId: String(multiplayerQuery.player),
-              loadToken: () => {
-                if (reconnectToken !== undefined) return reconnectToken
-                try {
-                  reconnectToken = window.localStorage.getItem(reconnectTokenKey) ?? undefined
-                } catch {
-                  // Fall back to the latest token retained for this page lifetime.
-                }
-                return reconnectToken
-              },
-              saveToken: (token) => {
-                reconnectToken = token
-                window.localStorage.setItem(reconnectTokenKey, token)
-              },
-              loadRegistrationToken: () => registrationToken,
-              clearRegistrationToken: () => {
-                registrationToken = undefined
-              },
-            },
-          })
-          const host = yield* makeMultiplayerHost.pipe(
-            Effect.provideService(TransportPort, transport),
-          )
-          yield* host.transitionConnection({ _tag: 'ConnectRequested' })
-          return {
-            query: multiplayerQuery,
-            host,
-            transport,
-            players: new Map<PlayerId, RemotePlayer>(),
-          } satisfies MultiplayerRuntime
-        }),
-      )
-  const multiplayerInboundStage = multiplayer?.host.stages.find(
-    (stage) => stage.id === 'multiplayer:inbound',
-  )
-  const multiplayerOutboundStage = multiplayer?.host.stages.find(
-    (stage) => stage.id === 'multiplayer:outbound',
-  )
-  // The server deduplicates commands across reconnects, so a fresh page must not reuse its counters.
-  const multiplayerCommandSessionId = crypto.randomUUID()
-  const commandIdFor = (scope: string, sequence: number): CommandId =>
-    CommandId.make(`${scope}-${multiplayerCommandSessionId}-${String(sequence)}`)
-  const requestIdFor = (scope: string, sequence: number): string =>
-    `${scope}-${multiplayerCommandSessionId}-${String(sequence)}`
-  let multiplayerRevision = 0
+  const multiplayerConnection = await connectMultiplayer({
+    sessionId,
+    search: window.location.search,
+    href: window.location.href,
+    getSessionStorage: () => window.sessionStorage,
+    getLocalStorage: () => window.localStorage,
+    failBoot,
+  })
+  if (multiplayerConnection.status === 'failed') return
+  const {
+    multiplayer,
+    multiplayerInboundStage,
+    multiplayerOutboundStage,
+    requiredSleepRatio,
+  } = multiplayerConnection
   let authoritativeLightning: Readonly<{ sequence: number; at: Vec3; expiresAtSecs: number }> | undefined
   const multiplayerEntities = new Map<string, AuthoritativeEntityState>()
-  let nextVitalsCommand = 0
-  let nextEntityCommand = 0
-  let nextFacilityCommand = 0
-  let nextInventoryCommand = 0
-  let nextPlayerDamageCommand = 0
-  let nextCraftingCommand = 0
-  let nextBrewingCommand = 0
-  let nextAnvilCommand = 0
-  let nextEnchantingCommand = 0
-  let nextVillagerTradeCommand = 0
-  let pendingVitalsCommand: CommandId | null = null
-  let pendingInventoryCommand: {
-    readonly commandId: CommandId
-    readonly action: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryCommand' }>['action']
-    acceptedRevision: number | null
-  } | null = null
-  type RetryableEntityCommand = WithoutAuthority<Extract<NetworkMessage, {
-    readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'VehicleCommand'
-  }>>
-  let pendingEntityCommand: { readonly commandId: CommandId; readonly command: RetryableEntityCommand } | null = null
-  let queuedEntityCommands: ReadonlyArray<RetryableEntityCommand> = []
-  let pendingInventoryRetry: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryCommand' }>['action'] | null = null
-  let pendingVillagerTradeCommand: CommandId | null = null
-  let queuedHotbarSelection: number | null = null
-type MultiplayerInventorySelection = Readonly<{
-  source: number
-  remaining: number
-  mode: 'all' | 'split'
-}>
+  type MultiplayerInventorySelection = Readonly<{
+    source: number
+    remaining: number
+    mode: 'all' | 'split'
+  }>
   let multiplayerInventorySelection: MultiplayerInventorySelection | null = null
   type QueuedPlayerDamage = Readonly<{
     readonly amount: number
     readonly minimumHealthPoints: number
   }>
   let queuedPlayerDamages: QueuedPlayerDamage[] = []
-  let pendingPlayerDamage: {
-    readonly commandId: string
-    readonly acceptedRevision: number | null
-  } | null = null
-  let playerDamageResyncPending = false
-  let lastPlayerVitalsRevision = -1
-  let lastCraftingInventoryRevision = -1
   let pendingCrafting: {
     readonly commandId: string
     readonly acceptedRevision: number | null
   } | null = null
-  let craftingStaleRetries = 0
-  let pendingBrewingCommand: {
-    readonly commandId: string
-  } | null = null
-  let pendingAnvilCommand: {
-    readonly commandId: string
-  } | null = null
-  let pendingEnchantingCommand: {
-    readonly commandId: string
-  } | null = null
+  let pendingBrewingCommand: { readonly commandId: string } | null = null
   let activeBrewingStandAt: { readonly x: number; readonly y: number; readonly z: number } | undefined
-  let pendingFacilityCommand: {
-    readonly commandId: CommandId
-    readonly facility: 'container' | 'furnace'
-    readonly facilityId: string
-    readonly expectsDelta: boolean
-    acceptedRevision: number | null
-    facilityDeltaRevision: number | null
-    inventoryDeltaRevision: number | null
-  } | null = null
-  // Set when a chest close was requested while a facility command was
-  // already in flight (`setInventoryOpen`'s guard below) — the close never
-  // got sent, so it must be retried once that command clears rather than
-  // silently dropped. See `clearPendingFacilityCommand`.
   let closeChestOnFacilityIdle = false
   let networkSleepState: SleepClientState = initialSleepClientState()
   let nextSleepRequest = 1
-  let nextPortalCommand = 1
-  let pendingPortalCommand: CommandId | null = null
-  let nextLeverCommand = 1
-  let pendingLeverCommand: CommandId | null = null
   let appliedNightSkipRevision: number | null = null
   let multiplayerRejection = ''
   let multiplayerHandshakeComplete = false
@@ -2292,1188 +2079,154 @@ type MultiplayerInventorySelection = Readonly<{
     readonly facing: { readonly yawRadians: number; readonly pitchRadians: number }
   } | undefined
 
-  const enqueueMultiplayerPlayerMove = (nowSecs: number): void => {
-    if (
-      multiplayer === undefined
-      || !multiplayerHandshakeComplete
-      || nowSecs - lastPlayerMoveSentAt < 0.1
-    ) return
-    const pose = Effect.runSync(playerApi.pose)
-    const world = WorldId.make(Effect.runSync(playerApi.dimension))
-    const facing = { yawRadians: pose.yawRadians, pitchRadians: pose.pitchRadians }
-    const changed = lastPlayerMoveSent === undefined
-      || lastPlayerMoveSent.world !== world
-      || lastPlayerMoveSent.at.x !== pose.feetPosition.x
-      || lastPlayerMoveSent.at.y !== pose.feetPosition.y
-      || lastPlayerMoveSent.at.z !== pose.feetPosition.z
-      || lastPlayerMoveSent.facing.yawRadians !== facing.yawRadians
-      || lastPlayerMoveSent.facing.pitchRadians !== facing.pitchRadians
-    if (!changed && nowSecs - lastPlayerMoveSentAt < 1) return
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'PlayerMove',
-      player: multiplayer.query.player,
+  const multiplayerClientContext: MultiplayerClientContext = {
+    multiplayer,
+    ui: {
+      canvas,
+      multiplayerStatus,
+      multiplayerChat,
+      multiplayerChatLog,
+      multiplayerChatForm,
+      multiplayerChatInput,
+    },
+    state: {
+      get inventoryOpen() { return inventoryOpen },
+      set inventoryOpen(value) { inventoryOpen = value },
+      get inventoryMode() { return inventoryMode },
+      set inventoryMode(value) { inventoryMode = value },
+      get tradeOpen() { return tradeOpen },
+      set tradeOpen(value) { tradeOpen = value },
+      get activeVillagerId() { return activeVillagerId },
+      set activeVillagerId(value) { activeVillagerId = value },
+      get brewingOpen() { return brewingOpen },
+      set brewingOpen(value) { brewingOpen = value },
+      get brewingStatus() { return brewingStatus },
+      set brewingStatus(value) { brewingStatus = value },
+      get tradeStatus() { return tradeStatus },
+      set tradeStatus(value) { tradeStatus = value },
+      get enchantmentSeed() { return enchantmentSeed },
+      set enchantmentSeed(value) { enchantmentSeed = value },
+      get anvilName() { return anvilName },
+      set anvilName(value) { anvilName = value },
+      get anvilStatus() { return anvilStatus },
+      set anvilStatus(value) { anvilStatus = value },
+      get enchantingStatus() { return enchantingStatus },
+      set enchantingStatus(value) { enchantingStatus = value },
+      get customNames() { return customNames },
+      get enchantedItems() { return enchantedItems },
+      get eyeOfEnderRuntimeState() { return eyeOfEnderRuntimeState },
+      set eyeOfEnderRuntimeState(value) { eyeOfEnderRuntimeState = value },
+      get sleepRuntimeState() { return sleepRuntimeState },
+      set sleepRuntimeState(value) { sleepRuntimeState = value },
+      get witherRevision() { return witherRevision },
+      set witherRevision(value) { witherRevision = value },
+      get witherRuntimeState() { return witherRuntimeState },
+      set witherRuntimeState(value) { witherRuntimeState = value },
+      get authoritativeEnderDragonSnapshot() { return authoritativeEnderDragonSnapshot },
+      set authoritativeEnderDragonSnapshot(value) { authoritativeEnderDragonSnapshot = value },
+      get enderDragonRevision() { return enderDragonRevision },
+      set enderDragonRevision(value) { enderDragonRevision = value },
+      get redstoneDirty() { return redstoneDirty },
+      set redstoneDirty(value) { redstoneDirty = value },
+      get leverStates() { return leverStates },
+      get poweredRails() { return poweredRails },
+      get fishingResult() { return fishingResult },
+      set fishingResult(value) { fishingResult = value },
+      get networkFishingState() { return networkFishingState },
+      set networkFishingState(value) { networkFishingState = value },
+      get furnaceStates() { return furnaceStates },
+      get activeFurnaceKey() { return activeFurnaceKey },
+      set activeFurnaceKey(value) { activeFurnaceKey = value },
+      get activeChestId() { return activeChestId },
+      set activeChestId(value) { activeChestId = value },
+      get selectedHotbarIndex() { return selectedHotbarIndex },
+      set selectedHotbarIndex(value) { selectedHotbarIndex = value },
+      get chestStatus() { return chestStatus },
+      set chestStatus(value) { chestStatus = value },
+      get furnaceStatus() { return furnaceStatus },
+      set furnaceStatus(value) { furnaceStatus = value },
+      get authoritativeLightning() { return authoritativeLightning },
+      set authoritativeLightning(value) { authoritativeLightning = value },
+      get multiplayerEntities() { return multiplayerEntities },
+      get multiplayerInventorySelection() { return multiplayerInventorySelection },
+      set multiplayerInventorySelection(value) { multiplayerInventorySelection = value },
+      get queuedPlayerDamages() { return queuedPlayerDamages },
+      set queuedPlayerDamages(value) { queuedPlayerDamages = value },
+      get pendingCrafting() { return pendingCrafting },
+      set pendingCrafting(value) { pendingCrafting = value },
+      get pendingBrewingCommand() { return pendingBrewingCommand },
+      set pendingBrewingCommand(value) { pendingBrewingCommand = value },
+      get activeBrewingStandAt() { return activeBrewingStandAt },
+      set activeBrewingStandAt(value) { activeBrewingStandAt = value },
+      get closeChestOnFacilityIdle() { return closeChestOnFacilityIdle },
+      set closeChestOnFacilityIdle(value) { closeChestOnFacilityIdle = value },
+      get networkSleepState() { return networkSleepState },
+      set networkSleepState(value) { networkSleepState = value },
+      get nextSleepRequest() { return nextSleepRequest },
+      set nextSleepRequest(value) { nextSleepRequest = value },
+      get appliedNightSkipRevision() { return appliedNightSkipRevision },
+      set appliedNightSkipRevision(value) { appliedNightSkipRevision = value },
+      get multiplayerRejection() { return multiplayerRejection },
+      set multiplayerRejection(value) { multiplayerRejection = value },
+      get multiplayerHandshakeComplete() { return multiplayerHandshakeComplete },
+      set multiplayerHandshakeComplete(value) { multiplayerHandshakeComplete = value },
+      get multiplayerClosed() { return multiplayerClosed },
+      set multiplayerClosed(value) { multiplayerClosed = value },
+      get lastPlayerMoveSentAt() { return lastPlayerMoveSentAt },
+      set lastPlayerMoveSentAt(value) { lastPlayerMoveSentAt = value },
+      get lastPlayerMoveSent() { return lastPlayerMoveSent },
+      set lastPlayerMoveSent(value) { lastPlayerMoveSent = value },
+    },
+    services: {
       world,
-      at: pose.feetPosition,
-      facing,
-    }))
-    lastPlayerMoveSent = { world, at: pose.feetPosition, facing }
-    lastPlayerMoveSentAt = nowSecs
+      gameplayState,
+      playerApi,
+      time,
+      weather,
+      currentChunkContext: () => currentChunkContext,
+      getOrCreateDimensionChunkContext,
+      leverKeyOf,
+      vehicleById,
+      vehicleService,
+      applyAuthoritativeVehicle,
+      alignActiveDimension: (dimension) => { alignActiveDimension(dimension) },
+      resetSimState,
+      presentWeather,
+      queueEndAudio,
+      craftingStaleRetryLimit: CRAFTING_STALE_RETRY_LIMIT,
+    },
+    callbacks: {
+      getInventoryInteraction: () => inventoryInteraction,
+      renderPlayerUi: () => renderPlayerUi(),
+      renderTradeUi: () => renderTradeUi(),
+      renderBrewingUi: () => renderBrewingUi(),
+      setInventoryOpen: (open) => setInventoryOpen(open),
+    },
   }
-
-  const drainMultiplayerInbound = (): void => {
-    if (multiplayer === undefined) return
-    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.sleepInbound))) {
-      if (message._tag === 'SleepSnapshot') networkSleepState = sleepClientFromSnapshot(message.snapshot)
-      else if (message._tag === 'SleepCommandResult') networkSleepState = applySleepCommandResult(networkSleepState, message.result)
-      else if (message._tag === 'SleepEvents') networkSleepState = applySleepEvents(networkSleepState, message.revision, message.events)
-      sleepRuntimeState = initialSleepRuntimeState()
-      for (const [player, location] of networkSleepState.sleepers) {
-        sleepRuntimeState = enterSleep(sleepRuntimeState, String(player), {
-          dimension: 'overworld',
-          position: location.bed,
-          bedPosition: location.bed,
-        })
-      }
-    }
-    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.witherInbound))) {
-      if (message._tag === 'WitherSnapshot') {
-        witherRevision = message.revision
-        witherRuntimeState = restoreWitherRuntime(message.snapshot)
-      }
-    }
-    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.enderDragonInbound))) {
-      if (message._tag === 'EnderDragonSnapshot' && message.revision >= enderDragonRevision) {
-        enderDragonRevision = message.revision
-        authoritativeEnderDragonSnapshot = message.snapshot
-      }
-    }
-    for (const message of Effect.runSync(multiplayer.host.drainInbound)) {
-      applyNetworkMessage(message)
-    }
-  }
-  multiplayerStatus.hidden = multiplayer === undefined
-  multiplayerStatus.textContent = multiplayer === undefined ? '' : 'Connecting to multiplayer server...'
-  multiplayerChat.hidden = multiplayer === undefined
-  canvas.setAttribute('data-multiplayer-connection', multiplayer === undefined ? 'disabled' : 'connecting')
-  canvas.setAttribute('data-multiplayer-player-count', '0')
-  canvas.setAttribute('data-multiplayer-revision', '0')
-  canvas.setAttribute('data-multiplayer-rejection', '')
-
-  const dimensionFromWorld = (worldId: WorldId): Dimension | undefined =>
-    worldId === 'overworld' || worldId === 'nether' || worldId === 'end'
-      ? (worldId as Dimension)
-      : undefined
-  const applyNetworkBlock = (
-    worldId: WorldId,
-    at: { readonly x: number; readonly y: number; readonly z: number },
-    block: string | null,
-  ): void => {
-    const dimension = dimensionFromWorld(worldId)
-    if (dimension === undefined) return
-    const context = getOrCreateDimensionChunkContext(dimension)
-    Effect.runSync(context.chunkStore.setBlock(blockPosition(at.x, at.y, at.z), block === null ? blockIdOf('air') : blockIdOf(block as Parameters<typeof blockIdOf>[0])))
-    if (dimension === currentChunkContext.dimension) redstoneDirty = true
-  }
-
-  const sendVitalsCommand = (action: Extract<NetworkMessage, { readonly _tag: 'PlayerVitalsCommand' }>['action']): void => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingVitalsCommand !== null) return
-    nextVitalsCommand += 1
-    const commandId = commandIdFor('vitals', nextVitalsCommand)
-    pendingVitalsCommand = commandId
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'PlayerVitalsCommand',
-      commandId,
-      player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      expectedRevision: multiplayerRevision,
-      action,
-    }))
-  }
-
-  const sendPortalUseCommand = (
-    portal: { readonly x: number; readonly y: number; readonly z: number },
-    tag: 'EndPortalUseCommand' | 'NetherPortalUseCommand',
-  ): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingPortalCommand !== null) return false
-    nextPortalCommand += 1
-    const commandId = commandIdFor(`${tag === 'EndPortalUseCommand' ? 'end' : 'nether'}-portal`, nextPortalCommand)
-    pendingPortalCommand = commandId
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: tag,
-      commandId,
-      player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      expectedRevision: multiplayerRevision,
-      portal,
-    }))
-    return true
-  }
-
-  const sendEndProgressCommand = (
-    command: { readonly _tag: 'ThrowEyeOfEnderCommand' }
-      | { readonly _tag: 'InsertEyeIntoEndPortalFrameCommand'; readonly frame: { readonly x: number; readonly y: number; readonly z: number } },
-  ): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingPortalCommand !== null) return false
-    nextPortalCommand += 1
-    const commandId = commandIdFor('end-eye', nextPortalCommand)
-    pendingPortalCommand = commandId
-    const header = {
-      commandId,
-      player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      expectedRevision: multiplayerRevision,
-    }
-    Effect.runSync(multiplayer.host.enqueueOutbound(
-      command._tag === 'ThrowEyeOfEnderCommand'
-        ? { _tag: command._tag, ...header }
-        : { _tag: command._tag, ...header, frame: command.frame },
-    ))
-    return true
-  }
-
-  const sendToggleLeverCommand = (lever: { readonly x: number; readonly y: number; readonly z: number }): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingLeverCommand !== null) return false
-    nextLeverCommand += 1
-    const commandId = commandIdFor('lever', nextLeverCommand)
-    pendingLeverCommand = commandId
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'ToggleLeverCommand',
-      commandId,
-      player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      expectedRevision: multiplayerRevision,
-      lever,
-    }))
-    return true
-  }
-
-  const sendInventoryCommand = (
-    action: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryCommand' }>['action'],
-  ): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingInventoryCommand !== null) return false
-    nextInventoryCommand += 1
-    const commandId = commandIdFor('inventory', nextInventoryCommand)
-    pendingInventoryCommand = { commandId, action, acceptedRevision: null }
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'PlayerInventoryCommand',
-      commandId,
-      player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      expectedRevision: multiplayerRevision,
-      action,
-    }))
-    return true
-  }
-
-  const sendInventorySelection = (slot: number): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete) return false
-    if (pendingInventoryCommand !== null) {
-      queuedHotbarSelection = slot
-      return true
-    }
-    return sendInventoryCommand({ _tag: 'select-slot', slot })
-  }
-
-  const sendVillagerTradeCommand = (villagerId: string, offerId: string): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingVillagerTradeCommand !== null) return false
-    nextVillagerTradeCommand += 1
-    const commandId = commandIdFor('villager-trade', nextVillagerTradeCommand)
-    pendingVillagerTradeCommand = commandId
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'VillagerTradeCommand',
-      commandId,
-      player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      expectedRevision: multiplayerRevision,
-      villagerId,
-      offerId,
-      action: 'execute-trade',
-    }))
-    return true
-  }
-
-  const flushQueuedHotbarSelection = (): void => {
-    if (pendingInventoryCommand !== null || queuedHotbarSelection === null) return
-    const slot = queuedHotbarSelection
-    queuedHotbarSelection = null
-    sendInventorySelection(slot)
-  }
-
-  const replayPendingInventoryCommand = (): void => {
-    if (pendingInventoryRetry === null || pendingInventoryCommand !== null) return
-    const action = pendingInventoryRetry
-    pendingInventoryRetry = null
-    sendInventoryCommand(action)
-  }
-
-  const sendEntityCommand = (
-    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'EntityAttackCommand' | 'EntityPickupCommand' | 'BowUseCommand' | 'IgniteTntCommand' | 'EnderPearlCommand' | 'BucketUseCommand' | 'VehicleUseCommand' | 'FishingCommand' | 'VehicleCommand' }>>,
-  ): void => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete) return
-    if (command._tag === 'EntityAttackCommand' || command._tag === 'EntityPickupCommand' || command._tag === 'VehicleCommand') {
-      const pickupIsPendingOrQueued = command._tag === 'EntityPickupCommand'
-        && (
-          (pendingEntityCommand?.command._tag === 'EntityPickupCommand'
-            && pendingEntityCommand.command.entityId === command.entityId)
-          || queuedEntityCommands.some((queued) =>
-            queued._tag === 'EntityPickupCommand' && queued.entityId === command.entityId)
-        )
-      if (pickupIsPendingOrQueued) return
-      if (pendingEntityCommand !== null) {
-        queuedEntityCommands = [...queuedEntityCommands, command]
-        return
-      }
-      nextEntityCommand += 1
-      const commandId = commandIdFor('entity', nextEntityCommand)
-      pendingEntityCommand = { commandId, command }
-      Effect.runSync(multiplayer.host.enqueueOutbound({
-        ...command,
-        commandId,
-        player: multiplayer.query.player,
-        world: WorldId.make(Effect.runSync(playerApi.dimension)),
-        expectedRevision: multiplayerRevision,
-      } as NetworkMessage))
-      return
-    }
-    nextEntityCommand += 1
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      ...command,
-      commandId: commandIdFor('entity', nextEntityCommand),
-      player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      expectedRevision: multiplayerRevision,
-    } as NetworkMessage))
-  }
-
-  const pumpEntityCommands = (): void => {
-    if (pendingEntityCommand !== null) return
-    const [next, ...remaining] = queuedEntityCommands
-    if (next === undefined) return
-    queuedEntityCommands = remaining
-    sendEntityCommand(next)
-  }
-
-  const resumeCommandsAfterResync = (): void => {
-    replayPendingInventoryCommand()
-    flushQueuedHotbarSelection()
-    pumpEntityCommands()
-  }
-
-  const sendFacilityCommand = (
-    command: WithoutAuthority<Extract<NetworkMessage, { readonly _tag: 'ContainerCommand' | 'FurnaceCommand' }>>,
-  ): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingFacilityCommand !== null) return false
-    nextFacilityCommand += 1
-    const commandId = commandIdFor('facility', nextFacilityCommand)
-    pendingFacilityCommand = {
-      commandId,
-      facility: command._tag === 'ContainerCommand' ? 'container' : 'furnace',
-      facilityId: command._tag === 'ContainerCommand' ? command.containerId : command.furnaceId,
-      expectsDelta: command.action._tag !== 'open' && command.action._tag !== 'close',
-      acceptedRevision: null,
-      facilityDeltaRevision: null,
-      inventoryDeltaRevision: null,
-    }
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      ...command,
-      commandId,
-      player: multiplayer.query.player,
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      expectedRevision: multiplayerRevision,
-    } as NetworkMessage))
-    return true
-  }
-
-  // Every site that clears `pendingFacilityCommand` must go through here,
-  // so a close that was blocked by an in-flight command (the guard in
-  // `setInventoryOpen`) gets retried the moment that command resolves,
-  // instead of leaving the dialog open until the player notices and
-  // presses again. `setInventoryOpen(false)` is itself a safe no-op if
-  // the inventory already closed some other way in the meantime.
-  const clearPendingFacilityCommand = (): void => {
-    pendingFacilityCommand = null
-    if (closeChestOnFacilityIdle) {
-      closeChestOnFacilityIdle = false
-      setInventoryOpen(false)
-    }
-  }
-
-  const pumpPlayerDamage = (): void => {
-    if (
-      multiplayer === undefined
-      || !multiplayerHandshakeComplete
-      || playerDamageResyncPending
-      || pendingPlayerDamage !== null
-    ) return
-    const next = queuedPlayerDamages[0]
-    if (next === undefined) return
-    queuedPlayerDamages = queuedPlayerDamages.slice(1)
-    nextPlayerDamageCommand += 1
-    const commandId = requestIdFor('damage', nextPlayerDamageCommand)
-    pendingPlayerDamage = { commandId, acceptedRevision: null }
-    const command = {
-      _tag: 'PlayerDamageCommand' as const,
-      commandId,
-      player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
-      expectedRevision: multiplayerRevision,
-      amount: next.amount,
-      minimumHealthPoints: next.minimumHealthPoints,
-    } as PlayerDamageCommand & Readonly<{ minimumHealthPoints: number }>
-    Effect.runSync(multiplayer.transport.sendPlayerDamage(command))
-  }
-
-  const settlePlayerDamageAfterVitals = (revision: number): void => {
-    lastPlayerVitalsRevision = Math.max(lastPlayerVitalsRevision, revision)
-    const pending = pendingPlayerDamage
-    if (
-      pending !== null
-      && pending.acceptedRevision !== null
-      && revision >= pending.acceptedRevision
-    ) {
-      pendingPlayerDamage = null
-      pumpPlayerDamage()
-    }
-  }
-
-  const applyPlayerDamageResult = (message: PlayerDamageCommandResult): void => {
-    if (multiplayer === undefined || pendingPlayerDamage?.commandId !== message.commandId) return
-    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-    if (message.accepted) {
-      pendingPlayerDamage = { ...pendingPlayerDamage, acceptedRevision: message.revision }
-      if (lastPlayerVitalsRevision >= message.revision) {
-        pendingPlayerDamage = null
-        pumpPlayerDamage()
-      }
-      return
-    }
-    pendingPlayerDamage = null
-    playerDamageResyncPending = true
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'AuthoritativeResyncRequest',
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      lastKnownRevision: multiplayerRevision,
-    }))
-  }
-
-  const drainPlayerDamageInbound = (): void => {
-    if (multiplayer === undefined) return
-    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.playerDamageInbound))) {
-      if (message._tag === 'PlayerDamageCommandResult') applyPlayerDamageResult(message)
-    }
-  }
-
-  const requestCrafting = (): void => {
-    if (
-      multiplayer === undefined
-      || !multiplayerHandshakeComplete
-      || pendingCrafting !== null
-    ) return
-    const grid = inventoryInteraction.state().grid
-    const dimensions = grid.width === 2 && grid.height === 2
-      ? { width: 2 as const, height: 2 as const }
-      : grid.width === 3 && grid.height === 3
-        ? { width: 3 as const, height: 3 as const }
-        : undefined
-    if (dimensions === undefined) return
-    nextCraftingCommand += 1
-    const commandId = requestIdFor('craft', nextCraftingCommand)
-    pendingCrafting = { commandId, acceptedRevision: null }
-    const command: CraftingCommand = {
-      _tag: 'CraftingCommand',
-      commandId,
-      player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
-      expectedRevision: multiplayerRevision,
-      grid: {
-        ...dimensions,
-        cells: grid.cells.map((cell) => cell?.item ?? null),
-      },
-    }
-    Effect.runSync(multiplayer.transport.sendCrafting(command))
-  }
-
-  const settleCraftingAfterInventory = (revision: number): void => {
-    lastCraftingInventoryRevision = Math.max(lastCraftingInventoryRevision, revision)
-    const pending = pendingCrafting
-    if (
-      pending !== null
-      && pending.acceptedRevision !== null
-      && revision >= pending.acceptedRevision
-    ) {
-      pendingCrafting = null
-      Effect.runSync(inventoryInteraction.confirmCraftOnce())
-    }
-  }
-
-  const applyCraftingResult = (message: CraftingCommandResult): void => {
-    if (multiplayer === undefined || pendingCrafting?.commandId !== message.commandId) return
-    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-    if (!message.accepted) {
-      pendingCrafting = null
-      Effect.runSync(multiplayer.host.enqueueOutbound({
-        _tag: 'AuthoritativeResyncRequest',
-        world: WorldId.make(Effect.runSync(playerApi.dimension)),
-        lastKnownRevision: multiplayerRevision,
-      }))
-      // The server compares revisions for strict equality and advances its own
-      // on any world activity, so a perfectly valid craft loses this race
-      // whenever anything at all happens between reading the revision and the
-      // server handling the command — another player, an entity tick, the
-      // clock. The rejection carries the server's current revision, adopted
-      // just above, so re-issuing sends a fresh one. Bounded, because a craft
-      // rejected for any other reason must not spin.
-      if (message.reason === 'stale-revision' && craftingStaleRetries < CRAFTING_STALE_RETRY_LIMIT) {
-        craftingStaleRetries += 1
-        requestCrafting()
-        return
-      }
-      craftingStaleRetries = 0
-      document.body.setAttribute('data-crafting-rejection', message.reason ?? 'unknown')
-      return
-    }
-    craftingStaleRetries = 0
-    document.body.removeAttribute('data-crafting-rejection')
-    pendingCrafting = { ...pendingCrafting, acceptedRevision: message.revision }
-    if (lastCraftingInventoryRevision >= message.revision) {
-      pendingCrafting = null
-      Effect.runSync(inventoryInteraction.confirmCraftOnce())
-    }
-  }
-
-  const drainCraftingInbound = (): void => {
-    if (multiplayer === undefined) return
-    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.craftingInbound))) {
-      if (message._tag === 'CraftingCommandResult') applyCraftingResult(message)
-    }
-  }
-
-  const requestBrewing = (action: BrewingCommand['action']): boolean => {
-    if (
-      multiplayer === undefined
-      || !multiplayerHandshakeComplete
-      || pendingBrewingCommand !== null
-      || activeBrewingStandAt === undefined
-    ) return false
-    nextBrewingCommand += 1
-    const commandId = requestIdFor('brewing', nextBrewingCommand)
-    pendingBrewingCommand = { commandId }
-    const command: BrewingCommand = {
-      _tag: 'BrewingCommand',
-      commandId,
-      player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
-      expectedRevision: multiplayerRevision,
-      at: activeBrewingStandAt,
-      action,
-    }
-    Effect.runSync(multiplayer.transport.sendBrewing(command))
-    return true
-  }
-
-  const resyncBrewing = (): void => {
-    if (multiplayer === undefined) return
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'AuthoritativeResyncRequest',
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      lastKnownRevision: multiplayerRevision,
-    }))
-  }
-
-  const applyBrewingResult = (message: BrewingCommandResult): void => {
-    if (multiplayer === undefined || pendingBrewingCommand?.commandId !== message.commandId) return
-    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-    pendingBrewingCommand = null
-    if (message.accepted) return
-    brewingStatus = `Cannot brew: ${message.reason ?? 'rejected'}`
-    resyncBrewing()
-    renderBrewingUi()
-  }
-
-  const sameBrewingPosition = (
-    left: { readonly x: number; readonly y: number; readonly z: number },
-    right: { readonly x: number; readonly y: number; readonly z: number },
-  ): boolean => left.x === right.x && left.y === right.y && left.z === right.z
-
-  const drainBrewingInbound = (): void => {
-    if (multiplayer === undefined) return
-    const currentWorld = String(WorldId.make(Effect.runSync(playerApi.dimension)))
-    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.brewingInbound))) {
-      if (message._tag === 'BrewingCommandResult') {
-        applyBrewingResult(message)
-        continue
-      }
-      if (message._tag !== 'BrewingStandDelta' && message._tag !== 'PlayerStatusEffectsDelta') continue
-      if (message.world !== currentWorld || message.revision < multiplayerRevision) continue
-      multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-      if (message._tag === 'BrewingStandDelta') {
-        if (activeBrewingStandAt !== undefined && sameBrewingPosition(activeBrewingStandAt, message.at)) {
-          Effect.runSync(restoreBrewingStand(gameplayState, message.state))
-          if (brewingOpen) renderBrewingUi()
-        }
-        continue
-      }
-      if (message.player === String(multiplayer.query.player)) {
-        Effect.runSync(restoreStatusEffects(gameplayState, message.state))
-      }
-    }
-  }
-
-  const requestAnvil = (): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingAnvilCommand !== null) return false
-    nextAnvilCommand += 1
-    const commandId = requestIdFor('anvil', nextAnvilCommand)
-    pendingAnvilCommand = { commandId }
-    const command: AnvilCommand = {
-      _tag: 'AnvilCommand',
-      commandId,
-      player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
-      expectedRevision: multiplayerRevision,
-      slot: selectedHotbarIndex,
-      name: anvilName.trim(),
-    }
-    Effect.runSync(multiplayer.transport.sendAnvil(command))
-    return true
-  }
-
-  const requestEnchanting = (offer: 0 | 1 | 2): boolean => {
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || pendingEnchantingCommand !== null) return false
-    nextEnchantingCommand += 1
-    const commandId = requestIdFor('enchanting', nextEnchantingCommand)
-    pendingEnchantingCommand = { commandId }
-    const command: EnchantingCommand = {
-      _tag: 'EnchantingCommand',
-      commandId,
-      player: String(multiplayer.query.player),
-      world: String(WorldId.make(Effect.runSync(playerApi.dimension))),
-      expectedRevision: multiplayerRevision,
-      slot: selectedHotbarIndex,
-      offer,
-    }
-    Effect.runSync(multiplayer.transport.sendEnchanting(command))
-    return true
-  }
-
-  const resyncAnvil = (): void => {
-    if (multiplayer === undefined) return
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'AuthoritativeResyncRequest',
-      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-      lastKnownRevision: multiplayerRevision,
-    }))
-  }
-
-  const applyAnvilResult = (message: AnvilCommandResult): void => {
-    if (multiplayer === undefined || pendingAnvilCommand?.commandId !== message.commandId) return
-    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-    pendingAnvilCommand = null
-    if (message.accepted) return
-    anvilStatus = `Cannot use anvil: ${message.reason}`
-    resyncAnvil()
-    renderPlayerUi()
-  }
-
-  const drainAnvilInbound = (): void => {
-    if (multiplayer === undefined) return
-    const currentWorld = String(WorldId.make(Effect.runSync(playerApi.dimension)))
-    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.anvilInbound))) {
-      if (message._tag === 'AnvilCommandResult') {
-        applyAnvilResult(message)
-        continue
-      }
-      if (message._tag !== 'PlayerAnvilNamesDelta') continue
-      if (
-        message.world !== currentWorld
-        || message.revision < multiplayerRevision
-        || message.player !== String(multiplayer.query.player)
-      ) continue
-      multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-      for (const key of [...customNames.keys()]) if (/^\d+$/u.test(key)) customNames.delete(key)
-      for (const { slot, name } of message.names) customNames.set(String(slot), name)
-      renderPlayerUi()
-    }
-  }
-
-  const applyEnchantingResult = (message: EnchantingCommandResult): void => {
-    if (multiplayer === undefined || pendingEnchantingCommand?.commandId !== message.commandId) return
-    multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-    pendingEnchantingCommand = null
-    if (message.accepted) return
-    enchantingStatus = `Cannot enchant: ${message.reason}`
-    resyncAnvil()
-    renderPlayerUi()
-  }
-
-  const drainEnchantingInbound = (): void => {
-    if (multiplayer === undefined) return
-    const currentWorld = String(WorldId.make(Effect.runSync(playerApi.dimension)))
-    for (const message of Effect.runSync(Queue.takeAll(multiplayer.transport.enchantingInbound))) {
-      if (message._tag === 'EnchantingCommandResult') {
-        applyEnchantingResult(message)
-        continue
-      }
-      if (message._tag !== 'PlayerEnchantmentsDelta') continue
-      if (
-        message.world !== currentWorld
-        || message.revision < multiplayerRevision
-        || message.player !== String(multiplayer.query.player)
-      ) continue
-      multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-      enchantmentSeed = message.seed
-      for (const key of [...enchantedItems.keys()]) if (/^\d+$/u.test(key)) enchantedItems.delete(key)
-      for (const { slot, item } of message.items) enchantedItems.set(String(slot), item)
-      renderPlayerUi()
-    }
-  }
-
-  document.addEventListener('mc-entity-command', (event) => {
-    const detail = (event as CustomEvent<{ readonly entityId: string; readonly action: 'attack' | 'pickup' | 'mount' | 'dismount' | 'move'; readonly direction?: 'forward' | 'backward' }>).detail
-    if (detail === undefined) return
-    const entityId = EntityId.make(detail.entityId)
-    if (detail.action === 'attack') sendEntityCommand({ _tag: 'EntityAttackCommand', entityId })
-    else if (detail.action === 'pickup') sendEntityCommand({ _tag: 'EntityPickupCommand', entityId })
-    else if (detail.action !== 'move') sendEntityCommand({
-      _tag: 'VehicleCommand',
-      entityId,
-      action: detail.action,
-    })
-    else if (detail.direction !== undefined) sendEntityCommand({ _tag: 'VehicleCommand', entityId, action: { _tag: 'move', direction: detail.direction } })
-  })
-
-  const applyNetworkVitals = (state: { readonly health: number; readonly hunger: number; readonly experience: number }): void => {
-    const current = Effect.runSync(world.vitals.snapshot)
-    Effect.runSync(world.vitals.restore({
-      ...current,
-      healthPoints: state.health,
-      hungerPoints: state.hunger,
-      totalExperience: state.experience,
-    }))
-    renderPlayerUi()
-  }
-
-  const applyNetworkInventory = (state: Extract<NetworkMessage, { readonly _tag: 'PlayerInventoryDelta' }>['state']): void => {
-    const storage = Effect.runSync(world.inventory.storageSnapshot)
-    const slots = state.slots.map((stack) => stack === null
-      ? undefined
-      : { item: stack.item as ItemStack['item'], count: StackCount(stack.count) })
-    const equipmentSlots = { ...storage.equipment.slots }
-    if (state.equipment !== undefined) {
-      for (const slot of EQUIPMENT_SLOTS) {
-        const stack = state.equipment[slot]
-        equipmentSlots[slot] = stack === null
-          ? null
-          : equipmentItem(
-              { item: stack.item as ItemStack['item'], count: StackCount(stack.count) },
-              stack.durability ?? durabilityForItem(stack.item as ItemStack['item']),
-            )
-      }
-    }
-    Effect.runSync(world.inventory.restoreStorage({
-      ...storage,
-      inventory: { slots },
-      inventoryDurability: slots.map((stack, index) => {
-        const durability = state.slots[index]?.durability ?? state.durability?.[index]
-        if (durability !== undefined) return durability
-        const previous = storage.inventory.slots[index]
-        return previous?.item === stack?.item
-          ? storage.inventoryDurability[index]
-          : stack === undefined ? null : durabilityForItem(stack.item)
-      }),
-      equipment: { slots: equipmentSlots },
-    }))
-    selectedHotbarIndex = state.selectedSlot
-  }
-
-  type NetworkVillagerTradeState = Extract<NetworkMessage, { readonly _tag: 'VillagerTradeDelta' }>['state']
-
-  const applyNetworkVillagerTrade = (state: NetworkVillagerTradeState): void => {
-    const current = Effect.runSync(snapshotVillagerTrades(gameplayState))
-    const villagers = current.villagers.map((villager) => {
-      if (villager.id !== state.villagerId) return villager
-      return {
-        ...villager,
-        offers: villager.offers.map((offer) => {
-          const networkOffer = state.offers.find((candidate) => candidate.offerId === offer.id)
-          const input = networkOffer?.input[0]
-          if (networkOffer === undefined || input === undefined) return offer
-          return {
-            ...offer,
-            input: { item: input.item as typeof offer.input.item, count: input.count },
-            output: { item: networkOffer.output.item as typeof offer.output.item, count: networkOffer.output.count },
-            uses: networkOffer.uses,
-            maxUses: networkOffer.maxUses,
-          }
-        }),
-      }
-    })
-    Effect.runSync(restoreVillagerTrades(gameplayState, { ...current, villagers }))
-  }
-
-  const applyNetworkTimeWeather = (
-    state: Extract<NetworkMessage, { readonly _tag: 'WorldTimeWeatherDelta' }>['state'],
-  ): void => {
-    Effect.runSync(time.setTimeOfDay(state.timeOfDay / 24_000))
-    const nextWeather: WeatherState = { weather: state.weather, remainingSecs: 300 }
-    Effect.runSync(weather.applyTransition(nextWeather))
-    presentWeather(nextWeather)
-  }
-
-  type NetworkContainerState = Extract<NetworkMessage, { readonly _tag: 'ContainerDelta' }>['state']
-  type NetworkFurnaceState = Extract<NetworkMessage, { readonly _tag: 'FurnaceDelta' }>['state']
-
-  const applyNetworkContainers = (states: ReadonlyArray<NetworkContainerState>): void => {
-    Effect.runSync(world.inventory.restoreContainerStorage({
-      version: 2,
-      containers: states.map((state) => ({
-        id: state.containerId,
-        kind: state.kind,
-        slots: state.slots.map((stack) => {
-          return stack == null
-            ? null
-            : {
-                item: stack.item as ItemStack['item'],
-                count: stack.count,
-                durability: stack.durability ?? null,
-              }
-        }),
-      })),
-    }))
-  }
-
-  const applyNetworkContainer = (state: NetworkContainerState): void => {
-    const snapshot = Effect.runSync(world.inventory.containerStorageSnapshot)
-    const existingStates: Array<NetworkContainerState> = snapshot.containers
-      .filter((container) => container.id !== state.containerId)
-      .map((container) => ({
-        containerId: container.id,
-        kind: container.kind,
-        slots: container.slots.map((stack) => stack === null
-          ? null
-          : {
-              item: stack.item,
-              count: stack.count,
-              ...(stack.durability === null ? {} : { durability: stack.durability }),
-            }),
-      }))
-    applyNetworkContainers([...existingStates, state])
-  }
-
-  const applyNetworkFurnace = (state: NetworkFurnaceState): void => {
-    const existing = furnaceStates.get(state.furnaceId)
-    let location: Pick<PersistedFurnaceState, 'dimension' | 'position'> | undefined = existing
-    if (location === undefined) {
-      try {
-        const parsed: unknown = JSON.parse(state.furnaceId)
-        if (
-          Array.isArray(parsed)
-          && parsed.length === 4
-          && (parsed[0] === 'overworld' || parsed[0] === 'nether' || parsed[0] === 'end')
-          && parsed.slice(1).every(Number.isFinite)
-        ) {
-          location = {
-            dimension: parsed[0],
-            position: { x: parsed[1] as number, y: parsed[2] as number, z: parsed[3] as number },
-          }
-        }
-      } catch {
-        return
-      }
-    }
-    if (location === undefined) return
-    const networkStack = (stack: NetworkFurnaceState['input']): ItemStack | null => stack === null
-      ? null
-      : itemStack(stack.item as ItemStack['item'], stack.count)
-    furnaceStates.set(state.furnaceId, {
-      ...location,
-      state: {
-        input: networkStack(state.input),
-        fuel: networkStack(state.fuel),
-        output: networkStack(state.output),
-        burnRemainingSecs: state.burnTicksRemaining / 20,
-        cookElapsedSecs: state.cookTicks / 20,
-      },
-    })
-  }
-
-  const applyNetworkMessage = (message: NetworkMessage): void => {
-    if (multiplayer === undefined) return
-    switch (message._tag) {
-      case 'WorldSnapshot':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        multiplayer.players.clear()
-        for (const player of message.players) {
-          if (player.player !== multiplayer.query.player) multiplayer.players.set(player.player, player)
-        }
-        for (const block of message.blocks) applyNetworkBlock(block.world, block.at, block.block)
-        const dimension = dimensionFromWorld(message.world)
-        if (dimension !== undefined) {
-          const dimensionKeyPrefix = `${JSON.stringify(dimension)},`
-          for (const key of poweredRails) {
-            if (key.startsWith(dimensionKeyPrefix)) poweredRails.delete(key)
-          }
-          for (const rail of message.poweredRails) {
-            const key = leverKeyOf({ dimension, position: rail.at })
-            if (rail.powered) poweredRails.add(key)
-          }
-          for (const [key, lever] of leverStates) {
-            if (lever.dimension === dimension) leverStates.delete(key)
-          }
-          for (const lever of message.levers) {
-            leverStates.set(leverKeyOf({ dimension, position: lever.at }), {
-              dimension,
-              position: { ...lever.at },
-              active: lever.active,
-            })
-          }
-          if (dimension === currentChunkContext.dimension) redstoneDirty = true
-        }
-        pendingLeverCommand = null
-        break
-      case 'AuthoritativeSnapshot': {
-        if (message.revision < multiplayerRevision) {
-          resumeCommandsAfterResync()
-          break
-        }
-        multiplayerRevision = message.revision
-        const local = message.vitals.find(({ player }) => player === multiplayer.query.player)
-        if (local !== undefined) {
-          applyNetworkVitals(local.state)
-          settlePlayerDamageAfterVitals(message.revision)
-        }
-        const localInventory = message.inventories.find(({ player }) => player === multiplayer.query.player)
-        if (localInventory !== undefined) applyNetworkInventory(localInventory.state)
-        networkFishingState = { phase: 'idle', result: 'idle' }
-        for (const villagerTrade of message.villagerTrades) applyNetworkVillagerTrade(villagerTrade)
-        applyNetworkTimeWeather(message.timeWeather)
-        applyNetworkContainers(message.containers)
-        furnaceStates.clear()
-        for (const furnace of message.furnaces) applyNetworkFurnace(furnace)
-        if (
-          inventoryOpen
-          && inventoryMode === 'chest'
-          && activeChestId !== undefined
-          && !message.containers.some(({ containerId }) => containerId === activeChestId)
-        ) {
-          activeChestId = undefined
-          setInventoryOpen(false)
-        }
-        if (
-          inventoryOpen
-          && inventoryMode === 'furnace'
-          && activeFurnaceKey !== undefined
-          && !furnaceStates.has(activeFurnaceKey)
-        ) {
-          activeFurnaceKey = undefined
-          setInventoryOpen(false)
-        }
-        multiplayerEntities.clear()
-        for (const entity of message.entities ?? []) {
-          multiplayerEntities.set(entity.entityId, entity)
-          if (entity._tag === 'vehicle') applyAuthoritativeVehicle(entity)
-        }
-        if (playerDamageResyncPending) {
-          playerDamageResyncPending = false
-          pendingPlayerDamage = null
-          pumpPlayerDamage()
-        }
-        resumeCommandsAfterResync()
-        pendingVillagerTradeCommand = null
-        break
-      }
-      case 'RealmTransferSnapshot': {
-        if (message.player !== multiplayer.query.player) break
-        const dimension = dimensionFromWorld(message.destinationWorld)
-        if (dimension === undefined) break
-        // Each realm maintains its own revision sequence.
-        multiplayerRevision = -1
-        applyNetworkMessage(message.worldSnapshot)
-        applyNetworkMessage(message.authoritativeSnapshot)
-        Effect.runSync(playerApi.restore({
-          feetPosition: message.at,
-          yawRadians: message.facing.yawRadians,
-          pitchRadians: message.facing.pitchRadians,
-        }, dimension))
-        alignActiveDimension(dimension)
-        resetSimState(true)
-        lastPlayerMoveSent = { world: message.destinationWorld, at: message.at, facing: message.facing }
-        lastPlayerMoveSentAt = performance.now() / 1_000
-        pendingPortalCommand = null
-        multiplayerStatus.textContent = `Connected to multiplayer server (${dimension})`
-        break
-      }
-      case 'EyeOfEnderThrown': {
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        const dimension = dimensionFromWorld(message.world)
-        if (dimension === undefined || dimension !== currentChunkContext.dimension) break
-        const dx = message.target.x - message.origin.x
-        const dz = message.target.z - message.origin.z
-        canvas.setAttribute('data-stronghold-direction', String(Math.atan2(dx, -dz)))
-        canvas.setAttribute('data-stronghold-distance', String(Math.round(Math.hypot(dx, dz))))
-        eyeOfEnderRuntimeState = launchRuntimeEyeOfEnder(eyeOfEnderRuntimeState, {
-          dimension,
-          position: message.origin,
-          target: message.target,
-          breaks: message.breaks,
-        })
-        queueEndAudio('eyeThrow', message.origin)
-        break
-      }
-      case 'EntitySpawnDelta':
-      case 'EntityUpdateDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        multiplayerEntities.set(message.entity.entityId, message.entity)
-        if (message.entity._tag === 'vehicle') applyAuthoritativeVehicle(message.entity)
-        break
-      case 'EntityDespawnDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        multiplayerEntities.delete(message.entityId)
-        const existingVehicle = vehicleById(String(message.entityId))
-        if (existingVehicle !== undefined) Effect.runSync(vehicleService.despawn(existingVehicle.id))
-        break
-      case 'PlayerInventoryDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        if (message.player === multiplayer.query.player) {
-          applyNetworkInventory(message.state)
-          settleCraftingAfterInventory(message.revision)
-        }
-        if (
-          message.player === multiplayer.query.player
-          && pendingFacilityCommand !== null
-        ) {
-          pendingFacilityCommand.inventoryDeltaRevision = message.revision
-          if (
-            pendingFacilityCommand.acceptedRevision !== null
-            && pendingFacilityCommand.facilityDeltaRevision !== null
-            && message.revision >= pendingFacilityCommand.acceptedRevision
-            && pendingFacilityCommand.facilityDeltaRevision >= pendingFacilityCommand.acceptedRevision
-          ) clearPendingFacilityCommand()
-        }
-        if (
-          message.player === multiplayer.query.player
-          && pendingInventoryCommand !== null
-          && pendingInventoryCommand.acceptedRevision !== null
-          && message.revision >= pendingInventoryCommand.acceptedRevision
-        ) {
-          pendingInventoryCommand = null
-          flushQueuedHotbarSelection()
-        }
-        break
-      case 'PlayerVitalsDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        if (message.player === multiplayer.query.player) {
-          applyNetworkVitals(message.state)
-          settlePlayerDamageAfterVitals(message.revision)
-        }
-        break
-      case 'PlayerFishingDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        if (message.player === multiplayer.query.player) {
-          networkFishingState = message.state
-          fishingResult = message.state.result
-          document.body.setAttribute('data-fishing-result', message.state.result)
-          document.body.setAttribute('data-fishing-phase', message.state.phase)
-        }
-        break
-      case 'WorldTimeWeatherDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        applyNetworkTimeWeather(message.state)
-        break
-      case 'LightningStrikeDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        authoritativeLightning = {
-          sequence: message.revision,
-          at: { ...message.at },
-          expiresAtSecs: performance.now() / 1_000 + 0.35,
-        }
-        break
-      case 'ContainerDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        applyNetworkContainer(message.state)
-        if (
-          pendingFacilityCommand?.facility === 'container'
-          && pendingFacilityCommand.facilityId === message.state.containerId
-        ) pendingFacilityCommand.facilityDeltaRevision = message.revision
-        if (inventoryOpen && inventoryMode === 'chest' && activeChestId === message.state.containerId) renderPlayerUi()
-        break
-      case 'FurnaceDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        applyNetworkFurnace(message.state)
-        if (
-          pendingFacilityCommand?.facility === 'furnace'
-          && pendingFacilityCommand.facilityId === message.state.furnaceId
-        ) pendingFacilityCommand.facilityDeltaRevision = message.revision
-        if (inventoryOpen && inventoryMode === 'furnace' && activeFurnaceKey === message.state.furnaceId) renderPlayerUi()
-        break
-      case 'VillagerTradeDelta':
-        if (message.revision < multiplayerRevision) return
-        multiplayerRevision = message.revision
-        applyNetworkVillagerTrade(message.state)
-        if (activeVillagerId === message.state.villagerId) {
-          tradeStatus = 'Trade complete'
-          renderTradeUi()
-        }
-        break
-      case 'AuthoritativeCommandAccepted':
-        multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-        if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
-        if (message.commandId === pendingPortalCommand) pendingPortalCommand = null
-        if (message.commandId === pendingInventoryCommand?.commandId) {
-          pendingInventoryCommand.acceptedRevision = message.revision
-        }
-        if (message.commandId === pendingEntityCommand?.commandId) {
-          pendingEntityCommand = null
-          pumpEntityCommands()
-        }
-        if (message.commandId === pendingFacilityCommand?.commandId) {
-          if (!pendingFacilityCommand.expectsDelta) clearPendingFacilityCommand()
-          else if (
-            pendingFacilityCommand.facilityDeltaRevision !== null
-            && pendingFacilityCommand.inventoryDeltaRevision !== null
-            && pendingFacilityCommand.facilityDeltaRevision >= message.revision
-            && pendingFacilityCommand.inventoryDeltaRevision >= message.revision
-          ) clearPendingFacilityCommand()
-          else pendingFacilityCommand.acceptedRevision = message.revision
-        }
-        if (message.commandId === pendingVillagerTradeCommand) {
-          pendingVillagerTradeCommand = null
-          tradeStatus = 'Trade complete'
-          if (tradeOpen) renderTradeUi()
-        }
-        break
-      case 'AuthoritativeCommandRejected':
-        multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-        multiplayerRejection = message.reason
-        if (message.commandId === pendingPortalCommand) pendingPortalCommand = null
-        if (message.commandId === pendingLeverCommand) pendingLeverCommand = null
-        if (message.commandId === pendingVitalsCommand) pendingVitalsCommand = null
-        if (message.commandId === pendingInventoryCommand?.commandId) {
-          if (message.resyncRequired) pendingInventoryRetry = pendingInventoryCommand.action
-          pendingInventoryCommand = null
-          if (!message.resyncRequired) flushQueuedHotbarSelection()
-        }
-        if (message.commandId === pendingEntityCommand?.commandId) {
-          const command = pendingEntityCommand.command
-          pendingEntityCommand = null
-          if (message.resyncRequired) {
-            queuedEntityCommands = [command, ...queuedEntityCommands]
-          }
-          else pumpEntityCommands()
-        }
-        if (message.commandId === pendingFacilityCommand?.commandId) {
-          clearPendingFacilityCommand()
-          chestStatus = message.reason
-          furnaceStatus = message.reason
-          if (inventoryOpen) renderPlayerUi()
-        }
-        if (message.resyncRequired) Effect.runSync(multiplayer.host.enqueueOutbound({ _tag: 'AuthoritativeResyncRequest', world: message.world, lastKnownRevision: multiplayerRevision }))
-        break
-      case 'PlayerJoin':
-        if (message.player !== multiplayer.query.player) {
-          multiplayer.players.set(message.player, {
-            name: message.name,
-            world: WorldId.make(currentChunkContext.dimension),
-            at: message.at,
-            facing: { yawRadians: 0, pitchRadians: 0 },
-          })
-        }
-        break
-      case 'PlayerMove': {
-        if (message.player === multiplayer.query.player) {
-          const world = message.world ?? WorldId.make(Effect.runSync(playerApi.dimension))
-          const dimension = dimensionFromWorld(world)
-          if (dimension !== undefined) {
-            Effect.runSync(playerApi.restore({
-              feetPosition: message.at,
-              yawRadians: message.facing.yawRadians,
-              pitchRadians: message.facing.pitchRadians,
-            }, dimension))
-            lastPlayerMoveSent = { world, at: message.at, facing: message.facing }
-            lastPlayerMoveSentAt = performance.now() / 1_000
-            multiplayerStatus.textContent = 'Movement corrected by server.'
-            multiplayerStatus.hidden = false
-          }
-          break
-        }
-        const previous = multiplayer.players.get(message.player)
-        multiplayer.players.set(message.player, {
-          name: previous?.name ?? PlayerName.make(String(message.player)),
-          world: message.world ?? previous?.world ?? WorldId.make(currentChunkContext.dimension),
-          at: message.at,
-          facing: message.facing,
-        })
-        break
-      }
-      case 'PlayerLeave':
-        multiplayer.players.delete(message.player)
-        break
-      case 'BlockPlace':
-        applyNetworkBlock(message.world ?? WorldId.make(currentChunkContext.dimension), message.at, message.block)
-        multiplayerRevision += 1
-        break
-      case 'BlockBreak':
-        {
-          const world = message.world ?? WorldId.make(currentChunkContext.dimension)
-          applyNetworkBlock(world, message.at, null)
-          const dimension = dimensionFromWorld(world)
-          if (dimension !== undefined) {
-            leverStates.delete(leverKeyOf({ dimension, position: message.at }))
-            if (dimension === currentChunkContext.dimension) redstoneDirty = true
-          }
-        }
-        multiplayerRevision += 1
-        break
-      case 'BlockMutationRejected':
-        multiplayerRevision = Math.max(multiplayerRevision, message.revision)
-        multiplayerRejection = `${message.operation}: ${message.reason}`
-        multiplayerStatus.textContent = multiplayerRejection
-        multiplayerStatus.hidden = false
-        break
-      case 'Chat': {
-        const row = document.createElement('li')
-        const sender = message.player === multiplayer.query.player
-          ? multiplayer.query.name
-          : multiplayer.players.get(message.player)?.name ?? message.player
-        row.textContent = `<${String(sender)}> ${message.text}`
-        multiplayerChatLog.append(row)
-        while (multiplayerChatLog.childElementCount > 50) {
-          multiplayerChatLog.firstElementChild?.remove()
-        }
-        break
-      }
-      default:
-        break
-    }
-    canvas.setAttribute('data-multiplayer-player-count', String(multiplayer.players.size + 1))
-    canvas.setAttribute('data-multiplayer-revision', String(multiplayerRevision))
-    canvas.setAttribute('data-multiplayer-rejection', multiplayerRejection)
-  }
-
-  multiplayerChatForm.addEventListener('submit', (event) => {
-    event.preventDefault()
-    const text = multiplayerChatInput.value.trim()
-    if (multiplayer === undefined || !multiplayerHandshakeComplete || text.length === 0) return
-    Effect.runSync(multiplayer.host.enqueueOutbound({
-      _tag: 'Chat',
-      player: multiplayer.query.player,
-      text: text.slice(0, 256),
-    }))
-    multiplayerChatInput.value = ''
-  })
-  for (const eventName of ['keydown', 'keyup'] as const) {
-    multiplayerChatInput.addEventListener(eventName, (event) => event.stopPropagation())
-  }
+  const {
+    enqueueMultiplayerPlayerMove,
+    drainMultiplayerInbound,
+    sendVitalsCommand,
+    sendPortalUseCommand,
+    sendEndProgressCommand,
+    sendToggleLeverCommand,
+    sendInventoryCommand,
+    sendInventorySelection,
+    sendVillagerTradeCommand,
+    sendEntityCommand,
+    sendFacilityCommand,
+    pumpPlayerDamage,
+    drainPlayerDamageInbound,
+    requestCrafting,
+    drainCraftingInbound,
+    requestBrewing,
+    drainBrewingInbound,
+    requestAnvil,
+    drainAnvilInbound,
+    requestEnchanting,
+    drainEnchantingInbound,
+    requestIdFor,
+  } = createMultiplayerClient(multiplayerClientContext)
 
   const modules = await makeHostModules({
     adapters,
@@ -4376,9 +3129,8 @@ type MultiplayerInventorySelection = Readonly<{
     for (const effect of plan.entityEffects) {
       // mc-kernel's `ExplosionEntityEffect.id` is a bare `string` (the
       // explosion-physics layer does not own the `EntityId` brand);
-      // `resolveBowHits` requires mc-sim's branded id specifically (the
-      // already-imported `EntityId` here is mx-multiplayer's Schema.brand,
-      // which is not directly callable).
+      // `resolveBowHits` requires mc-sim's brand; the mx-multiplayer schema brand
+      // is not directly callable.
       Effect.runSync(resolveBowHits(world.entities, [{ id: SimEntityId(effect.id), damage: effect.damage }]))
     }
     const playerPosition = Effect.runSync(playerApi.pose).feetPosition
