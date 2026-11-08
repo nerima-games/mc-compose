@@ -1,11 +1,16 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const mainSource = readFileSync(new URL('../apps/web/main.ts', import.meta.url), 'utf8')
+const frameInputSource = readFileSync(new URL('../apps/web/tick/frame-input.ts', import.meta.url), 'utf8')
+const postFrameGameplayPath = new URL('../apps/web/tick/post-frame-gameplay.ts', import.meta.url)
+const postFrameGameplaySource = existsSync(postFrameGameplayPath)
+  ? readFileSync(postFrameGameplayPath, 'utf8')
+  : mainSource
 
 const positionOf = (source: string, marker: string, fromIndex = 0): number => {
   const position = source.indexOf(marker, fromIndex)
-  expect(position, `expected main.ts to contain ${marker}`).toBeGreaterThanOrEqual(0)
+  expect(position, `expected source to contain ${marker}`).toBeGreaterThanOrEqual(0)
   return position
 }
 
@@ -17,7 +22,7 @@ describe('H4b main.ts wiring', () => {
     const runtimeDestructure = positionOf(mainSource, '} = inventoryRuntime')
     const listenerInstallation = positionOf(mainSource, 'installInventoryListeners()')
     const pauseInstallation = positionOf(mainSource, 'const handlePauseRequest = installPauseControls({')
-    const tickStart = positionOf(mainSource, 'const tick = (): void => {')
+    const tickStart = positionOf(mainSource, 'const tick = (() => {')
 
     expect(clientCreation).toBeLessThan(runtimeCreation)
     expect(runtimeCreation).toBeLessThan(runtimeDestructure)
@@ -63,15 +68,15 @@ describe('H4b main.ts wiring', () => {
   })
 
   it('keeps inventory input gated before calling the extracted runtime', () => {
-    const tickStart = positionOf(mainSource, 'const tick = (): void => {')
-    const tickInput = mainSource.slice(
+    const tickStart = positionOf(frameInputSource, 'export const runTickFrameInput = (')
+    const tickInput = frameInputSource.slice(
       tickStart,
-      positionOf(mainSource, 'if (!dead && !inventoryOpen && !tradeOpen)', tickStart),
+      positionOf(frameInputSource, 'if (!dead && !state.inventoryOpen.get() && !state.tradeOpen.get())', tickStart),
     )
     const deadGate = positionOf(tickInput, '!dead &&')
-    const bowGate = positionOf(tickInput, '!bowInteractionLocked()')
+    const bowGate = positionOf(tickInput, '!context.bowInteractionLocked()')
     const openInput = positionOf(tickInput, "wasActionJustTriggered('openInventory')")
-    const runtimeCall = positionOf(tickInput, "setInventoryOpen(!inventoryOpen, 'player')")
+    const runtimeCall = positionOf(tickInput, "context.setInventoryOpen(!state.inventoryOpen.get(), 'player')")
 
     expect(deadGate).toBeLessThan(bowGate)
     expect(bowGate).toBeLessThan(openInput)
@@ -79,31 +84,39 @@ describe('H4b main.ts wiring', () => {
   })
 
   it('preserves workstation setup and container command ordering before opening each screen', () => {
-    const crafting = positionOf(mainSource, "route?.kind === 'craftingTable'")
-    const craftingOpen = positionOf(mainSource, "setInventoryOpen(true, 'craftingTable')")
+    const crafting = positionOf(postFrameGameplaySource, "route?.kind === 'craftingTable'")
+    const craftingOpen = positionOf(postFrameGameplaySource, "setInventoryOpen(true, 'craftingTable')")
     expect(crafting).toBeLessThan(craftingOpen)
 
-    const furnaceStart = positionOf(mainSource, "route?.kind === 'furnace'")
-    const furnaceEnd = positionOf(mainSource, "route?.kind === 'storage'", furnaceStart)
-    const furnaceRoute = mainSource.slice(furnaceStart, furnaceEnd)
+    const furnaceStart = positionOf(postFrameGameplaySource, "route?.kind === 'furnace'")
+    const furnaceEnd = positionOf(postFrameGameplaySource, "route?.kind === 'storage'", furnaceStart)
+    const furnaceRoute = postFrameGameplaySource.slice(furnaceStart, furnaceEnd)
+    const activeFurnaceUpdate = furnaceRoute.includes('h5bState.activeFurnaceKey.set(key)')
+      ? 'h5bState.activeFurnaceKey.set(key)'
+      : 'activeFurnaceKey = key'
     expect(positionOf(furnaceRoute, 'furnaceStates.set(key,')).toBeLessThan(
-      positionOf(furnaceRoute, 'activeFurnaceKey = key'),
+      positionOf(furnaceRoute, activeFurnaceUpdate),
     )
-    expect(positionOf(furnaceRoute, 'activeFurnaceKey = key')).toBeLessThan(
+    expect(positionOf(furnaceRoute, activeFurnaceUpdate)).toBeLessThan(
       positionOf(furnaceRoute, "setInventoryOpen(true, 'furnace')"),
     )
 
-    const storageRoute = mainSource.slice(furnaceEnd, positionOf(mainSource, 'const inventoryBeforeUse', furnaceEnd))
-    expect(storageRoute).toContain([
-      'if (container !== undefined && sendFacilityCommand({',
-      "              _tag: 'ContainerCommand',",
-      '              containerId: id,',
-      "              action: { _tag: 'open' },",
-      '            })) {',
-    ].join('\n'))
-    expect(positionOf(storageRoute, "action: { _tag: 'open' }"))
-      .toBeLessThan(positionOf(storageRoute, 'activeChestId = id'))
-    expect(positionOf(storageRoute, 'activeChestId = id'))
+    const storageRoute = postFrameGameplaySource.slice(
+      furnaceEnd,
+      positionOf(postFrameGameplaySource, 'const inventoryBeforeUse', furnaceEnd),
+    )
+    const containerCommandStart = positionOf(storageRoute, 'if (container !== undefined && sendFacilityCommand({')
+    const containerCommandOpen = positionOf(storageRoute, "action: { _tag: 'open' }")
+    const containerCommandEnd = positionOf(storageRoute, '})) {', containerCommandOpen)
+    expect(storageRoute).toContain("_tag: 'ContainerCommand'")
+    expect(storageRoute).toContain('containerId: id,')
+    expect(containerCommandStart).toBeLessThan(containerCommandOpen)
+    const activeChestUpdate = storageRoute.includes('h5bState.activeChestId.set(id)')
+      ? 'h5bState.activeChestId.set(id)'
+      : 'activeChestId = id'
+    expect(containerCommandOpen).toBeLessThan(containerCommandEnd)
+    expect(containerCommandEnd).toBeLessThan(positionOf(storageRoute, activeChestUpdate))
+    expect(positionOf(storageRoute, activeChestUpdate))
       .toBeLessThan(positionOf(storageRoute, "setInventoryOpen(true, 'chest')"))
   })
 })
