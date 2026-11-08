@@ -82,7 +82,7 @@
  * block edits and mc-render meshing all observe the same mc-worldgen store;
  * dirty chunk notifications are the only render synchronization path.
  */
-import { Context, Effect, Either, Exit, Layer, Option, Queue, Ref, Scope } from 'effect'
+import { Context, Effect, Either, Exit, Option, Queue, Ref } from 'effect'
 import {
   BLOCK_PROPERTY_DEFAULTS,
   BlockId,
@@ -103,7 +103,6 @@ import {
   type Position as Vec3,
 } from '@nerima-games/mc-kernel'
 import { aabbOfCollisionShape } from '@nerima-games/mc-physics'
-import { indexedDbStorageLayer } from '@nerima-games/mc-save'
 import {
   addExperience as addVitalsExperience,
   containerIdAt,
@@ -194,7 +193,6 @@ import {
   createAnvilView,
   createChestStorageView,
   createEnchantingTableView,
-  createMainMenuView,
   createCrosshairView,
   createFurnaceView,
   createHudView,
@@ -204,13 +202,10 @@ import {
   anvilViewModel,
   enchantingTableViewModel,
   hudViewModel,
-  initialMainMenuState,
   inventoryViewModel,
   inventoryActionTarget,
-  mainMenuViewModel,
   makeUiFrameState,
   slotSnapshotOf,
-  type CreateWorldRequest,
   type ChestStorageSlotTarget,
   type FurnaceSlotId,
   type FurnaceSnapshot,
@@ -219,8 +214,6 @@ import {
   type InventoryActionTarget,
   type InventoryDragTarget,
   type EquipmentSlotId,
-  type MainMenuState,
-  type SavedWorld,
 } from '@nerima-games/mx-ui'
 import {
   applyPistonPlan,
@@ -469,7 +462,6 @@ import {
 import {
   DEFAULT_PLAYER_SETTINGS,
   PLAYER_BINDING_ACTIONS,
-  loadPlayerSettings,
   savePlayerSettings,
   type PlayerSettingsV1,
 } from './settings'
@@ -485,7 +477,6 @@ import {
   type TouchControlAction,
 } from './touch-input'
 import {
-  listSessions,
   makeSessionChunkSource,
   saveSession,
   EMPTY_ENTITY_ROSTER,
@@ -503,22 +494,17 @@ import {
   type SessionState,
 } from './session-persistence'
 import {
-  createSessionHref,
-  createUniqueSessionId,
   readSessionRoute,
-  sessionHref,
   type SessionRoute,
 } from './session-navigation'
 import {
-  DATABASE_NAME,
-  MISSING_SESSION_ERROR,
   RequestedSessionNotFoundError,
   makePlatformAdapters,
-  makeSettingsWriteQueue,
   type SettingsWriteQueue,
 } from './platform-adapters'
 import { makeHostModules } from './host-modules'
 import { makeQaSurface } from './qa-surface'
+import { bootTitleMenu } from './title-menu'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -755,197 +741,19 @@ const failBoot = (reason: string, detail?: unknown): void => {
   console.error(`[mc-compose] boot failed: ${reason}`, detail)
 }
 
-const bootTitle = async (): Promise<void> => {
-  const titleScreen = requireElement('title-screen')
-  const menuParent = requireElement('main-menu-root')
-  const titleStatus = requireElement('title-status')
-  const settingsRoot = requireElement('settings-root')
-  const multiplayerJoin = requireElement('multiplayer-join')
-  const multiplayerWorld = requireElement('multiplayer-world')
-  const multiplayerName = requireElement('multiplayer-name')
-  const multiplayerPlayer = requireElement('multiplayer-player')
-  const multiplayerUrl = requireElement('multiplayer-url')
-  const multiplayerRegistrationToken = requireElement('multiplayer-registration-token')
-  const multiplayerJoinButton = requireElement('multiplayer-join-button')
-  if (!(multiplayerJoin instanceof HTMLFormElement)
-    || !(multiplayerWorld instanceof HTMLSelectElement)
-    || !(multiplayerName instanceof HTMLInputElement)
-    || !(multiplayerPlayer instanceof HTMLInputElement)
-    || !(multiplayerUrl instanceof HTMLInputElement)
-    || !(multiplayerRegistrationToken instanceof HTMLInputElement)
-    || !(multiplayerJoinButton instanceof HTMLButtonElement)) {
-    throw new Error('index.html has invalid multiplayer join controls')
-  }
-  titleScreen.hidden = false
-  document.body.setAttribute('data-mc-compose-route', 'title')
-  if (new URLSearchParams(window.location.search).get('loadError') === 'missing-session') {
-    titleStatus.textContent = MISSING_SESSION_ERROR
-  }
-
-  const scope = Effect.runSync(Scope.make())
-  const storageContext = await Effect.runPromise(
-    Effect.provideService(
-      Layer.build(indexedDbStorageLayer({ factory: indexedDB, databaseName: DATABASE_NAME })),
-      Scope.Scope,
-      scope,
-    ),
-  )
-  const sessions = await Effect.runPromise(Effect.provide(listSessions(), storageContext))
-  let playerSettings = await Effect.runPromise(
-    Effect.provide(loadPlayerSettings(), storageContext),
-  ).catch(() => DEFAULT_PLAYER_SETTINGS)
-  const settingsWrites = makeSettingsWriteQueue()
-  let settingsView: ReturnType<typeof createSettingsView>
-  const persistPlayerSettings = (next: PlayerSettingsV1): void => {
-    document.body.setAttribute('data-player-settings-persistence', 'dirty')
-    settingsView.clearPersistenceError()
-    enqueueSettingsWrite(
-      settingsWrites,
-      () => Effect.runPromise(Effect.provide(savePlayerSettings(next), storageContext)),
-      () => {
-        if (playerSettings === next) {
-          document.body.setAttribute('data-player-settings-persistence', 'saved')
-        }
-      },
-      (error) => {
-        document.body.setAttribute('data-player-settings-persistence', 'error')
-        const message = 'Settings could not be saved.'
-        titleStatus.textContent = message
-        settingsView.reportPersistenceError(message)
-        console.error('[mc-compose] player settings persistence failed', error)
-      },
-    )
-  }
-  const savedWorlds: ReadonlyArray<SavedWorld> = sessions.map(({ sessionId, metadata }) => ({
-    sessionId,
-    name: metadata.name,
-  }))
-  multiplayerWorld.replaceChildren(...savedWorlds.map(({ sessionId, name }) => {
-    const option = document.createElement('option')
-    option.value = sessionId
-    option.textContent = name
-    return option
-  }))
-  multiplayerPlayer.value = `player-${crypto.randomUUID().slice(0, 8)}`
-  multiplayerJoinButton.disabled = savedWorlds.length === 0
-  const existingIds = savedWorlds.map(({ sessionId }) => sessionId)
-  let menuState: MainMenuState = initialMainMenuState
-  let menuView: ReturnType<typeof createMainMenuView>
-  settingsView = createSettingsView(document, settingsRoot, {
-    onChange: (next) => {
-      playerSettings = next
-      persistPlayerSettings(next)
-    },
-    onClose: () => {
-      titleScreen.inert = false
-    },
-  })
-
-  let titleNavigationPending = false
-  const setTitleNavigationPending = (pending: boolean): void => {
-    titleNavigationPending = pending
-    if (pending) menuParent.setAttribute('aria-busy', 'true')
-    else menuParent.removeAttribute('aria-busy')
-    for (const control of menuParent.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button, input')) {
-      control.disabled = pending
-    }
-  }
-
-  const navigateAfterSettingsSaved = async (href: string): Promise<void> => {
-    if (titleNavigationPending) return
-    setTitleNavigationPending(true)
-    try {
-      await drainSettingsWrites(settingsWrites)
-      window.location.assign(href)
-    } catch (error: unknown) {
-      setTitleNavigationPending(false)
-      titleStatus.textContent = 'Could not finish saving settings. Please try again.'
-      console.error('[mc-compose] navigation blocked by settings persistence failure', error)
-    }
-  }
-  const openSession = async (sessionId: string): Promise<void> => {
-    await navigateAfterSettingsSaved(sessionHref(sessionId))
-  }
-  multiplayerJoin.addEventListener('submit', (event) => {
-    event.preventDefault()
-    if (titleNavigationPending || !multiplayerJoin.reportValidity()) return
-    const player = multiplayerPlayer.value.trim()
-    const name = multiplayerName.value.trim()
-    if (player.length === 0 || name.length === 0) {
-      titleStatus.textContent = 'Player name and ID cannot be blank.'
-      return
-    }
-    const validation = validateMultiplayerUrl(multiplayerUrl.value, window.location.href)
-    if (!validation.ok) {
-      titleStatus.textContent = validation.message
-      return
-    }
-    const href = new URL(sessionHref(multiplayerWorld.value), window.location.origin)
-    href.searchParams.set('multiplayer', validation.url.href)
-    href.searchParams.set('player', player)
-    href.searchParams.set('multiplayerName', name)
-    const registrationToken = multiplayerRegistrationToken.value
-    try {
-      const registrationTokenKey = multiplayerRegistrationTokenKey(
-        validation.url.href,
-        multiplayerWorld.value,
-        player,
-      )
-      if (registrationToken.length > 0) {
-        window.sessionStorage.setItem(
-          registrationTokenKey,
-          registrationToken,
-        )
-      } else {
-        window.sessionStorage.removeItem(registrationTokenKey)
-      }
-    } catch (error: unknown) {
-      titleStatus.textContent = 'Legacy registration token could not be stored for navigation.'
-      console.error('[mc-compose] multiplayer registration token storage failed', error)
-      return
-    }
-    void navigateAfterSettingsSaved(`${href.pathname}${href.search}`)
-  })
-  const createWorld = async ({ name, mode }: CreateWorldRequest): Promise<void> => {
-    titleStatus.textContent = ''
-    const sessionId = createUniqueSessionId(name, existingIds)
-    await navigateAfterSettingsSaved(createSessionHref(sessionId, { name, mode }))
-  }
-
-  menuView = createMainMenuView(document, menuParent, {
-    onStateChange: (state) => {
-      menuState = state
-      menuView.render(mainMenuViewModel(menuState, savedWorlds))
-    },
-    onCreateWorld: (request) => {
-      void createWorld(request)
-    },
-    onLoadWorld: ({ sessionId }) => {
-      void openSession(sessionId)
-    },
-    onOpenSettings: () => {
-      const returnFocus = document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : menuParent
-      titleStatus.textContent = ''
-      titleScreen.inert = true
-      settingsView.open(playerSettings, returnFocus)
-    },
-  })
-  menuView.render(mainMenuViewModel(menuState, savedWorlds))
-  const handleTitlePageHide = (event: PageTransitionEvent): void => {
-    if (!event.persisted) settingsView.dispose()
-  }
-  window.addEventListener('pagehide', handleTitlePageHide)
-  const hot = (import.meta as ImportMeta & {
+const bootTitle = async (): Promise<void> => bootTitleMenu({
+  document,
+  window,
+  indexedDB,
+  crypto,
+  requireElement,
+  enqueueSettingsWrite,
+  drainSettingsWrites,
+  multiplayerRegistrationTokenKey,
+  hot: (import.meta as ImportMeta & {
     readonly hot?: { readonly dispose: (handler: () => void) => void }
-  }).hot
-  hot?.dispose(() => {
-    window.removeEventListener('pagehide', handleTitlePageHide)
-    settingsView.dispose()
-  })
-  document.body.setAttribute('data-mc-compose-boot', 'running')
-}
+  }).hot,
+})
 
 type MultiplayerQuery = {
   readonly url: string
