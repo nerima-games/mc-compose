@@ -31,6 +31,7 @@ E2E でしか検証できなくなった。**それが本計画全体の出発�
 | [porting.md](./porting.md) | 移植計画。**LOC は実測値**(plan.md の見積りは 22 倍ずれている) | 実装者 |
 | [testing.md](./testing.md) | テスト戦略。公開package境界の実ブラウザ最終ゲート(§3.5) | 実装者・レビュアー |
 | [e2e-triage.md](./e2e-triage.md) | **参照実装 E2E 70 本を 1 本ずつ判定したもの。** compose に残る 25 本 / 降ろす 43 本 / 消える 2 本。公開 package 境界での検証状況と残課題を記録している(§4) | 実装者。E2E に着手するとき |
+| [execution/completion-criteria.md](./execution/completion-criteria.md) | Completion criteria for W6 verification and W7 acceptance | Contributors |
 | [versioning.md](./versioning.md) | 0.x → 1.0.0、GitHub Packages、modding API バージョン | リリース担当 |
 
 ## 2. 読む順番
