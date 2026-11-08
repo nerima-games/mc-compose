@@ -191,8 +191,6 @@ import {
   drainPlayerDamages,
   drainPlayerHeals,
   drainVillagerTradeResults,
-  enchantmentOffers,
-  enchantmentLevel,
   DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
   fishingPhase,
