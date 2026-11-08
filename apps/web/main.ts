@@ -92,10 +92,8 @@ import {
   DeltaTimeSecs,
   chunkCoord,
   isEmpty,
-  MonotonicTimeSecs as KernelMonotonicTimeSecs,
   propertyOfBlockId,
   resolvedBlockOfId,
-  StackCount,
   StageId,
   type BlockPosition,
   type MonotonicTimeSecs,
@@ -105,7 +103,6 @@ import { aabbOfCollisionShape } from '@nerima-games/mc-physics'
 import {
   addExperience as addVitalsExperience,
   containerIdAt,
-  emptyFurnaceState,
   emptyPlayerStorage,
   itemStack,
   makeCropService,
@@ -115,17 +112,13 @@ import {
   makeVehicleService,
   maxStackCountForItem,
   resetLandingImpact,
-  changed,
-  UNCHANGED,
   OccupantId,
   EntityId as SimEntityId,
-  type CropLocation,
   type ItemStack,
   type SimPhysicsConfig,
   type WeatherState,
   type Vehicle,
 } from '@nerima-games/mc-sim'
-import { END_PORTAL_BLOCK } from '@nerima-games/mc-worldgen'
 import {
   InputService,
   chunkKeyOf,
@@ -146,10 +139,8 @@ import {
 import {
   NETHER_PORTAL_BLOCK_ID,
   OBSIDIAN_BLOCK_ID,
-  REDSTONE_PLACEMENT_ITEMS,
 } from './qa-fixtures'
 import { trackChunkLightColor } from './render-lighting'
-import { excludeReservedPlacementConsumptions } from './placement-consumption'
 import {
   advancePlayerSwimmingRuntime,
   initialPlayerSwimmingRuntimeState,
@@ -173,25 +164,17 @@ import {
 import {
   advanceFishing,
   advanceMiningProgress,
-  boardVehicle,
   bowCharge,
   bowDamage,
   bowDamageWithEnchantments,
   canFireBow,
   cancelFishing,
-  castFishing,
   durabilityWearWithEnchantments,
-  drainBlockUseResults,
-  drainBowKnockbacks,
-  drainItemUseResults,
   drainMeleeAttackResults,
-  drainMobDrops,
-  drainMobExperience,
   drainPortalTravels,
   drainPlayerDamages,
   drainPlayerHeals,
   drainVillagerTradeResults,
-  DEFAULT_BLOCK_REACH,
   EYE_LEVEL_OFFSET,
   fishingPhase,
   getPlayerMovementSpeedMultiplier,
@@ -204,26 +187,16 @@ import {
   isDroppedItemBehaviour,
   isHoeItem,
   isIgnitionItem,
-  isBucketItem,
   isPlaceableItem,
   PLAYER_HALF_HEIGHT,
   PLAYER_HALF_WIDTH,
   requestBlockBreak,
   requestFurnaceAdvance,
-  requestBlockPlacementCommand,
   requestMeleeAttack,
-  requestPotatoFoodUse,
   requestPotatoHarvest,
-  requestTargetedPotatoPlanting,
   requestTargetedSoilTill,
-  requestTargetedBlockPlacement,
-  requestTargetedBlockUse,
   requestTargetedItemUse,
-  resolveTargetedBlock,
   requestVillagerTrade,
-  drainBlockPlacementResults,
-  reelFishing,
-  resolveBedSleep,
   resolveBowHits,
   resolveFallDamage,
   resolveTargetedPrimaryAttack,
@@ -233,14 +206,11 @@ import {
   setPortalCandidates,
   solidityFromStore,
   spawnDroppedItems,
-  spawnMobDrops,
   snapshotVillagerTrades,
   snapshotBrewingStand,
   snapshotStatusEffects,
   collectBrewingPotion,
-  targetedRightClickRoute,
   useBrewingPotion,
-  useBucket,
   miningLootContextForItem,
   type IgnitionItemType,
   type EnvironmentalContact,
@@ -253,7 +223,6 @@ import {
   type VillagerTradeResult,
   type BrewingBottle,
   type BrewingIngredient,
-  type FishingRod,
   type FishingSession,
 } from '@nerima-games/mx-gameplay'
 import {
@@ -289,10 +258,8 @@ import {
 import {
   advanceWitherRuntime,
   damageRuntimeWither,
-  matchRuntimeWitherSummon,
   restoreWitherRuntime,
   snapshotWitherRuntime,
-  summonRuntimeWither,
   witherRenderDescriptors,
 } from '../multiplayer-shared/wither-runtime'
 import {
@@ -312,7 +279,6 @@ import {
   type MultiplayerClientContext,
 } from './multiplayer-client'
 import {
-  captionRenderSignature,
   horizontalListenerForward,
 } from './audio-runtime'
 import {
@@ -327,7 +293,7 @@ import {
   enqueueNativeMouseButton,
   type NativeInputQueueState,
 } from './native-input-queue'
-import { requestPlacementFromSelectedSlot, selectedHotbarAfterInput } from './player-experience'
+import { selectedHotbarAfterInput } from './player-experience'
 import { createDroppedItemLifetimeTracker } from './dropped-item-lifetime'
 import { createSessionSaveCoordinator } from './session-save-coordinator'
 import { makeSurvivalHungerCoordinator } from './survival-hunger-runtime'
@@ -336,23 +302,15 @@ import {
   initialFootstepRuntimeState,
   surfaceForBlockType,
 } from './footstep-runtime'
-import { advanceFurnaceRuntime } from './furnace-runtime'
 import {
-  advanceSleep,
-  enterSleep,
   initialSleepRuntimeState,
-  isDangerNearby,
   leaveSleep,
-  reconcileSleepers,
-  requiredSleeperCount,
   validRespawnLocation,
   type SleepLocation,
 } from './sleep-runtime'
 import {
   initialSleepClientState,
-  queueSleepCommand,
   type SleepClientState,
-  type SleepCommand,
 } from '../multiplayer-shared/sleep-network'
 import {
   DEFAULT_PLAYER_SETTINGS,
@@ -418,6 +376,8 @@ import { mutableState, type H5aTickContext } from './tick/h5a-context'
 import { runTickPlayerMovement } from './tick/player-movement'
 import type { H5bPostFrameContext } from './tick/h5b-context'
 import { runTickPostFrame } from './tick/post-frame'
+import type { H5cTickContext } from './tick/h5c-context'
+import { runTickPostFrameGameplay } from './tick/post-frame-gameplay'
 
 /**
  * plan.md §3.4's measured clamp, applied by the DELTA'S PRODUCER.
@@ -3350,6 +3310,103 @@ const bootGame = async (
       },
       spawnDroppedItems,
     }
+    const h5cTickContext: H5cTickContext = {
+      h5a: h5aTickContext,
+      h5b: h5bTickContext,
+      state: {
+        framesTotal: mutableState(() => framesTotal, (value) => { framesTotal = value }),
+        renderedCaptionSignature: mutableState(
+          () => renderedCaptionSignature,
+          (value) => { renderedCaptionSignature = value },
+        ),
+        nextFishingRoll: mutableState(() => nextFishingRoll, (value) => { nextFishingRoll = value }),
+        mountedVehicleId: mutableState(() => mountedVehicleId, (value) => { mountedVehicleId = value }),
+        activeBrewingStandAt: mutableState(() => activeBrewingStandAt, (value) => { activeBrewingStandAt = value }),
+        brewingStatus: mutableState(() => brewingStatus, (value) => { brewingStatus = value }),
+        sleepRuntimeState: mutableState(() => sleepRuntimeState, (value) => { sleepRuntimeState = value }),
+        respawnLocation: mutableState(() => respawnLocation, (value) => { respawnLocation = value }),
+        networkSleepState: mutableState(() => networkSleepState, (value) => { networkSleepState = value }),
+        nextSleepRequest: mutableState(() => nextSleepRequest, (value) => { nextSleepRequest = value }),
+        appliedNightSkipRevision: mutableState(
+          () => appliedNightSkipRevision,
+          (value) => { appliedNightSkipRevision = value },
+        ),
+        multiplayerRejection: mutableState(() => multiplayerRejection, (value) => { multiplayerRejection = value }),
+        nextBlockUseRequestId: mutableState(() => nextBlockUseRequestId, (value) => { nextBlockUseRequestId = value }),
+        nextBlockPlacementRequestId: mutableState(
+          () => nextBlockPlacementRequestId,
+          (value) => { nextBlockPlacementRequestId = value },
+        ),
+        placementsRequested: mutableState(() => placementsRequested, (value) => { placementsRequested = value }),
+        dragonEggRewarded: mutableState(() => dragonEggRewarded, (value) => { dragonEggRewarded = value }),
+        exitPortalMaterialized: mutableState(() => exitPortalMaterialized, (value) => { exitPortalMaterialized = value }),
+        nextMobDropId: mutableState(() => nextMobDropId, (value) => { nextMobDropId = value }),
+        lastObservedItemUse: mutableState(() => lastObservedItemUse, (value) => { lastObservedItemUse = value }),
+      },
+      services: {
+        nearestVillagerForTrade,
+        setTradeOpen,
+        setInventoryOpen,
+        targetedBlock,
+        fishingEnvironmentAt,
+        networkFishingPhase: () => networkFishingState.phase,
+        playerSettings: () => playerSettings,
+        vehicleService,
+        vehicleList,
+        localVehicleOccupant,
+        replaceVehicle,
+        multiplayerClient: {
+          sendVitalsCommand,
+          sendPortalUseCommand,
+          sendToggleLeverCommand,
+          sendEntityCommand,
+          sendFacilityCommand,
+          requestBrewing,
+        },
+        endPortalComplete: () => endPortalComplete,
+        useEndFeature,
+        renderBrewingUi,
+        time,
+        weather,
+        redstoneContainerRuntime: {
+          syncRedstoneSnapshot,
+          containerIdForStorageBlock,
+          applyHopperTransfer,
+          applyDispenserTrigger,
+          applyDropperTrigger,
+          applyPoweredPistonTransition,
+        },
+        redstoneRuntime,
+        leverKeyOf,
+        asBlockPosition,
+        streamAround,
+        presentWeather,
+        presentWeatherRuntime,
+        syncRenderedEntities,
+        registerPortal,
+        requiredSleepRatio,
+        sleepHud,
+        endDragonSnapshot,
+        adapters: { ...adapters, placementAudio },
+        uiFrameState,
+        fpsValue,
+        captionsParent,
+        observedMobDrops,
+        pendingItemUses,
+        pendingBlockUses,
+        pendingBlockPlacements,
+        pendingWitherSummonChecks,
+        leverStates,
+        comparatorModes,
+        poweredRails,
+        redstoneLampTransitionLog,
+        crops,
+        isGameplayUseItemType,
+        isGameplayHoeItem,
+        isGameplayIgnitionItem,
+        isPlaceableGameplayItem,
+      },
+    }
 
     return (): void => {
     const nowSecs = readNow()
@@ -3359,1058 +3416,8 @@ const bootGame = async (
       if (frame === undefined) return
       const movement = runTickPlayerMovement(h5aTickContext, frame)
       if (movement === undefined) return
-      const {
-        deltaSecs,
-        useTriggered,
-      } = frame
-      const {
-        poseBeforeFrame,
-        weatherBeforeFrame,
-      } = movement
-      const {
-        deadAfterFrame,
-        dimensionChanged,
-        postFramePose,
-        dimensionAfterFrame,
-        bowAdvance,
-        groundedAfterFrame,
-        playerHeals,
-      } = runTickPostFrame(h5bTickContext, { frame, movement, framesTotal })
-      let nearbyVillager: PersistedVillager | undefined
-      try {
-        nearbyVillager = !deadAfterFrame && !dimensionChanged && useTriggered
-          ? nearestVillagerForTrade(postFramePose.feetPosition, currentChunkContext.dimension)
-          : undefined
-      } catch (error) {
-        console.warn('Unable to resolve nearby villager for interaction', error)
-      }
-      if (nearbyVillager !== undefined && !bowAdvance.capturedUse) {
-        setTradeOpen(true, nearbyVillager.id)
-      }
-
-      if (
-        nearbyVillager === undefined
-        && !deadAfterFrame
-        && useTriggered
-        && !bowAdvance.capturedUse
-      ) {
-        let usedSpecialItem = false
-        const fishingStorage = Effect.runSync(world.inventory.storageSnapshot)
-        const fishingHeld = fishingStorage.inventory.slots[selectedHotbarIndex]
-        const fishingDurability = fishingStorage.inventoryDurability[selectedHotbarIndex]
-        if (multiplayer !== undefined && multiplayerHandshakeComplete && (fishingSession !== undefined || fishingHeld?.item === 'fishing_rod')) {
-          sendEntityCommand({ _tag: 'FishingCommand', action: networkFishingState.phase === 'idle' ? 'cast' : 'reel' })
-          usedSpecialItem = true
-        } else if (fishingSession !== undefined) {
-          const result = reelFishing(fishingSession)
-          Effect.runSync(world.inventory.damageAt(
-            { _tag: 'Inventory', slotIndex: selectedHotbarIndex },
-            1,
-          ))
-          if (result._tag === 'Caught') {
-            Effect.runSync(world.inventory.add(result.loot.item, result.loot.count))
-            setFishingResult(`caught-${result.loot.item}`)
-          } else {
-            setFishingResult(result._tag === 'ReeledTooEarly' ? 'too-early' : 'too-late')
-          }
-          fishingSession = undefined
-          fishingWater = undefined
-          document.body.setAttribute('data-fishing-phase', 'idle')
-          markSessionDirty()
-          renderPlayerUi()
-          usedSpecialItem = true
-        } else if (
-          fishingHeld?.item === 'fishing_rod' &&
-          fishingDurability !== null &&
-          fishingDurability !== undefined
-        ) {
-          const target = Effect.runSync(targetedBlock())
-          const dimension = Effect.runSync(playerApi.dimension)
-          const environment = target === undefined
-            ? { hasWater: false, hasSkyAccess: false, isRaining: false, isOpenWater: false }
-            : Effect.runSync(fishingEnvironmentAt(
-                target.position,
-                weatherBeforeFrame.weather === 'rain' || weatherBeforeFrame.weather === 'thunder',
-              ))
-          const serial = nextFishingRoll++
-          const cast = castFishing({
-            item: 'fishing_rod',
-            count: StackCount(1),
-            durability: fishingDurability,
-          } satisfies FishingRod, environment, {
-            wait: ((serial * 37) % 997) / 997,
-            category: ((serial * 101) % 997) / 997,
-            item: ((serial * 211) % 997) / 997,
-          })
-          if (cast._tag === 'Cast' && target !== undefined) {
-            fishingSession = cast.session
-            fishingWater = { dimension, position: target.position }
-            setFishingResult('cast')
-          } else {
-            setFishingResult(cast._tag === 'NoWater' ? 'no-water' : 'invalid-rod')
-          }
-          usedSpecialItem = true
-        }
-        if (!usedSpecialItem && mountedVehicleId !== undefined) {
-          const vehicle = vehicleById(mountedVehicleId)
-          if (vehicle !== undefined) Effect.runSync(vehicleService.dismount(vehicle.id, localVehicleOccupant))
-          mountedVehicleId = undefined
-          usedSpecialItem = true
-        } else if (!usedSpecialItem) {
-          const pose = Effect.runSync(playerApi.pose)
-          const nearbyVehicle = vehicleList()
-            .filter((vehicle) => vehicle.dimension === currentChunkContext.dimension && vehicle.occupant === undefined)
-            .map((vehicle) => ({ vehicle, distance: Math.hypot(
-              vehicle.position.x - pose.feetPosition.x,
-              vehicle.position.y - pose.feetPosition.y,
-              vehicle.position.z - pose.feetPosition.z,
-            ) }))
-            .filter(({ distance }) => distance <= 2)
-            .sort((left, right) => left.distance - right.distance)[0]
-          if (nearbyVehicle !== undefined) {
-            const boarded = boardVehicle(nearbyVehicle.vehicle, localVehicleOccupant, nearbyVehicle.distance)
-            if (boarded.occupant !== undefined) Effect.runSync(vehicleService.mount(boarded.id, localVehicleOccupant))
-            mountedVehicleId = String(boarded.id)
-            usedSpecialItem = true
-          }
-        }
-        const specialInventory = Effect.runSync(world.inventory.snapshot)
-        const specialSelected = specialInventory.slots[selectedHotbarIndex]
-        if (!usedSpecialItem && specialSelected?.item === 'ender_pearl') {
-          if (multiplayer !== undefined) {
-            sendEntityCommand({ _tag: 'EnderPearlCommand' })
-          } else {
-            const pose = Effect.runSync(playerApi.pose)
-            const horizontal = Math.cos(pose.pitchRadians)
-            const origin = {
-              x: pose.feetPosition.x,
-              y: pose.feetPosition.y + EYE_LEVEL_OFFSET,
-              z: pose.feetPosition.z,
-            }
-            const target = Effect.runSync(targetedBlock())
-            const hitDistance = target === undefined
-              ? undefined
-              : Math.hypot(
-                  target.position.x + 0.5 - origin.x,
-                  target.position.y + 0.5 - origin.y,
-                  target.position.z + 0.5 - origin.z,
-                )
-            Effect.runSync(Ref.update(gameplayState.pendingPearlThrows, (requests) => [
-              ...requests,
-              {
-                origin,
-                inventory: {
-                  mode: isCreativeMode ? 'creative' as const : 'survival' as const,
-                  slotIndex: selectedHotbarIndex,
-                },
-                dirX: -Math.sin(pose.yawRadians) * horizontal,
-                dirY: Math.sin(pose.pitchRadians),
-                dirZ: -Math.cos(pose.yawRadians) * horizontal,
-                ...(hitDistance === undefined ? {} : { hitDistance }),
-              },
-            ]))
-            if (!isCreativeMode) {
-              Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, 'ender_pearl', 1))
-            }
-            markSessionDirty()
-            renderPlayerUi()
-          }
-          usedSpecialItem = true
-        }
-        if (!usedSpecialItem && specialSelected !== undefined && isBucketItem(specialSelected.item)) {
-          if (multiplayer !== undefined && multiplayerHandshakeComplete) {
-            sendEntityCommand({ _tag: 'BucketUseCommand' })
-            usedSpecialItem = true
-          } else {
-            const target = Effect.runSync(targetedBlock())
-            if (target !== undefined) {
-              const dimension = Effect.runSync(playerApi.dimension)
-              const result = Effect.runSync(useBucket(
-                currentChunkStore,
-                world.inventory,
-                gameplayState.fluidFrontier,
-                {
-                  activeDimension: dimension,
-                  targetDimension: dimension,
-                  position: (specialSelected.item === 'bucket'
-                    ? blockPosition(target.position.x, target.position.y, target.position.z)
-                    : blockPosition(target.adjacentPosition.x, target.adjacentPosition.y, target.adjacentPosition.z)),
-                  heldItem: specialSelected.item,
-                },
-              ))
-              document.body.setAttribute('data-bucket-result', result._tag)
-              usedSpecialItem = true
-              if (result._tag === 'Collected' || result._tag === 'Placed') {
-                markSessionDirty()
-                renderPlayerUi()
-              }
-            }
-          }
-        }
-        if (!usedSpecialItem && specialSelected !== undefined
-          && (specialSelected.item === 'oak_boat' || specialSelected.item === 'minecart')) {
-          if (multiplayer !== undefined && multiplayerHandshakeComplete) {
-            sendEntityCommand({ _tag: 'VehicleUseCommand' })
-          } else {
-            const target = Effect.runSync(targetedBlock())
-            if (target !== undefined) {
-              const type = specialSelected.item === 'oak_boat' ? 'boat' : 'minecart'
-              const item = specialSelected.item
-              // A boat aimed at open water must land AT the water block's
-              // own cell, not the empty cell adjacent to whichever face was
-              // hit — the same reason a minecart lands at the rail's own
-              // cell rather than beside it. mx-gameplay's vehicle-frame.ts
-              // (`waterAt`) reads whether the BOAT'S OWN cell (or the one
-              // above it) is water to decide propulsion; a boat commonly
-              // gets placed by aiming down at open water, which hits the
-              // water block's TOP face, and `target.adjacentPosition` for a
-              // top-face hit is one cell ABOVE the water — never detected as
-              // in-water, so the boat only ever gets stepBoat's 15% off-water
-              // crawl (~0.05 blocks/sec measured) no matter how it is
-              // driven. Landed via a QA-seeded pool and the SAME real
-              // right-click placement path in e2e/boat-water.e2e.ts before
-              // this fix: placed at water's own y+1, terminal speed 0.048.
-              const at = (
-                (type === 'minecart' && (blockTypeOfId(target.block) === 'rail' || blockTypeOfId(target.block) === 'powered_rail'))
-                || (type === 'boat' && blockTypeOfId(target.block) === 'water')
-              )
-                ? target.position
-                : target.adjacentPosition
-              const removed = Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, item, 1))
-              if (removed._tag === 'Removed') {
-                const spawned = Effect.runSync(vehicleService.spawn(
-                  type,
-                  Effect.runSync(playerApi.dimension),
-                  { x: at.x + 0.5, y: at.y, z: at.z + 0.5 },
-                  poseBeforeFrame.yawRadians,
-                ))
-                replaceVehicle({
-                  ...spawned,
-                  velocity: type === 'minecart' ? { x: 0, y: 0, z: -0.25 } : { x: 0, y: 0, z: 0 },
-                })
-                document.body.setAttribute('data-vehicle-result', `placed-${type}`)
-                markSessionDirty()
-                renderPlayerUi()
-              }
-            }
-          }
-          usedSpecialItem = true
-        }
-        const portalTarget = !usedSpecialItem && multiplayer !== undefined && multiplayerHandshakeComplete
-          ? Effect.runSync(targetedBlock())
-          : undefined
-        const portalBlock = portalTarget === undefined ? undefined : blockTypeOfId(portalTarget.block)
-        const usedMultiplayerPortal = portalTarget !== undefined
-          && (portalBlock === 'end_portal' || portalBlock === 'nether_portal')
-          && sendPortalUseCommand(
-            portalTarget.position,
-            portalBlock === 'end_portal' ? 'EndPortalUseCommand' : 'NetherPortalUseCommand',
-          )
-        const usedMultiplayerLever = portalTarget !== undefined
-          && blockTypeOfId(portalTarget.block) === 'lever'
-        if (usedMultiplayerLever) sendToggleLeverCommand(portalTarget.position)
-        const shouldAttemptEndFeature = currentChunkContext.dimension === 'end'
-          || endPortalComplete
-          || specialSelected?.item === 'eye_of_ender'
-        const usedEndFeature = usedSpecialItem
-          || usedMultiplayerPortal
-          || (shouldAttemptEndFeature && Effect.runSync(useEndFeature()))
-        const brewingTarget = usedEndFeature || usedMultiplayerLever ? undefined : Effect.runSync(targetedBlock())
-        const opensBrewing = brewingTarget !== undefined && blockTypeOfId(brewingTarget.block) === 'brewing_stand'
-        const route = usedEndFeature || usedMultiplayerLever || opensBrewing
-          ? undefined
-          : Effect.runSync(targetedRightClickRoute(currentChunkStore, playerApi, DEFAULT_BLOCK_REACH))
-        if (usedEndFeature || usedMultiplayerLever) {
-          renderPlayerUi()
-        } else if (opensBrewing) {
-          setBrewingOpen(true)
-          if (multiplayer !== undefined && brewingTarget !== undefined) {
-            activeBrewingStandAt = { ...brewingTarget.position }
-            if (!requestBrewing({ _tag: 'open' })) brewingStatus = 'Brewing stand is unavailable'
-            renderBrewingUi()
-          }
-        } else if (route?.kind === 'craftingTable') {
-          setInventoryOpen(true, 'craftingTable')
-        } else if (route?.kind === 'anvil') {
-          setInventoryOpen(true, 'anvil')
-        } else if (route?.kind === 'enchantingTable') {
-          setInventoryOpen(true, 'enchanting')
-        } else if (route?.kind === 'bed') {
-          const bedPosition = blockPosition(
-            Math.floor(route.at.x),
-            Math.floor(route.at.y),
-            Math.floor(route.at.z),
-          )
-          const currentDimension = Effect.runSync(playerApi.dimension)
-          if (currentDimension !== 'overworld' && multiplayer !== undefined) {
-            document.body.setAttribute('data-sleep-result', 'unavailable')
-          } else if (currentDimension !== 'overworld') {
-            sleepRuntimeState = leaveSleep(sleepRuntimeState, multiplayer?.query.player ?? 'local')
-            Effect.runSync(currentChunkStore.setBlock(bedPosition, blockIdOf('air')))
-            applyWorldExplosion(
-              { x: bedPosition.x + 0.5, y: bedPosition.y + 0.5, z: bedPosition.z + 0.5 },
-              5,
-              Math.floor(simulationElapsedSecs * 20),
-              false,
-            )
-            document.body.setAttribute(
-              'data-bed-explosion-request',
-              `${currentDimension}:${bedPosition.x},${bedPosition.y},${bedPosition.z}`,
-            )
-            document.body.setAttribute('data-sleep-result', 'exploded')
-          } else {
-            const hostilePositions = Effect.runSync(world.entities.snapshot).entities
-              .filter((entity) => entity.kind !== 'dropped_item')
-              .map((entity) => entity.feetPosition)
-            const decision = resolveBedSleep({
-              bedPosition,
-              dangerNearby: isDangerNearby(bedPosition, hostilePositions),
-              dimension: currentDimension,
-              timeOfDay: Effect.runSync(time.timeOfDay),
-              weather: Effect.runSync(weather.snapshot).weather,
-            })
-            if (decision._tag === 'SleepAccepted') {
-              respawnLocation = { ...decision.respawnLocation, bedPosition }
-              if (multiplayer === undefined) {
-                sleepRuntimeState = enterSleep(sleepRuntimeState, 'local', respawnLocation)
-                document.body.setAttribute('data-sleep-result', 'accepted')
-              } else {
-                const command: SleepCommand = {
-                  _tag: 'EnterSleep',
-                  actor: multiplayer.query.player,
-                  session: String(multiplayer.query.player),
-                  requestId: `sleep-${String(nextSleepRequest++)}`,
-                  expectedRevision: networkSleepState.revision,
-                  clientTick: Math.floor(performance.now()),
-                  bed: bedPosition,
-                }
-                networkSleepState = queueSleepCommand(networkSleepState, command)
-                Effect.runFork(multiplayer.transport.sendSleep({ _tag: 'SleepCommand', command }))
-                document.body.setAttribute('data-sleep-result', 'pending')
-              }
-              markSessionDirty()
-            } else {
-              document.body.setAttribute('data-sleep-result', decision.reason)
-            }
-          }
-        } else if (route?.kind === 'furnace') {
-          const dimension = Effect.runSync(playerApi.dimension)
-          const position = {
-            x: Math.floor(route.at.x),
-            y: Math.floor(route.at.y),
-            z: Math.floor(route.at.z),
-          }
-          const key = furnaceKeyOf({ dimension, position })
-          if (multiplayer === undefined && !furnaceStates.has(key)) {
-            furnaceStates.set(key, { dimension, position, state: emptyFurnaceState() })
-            markSessionDirty()
-          }
-          if (multiplayer === undefined || furnaceStates.has(key)) {
-            activeFurnaceKey = key
-            setInventoryOpen(true, 'furnace')
-          } else {
-            multiplayerRejection = 'Furnace is not present in the authoritative snapshot.'
-          }
-        } else if (route?.kind === 'storage') {
-          const dimension = Effect.runSync(playerApi.dimension)
-          const position = {
-            x: Math.floor(route.at.x),
-            y: Math.floor(route.at.y),
-            z: Math.floor(route.at.z),
-          }
-          const id = containerIdAt(dimension, position)
-          if (multiplayer !== undefined) {
-            const container = Effect.runSync(world.inventory.containerSnapshot(id))
-            if (container !== undefined && sendFacilityCommand({
-              _tag: 'ContainerCommand',
-              containerId: id,
-              action: { _tag: 'open' },
-            })) {
-              activeChestId = id
-              setInventoryOpen(true, 'chest')
-            }
-          } else {
-            const localContainerId = containerIdForStorageBlock(dimension, position)
-            if (localContainerId !== undefined) {
-              activeChestId = localContainerId
-              setInventoryOpen(true, 'chest')
-            }
-          }
-        } else {
-          const inventoryBeforeUse = Effect.runSync(world.inventory.snapshot)
-          const selected = inventoryBeforeUse.slots[selectedHotbarIndex]
-          let shouldAttemptPlacement = selected !== undefined
-            && !isGameplayUseItemType(selected.item)
-
-          if (selected !== undefined && isGameplayUseItemType(selected.item)) {
-            nextItemUseRequestId += 1
-            const requestId = `item-use-${String(nextItemUseRequestId)}`
-            if (selected.item === 'potato') {
-              const target = Effect.runSync(
-                requestTargetedPotatoPlanting(
-                  gameplayState,
-                  currentChunkStore,
-                  playerApi,
-                  requestId,
-                ),
-              )
-              if (Option.isSome(target)) {
-                pendingItemUses.set(requestId, {
-                  kind: 'plant',
-                  slotIndex: selectedHotbarIndex,
-                  dimension: Effect.runSync(playerApi.dimension),
-                })
-              } else {
-                Effect.runSync(
-                  requestPotatoFoodUse(
-                    gameplayState,
-                    requestId,
-                    Effect.runSync(world.vitals.snapshot),
-                  ),
-                )
-                pendingItemUses.set(requestId, { kind: 'eat', slotIndex: selectedHotbarIndex })
-              }
-            } else if (
-              isLegacyGameplayItemType(selected.item) &&
-              isGameplayHoeItem(selected.item)
-            ) {
-              const target = Effect.runSync(
-                requestTargetedSoilTill(
-                  gameplayState,
-                  currentChunkStore,
-                  playerApi,
-                  requestId,
-                  selected.item,
-                ),
-              )
-              if (Option.isSome(target)) {
-                pendingItemUses.set(requestId, {
-                  kind: 'till',
-                  slotIndex: selectedHotbarIndex,
-                  heldItem: selected.item,
-                })
-              }
-            } else if (
-              isLegacyGameplayItemType(selected.item) &&
-              isGameplayIgnitionItem(selected.item)
-            ) {
-              const blockTarget = Effect.runSync(resolveTargetedBlock(currentChunkStore, playerApi))
-              const blockReading = Option.isSome(blockTarget)
-                ? Effect.runSync(currentChunkStore.getBlock(blockPosition(blockTarget.value.position.x, blockTarget.value.position.y, blockTarget.value.position.z)))
-                : undefined
-              if (
-                multiplayer !== undefined &&
-                Option.isSome(blockTarget) &&
-                blockReading?._tag === 'Block' &&
-                blockTypeOfId(blockReading.block) === 'tnt'
-              ) {
-                sendEntityCommand({ _tag: 'IgniteTntCommand', at: blockTarget.value.position })
-              } else {
-                const target = Effect.runSync(
-                  requestTargetedItemUse(
-                    gameplayState,
-                    currentChunkStore,
-                    playerApi,
-                    requestId,
-                    selected.item,
-                  ),
-                )
-                if (Option.isSome(target)) {
-                  pendingItemUses.set(requestId, {
-                    kind: 'ignition',
-                    slotIndex: selectedHotbarIndex,
-                    heldItem: selected.item,
-                    dimension: Effect.runSync(playerApi.dimension),
-                  })
-                }
-              }
-            } else {
-              shouldAttemptPlacement = true
-            }
-          }
-
-          if (shouldAttemptPlacement) {
-            placementAudio.request()
-            requestPlacementFromSelectedSlot(
-              inventoryBeforeUse.slots,
-              selectedHotbarIndex,
-              isPlaceableGameplayItem,
-              (heldItem) => {
-                if (multiplayer !== undefined) {
-                  const target = Effect.runSync(
-                    requestTargetedBlockPlacement(
-                      gameplayState,
-                      currentChunkStore,
-                      playerApi,
-                      heldItem,
-                    ),
-                  )
-                  Effect.runSync(Ref.set(gameplayState.pendingPlacements, []))
-                  if (Option.isSome(target)) {
-                    Effect.runSync(multiplayer.host.enqueueOutbound({
-                      _tag: 'BlockPlace',
-                      player: multiplayer.query.player,
-                      world: WorldId.make(Effect.runSync(playerApi.dimension)),
-                      at: target.value.adjacentPosition,
-                      block: heldItem,
-                    }))
-                    placementsRequested += 1
-                    placementAudio.request(target.value.adjacentPosition)
-                    canvas.setAttribute('data-placements-requested', String(placementsRequested))
-                  }
-                  return
-                }
-                nextBlockUseRequestId += 1
-                const requestId = `block-use-${String(nextBlockUseRequestId)}`
-                const target = Effect.runSync(
-                  requestTargetedBlockUse(
-                    gameplayState,
-                    currentChunkStore,
-                    playerApi,
-                    requestId,
-                    heldItem,
-                  ),
-                )
-                if (Option.isSome(target)) {
-                  const reading = Effect.runSync(currentChunkStore.getBlock(blockPosition(target.value.position.x, target.value.position.y, target.value.position.z)))
-                  if (reading._tag === 'Block' && reading.block === 76) {
-                    pendingBlockUses.set(requestId, {
-                      dimension: currentChunkContext.dimension,
-                      position: target.value.position,
-                    })
-                  } else if (reading._tag === 'Block' && reading.block === 77) {
-                    Effect.runSync(redstoneRuntime.pressButton(
-                      currentChunkContext.dimension,
-                      target.value.position,
-                    ))
-                  } else if (reading._tag === 'Block' && reading.block === 82) {
-                    const key = leverKeyOf({
-                      dimension: currentChunkContext.dimension,
-                      position: target.value.position,
-                    })
-                    comparatorModes.set(
-                      key,
-                      comparatorModes.get(key) === 'subtract' ? 'compare' : 'subtract',
-                    )
-                    redstoneDirty = true
-                  } else {
-                    Effect.runSync(Ref.set(gameplayState.pendingPlacements, []))
-                    nextBlockPlacementRequestId += 1
-                    const placementRequestId = `block-placement-${String(nextBlockPlacementRequestId)}`
-                    Effect.runSync(requestBlockPlacementCommand(gameplayState, {
-                      requestId: placementRequestId,
-                      positionKey: `${target.value.adjacentPosition.x},${target.value.adjacentPosition.y},${target.value.adjacentPosition.z}` as Parameters<typeof requestBlockPlacementCommand>[1]['positionKey'],
-                      heldItem,
-                      mode: isCreativeMode ? 'creative' : 'survival',
-                    }))
-                    pendingBlockPlacements.set(placementRequestId, {
-                      dimension: currentChunkContext.dimension,
-                      item: heldItem,
-                      position: target.value.adjacentPosition,
-                    })
-                    placementsRequested += 1
-                    placementAudio.request(target.value.adjacentPosition)
-                    canvas.setAttribute('data-placements-requested', String(placementsRequested))
-                  }
-                  markSessionDirty()
-                }
-              },
-            )
-          }
-        }
-      }
-      if (multiplayer === undefined) {
-        for (const outcome of Effect.runSync(Ref.getAndSet(gameplayState.enderPearlOutcomes, []))) {
-          const pose = Effect.runSync(playerApi.pose)
-          Effect.runSync(playerApi.moveTo({
-            x: pose.feetPosition.x + outcome.displacement.x,
-            y: pose.feetPosition.y + outcome.displacement.y,
-            z: pose.feetPosition.z + outcome.displacement.z,
-          }))
-          if (outcome.damage !== undefined) applyPlayerDamage(outcome.damage)
-          markSessionDirty()
-        }
-        for (const knockback of Effect.runSync(drainBowKnockbacks(gameplayState))) {
-          let applied = false
-          Effect.runSync(world.entities.sweep((entity) => {
-            if (entity.id !== knockback.id || entity.healthPoints <= 0) {
-              return { transition: UNCHANGED, emit: undefined }
-            }
-            applied = true
-            return {
-              transition: changed({
-                feetPosition: knockback.direction._tag === 'Away'
-                  ? {
-                    x: entity.feetPosition.x + knockback.direction.x * 0.35,
-                    y: entity.feetPosition.y,
-                    z: entity.feetPosition.z + knockback.direction.z * 0.35,
-                  }
-                  : {
-                    x: entity.feetPosition.x,
-                    y: entity.feetPosition.y + 0.35,
-                    z: entity.feetPosition.z,
-                  },
-                healthPoints: entity.healthPoints,
-                behaviour: entity.behaviour,
-              }),
-              emit: undefined,
-            }
-          }))
-          if (applied) markSessionDirty()
-        }
-      }
-      const confirmedPlacementItems: GameplayItemType[] = []
-      const reservedPlacementItems: GameplayItemType[] = []
-      for (const result of Effect.runSync(drainBlockPlacementResults(gameplayState))) {
-        const pending = pendingBlockPlacements.get(result.requestId)
-        pendingBlockPlacements.delete(result.requestId)
-        if (pending === undefined || !result.success) continue
-        confirmedPlacementItems.push(pending.item)
-        if (result.consumed) reservedPlacementItems.push(pending.item)
-        markSessionDirty()
-        if (REDSTONE_PLACEMENT_ITEMS.has(pending.item)) redstoneDirty = true
-        if (pending.item === 'wither_skeleton_skull') {
-          pendingWitherSummonChecks.push(pending as {
-            readonly dimension: Dimension
-            readonly item: 'wither_skeleton_skull'
-            readonly position: { readonly x: number; readonly y: number; readonly z: number }
-          })
-        }
-      }
-
-      // Placement requests are serviced after the frame-start redstone sync.
-      // Only the success outbox proves that a component now exists in the store.
-      const consumedPlacements = excludeReservedPlacementConsumptions(
-        Effect.runSync(Ref.getAndSet(gameplayState.consumedItems, [])),
-        reservedPlacementItems,
-      )
-      for (const item of consumedPlacements) {
-        if (isCreativeMode) {
-          Effect.runSync(world.inventory.add(item, 1))
-        } else {
-          const selected = Effect.runSync(world.inventory.snapshot).slots[selectedHotbarIndex]
-          if (selected?.item === item) {
-            Effect.runSync(world.inventory.removeAt(selectedHotbarIndex, item, 1))
-          }
-        }
-        let summonCheckIndex = -1
-        for (let index = pendingWitherSummonChecks.length - 1; index >= 0; index -= 1) {
-          if (pendingWitherSummonChecks[index]?.item === item) {
-            summonCheckIndex = index
-            break
-          }
-        }
-        if (summonCheckIndex >= 0) {
-          const [pending] = pendingWitherSummonChecks.splice(summonCheckIndex, 1)
-          for (let index = pendingWitherSummonChecks.length - 1; index >= 0; index -= 1) {
-            if (pendingWitherSummonChecks[index]?.item === item) {
-              pendingWitherSummonChecks.splice(index, 1)
-            }
-          }
-          if (pending !== undefined) {
-            const context = dimensionContexts.get(pending.dimension)
-            const match = context === undefined ? undefined : matchRuntimeWitherSummon(
-              pending.position,
-              (cell) => {
-                const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(cell.x, cell.y, cell.z)))
-                return reading._tag === 'Block' ? blockTypeOfId(reading.block) : undefined
-              },
-            )
-            if (match !== undefined && context !== undefined) {
-              for (const position of match.consumedBlocks) {
-                Effect.runSync(context.chunkStore.setBlock(blockPosition(position.x, position.y, position.z), blockIdOf('air')))
-              }
-              witherRuntimeState = summonRuntimeWither(
-                witherRuntimeState,
-                pending.dimension,
-                match.spawnPosition,
-              )
-              markSessionDirty()
-            }
-          }
-        }
-      }
-      placementAudio.confirm([...consumedPlacements, ...confirmedPlacementItems])
-      if (consumedPlacements.some((item) => REDSTONE_PLACEMENT_ITEMS.has(item))) {
-        redstoneDirty = true
-      }
-
-      for (const result of Effect.runSync(drainBlockUseResults(gameplayState))) {
-        const pending = pendingBlockUses.get(result.requestId)
-        pendingBlockUses.delete(result.requestId)
-        if (
-          pending !== undefined &&
-          result.success &&
-          result.outcome._tag === 'ToggleLever' &&
-          result.outcome.position.x === pending.position.x &&
-          result.outcome.position.y === pending.position.y &&
-          result.outcome.position.z === pending.position.z
-        ) {
-          const key = leverKeyOf(pending)
-          leverStates.set(key, {
-            dimension: pending.dimension,
-            position: pending.position,
-            active: !(leverStates.get(key)?.active ?? false),
-          })
-          redstoneDirty = true
-          markSessionDirty()
-        }
-      }
-
-      if (multiplayer === undefined) {
-        for (const transition of Effect.runSync(redstoneRuntime.drainLampTransitions)) {
-          const context = dimensionContexts.get(transition.dimension as Dimension)
-          if (context === undefined) continue
-          const lampPosition = asBlockPosition(transition.position)
-          Effect.runSync(context.chunkStore.setBlock(lampPosition, transition.lit ? blockIdOf('redstone_lamp_lit') : blockIdOf('redstone_lamp')))
-          const confirmedRead = Effect.runSync(context.chunkStore.getBlock(lampPosition))
-          const transitionKey = leverKeyOf({ dimension: transition.dimension as Dimension, position: transition.position })
-          redstoneLampTransitionLog.set(transitionKey, [
-            ...(redstoneLampTransitionLog.get(transitionKey) ?? []),
-            { lit: transition.lit, writtenBlock: confirmedRead._tag === 'Block' ? confirmedRead.block : null },
-          ])
-          markSessionDirty()
-        }
-        for (const transition of Effect.runSync(redstoneRuntime.drainPistonTransitions)) {
-          applyPoweredPistonTransition(transition)
-        }
-        for (const event of Effect.runSync(redstoneRuntime.drainTriggerEvents)) {
-          canvas.setAttribute(
-            'data-redstone-trigger',
-            `${event.kind}:${event.dimension}:${event.position.x},${event.position.y},${event.position.z}`,
-          )
-          if (event.kind === 'dispenser') {
-            applyDispenserTrigger(event.dimension as Dimension, event.position)
-          } else if (event.kind === 'dropper') {
-            applyDropperTrigger(event.dimension as Dimension, event.position)
-          }
-          markSessionDirty()
-        }
-        for (const event of Effect.runSync(redstoneRuntime.drainHopperTransferEvents)) {
-          applyHopperTransfer(event.dimension as Dimension, event.position)
-        }
-        for (const transition of Effect.runSync(redstoneRuntime.drainPoweredComponentTransitions)) {
-          const context = dimensionContexts.get(transition.dimension as Dimension)
-          if (context === undefined) continue
-          const key = leverKeyOf({
-            dimension: transition.dimension as Dimension,
-            position: transition.position,
-          })
-          if (transition.kind === 'door') {
-            Effect.runSync(context.chunkStore.setBlock(asBlockPosition(transition.position), transition.powered ? blockIdOf('door_open') : blockIdOf('door')))
-          } else if (transition.kind === 'powered-rail') {
-            if (transition.powered) poweredRails.add(key)
-            else poweredRails.delete(key)
-            canvas.setAttribute('data-powered-rail', `${key}:${String(transition.powered)}`)
-          }
-          markSessionDirty()
-        }
-      }
-
-      // Portal stages can replace both dimension and pose. Stream and present
-      // only after the frame so the renderer never meshes the destination pose
-      // against the source dimension's store.
-      Effect.runSync(
-        streamAround(
-          currentChunkContext,
-          postFramePose.feetPosition.x,
-          postFramePose.feetPosition.z,
-        ),
-      )
-      canvas.setAttribute(
-        'data-player-feet',
-        `${postFramePose.feetPosition.x.toFixed(2)},${postFramePose.feetPosition.y.toFixed(2)},${postFramePose.feetPosition.z.toFixed(2)}`,
-      )
-      canvas.setAttribute('data-player-grounded', String(groundedAfterFrame))
-
-      const weatherAdvanced = Effect.runSync(Ref.get(gameplayState.weatherAdvanced))
-      if (weatherAdvanced !== undefined) {
-        Effect.runSync(weather.applyTransition(weatherAdvanced))
-        presentWeather(weatherAdvanced)
-        if (weatherAdvanced.weather !== weatherBeforeFrame.weather) markSessionDirty()
-      }
-      const localSleepPlayerId = String(multiplayer?.query.player ?? 'local')
-      const connectedSurvivalPlayers = new Set<string>([
-        localSleepPlayerId,
-        ...[...(multiplayer?.players.keys() ?? [])].map(String),
-      ])
-      if (multiplayer === undefined && (deadAfterFrame || dimensionChanged)) {
-        sleepRuntimeState = leaveSleep(sleepRuntimeState, localSleepPlayerId)
-      } else if (multiplayer !== undefined && (deadAfterFrame || dimensionChanged) && networkSleepState.sleepers.has(multiplayer.query.player)) {
-        const command: SleepCommand = {
-          _tag: 'LeaveSleep',
-          actor: multiplayer.query.player,
-          session: String(multiplayer.query.player),
-          requestId: `sleep-${String(nextSleepRequest++)}`,
-          expectedRevision: networkSleepState.revision,
-          clientTick: Math.floor(performance.now()),
-        }
-        networkSleepState = queueSleepCommand(networkSleepState, command)
-        Effect.runFork(multiplayer.transport.sendSleep({ _tag: 'SleepCommand', command }))
-      }
-      if (multiplayer === undefined) sleepRuntimeState = reconcileSleepers(
-        sleepRuntimeState,
-        connectedSurvivalPlayers,
-        (location) => {
-          const context = getOrCreateDimensionChunkContext(location.dimension)
-          const reading = Effect.runSync(context.chunkStore.getBlock(blockPosition(location.bedPosition.x, location.bedPosition.y, location.bedPosition.z)))
-          return reading._tag === 'Block' && blockTypeOfId(reading.block) === 'bed'
-        },
-      )
-      const sleepAdvance = multiplayer === undefined ? advanceSleep(
-        sleepRuntimeState,
-        deltaSecs,
-        connectedSurvivalPlayers.size,
-        requiredSleepRatio,
-        2,
-      ) : {
-        state: sleepRuntimeState,
-        skipToMorning: networkSleepState.skippedRevision === networkSleepState.revision
-          && appliedNightSkipRevision !== networkSleepState.revision,
-      }
-      sleepRuntimeState = sleepAdvance.state
-      const requiredSleepers = requiredSleeperCount(connectedSurvivalPlayers.size, requiredSleepRatio)
-      sleepHud.textContent = `Sleeping ${String(sleepRuntimeState.sleepers.length)}/${String(requiredSleepers)}`
-      sleepHud.hidden = sleepRuntimeState.sleepers.length === 0
-      document.body.setAttribute('data-sleeping-players', String(sleepRuntimeState.sleepers.length))
-      document.body.setAttribute('data-sleep-required', String(requiredSleepers))
-      if (sleepAdvance.skipToMorning) {
-        appliedNightSkipRevision = multiplayer === undefined ? null : networkSleepState.revision
-        if (multiplayer === undefined) {
-          const clearWeather: WeatherState = { weather: 'clear', remainingSecs: 300 }
-          Effect.runSync(time.setTimeOfDay(0.25))
-          Effect.runSync(weather.applyTransition(clearWeather))
-          presentWeather(clearWeather)
-          markSessionDirty()
-        }
-        sleepRuntimeState = initialSleepRuntimeState()
-        sleepHud.hidden = true
-        document.body.setAttribute('data-sleep-result', 'morning-skipped')
-      }
-      presentWeatherRuntime(
-        weatherAdvanced ?? Effect.runSync(weather.snapshot),
-        postFramePose,
-        nowSecs,
-      )
-
-      const itemUseResults = Effect.runSync(drainItemUseResults(gameplayState))
-      for (const result of itemUseResults) {
-        if ('action' in result && result.action === 'AdvanceFurnace') {
-          const key = pendingFurnaceAdvances.get(result.requestId)
-          pendingFurnaceAdvances.delete(result.requestId)
-          const furnace = key === undefined ? undefined : furnaceStates.get(key)
-          if (key !== undefined && furnace !== undefined) {
-            const applied = advanceFurnaceRuntime(furnace.state, result.plan)
-            if (applied.deferredSecs > 0) {
-              deferredFurnaceAdvanceSecs.set(
-                key,
-                (deferredFurnaceAdvanceSecs.get(key) ?? 0) + applied.deferredSecs,
-              )
-            }
-            if (applied.changed) {
-              furnaceStates.set(key, { ...furnace, state: applied.state })
-              markSessionDirty()
-              if (inventoryOpen && inventoryMode === 'furnace') renderPlayerUi()
-            }
-          }
-          continue
-        }
-        lastObservedItemUse = result
-        const pending = pendingItemUses.get(result.requestId)
-        pendingItemUses.delete(result.requestId)
-        if (pending === undefined || !result.success) continue
-
-        if (!('action' in result) && pending.kind === 'ignition' && pending.heldItem === result.heldItem) {
-          if (
-            result.outcome._tag === 'Portal'
-            && result.outcome.outcome._tag === 'Lit'
-            && result.outcome.outcome.cells.length === result.outcome.outcome.frame.interior.length
-            && result.outcome.outcome.cells.length > 0
-          ) {
-            const anchor = [...result.outcome.outcome.cells].sort((left, right) =>
-              left.y - right.y || left.x - right.x || left.z - right.z
-            )[0]
-            if (anchor !== undefined) {
-              registerPortal({ dimension: pending.dimension, position: anchor })
-            }
-          }
-          if (result.heldItem === 'fire_charge') {
-            Effect.runSync(world.inventory.removeAt(pending.slotIndex, pending.heldItem, 1))
-          } else if (Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]?.item === 'flint_and_steel') {
-            Effect.runSync(world.inventory.damageAt({ _tag: 'Inventory', slotIndex: pending.slotIndex }, 1))
-          }
-        } else if ('action' in result) {
-          switch (result.action) {
-            case 'TillSoil':
-              if (
-                pending.kind === 'till'
-                && pending.heldItem === result.heldItem
-                && Effect.runSync(world.inventory.snapshot).slots[pending.slotIndex]?.item === result.heldItem
-              ) {
-                Effect.runSync(
-                  world.inventory.damageAt(
-                    { _tag: 'Inventory', slotIndex: pending.slotIndex },
-                    result.durabilityDamage,
-                  ),
-                )
-              }
-              break
-            case 'PlantPotato':
-              if (pending.kind === 'plant' && result.outcome._tag === 'planted') {
-                const planted = Effect.runSync(crops.plant({
-                  dimension: pending.dimension,
-                  position: result.outcome.at as CropLocation['position'],
-                }))
-                if (planted) {
-                  Effect.runSync(
-                    world.inventory.removeAt(pending.slotIndex, 'potato', result.consumedCount),
-                  )
-                }
-              }
-              break
-            case 'HarvestPotato':
-              if (pending.kind === 'harvest' && result.outcome._tag === 'drops') {
-                const at = {
-                  x: pending.position.x + 0.5,
-                  y: pending.position.y + 0.5,
-                  z: pending.position.z + 0.5,
-                }
-                const leftovers = result.outcome.drops.flatMap((drop) => {
-                  const leftover = Effect.runSync(world.inventory.add(drop.item, drop.count))
-                  return leftover > 0 ? [{ item: drop.item, count: leftover }] : []
-                })
-                if (leftovers.length > 0) {
-                  Effect.runSync(spawnDroppedItems(world.entities, leftovers.map((stack) => ({ ...stack, at }))))
-                }
-              }
-              break
-            case 'EatPotato':
-              if (pending.kind === 'eat' && result.outcome._tag === 'consume') {
-                if (multiplayer !== undefined) {
-                  sendVitalsCommand({ _tag: 'eat', item: 'potato' })
-                  break
-                }
-                const removal = Effect.runSync(
-                  world.inventory.removeAt(pending.slotIndex, 'potato', result.consumedCount),
-                )
-                if (removal._tag === 'Removed') {
-                  survivalHunger.eat(
-                    result.outcome.foodPoints,
-                    result.outcome.saturationModifier,
-                  )
-                }
-              }
-              break
-          }
-        }
-        markSessionDirty()
-      }
-
-      const mobDrops = multiplayer === undefined
-        ? Effect.runSync(drainMobDrops(gameplayState))
-        : []
-      if (mobDrops.length > 0) {
-        Effect.runSync(spawnMobDrops(world.entities, mobDrops))
-        markSessionDirty()
-      }
-      for (const drop of mobDrops) {
-        nextMobDropId += 1
-        observedMobDrops.push({ ...drop, renderId: `mob-drop-${nextMobDropId}` })
-      }
-      const mobExperience = multiplayer === undefined
-        ? Effect.runSync(drainMobExperience(gameplayState))
-        : []
-      for (const event of mobExperience) {
-        const currentVitals = Effect.runSync(world.vitals.snapshot)
-        Effect.runSync(world.vitals.restore(addVitalsExperience(currentVitals, event.amount)))
-      }
-      if (mobExperience.length > 0 || (multiplayer === undefined && playerHeals.length > 0)) markSessionDirty()
-
-      const dragonEvents = multiplayer === undefined
-        ? Effect.runSync(gameplayState.enderDragonEncounter.drainEvents)
-        : []
-      for (const event of dragonEvents) {
-        switch (event._tag) {
-          case 'PlayerDamaged': {
-            if (dimensionAfterFrame !== 'end') break
-            const dragon = endDragonPosition()
-            const player = Effect.runSync(playerApi.pose).feetPosition
-            if (Math.hypot(dragon.x - player.x, dragon.y - player.y, dragon.z - player.z) <= 6) {
-              applyPlayerDamage({ amount: event.amount, cause: 'generic' })
-              queueEndAudio('playerHit', player)
-            }
-            break
-          }
-          case 'ExperienceRewarded': {
-            const currentVitals = Effect.runSync(world.vitals.snapshot)
-            Effect.runSync(world.vitals.restore(addVitalsExperience(currentVitals, event.amount)))
-            queueEndAudio('dragonReward', endDragonPosition())
-            break
-          }
-          case 'DragonEggRewarded':
-            if (!dragonEggRewarded) {
-              Effect.runSync(spawnDroppedItems(world.entities, [{
-                item: event.item,
-                count: event.count,
-                at: endDragonPosition(),
-              }]))
-              dragonEggRewarded = true
-            }
-            break
-          case 'ExitPortalMaterializationRequested':
-            if (!exitPortalMaterialized) {
-              const portalY = 64
-              for (let x = -1; x <= 1; x += 1) {
-                for (let z = -1; z <= 1; z += 1) {
-                  Effect.runSync(currentChunkStore.setBlock(blockPosition(x, portalY, z), END_PORTAL_BLOCK.PORTAL))
-                }
-              }
-              exitPortalMaterialized = true
-              queueEndAudio('exitPortal', { x: 0, y: portalY, z: 0 })
-            }
-            break
-          case 'DragonDamagedByPlayer':
-            queueEndAudio('dragonHurt', endDragonPosition())
-            break
-        }
-      }
-      if (dragonEvents.length > 0) markSessionDirty()
-      const dragonSnapshot = endDragonSnapshot()
-      canvas.setAttribute('data-end-dragon-phase', dragonSnapshot.phase)
-      canvas.setAttribute('data-end-dragon-health', String(dragonSnapshot.health))
-      endAudio.update({
-        dimension: dimensionAfterFrame,
-        phase: dragonSnapshot.phase === 'dead' ? 'defeated' : 'active',
-        nowSecs,
-        listener: postFramePose.feetPosition,
-        listenerForward: adapters.getReadAudioListenerForward(),
-        events: adapters.drainEndAudioEvents(),
-      })
-
-      syncRenderedEntities()
-      if (brewingOpen) renderBrewingUi()
-      renderPlayerUi()
-      renderCrosshair(nowSecs)
-      const captions = playerSettings.captionsEnabled ? audio.visible(KernelMonotonicTimeSecs(nowSecs)) : []
-      const nextCaptionSignature = captionRenderSignature(captions)
-      if (nextCaptionSignature !== renderedCaptionSignature) {
-        captionsParent.replaceChildren(...captions.map((caption) => {
-          const row = document.createElement('div')
-          row.className = 'sound-caption'
-          row.dataset['cueId'] = caption.cueId
-          row.setAttribute('data-testid', 'sound-caption')
-          row.textContent = caption.text
-          return row
-        }))
-        renderedCaptionSignature = nextCaptionSignature
-      }
-
-      framesTotal += 1
-      fpsValue.textContent = String(Math.round(Effect.runSync(Ref.get(uiFrameState.fpsCounter)).fps))
-
-      // Readable by a test without a QA command: the frame count IS the claim
-      // that the loop is running, and docs/e2e-triage.md #4 is exactly that claim.
-      document.body.setAttribute('data-frames', String(framesTotal))
+      const postFrame = runTickPostFrame(h5bTickContext, { frame, movement, framesTotal })
+      runTickPostFrameGameplay(h5cTickContext, { frame, movement, postFrame, nowSecs })
     } finally {
       Effect.runSync(inputApi.endFrame(frameInput))
     }
