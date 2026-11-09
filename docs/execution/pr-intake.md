@@ -2,6 +2,11 @@
 
 This record documents W0-8, the execution-plan-v2 task to review open pull requests and record follow-up intake before closing them. The scope counts conflict: the launch instruction says W0-7 covered 15 repositories but explicitly lists 16 W0-8 targets; plan §7.3 says W0-7 covers 17 and W0-8 covers 15, without naming either set. This record follows the 16-repository W0-8 list in the launch instruction. At review start on 2026-10-24, those repositories had 85 open PRs.
 
+Path references in this intake are evidence from the W0-8 review snapshot. Browser host paths later moved to
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[H4b test PR #11](https://github.com/nerima-games/mc-host-web/pull/11)); server and shared runtime paths moved to
+[mc-server](https://github.com/nerima-games/mc-server) ([PR #1](https://github.com/nerima-games/mc-server/pull/1)).
+
 Class 1 means a dependency PR proposes a version already on main or an older one, or a code PR's equivalent change already exists on main. Class 2 means the change should be carried into the listed wave. Class 3 means the current plan has no change to retain. Class 1 dependency decisions compare each PR's proposed version with the version in that repository's `package.json` or the referenced workflow on `main` at W0-8 review time. The table's Reason (comment) cells reproduce the English comments posted before closing each PR.
 
 During W0-8, each PR's intake was recorded and the PR closed. Class 2 changes are carried in their assigned later wave; those PRs were closed without requesting branch deletion. If GitHub removes a Dependabot branch ref after closure, use the recorded PR head SHA and `refs/pull/<number>/head` fetch ref below.

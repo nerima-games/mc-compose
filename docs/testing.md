@@ -6,6 +6,15 @@ plan.md §3.15 検証:
 
 (実測は 64 本ではなく **70 本**。[porting.md](./porting.md) §0、per-test の triage は [e2e-triage.md](./e2e-triage.md))
 
+Current ownership: mc-compose retains the roster stage-order Vitest test at
+`test/e2e/roster-frame-order.test.ts`. The browser host, Playwright/Vite setup, browser E2E, and H4b
+integration test live in [mc-host-web](https://github.com/nerima-games/mc-host-web)
+([migration PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[H4b test PR #11](https://github.com/nerima-games/mc-host-web/pull/11)). The authoritative server, shared
+runtime, and their tests live in [mc-server](https://github.com/nerima-games/mc-server)
+([PR #1](https://github.com/nerima-games/mc-server/pull/1)). Path examples below that name the former
+compose host are historical unless they link to the current destination.
+
 ## 1. 何をどこで検証するか
 
 | レイヤ | 検証手段 | 現状 |
@@ -13,7 +22,7 @@ plan.md §3.15 検証:
 | stage 全順序の解決 | 決定性・循環検出・dangling・フェーズ所属・skeleton 連鎖 | `test/stage-order.test.ts` |
 | Layer 合成 + フレーム実行 | 解決順が**実際に実行を駆動する**こと | `test/composition.test.ts` |
 | セッションライフサイクル | 状態機械。**2 周目**が最重要 | `test/session.test.ts` |
-| ブラウザ session lifecycle | runtime の宣言順起動、完了済み runtime の逆順 rollback、割り込み時の冪等性 | `test/browser-session.test.ts` |
+| Browser session lifecycle | Declaration-order startup, reverse rollback of started runtimes, and idempotent interruption | [mc-host-web tests](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8)) |
 | QA API | 名前空間マージ・衝突拒否・インストール | `test/qa-api.test.ts` |
 | Modding 入口 | 名前空間予約・一級モジュール性 | `test/modding.test.ts` |
 | 公開 API + 規範 | バレルのピン留め + ゲームルール名の検査 + **フェーズ所属のピン留め** | `test/public-api.test.ts` |
@@ -22,7 +31,7 @@ plan.md §3.15 検証:
 | 公開 API | 公開バレルと公開型の回帰 | `test/public-api.test.ts` |
 | **ロスター実在性ゲート** | 転記が兄弟リポジトリの実ソースと一致するか | `test/check-roster-manifest.test.ts` |
 | **モジュール間相互作用 — フレーム側** | **E2E** | `test/e2e/roster-frame-order.test.ts`。§3 |
-| **モジュール間相互作用 — 振る舞い側** | **E2E** | `e2e/`。採掘・inventoryとbrowser lifecycleを公開package境界で検証。§3.4 |
+| **モジュール間相互作用 — 振る舞い側** | Browser E2E | [mc-host-web](https://github.com/nerima-games/mc-host-web) validates mining, inventory, and browser lifecycle at the published-package boundary. §3.4 |
 
 テスト本数と実行時間はテスト追加・依存更新で変動するため、固定値を文書に持たせない。現在の選択数は
 `pnpm test` の出力を一次情報とする。
@@ -74,16 +83,14 @@ per-test の判定は [e2e-triage.md](./e2e-triage.md) にある。
 - **ヘッドレスではポインタロックが使えない** — 視点操作は QA API 経由で行う
 - QA API のキーは `__NERIMA_GAMES_QA__`(参照実装の `__TS_MINECRAFT_QA__` ではない)。
   古い名前に固定された E2E が古いビルドに対して黙って通るのを防ぐため
-- ブラウザ本体は Nix ではなく `npx playwright install --with-deps chromium` で取得する。
-  固定した nixpkgs revision の `playwright-driver.browsers` は 1.61.1 で、
-  `@playwright/test` の pin(1.64.1)が要求する chromium revision を一致させて
-  提供できない — 提供できるふりをして `browserType.launch: Executable doesn't exist`
-  を実行時まで隠す方が実害が大きいため、`flake.nix` はこのパッケージを一切持たない
-  (mx-ui と同じ構成)。ローカルでは `nix develop` に入った後に一度実行すればよく、
-  `e2e-browser` CI job も `pnpm e2e:browser` の前に同じコマンドを踏む
-  ([ci.yaml](../.github/workflows/ci.yaml))。
+- The browser binary and Playwright version must match the pins in
+  [mc-host-web](https://github.com/nerima-games/mc-host-web); its setup and CI moved with the browser host in
+  [PR #8](https://github.com/nerima-games/mc-host-web/pull/8).
 
-農業のブラウザ回帰は `e2e/farming.e2e.ts` が担当する。QA API は初期状態の設定と
+Current browser suites are in [mc-host-web](https://github.com/nerima-games/mc-host-web), migrated in
+[PR #8](https://github.com/nerima-games/mc-host-web/pull/8). The H4b integration test is in
+[PR #11](https://github.com/nerima-games/mc-host-web/pull/11). Agricultural browser regression is covered by
+[`e2e/farming.e2e.ts`](https://github.com/nerima-games/mc-host-web/blob/main/e2e/farming.e2e.ts). Its QA API sets initial state and
 収穫要求の発火だけに使い、成熟は通常のフレーム tick、食事と再植付けは実際の
 右クリック入力で進める。単一シナリオで次の契約を固定する。
 
@@ -94,7 +101,7 @@ per-test の判定は [e2e-triage.md](./e2e-triage.md) にある。
 - 残ったジャガイモを耕地へ再植付けでき、inventory と crop registry が同期する
 
 環境接触ダメージのブラウザ回帰は
-`e2e/environmental-contact-damage.e2e.ts` が担当する。QA API は接触地形とプレイヤー位置の
+[`e2e/environmental-contact-damage.e2e.ts`](https://github.com/nerima-games/mc-host-web/blob/main/e2e/environmental-contact-damage.e2e.ts) in mc-host-web covers it. Its QA API sets contact terrain and player position,
 初期設定にだけ使い、cactus への接近は通常の移動入力と physics で進める。スナップショットの
 接触セルはテスト側で、lava はプレイヤー AABB との体積 overlap、cactus は水平側面接触として
 再照合し、次の契約を固定する。
@@ -105,7 +112,7 @@ per-test の判定は [e2e-triage.md](./e2e-triage.md) にある。
 - lava 接触が続く場合、次の 4 ダメージは 0.5 秒以上後に発生する
 - lava と cactus の同時接触では最強の lava だけが採用され、致死原因も `lava` になる
 
-落下ダメージのブラウザ回帰は `e2e/fall-damage.e2e.ts` が担当する。QA API は着地点の
+[`e2e/fall-damage.e2e.ts`](https://github.com/nerima-games/mc-host-web/blob/main/e2e/fall-damage.e2e.ts) in mc-host-web covers fall-damage browser regressions. Its QA API sets landing terrain,
 地形と開始高度だけを設定し、落下距離の蓄積、着地信号、ダメージ適用は通常の physics と
 フレームループで進める。mc-sim の `landingImpact` は `runFrame` 後の 1 フレームだけ有効で、
 ホストは同じフレームで 1 回だけ読み、落下ダメージを環境接触ダメージより先に解決する。
@@ -123,15 +130,15 @@ plan.md §3.15 の主張には**半分が 2 つある**。それを混ぜない�
 | 半分 | 内容 | 現状 |
 | --- | --- | --- |
 | **(a) フレーム** | 16 本の stage が 1 本の全順序になる。どの id が、どのフェーズに入り、どの順で走るか | **検証済み**。`test/e2e/roster-frame-order.test.ts` |
-| **(b) 振る舞い** | 「採掘したらインベントリに入る」 | **部分検証済み**。公開 package 境界の browser E2E に採掘・inventory・永続化の経路がある。 |
+| **(b) 振る舞い** | 「採掘したらインベントリに入る」 | **部分検証済み**。 [mc-host-web](https://github.com/nerima-games/mc-host-web) browser E2E covers mining, inventory, and persistence at the published-package boundary. |
 
 **(b) は完全な一つのシナリオとしては、まだこの文書で主張しない。**
 
 - `package.json` は公開済みの `@nerima-games/*` package をバージョン固定し、
   `pnpm install --frozen-lockfile` で解決する。
-- `e2e/survival-combat.e2e.ts` は長押し採掘、進捗、破壊要求を検証する。
-- `e2e/persistence.e2e.ts` は採掘した world・inventory・姿勢を reload 後に検証する。
-- `e2e/chest-storage.e2e.ts` は inventory と chest の相互作用を検証する。
+- [mc-host-web `e2e/survival-combat.e2e.ts`](https://github.com/nerima-games/mc-host-web/blob/main/e2e/survival-combat.e2e.ts) checks held mining, progress, and break requests.
+- [mc-host-web `e2e/persistence.e2e.ts`](https://github.com/nerima-games/mc-host-web/blob/main/e2e/persistence.e2e.ts) checks mined world, inventory, and pose after reload.
+- [mc-host-web `e2e/chest-storage.e2e.ts`](https://github.com/nerima-games/mc-host-web/blob/main/e2e/chest-storage.e2e.ts) checks inventory and chest interaction.
 
 これらは公開 package を実ブラウザで組み合わせる検証であり、合成アルゴリズムだけを偽物の
 module で再検証するものではない。一方、単一の「ブロック破壊の drop が同じフレームで
@@ -176,8 +183,7 @@ mc-render が登録するのは `render:input` / `render:camera-mirror` / `rende
 | --- | --- | --- |
 | `pnpm e2e`(= `vitest run test/e2e`) | マニフェストが §4.2 のフレームに合成されるか | **入る**。`effect` と自分の `domain/` しか要らない純粋なテストで、`pnpm test` のグロブが既に拾う |
 | `pnpm check:roster` | マニフェストが兄弟リポジトリの**実ソース**と一致するか(id・`after`・`file:line` の 26 箇所すべて) | **入らない**。兄弟リポジトリのチェックアウトが要る |
-| `pnpm e2e:browser`(= `playwright test`) | **公開パッケージ群を合成したゲームが実ブラウザで起動し、フレームが回り、停止できるか**([e2e-triage.md](./e2e-triage.md) §3.1) | **入らない**。Chromium と dev サーバを要るが、兄弟checkoutは不要 |
-| `pnpm typecheck:preview` | 公開パッケージ境界で `apps/` と `e2e/` が型として通るか(`tsconfig.preview.json`) | **入る**。`pnpm verify` が実行する |
+| Browser E2E in mc-host-web | **公開パッケージ群を合成したゲームが実ブラウザで起動し、フレームが回り、停止できるか**([e2e-triage.md](./e2e-triage.md) §3.1) | **mc-host-web の Playwright command で実行**。設定と CI も [mc-host-web](https://github.com/nerima-games/mc-host-web) が所有 |
 
 `pnpm check:roster` を `verify` に入れない理由は 1 つで、
 **mc-compose の CI は mc-compose しか clone しない**からである。
@@ -201,26 +207,23 @@ CI で走れないゲートを CI が走らせるゲートに入れると、`pnp
 ファイルシステムで検証しており、これは CI で走る。
 **テストされていない腐り検出器は、それが守るはずだった腐ったマニフェストと同じ価値しか無い。**
 
-`pnpm e2e:browser` はChromiumを要するため `verify` の外に置く。
-どちらも
-公開済みpackageを `node_modules` から解決し、兄弟checkoutには依存しない。
+The browser suite runs in mc-host-web, outside this repository's `pnpm verify`; see its migration
+[PR #8](https://github.com/nerima-games/mc-host-web/pull/8) and H4b test
+[PR #11](https://github.com/nerima-games/mc-host-web/pull/11).
 
 ### 3.5.1 公開package境界での最終ゲート
 
-ブラウザエントリポイント(`apps/web/main.ts` + `index.html` + `vite.config.ts`)は
-**本物の公開済み mc-render / mx-ui / mx-redstone などを import する。** 偽物を作らず、
-consumerと同じ `node_modules` 境界を通す。
+Browser composition, `makeBrowserPreview`, Vite, Playwright, and the final browser gate are owned by
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8));
+the H4b runtime integration test was added in
+[PR #11](https://github.com/nerima-games/mc-host-web/pull/11). That repository resolves published package
+versions at the consumer boundary.
 
-`@nerima-games/mc-playground-kit` はブラウザホストの runtime dependency として使い、
-`makeBrowserPreview` がcanvas・RAF・AbortSignal・cleanupを一世代として所有する。
-Playwrightは起動後のframe増加をQAで観測し、`lifecycle.stop` 後にframeが固定され、
-QA surfaceが解放されるところまでを最終ゲートとする。
+### 3.5.2 Historical note: the host supplies `three`
 
-公開 package pin を `dependencies` に置くため、単独 checkout の
-`pnpm install --frozen-lockfile` と consumer 相当の解決を同時に検証できる。兄弟 source alias は
-local overlay の補助に限り、未公開 package を前提にしたゲートにはしない。
-
-### 3.5.2 `three` はホストが渡す —— それがなぜ prime directive 違反でないか
+This records the design decision made while the browser entry point lived in mc-compose. Paths named below
+were compose paths at that time; the current host implementation is in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8)).
 
 **2026-07-28。`three` と `@types/three` が mc-compose の `devDependencies` に入った。**
 `dependencies` ではない。使うのは `apps/web/main.ts` だけで、それは
@@ -256,10 +259,12 @@ WebGL2 コンテキストを作るのは mc-render の `new WebGLRenderer({ canv
 `canvas.width` が CSS サイズと一致すること(= `renderer.setSize` が呼ばれた)——
 を問うており、ホストから描画器の生成を外すミューテーションで赤くなることを確認してある。
 
-**現行の画面:** `apps/web` は `mc-worldgen` の生成データと、mc-render が所有する公開
+**Historical screen at the time of this review:** the compose `apps/web` used `mc-worldgen` generated data and the public
 meshing/render path を使う generated-world entrypoint である。`mc-meshing` への直接 import は
 `.oxlintrc.json` + `pnpm lint` が境界として拒否し、meshing は mc-render 側に属する。
-`apps/render-preview` は fixture-only で、`e2e/render-preview.e2e.ts` が fixture pixels を検証する。
+The compose `apps/render-preview` was fixture-only, and compose `e2e/render-preview.e2e.ts` checked fixture pixels. Both moved to
+[mc-host-web](https://github.com/nerima-games/mc-host-web) in
+[PR #8](https://github.com/nerima-games/mc-host-web/pull/8).
 generated-world の mining / persistence / chest paths は browser E2E で検証済みだが、画面全体の
 pixel golden test を意味するものではない。
 

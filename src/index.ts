@@ -30,18 +30,13 @@
  * - Session lifecycle, title <-> game. `domain/session.ts`.
  * - The QA / debug API surface. `domain/qa-api.ts`.
  * - The modding entry point. `domain/modding.ts`.
- * - The E2E suite — the final gate, and the only place cross-module
- *   interaction can be verified. TWO suites, and they must not be conflated:
- *   `pnpm e2e` (`test/e2e/`, pure, in `pnpm verify`) answers whether the
- *   declared stage ids compose into one total order; `pnpm e2e:browser`
- *   (`e2e/`, Playwright, NOT in `verify`) runs the composed game in Chromium
- *   against the browser entry point in `apps/web/`. See docs/testing.md §3.5.
+ * - The stage-order integration suite in `test/e2e/`, run by `pnpm e2e`,
+ *   checks that the declared stage ids compose into one total order.
  *
  * NOTE: `apps/` and `e2e/` are NOT part of this package. `files` above lists
  * `index.ts` and `domain` only — the entry point is an application that
- * consumes this library, and it is where the host-side wiring lives so that it
- * does not accumulate here. Read `apps/web/main.ts` before adding anything to
- * this repository that feels like startup.
+ * consumes this library, and host-side wiring lives in mc-host-web. Read that
+ * repository's host entry point before adding startup code here.
  */
 
 export * from './domain/composition'

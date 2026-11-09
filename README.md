@@ -24,20 +24,22 @@ plan.md §3.15:
 | セッションライフサイクル(タイトル ⇄ ゲーム) | `src/domain/session.ts` |
 | QA / デバッグ API | `src/domain/qa-api.ts` |
 | Modding 入口 | `src/domain/modding.ts` |
-| **E2E**(最終ゲート) | `e2e/`。公開パッケージ群を実ブラウザで合成し、起動・RAF・QA観測・teardownまで検証 |
+| Browser composition and E2E | [mc-host-web](https://github.com/nerima-games/mc-host-web) ([migration PR #8](https://github.com/nerima-games/mc-host-web/pull/8), [H4b integration test PR #11](https://github.com/nerima-games/mc-host-web/pull/11)) |
+| Compose-owned E2E | `test/e2e/roster-frame-order.test.ts` checks stage registration and ordering with Vitest |
 
 **ゲームルールは 1 行も持たない。**
 
 ## 依存
 
 `package.json#dependencies` は、合成に必要な公開パッケージを直接宣言している:
-`mc-audio` / `mc-kernel` / `mc-physics` / `mc-render` / `mc-save` / `mc-sim` /
-`mc-worldgen` / `mx-gameplay` / `mx-multiplayer` / `mx-redstone` / `mx-ui` / `effect`。
-ブラウザ起動の `makeBrowserPreview` を出荷エントリポイントから呼ぶため、
-`mc-playground-kit` も runtime dependency として宣言している。
-
-`mc-render` は入力・描画 stage を所有し、`mc-playground-kit` はブラウザの起動配線を提供する。
-compose はこれらの公開 `GameModule` を合成するだけで、ゲームルールは持たない。
+`mc-kernel` / `mc-render` / `mc-save` / `mc-sim` / `mc-worldgen` /
+`mx-gameplay` / `mx-multiplayer` / `mx-redstone` / `mx-ui` / `effect`。
+Browser hosting, `makeBrowserPreview`, and browser E2E live in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[PR #11](https://github.com/nerima-games/mc-host-web/pull/11)). The authoritative server and its shared
+runtime live in [mc-server](https://github.com/nerima-games/mc-server) ([PR #1](https://github.com/nerima-games/mc-server/pull/1));
+its shared package entry is `@nerima-games/mc-server/shared`.
+This repository keeps the stage-order Vitest suite at `test/e2e/roster-frame-order.test.ts`.
 依存の経緯と境界は [docs/architecture.md](./docs/architecture.md) §2–§5 にまとめている。
 
 **推移的には全リポジトリに到達する。だからこそ推移閉包の禁止がここで最も重要になる。**
@@ -47,11 +49,9 @@ compose はこれらの公開 `GameModule` を合成するだけで、ゲーム�
 `no-restricted-imports`(Tier4 の 2 パターン)がその import を検出して `pnpm lint` を落とす。
 **oxlint は package.json の devDependency として固定**されており、このリポジトリが以前固定していた
 `^0.12.0` から更新された。現在のバイナリは `.oxlintrc.json` を `-c` なしで自動検出し、
-`no-restricted-imports` も実装している。`mc-playground-kit` はブラウザ起動のための直接依存なので、
-その import 自体は禁止せず、package.json に直接宣言していない推移的な
-`mc-meshing` / `mc-noise` などの直接 import を禁止する。`mc-sim` は現在、公開 API を
-ブラウザ host で合成するための直接依存として宣言しており、host が行うのは stage と
-service の登録・配線だけである。
+`no-restricted-imports` も実装している。ブラウザ起動の `mc-playground-kit` は
+[mc-host-web](https://github.com/nerima-games/mc-host-web) が所有する。compose では
+package.json に直接宣言していない推移的な `mc-meshing` / `mc-noise` などの直接 import を禁止する。
 
 これが規範の機械化された半分である。ゲームルールを所有するのは引き続き sibling package であり、
 mc-compose の `mc-sim` import は公開 module の登録という合成配線に限定する。
@@ -71,7 +71,7 @@ mc-compose の `mc-sim` import は公開 module の登録という合成配線�
 | --- | --- |
 | [docs/README.md](./docs/README.md) | 索引と読む順番 |
 | [docs/responsibility.md](./docs/responsibility.md) | **PRIME DIRECTIVE。必読** |
-| [docs/architecture.md](./docs/architecture.md) | 4 階層、16 リポジトリ依存グラフ、mc-playground-kit の browser runtime 境界、mc-render の stage 所有 |
+| [docs/architecture.md](./docs/architecture.md) | 4 階層、runtime package dependencies, and the host ownership boundary |
 | [docs/public-api.md](./docs/public-api.md) | 公開 API と契約 |
 | [docs/design-notes.md](./docs/design-notes.md) | 参照実装の実測知見(回帰テスト名付き)。**必読** |
 | [docs/porting.md](./docs/porting.md) | 移植計画。LOC は実測値 |
@@ -88,7 +88,7 @@ mc-compose の `mc-sim` import は公開 module の登録という合成配線�
 | 推移閉包の禁止 | A→B、B→C のとき A は C を import できない。依存は直接依存のみが import 許可を意味する |
 | kernel は例外 | mc-kernel はどこからでも import 可 |
 | 宣言と実体の一致 | import する `@nerima-games/*` は `package.json` に記載されていなければならない |
-| mc-playground-kit の扱い | ブラウザ起動で `makeBrowserPreview` を使うため、このリポジトリでは runtime dependency。入力・描画 stage の所有者は mc-render |
+| Browser host | Maintained by [mc-host-web](https://github.com/nerima-games/mc-host-web), including `makeBrowserPreview` and browser E2E |
 
 正典は org リポジトリ `.github` の `DEPENDENCY_POLICY.md`。実効機構(の設計)は各リポジトリの
 `.oxlintrc.json` の `no-restricted-imports` であり(このリポジトリの分は本ファイル内の
@@ -135,23 +135,23 @@ Nix を使わない場合は Node.js 24 以上と pnpm 11.24.0(`corepack` 推奨
 
 | コマンド | 内容 |
 | --- | --- |
-| `pnpm typecheck` | `tsconfig.build.json` / `tsconfig.test.json` / `tsconfig.preview.json` の 3 つを型検査(`apps/` と `e2e/` を含む公開パッケージ境界も検査する) |
+| `pnpm typecheck` | Type-checks compose source and tests with `tsconfig.build.json` and `tsconfig.test.json` |
 | `pnpm lint` | `oxlint --deny-warnings`(Nix 提供)+ `ast-grep scan`(`.ast-grep/rules/*`)。**`--deny-warnings` 付きで走る**ため oxlint の `warn` ルールもビルドを落とす設計で、`.oxlintrc.json` は `-c` なしで自動的に読み込まれる。`no-type-assertion` は Wave 0 時点で pre-existing hit があるため `warning` に据え置いている(W3 で `error` に上げる) |
 | `pnpm lint:fix` | oxlint の自動修正(`ast-grep` 分は対象外) |
 | `pnpm test` | vitest(`@effect/vitest` の `it.effect` が主 API) |
 | `pnpm test:watch` | vitest watch |
-| `pnpm test:coverage` | `src/**` のカバレッジ計測 + statements / branches / functions / lines の 100% ゲート(`apps/` は対象外)。`verify` には含まれない CI 別ゲート |
-| `pnpm e2e` | E2E だけを走らせる(`vitest run test/e2e`)。純粋なので `pnpm test` も `pnpm verify` も既に拾っている |
+| `pnpm test:coverage` | `src/**` coverage and 100% statements / branches / functions / lines gate. Separate from `verify` |
+| `pnpm e2e` | Runs the compose-owned roster stage-order Vitest suite in `test/e2e/`; `pnpm test` and `pnpm verify` also include it |
 | `pnpm check:roster` | `test/e2e/roster.ts` の転記が兄弟リポジトリの実ソースと一致するかを照合。**`verify` に入っていない** — 兄弟のチェックアウトが要り、CI には無いため([docs/testing.md](./docs/testing.md) §3.5) |
-| `pnpm e2e:browser` | Chromium で全 Playwright E2E を実行。CI では `ci.yaml` の別 job(`Verify` とは並列) |
 | `pnpm changeset` | ユーザー向け変更に `.changeset/*.md` を追加する(RELEASE_STANDARD.md §1) |
-| `pnpm verify` | `typecheck && lint && test`。CI の Verify と同じ内容。`build:web` と coverage は CI の別ステップ |
+| `pnpm verify` | `typecheck && lint && test`; matches the CI Verify job. Coverage runs as a separate CI step |
 
 ## 現状
 
-このリポジトリには、公開済み sibling package を実際に合成するブラウザ composition root がある。
-`apps/web/main.ts` が DOM、WebGL、音声、保存、ネットワーク adapter を構築し、
-`startBrowserSession` を通して各 `GameModule` の起動・合成・停止を管理する。
+This repository provides the composition APIs. Browser and server entry points are maintained in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[PR #11](https://github.com/nerima-games/mc-host-web/pull/11)) and
+[mc-server](https://github.com/nerima-games/mc-server) ([PR #1](https://github.com/nerima-games/mc-server/pull/1)).
 
 確定している **仕組み**:
 
@@ -184,15 +184,14 @@ Nix を使わない場合は Node.js 24 以上と pnpm 11.24.0(`corepack` 推奨
 
 - survival / creative の両モード、チャンク生成と描画、original terrain atlas と audio bank、
   inventory / crafting / furnace / storage / farming / redstone、保存と再開をブラウザホストで合成する
-- Nether / End と dragon progression、multiplayer の authoritative entity と combat、
-  drop / vehicle / Wither / reconnect 経路を Playwright E2E で検証する
-- `pnpm e2e:browser` は全ブラウザ E2E を実行する。main への push と pull request では
-  `.github/workflows/browser-regression.yml` が代表的な機能回帰を必須チェックとして実行する
-- frame-time budget は機能回帰と混ぜず、`.github/workflows/browser-performance.yml` が独立して検証する
+- Browser composition and Playwright E2E for gameplay and multiplayer run in
+  [mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+  [PR #11](https://github.com/nerima-games/mc-host-web/pull/11)).
 
-mc-compose が所有するのはホスト配線、stage 順序、セッションライフサイクルであり、
-各ゲーム規則や adapter 実装そのものではない。公開 API の境界は
-[docs/public-api.md](./docs/public-api.md) を参照する。
+mc-compose owns module composition, stage order, and session lifecycle APIs. Browser and server host wiring
+lives in [mc-host-web](https://github.com/nerima-games/mc-host-web) and
+[mc-server](https://github.com/nerima-games/mc-server). See [docs/public-api.md](./docs/public-api.md) for the
+public API boundary.
 
 確定している **仕組み(org 標準への移行)**:
 

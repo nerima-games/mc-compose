@@ -7,6 +7,12 @@
 参照実装のパスは `<reference-impl>` 起点。
 行番号・LOC は実測(2026-07-26)。
 
+Migration note: paths such as `apps/web` and `playwright.config.ts` in these notes refer to the former
+compose tree. Current browser hosting and browser tests are in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([migration PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[H4b test PR #11](https://github.com/nerima-games/mc-host-web/pull/11)); server and shared runtime paths are in
+[mc-server](https://github.com/nerima-games/mc-server) ([PR #1](https://github.com/nerima-games/mc-server/pull/1)).
+
 ---
 
 ## DN-0: 合成層へのロジック堆積 — このリポジトリの存在理由
@@ -619,9 +625,9 @@ mod がそのフェーズになれる**ことを意味する。
 | 自動保存の `Schedule.spaced`(plan.md §3.8) | mc-sim 側。compose は stage 順序だけ |
 | フレーム予算 / adaptive quality | 参照実装は `frame-adaptive-quality.ts` を持つ。**compose には置かない** |
 | **`sim:physics` を誰が登録するのか** | **解決。DN-14。** mc-sim が登録した(`stages/registration.ts:167`)。4 本のエッジはすべて繋がり、フレームは動かなかった |
-| **mc-sim の `GameModule` を誰がホストに渡すのか** | **解決。** `apps/web/main.ts` が公開 `mc-sim` API の `registerModule` を呼び、解決済み stage を composition に登録する |
+| **mc-sim の `GameModule` を誰がホストに渡すのか** | **解決。** Historical compose path `apps/web/main.ts` called the public `mc-sim` API `registerModule`; the current browser host is [mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8)) |
 | **`InventoryService` のインスタンスを誰が構築するのか** | **解決。** `mx-gameplay` の公開 `makeGeneratedWorld` が generated `ChunkStore` と同じ `InventoryService` / Player / Entity / Time services を構築し、host はその `world.layer` を共有する |
 | **`BlockId`(数値)から canonical `ItemType` への解決を誰が持つか** | **解決。** `mc-sim` の `ItemType` は `mc-kernel` から再公開され、`mx-gameplay` の block vocabulary が drop をその型へ橋渡しする |
 | **ネットワーク同期のフェーズ位置** | **解決。DN-15。** `network:inbound`(input と physics の間)/ `network:outbound`(time-weather と camera-mirror の間)を骨格に追加。§4.2 の**拡張**であり転記ではない([architecture.md](./architecture.md) §4.5) |
-| E2E の (b) 側(振る舞いの相互作用) | 現行 browser composition gate は実装済み。[testing.md](./testing.md) §3.5。ホストは次フレームのブロック状態遷移を `data-breaks-completed` として観測する。依存 API が返す同一フレームの drop → inventory reflection と、その一回性を検証する専用シナリオは残課題 |
-| E2E ハーネス(Playwright、SwiftShader、ポインタロック不可) | 実装済み。[playwright.config.ts](../playwright.config.ts) と `pnpm e2e:browser` |
+| E2E の (b) 側(振る舞いの相互作用) | Browser composition gate is in [mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8)); see [testing.md](./testing.md) §3.5. The dedicated same-frame drop-to-inventory scenario remains an open item in this record |
+| E2E ハーネス(Playwright、SwiftShader、ポインタロック不可) | The Playwright harness is in [mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8)) |

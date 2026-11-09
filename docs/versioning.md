@@ -2,8 +2,8 @@
 
 ## 1. 現在地
 
-- **package version**: `0.1.48`
-- **ビルド**: `pnpm build:web` がブラウザ bundle を生成する
+- **package version**: `0.2.13`
+- **Browser build**: owned by [mc-host-web](https://github.com/nerima-games/mc-host-web) ([migration PR #8](https://github.com/nerima-games/mc-host-web/pull/8))
 - **`package.json#exports`**: TypeScript ソースを直接指している(`./src/index.ts`)
 - **公開状態**: この checkout からの publish 結果は未確認。publish workflow も未配置
 
@@ -25,18 +25,19 @@ plan.md §8 のリスク表も、初期段階では次の理由で publish を�
 
 ## 3. dependencies と互換性パッチ
 
-mc-compose は次の sibling package を runtime dependency として version pin している:
+mc-compose は `package.json#dependencies` に次の sibling package を直接 pin している:
 
-- `mc-audio`, `mc-kernel`, `mc-physics`, `mc-render`, `mc-save`, `mc-sim`, `mc-worldgen`
+- `mc-kernel`, `mc-render`, `mc-save`, `mc-sim`, `mc-worldgen`
 - `mx-gameplay`, `mx-multiplayer`, `mx-redstone`, `mx-ui`
-- `mc-playground-kit` — ブラウザ bootstrap のための明示的な runtime 例外
 
-`effect` も直接依存し、`pnpm-lock.yaml` はこれらの解決結果を固定する。
-まだ dist 形で公開されていない sibling package(ソースを直接 export しているもの)には、
-この checkout の TypeScript 7(`isolatedDeclarations` / `verbatimModuleSyntax` などの
-strictness)との互換性を保つため、`patches/` の patch を `pnpm-workspace.yaml` で適用している。
-その sibling が dist 形での公開に切り替わった時点で、対象パッケージの patch エントリは
-不要になる(mc-sim は 0.2.1 で切り替わり、Wave 0 でこの patch を削除した)。
+`effect` も直接依存し、`pnpm-lock.yaml` はこれらの解決結果を固定する。`mc-audio` は
+`mx-gameplay` と `mx-ui`、`mc-physics` は `mc-sim` から推移的に解決されるが、Compose の
+直接依存ではない。`mc-playground-kit` とブラウザ build は [mc-host-web](https://github.com/nerima-games/mc-host-web)
+([PR #8](https://github.com/nerima-games/mc-host-web/pull/8)) が所有する。
+
+この checkout では sibling package 向けの pnpm patch を適用していない。以前 `patches/` に
+あった `@types/three` patch はブラウザ app 用であり、Compose から削除した。mc-host-web は
+自分のブラウザ依存に対応する patch を管理する。
 
 `pnpm install --frozen-lockfile` が単独 checkout でこの境界を再現する検証手段であり、
 兄弟リポジトリの source alias や `workspace:*` を runtime 解決には使わない。
@@ -93,8 +94,9 @@ publish する理由があるとすれば:
 
 ## 7. ビルドと publish
 
-`pnpm build:web` は Vite のブラウザ向け bundle を生成する。`tsconfig.base.json` は
-`noEmit: true` で、TypeScript package の `.d.ts` / ESM emit はまだ設定していない。
+The browser bundle moved to [mc-host-web](https://github.com/nerima-games/mc-host-web) in
+[PR #8](https://github.com/nerima-games/mc-host-web/pull/8). `tsconfig.base.json` remains `noEmit: true`,
+and TypeScript package `.d.ts` / ESM emit is not configured here.
 
 現在このリポジトリで未確認・未配置なのは次の項目である:
 

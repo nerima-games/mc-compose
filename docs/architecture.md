@@ -9,16 +9,18 @@ plan.md §2.2 の 4 階層。16 リポジトリはすべてこのいずれかに
 | 安定ライブラリ | mc-kernel / mc-noise / mc-meshing / mc-physics / mc-save / mc-audio | 純粋関数・狭い界面・変更頻度が低い。相互独立で並行構築可能 |
 | 基盤 | mc-worldgen / mc-sim / mc-render / mc-playground-kit | 状態とサービス(**名詞**)。体験モジュールが乗る土台 |
 | 体験モジュール | mx-gameplay / mx-redstone / mx-ui / mx-multiplayer | ルールと UI(**動詞**)。互いを知らず、基盤サービス経由でのみ会話する |
-| 合成 | **mc-compose** | Layer マージ + stage 順序表 + E2E。**ロジックを持たない** |
+| 合成 | **mc-compose** | Layer merge + stage-order table + roster-order Vitest. **No game logic.** |
 | (グラフ外) | mc-dev-meta | 開発時ワークスペース束ね役。ゲームグラフには参加しない |
 
 **mc-compose は第 4 階層(合成)であり、グラフの頂点である。**
 
 ## 2. 依存グラフ(16 リポジトリ全体)
 
-実線 = 実行時依存(`dependencies`)、点線 = 任意の tooling 依存。
-`mc-playground-kit` は `apps/web/main.ts` が実行時に使うブラウザホストなので、
-このリポジトリでは runtime dependency として描く。
+Solid arrows = runtime dependencies (`dependencies`); dotted arrows = optional tooling dependencies.
+The browser host lives in [mc-host-web](https://github.com/nerima-games/mc-host-web)
+([migration PR #8](https://github.com/nerima-games/mc-host-web/pull/8)); the authoritative server and
+shared runtime live in [mc-server](https://github.com/nerima-games/mc-server)
+([migration PR #1](https://github.com/nerima-games/mc-server/pull/1)).
 `mc-kernel` はどこからでも import 可能なため、エッジとしては描かない。
 
 ```mermaid
@@ -71,7 +73,6 @@ graph BT
   compose --> ui
   compose --> multiplayer
   compose --> render
-  compose --> kit
 
   style compose fill:#7f1d1d,color:#ffffff
   style devmeta stroke-dasharray: 5 5
@@ -86,10 +87,10 @@ graph BT
 
 合成層 `src/` がゲームグラフとして直接扱うのは **4 つの体験モジュール + mc-render**
 である: mx-gameplay / mx-redstone / mx-ui / mx-multiplayer / mc-render。
-一方、package の runtime surface には、ブラウザ・サーバーの adapter が使う
-`mc-kernel` / `mc-sim` / `mc-worldgen` / `mc-save` / `mc-audio` などの公開 package と、
-ブラウザ起動配線を提供する `mc-playground-kit` も直接記載されている。
-これは `src/` がそれらのゲームルールを所有することを意味しない。
+Compose runtime dependencies are limited to the modules and services used by `src/`.
+The browser host consumes the published compose API from [mc-host-web](https://github.com/nerima-games/mc-host-web)
+([PR #8](https://github.com/nerima-games/mc-host-web/pull/8)); the authoritative server consumes it from
+[mc-server](https://github.com/nerima-games/mc-server) ([PR #1](https://github.com/nerima-games/mc-server/pull/1)).
 
 mc-render のエッジは縦切りスパイクが足した唯一の tier 2 エッジで、根拠は §5 にある。
 「他モジュールの stage を登録するのは配線であってルールではない」が理由であり、
@@ -127,25 +128,18 @@ compose が持つのは、名詞と動詞をどう束ねるかという**配線*
 
 回帰テスト: `test/public-api.test.ts` と roster の公開 package 境界検査。
 
-### 4.2 mc-playground-kit はブラウザホストの runtime dependency
+### 4.2 Browser hosting belongs to mc-host-web
 
-`mc-playground-kit` はブラウザの canvas / RAF / teardown とプレビュー起動を束ねる
-ホスト adapter であり、`apps/web/main.ts` が `makeBrowserPreview` を実行時に使う。
-したがって `package.json` の `dependencies` に置く。`build:web` で出荷されるブラウザ
-エントリから参照されるため、devDependency 専用にはできない。
+The browser host, Vite entry point, `makeBrowserPreview` integration, and Playwright suite live in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([migration PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[H4b integration test PR #11](https://github.com/nerima-games/mc-host-web/pull/11)).
+The host uses `mc-playground-kit` to own canvas, RAF, and teardown lifecycle; mc-compose does not depend on it.
+The authoritative multiplayer server and shared runtime live in
+[mc-server](https://github.com/nerima-games/mc-server) ([PR #1](https://github.com/nerima-games/mc-server/pull/1));
+its shared package entry is `@nerima-games/mc-server/shared`.
 
-実行時の input / render stage の所有者は `mc-render` であり、kit は stage を登録する
-ゲームモジュールではない。`mc-render` は `render:input` / `render:camera-mirror` /
-`render:chunk-sync` / `render:draw` / `render:post-fx` を登録し、kit はブラウザの
-ライフサイクルからその公開 module を起動する。
-
-この境界は二段階で検証する:
-
-1. `package.json` の runtime dependency と `.oxlintrc.json` の直接 import 境界
-2. `pnpm typecheck:preview` / `pnpm build:web` / ブラウザ E2E と、
-   `test/public-api.test.ts`・roster の stage 所有検査
-
-compose の検証は kit のミニ世界ではなく、本物の合成済みゲームを対象とする。
+mc-compose keeps the roster and stage-order Vitest test at `test/e2e/roster-frame-order.test.ts`.
+It validates the compose-owned ordering contract without starting a browser.
 
 ### 4.3 stage 実行順序表は compose が唯一所有(plan.md §2.3-3)
 
@@ -306,7 +300,11 @@ plan.md 本文に対してではない。§4.2 が実はネットワークにつ
 そして描画 stage には**ゲームルールが 1 つも無い**。体験モジュール(plan.md §2.2)が所有するのは
 VERB であり、これらを抱えたモジュールは VERB を 1 つも所有しない。名前だけの体験モジュールになる。
 
-### 5-2. 決め手は設計の対称性ではなく、実在する欠陥だった
+### 5-2. Historical: mc-render owns its stages
+
+This section records the original host implementation in mc-compose. Browser host paths cited here were
+compose paths before the migration to [mc-host-web](https://github.com/nerima-games/mc-host-web)
+([PR #8](https://github.com/nerima-games/mc-host-web/pull/8)).
 
 `InputService.endFrame`(`mc-render/application/input-service.ts`)はフレーム毎にちょうど 1 回
 呼ばれなければならない。**フレーム毎にちょうど 1 回起きるものは、定義上 stage である。**

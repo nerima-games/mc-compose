@@ -7,9 +7,8 @@
     "target": "ES2024",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    // mc-compose ships a real browser application (apps/web) in addition to its
-    // package export, so DOM is a genuine runtime need here — not, as in
-    // mc-kernel, a leaked declaration surface from Effect's Web-standard types.
+    // The exported browser-session API is consumed by browser hosts, so DOM
+    // declarations remain available to host integrations.
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "types": [],
 

@@ -2,6 +2,11 @@
 
 All counted runs used source at commit `d66f98553516072126d36c2b37aec614d7045035`, package version `0.2.13`.
 
+Historical path note: the `e2e/` files and Playwright command below refer to that mc-compose snapshot. The
+browser host, performance E2E, and Playwright setup now live in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([migration PR #8](https://github.com/nerima-games/mc-host-web/pull/8));
+the measurements below remain evidence for the recorded source revision.
+
 The target inventory is the five `parity/performance/*` rows and 22 `perf/fr-*` rows in `docs/execution/parity-ledger-plan.md`. The final W6 regression-check wave will use this baseline. The baseline adds no benchmark code. Of those 27 rows, `perf/fr-0.3` has five pass/fail samples, and `parity/performance/test-suite-count` has five unit-test count samples but no completed E2E pass count. The other 25 rows have no baseline measurement from the existing tools.
 
 ## Environment and protocol

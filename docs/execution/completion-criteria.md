@@ -4,6 +4,12 @@
 
 The upstream reference is `takeokunn/ts-minecraft`, `docs/reference/vanilla-parity.md`. It contains 66 table rows: 54 feature rows, 7 content inventory rows, and 5 performance metrics. The supplied re-audit report has 98 ledger IDs, so the two row sets are not one-to-one. The report does not provide a mapping that accounts for all 98 IDs against the upstream rows. This table records the 98 IDs and dispositions from the report without inventing that mapping. The report does not name package tag versions; each version cell records `latest tag (version not specified in report)`.
 
+Evidence paths in this ledger are from the audit snapshot. Paths in `apps/web`, `apps/multiplayer-server`,
+`apps/multiplayer-shared`, and root `e2e/` were compose paths at that time; the browser host and its tests now live in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[H4b test PR #11](https://github.com/nerima-games/mc-host-web/pull/11)), and the server/shared runtime and tests
+now live in [mc-server](https://github.com/nerima-games/mc-server) ([PR #1](https://github.com/nerima-games/mc-server/pull/1)).
+
 | Status | Rows |
 |---|---:|
 | implemented | 26 |
