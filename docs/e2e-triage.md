@@ -16,6 +16,13 @@ E2E に残すべきは「モジュール間の相互作用でしか壊れない�
 > 現行の package pin と browser E2E の検証結果は [testing.md](./testing.md) §3.5 と
 > [README.md](../README.md) を正とする。過去の判定語は、当時の契約を記録するために残している。
 
+Migration note: `apps/web` and root `e2e/` paths in entries marked as implemented in mc-compose identify the
+former compose tree. The `e2e/` commands under §0 and the referenced upstream Playwright setup describe the
+reference implementation. Browser hosting and browser E2E now live in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[H4b integration test PR #11](https://github.com/nerima-games/mc-host-web/pull/11)). The compose-owned
+`test/e2e/roster-frame-order.test.ts` remains in mc-compose.
+
 ## 0. 数え方(再現可能)
 
 ```console
@@ -790,12 +797,16 @@ mx-ui は「読む先が要る」としか言えず、mc-sim は誰が自分を�
 ### 4.4 現在地
 
 現行では、`mx-gameplay` の公開 `makeGeneratedWorld` が generated `ChunkStore` と同じ
-`InventoryService` / Player / Entity / Time services を構築し、`apps/web/main.ts` が
+`InventoryService` / Player / Entity / Time services を構築し、[mc-host-web の
+`apps/web/main.ts`](https://github.com/nerima-games/mc-host-web/blob/main/apps/web/main.ts) が
 その `world.layer` と各 service handle を同じ composition に渡している。`mc-sim` の
 `ItemType` は `mc-kernel` の canonical vocabulary を再公開し、block drop の橋渡しも
-公開 gameplay API に含まれる。survival / persistence / chest の browser paths は検証済みで、ホスト側の次フレームの
-ブロック状態遷移は `data-breaks-completed` として観測できる。残るのは exact same-frame の
-block-drop → inventory reflection を一回だけ確認する専用
+公開 gameplay API に含まれる。survival / persistence / chest の browser paths は
+[mc-host-web](https://github.com/nerima-games/mc-host-web) の [survival-combat](https://github.com/nerima-games/mc-host-web/blob/main/e2e/survival-combat.e2e.ts)、
+[persistence](https://github.com/nerima-games/mc-host-web/blob/main/e2e/persistence.e2e.ts)、
+[chest-storage](https://github.com/nerima-games/mc-host-web/blob/main/e2e/chest-storage.e2e.ts) で検証する。
+ホスト側の次フレームのブロック状態遷移は `data-breaks-completed` として観測できる。残るのは
+exact same-frame の block-drop → inventory reflection を一回だけ確認する専用
 シナリオである。[design-notes.md](./design-notes.md) の未検証表もこの現在地を正とする。
 
 ## 5. 初期調査時の移植順序（履歴）

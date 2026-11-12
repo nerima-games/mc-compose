@@ -4,10 +4,7 @@
   // flag for tests: test code is code, and a skeleton has no legacy to grandfather.
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node"],
-    "paths": {
-      "@nerima-games/mc-audio": ["../mc-audio/src/index.ts"]
-    }
+    "types": ["node"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "coverage", "dist"]

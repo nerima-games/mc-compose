@@ -2,6 +2,13 @@
 
 参照実装 `takeokunn/ts-minecraft` の `docs/reference/vanilla-parity.md`（取得: 2026-09-29）54行を、release `0.2.13` の compose host と sibling package に突合した台帳。`phase/04-performance-requirements.md` の FR-0.1〜FR-4.6 も、該当する性能・描画行に補足として反映した。
 
+The `apps/web`, `apps/multiplayer-server`, `apps/multiplayer-shared`, and `e2e/` paths below are compose paths from that audit snapshot.
+The browser host and its tests now live in [mc-host-web](https://github.com/nerima-games/mc-host-web)
+([PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[H4b test PR #11](https://github.com/nerima-games/mc-host-web/pull/11)); the server and shared runtime live in
+[mc-server](https://github.com/nerima-games/mc-server) ([PR #1](https://github.com/nerima-games/mc-server/pull/1)).
+The findings and evidence paths remain a record of the 0.2.13 compose host.
+
 ## 集計
 
 | 判定 | 件数 |

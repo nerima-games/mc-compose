@@ -441,20 +441,22 @@ mod 専用フックも優先度も pre/post パスも無い。
 
 ## 8. ブラウザ composition root と E2E
 
-公開 API の `startBrowserSession` は、ホストから注入された runtime の起動、`GameModule` の合成、
-失敗時 rollback、冪等な停止を担う。具体的な実行エントリは `apps/web/main.ts` にあり、
-DOM、WebGL、音声、保存、ネットワーク adapter を sibling package の公開 API から構築する。
-authoritative WebSocket サーバーの実行エントリは `apps/multiplayer-server/main.ts` である。
+The public `startBrowserSession` API starts injected runtimes, composes `GameModule` values, rolls back
+failed startup, and stops idempotently. The browser entry point and Playwright E2E live in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([migration PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[H4b integration test PR #11](https://github.com/nerima-games/mc-host-web/pull/11)).
+The authoritative WebSocket server and shared runtime live in
+[mc-server](https://github.com/nerima-games/mc-server) ([PR #1](https://github.com/nerima-games/mc-server/pull/1)).
+The shared import entry is `@nerima-games/mc-server/shared`.
 
 | 境界 | 実装と検証 |
 | --- | --- |
-| セッション | 起動、逆順 rollback、停止失敗の集約、冪等な stop を unit test で固定 |
-| ブラウザ起動 | smoke E2E が起動、frame、QA、描画・音声、teardown を検証 |
-| プレイ経路 | creative、survival、採掘・inventory、保存と再開を専用 E2E で検証 |
-| multiplayer | 基本同期、authoritative survival、戦闘、乗物、Wither、再接続を検証 |
-| progression | Nether / End と dragon progression を実ブラウザ経路で検証 |
+| Session API | Unit tests cover startup, reverse rollback, stop-failure aggregation, and idempotent stop |
+| Browser startup | [mc-host-web](https://github.com/nerima-games/mc-host-web) smoke E2E covers startup, frames, QA, rendering, audio, and teardown |
+| Gameplay paths | [mc-host-web](https://github.com/nerima-games/mc-host-web) E2E covers creative and survival play, mining, inventory, and persistence |
+| Multiplayer | [mc-server](https://github.com/nerima-games/mc-server) owns the server runtime; [mc-host-web](https://github.com/nerima-games/mc-host-web) owns browser multiplayer coverage |
+| Progression | [mc-host-web](https://github.com/nerima-games/mc-host-web) browser E2E covers Nether / End and dragon progression |
 
-`pnpm e2e:browser` は `e2e/*.e2e.ts` の全 Playwright スイートを Chromium で実行する。
-main への push と pull request では `.github/workflows/browser-regression.yml` が代表的な機能回帰を実行し、
-`.github/workflows/browser-performance.yml` は frame-time budget だけを独立して検証する。
-性能測定を機能回帰から分離することで、性能専用条件の変動を通常の動作保証に混ぜない。
+The browser command, Playwright configuration, and browser CI are maintained in
+[mc-host-web](https://github.com/nerima-games/mc-host-web) ([PR #8](https://github.com/nerima-games/mc-host-web/pull/8),
+[PR #11](https://github.com/nerima-games/mc-host-web/pull/11)).
