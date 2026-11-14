@@ -1,0 +1,92 @@
+[
+  {
+    "count": 1,
+    "file": "src/domain/composition.ts",
+    "ruleId": "no-raw-exported-function-parameter",
+    "text": "number"
+  },
+  {
+    "count": 3,
+    "file": "src/domain/modding.ts",
+    "ruleId": "no-raw-exported-function-parameter",
+    "text": "string"
+  },
+  {
+    "count": 4,
+    "file": "src/domain/qa-api.ts",
+    "ruleId": "no-raw-exported-function-parameter",
+    "text": "string"
+  },
+  {
+    "count": 2,
+    "file": "src/domain/stage-order.ts",
+    "ruleId": "no-raw-exported-function-parameter",
+    "text": "string"
+  },
+  {
+    "count": 2,
+    "file": "src/domain/modding.ts",
+    "ruleId": "no-raw-exported-function-return",
+    "text": "string"
+  },
+  {
+    "count": 3,
+    "file": "src/domain/qa-api.ts",
+    "ruleId": "no-raw-exported-function-return",
+    "text": "string"
+  },
+  {
+    "count": 1,
+    "file": "src/domain/session.ts",
+    "ruleId": "no-raw-exported-function-return",
+    "text": "number"
+  },
+  {
+    "count": 2,
+    "file": "src/domain/stage-order.ts",
+    "ruleId": "no-raw-exported-function-return",
+    "text": "string"
+  },
+  {
+    "count": 3,
+    "file": "src/domain/browser-session.ts",
+    "ruleId": "no-raw-exported-type-field",
+    "text": "string"
+  },
+  {
+    "count": 3,
+    "file": "src/domain/composition.ts",
+    "ruleId": "no-raw-exported-type-field",
+    "text": "string"
+  },
+  {
+    "count": 3,
+    "file": "src/domain/modding.ts",
+    "ruleId": "no-raw-exported-type-field",
+    "text": "number"
+  },
+  {
+    "count": 6,
+    "file": "src/domain/modding.ts",
+    "ruleId": "no-raw-exported-type-field",
+    "text": "string"
+  },
+  {
+    "count": 6,
+    "file": "src/domain/qa-api.ts",
+    "ruleId": "no-raw-exported-type-field",
+    "text": "string"
+  },
+  {
+    "count": 2,
+    "file": "src/domain/session.ts",
+    "ruleId": "no-raw-exported-type-field",
+    "text": "string"
+  },
+  {
+    "count": 2,
+    "file": "src/domain/stage-order.ts",
+    "ruleId": "no-raw-exported-type-field",
+    "text": "string"
+  }
+]
