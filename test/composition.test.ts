@@ -676,7 +676,7 @@ describe('C1 module contracts', () => {
         expect(error).toMatchObject({
           _tag: 'DuplicateModuleContract',
           kind: 'qa-operation',
-          id: `gameplay.<${map}>`,
+          id: 'gameplay.<map>',
         })
       }
     }),
