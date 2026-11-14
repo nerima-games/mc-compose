@@ -588,6 +588,24 @@ describe('C1 module contracts', () => {
     }),
   )
 
+  it.effect('preserves QA namespace and save slices through registerModule', () =>
+    Effect.gen(function* () {
+      const qa = qaNamespace('registered', {}, {})
+      const slices = [saveSlice('registered-state')]
+      const registered = yield* registerModule({
+        name: 'registered-module',
+        layers: EMPTY_MODULE_LAYER,
+        frameStages: Effect.succeed([]),
+        qa,
+        saveSlices: slices,
+      })
+      const game = yield* composeGame([registered])
+
+      expect(game.qaNamespaces.map((namespace) => namespace.name)).toStrictEqual([qa.name])
+      expect(game.saveSlices.map((slice) => slice.id)).toStrictEqual([slices[0].id])
+    }),
+  )
+
   it.effect('rejects duplicate namespaces without exposing a partial registry', () =>
     Effect.gen(function* () {
       const shared = qaNamespace('gameplay', {}, {})
@@ -640,6 +658,50 @@ describe('C1 module contracts', () => {
         _tag: 'DuplicateModuleContract',
         kind: 'qa-operation',
         id: 'gameplay.declaredName',
+      })
+    }),
+  )
+
+  it.effect('rejects non-record observe and command maps with their namespace-qualified IDs', () =>
+    Effect.gen(function* () {
+      for (const map of ['observe', 'command'] as const) {
+        const namespace = qaNamespace('gameplay', {}, {})
+        Object.defineProperty(namespace, map, { enumerable: true, value: null })
+
+        const error = yield* Effect.flip(
+          composeGame([moduleWithQa('gameplay', namespace, EMPTY_MODULE_LAYER)]),
+        )
+
+        expect(error).toBeInstanceOf(DuplicateModuleContract)
+        expect(error).toMatchObject({
+          _tag: 'DuplicateModuleContract',
+          kind: 'qa-operation',
+          id: `gameplay.<${map}>`,
+        })
+      }
+    }),
+  )
+
+  it.effect('rejects a non-record QA operation value with its namespace-qualified ID', () =>
+    Effect.gen(function* () {
+      const operation = {
+        name: operationName('status'),
+        input: Schema.Struct({}),
+        output: Schema.Boolean,
+        run: () => Effect.succeed(true),
+      }
+      const namespace = qaNamespace('gameplay', { status: operation }, {})
+      Object.defineProperty(namespace.observe, 'status', { enumerable: true, value: null })
+
+      const error = yield* Effect.flip(
+        composeGame([moduleWithQa('gameplay', namespace, EMPTY_MODULE_LAYER)]),
+      )
+
+      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toMatchObject({
+        _tag: 'DuplicateModuleContract',
+        kind: 'qa-operation',
+        id: 'gameplay.status',
       })
     }),
   )
