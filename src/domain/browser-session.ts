@@ -40,7 +40,7 @@ export type BrowserSessionStopError = {
 }
 
 export type BrowserSession = {
-  readonly game: ComposedGame
+  readonly game: ComposedGame<ReadonlyArray<GameModule>>
   /** Stops each successfully started runtime once, in reverse start order. */
   readonly stop: Effect.Effect<void, BrowserSessionStopError>
 }
@@ -149,7 +149,7 @@ export const startBrowserSession = (
       return Effect.gen(function* startBrowserSessionGen() {
         const { modules } = yield* startRuntimes(runtimes, started, rollbackAndFail)
 
-        const composed = composeGame(modules, options.compose)
+        const composed = yield* Effect.result(composeGame(modules, options.compose))
         if (Result.isFailure(composed)) {
           return yield* rollbackAndFail({
             _tag: 'BrowserSessionStartError',

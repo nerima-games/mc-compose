@@ -31,9 +31,21 @@ import type {
   DeltaTimeSecs,
   FrameServices,
   GameModule as KernelGameModule,
+  QaNamespace as KernelQaNamespace,
+  SaveSliceRegistration,
   StageRegistration as KernelStageRegistration,
 } from '@nerima-games/mc-kernel'
-import { Effect, Layer, Result } from 'effect'
+import {
+  ModuleContractIdSchema,
+  ModuleContractKindSchema,
+  QaNamespaceNameSchema,
+  QaOperationNameSchema,
+  SaveSliceIdSchema,
+  SaveVersionSchema,
+} from '@nerima-games/mc-kernel'
+import { Effect, Layer, Result, Schema } from 'effect'
+import type { Cause } from 'effect'
+import { QaOperationNotFound, type QaBridgeApi } from './qa-api'
 import {
   type StageConstraint,
   type StageOrderError,
@@ -77,34 +89,16 @@ export type { FrameServices } from '@nerima-games/mc-kernel'
 export type StageRegistration = KernelStageRegistration
 
 /**
- * A self-contained module Layer at the composition boundary.
+ * A module Layer at the composition boundary.
  *
  * ---------------------------------------------------------------------------
  * What is erased, what is not, and why the difference matters
  * ---------------------------------------------------------------------------
  *
- * `composeGame` takes a heterogeneous array of modules whose PROVIDED service
- * types differ. The variadic tuple is threaded through
- * `mergeModuleLayers`, `ComposedGame` and `composeGame`'s return, so the
- * composed layer exposes the union of the services the supplied modules
- * provide. An explicitly erased `GameModule` still produces `never`, which is
- * deliberately conservative: the boundary never claims an unknown service.
- *
- * `RIn` is `never`, and that is a real tightening rather than a cosmetic one.
- * With `RIn` erased to `any`, `Effect.provide(game.layer)` ERASED the
- * requirement instead of discharging it: an effect needing a service no module
- * provided typechecked and then died at runtime with `Service not found`, which
- * is the worst possible shape for this particular failure — `tsc` caught it
- * only incidentally, via `exactOptionalPropertyTypes`, and only sometimes.
- * `Layer`'s `RIn` is covariant (`out RIn`), so `Layer<X, Err, R>` is assignable
- * to `Layer<never, unknown, never>` exactly when `R` is `never`. A module must
- * therefore arrive SELF-CONTAINED, which is not a new rule: modules are peers
- * (`Layer.merge`, never `Layer.provide`), and a module needing another
- * module's services to build is the dependency edge plan.md §2.3-1 forbids
- * outright. A module that needs a platform handle takes it before it is handed
- * to `composeGame`, where the host still has the type to satisfy.
- *
- * The frame path remains precise through `FrameServices` and `runFrameWith`.
+ * `composeGame` retains the union of services produced by module layers and
+ * records their requirements, QA operation requirements, and registration
+ * requirements on the composed layer. The host can then provide that layer to
+ * the dispatcher without erasing requirements.
  */
 export type ModuleLayer = Layer.Layer<never, unknown, never>
 
@@ -130,29 +124,41 @@ export const EMPTY_MODULE_LAYER: ModuleLayer = Layer.empty as unknown as ModuleL
  * with an array there was no context in which to do that (see
  * `mc-kernel/domain/frame.ts` and its freeze checklist (b)).
  *
- * That Effect runs ONCE, at startup, and `composeGame` runs after it. So the
- * type this repository composes is kernel's with `frameStages` already
- * evaluated. Keeping the boundary there is what lets `composeGame` stay a pure
- * `Result` — resolving a total order is a calculation over ids and edges, and
- * making it an `Effect` because of somebody else's constructor would be
- * borrowing a fibre to do arithmetic.
+ * That Effect runs ONCE, at startup, and `composeGame` runs after it.
+ * `RRegister` is retained as `GameModule`'s phantom type parameter, then carried
+ * into `ComposedGame.layers` so the host can provide the registration services.
  *
- * `registerModule` below is the bridge, and it is the ONLY place `RRegister`
- * appears. It is deliberately not erased there: the host is what discharges it,
- * and the host has the type to do so.
+ * `registerModule` below is the adapter between the kernel's registration-time
+ * module and this post-registration shape. It evaluates `frameStages` once and
+ * preserves `RRegister` in the result type; it does not erase that requirement.
  */
-export type GameModule<ROut = never, Err = unknown> = Pick<
-  KernelGameModule<ROut, Err, never>,
+declare const registrationRequirements: unique symbol
+
+export type GameModule<
+  ROut = never,
+  Err = unknown,
+  RIn = never,
+  Qa extends KernelQaNamespace = KernelQaNamespace,
+  Slices extends ReadonlyArray<SaveSliceRegistration> = ReadonlyArray<SaveSliceRegistration>,
+  RRegister = never,
+> = Pick<
+  KernelGameModule<ROut, Err, RIn>,
   'layers'
 > & {
   /** For diagnostics only. Never branched on. */
   readonly name: string
   readonly frameStages: ReadonlyArray<StageRegistration>
+  readonly qa?: Qa
+  readonly saveSlices?: Slices
+  readonly [registrationRequirements]?: RRegister
 }
 
-type RegisterableGameModule<ROut, Err, RRegister> = KernelGameModule<ROut, Err, never, RRegister> & {
-  readonly name: string
-}
+type RegisterableGameModule<ROut, Err, RIn, RRegister, Qa, Slices> =
+  KernelGameModule<ROut, Err, RIn, RRegister> & {
+    readonly name: string
+    readonly qa?: Qa
+    readonly saveSlices?: Slices
+  }
 
 /**
  * Run a kernel-shaped module's registration Effect and hand back the
@@ -164,26 +170,57 @@ type RegisterableGameModule<ROut, Err, RRegister> = KernelGameModule<ROut, Err, 
  * no stage, decides nothing, and adds no behaviour — it evaluates a value the
  * module already computed and copies it into a record.
  *
- * `RRegister` flows straight through, so a module that acquires `InputService`
- * to build its input stage still forces the host to supply `InputService`. That
- * is the property the erased `ModuleLayer` cannot give, and it is why this
- * function exists rather than callers writing `Effect.map` by hand and losing
- * the parameter to inference on an erased boundary.
+ * `RRegister` flows straight through into the result's phantom type and then
+ * `ComposedGame.layers`, so a module that acquires `InputService` to build its
+ * input stage still forces the host to supply `InputService`. That is the
+ * property the erased `ModuleLayer` cannot give, and it is why this function
+ * exists rather than callers writing `Effect.map` by hand and losing the
+ * parameter to inference on an erased boundary.
  */
-export const registerModule = <RRegister, ROut = never, Err = unknown>(
-  module: RegisterableGameModule<ROut, Err, RRegister>,
-): Effect.Effect<GameModule<ROut, Err>, never, RRegister> =>
+export const registerModule = <
+  RRegister,
+  ROut = never,
+  Err = unknown,
+  RIn = never,
+  Qa extends KernelQaNamespace = KernelQaNamespace,
+  Slices extends ReadonlyArray<SaveSliceRegistration> = ReadonlyArray<SaveSliceRegistration>,
+>(
+  module: RegisterableGameModule<ROut, Err, RIn, RRegister, Qa, Slices>,
+): Effect.Effect<GameModule<ROut, Err, RIn, Qa, Slices, RRegister>, never, RRegister> =>
   Effect.map(module.frameStages, (frameStages) => ({
     frameStages,
     layers: module.layers,
     name: module.name,
+    ...(typeof module.qa === 'undefined' ? {} : { qa: module.qa }),
+    ...(typeof module.saveSlices === 'undefined' ? {} : { saveSlices: module.saveSlices }),
   }))
 
-export type ComposedGame<ROut = never, Err = unknown> = {
+type ModuleList = ReadonlyArray<
+  GameModule<never, unknown, unknown, KernelQaNamespace, ReadonlyArray<SaveSliceRegistration>, unknown>
+>
+
+export type ComposedGame<Modules extends ModuleList = ModuleList> = {
+  readonly modules: Modules
+  readonly qaNamespaces: ReadonlyArray<KernelQaNamespace>
+  readonly saveSlices: ReadonlyArray<SaveSliceRegistration>
+  readonly qaBridge: QaBridgeApi<
+    QaOperationErrorsOfModules<Modules>,
+    QaOperationRequirementsOfModules<Modules>
+  >
+  /** Every module's services, merged. */
+  readonly layers: Layer.Layer<
+    ModuleOutput<Modules>,
+    ModuleError<Modules>,
+    ModuleCompositionRequirements<Modules>
+  >
+  /** Compatibility alias for consumers of the U5-1 composition API. */
+  readonly layer: Layer.Layer<
+    ModuleOutput<Modules>,
+    ModuleError<Modules>,
+    ModuleCompositionRequirements<Modules>
+  >
   /** The resolved total order, plus the dropped and the unrecognised. */
   readonly plan: StageOrderPlan
-  /** Every module's services, merged. */
-  readonly layer: Layer.Layer<ROut, Err, never>
   /**
    * Run one frame: every stage, once, in `plan.order`.
    *
@@ -236,27 +273,264 @@ export type ComposeOptions = {
  * needed module B's services to *build*, that would be a dependency edge
  * between two experience modules, which plan.md §2.3-1 forbids outright.
  */
-type ModuleList = ReadonlyArray<GameModule<never, unknown>>
-type LayerOutput<LayerType> = LayerType extends Layer.Layer<infer ROut, unknown, never> ? ROut : never
-type LayerError<LayerType> = LayerType extends Layer.Layer<never, infer Err, never> ? Err : never
+type LayerOutput<LayerType> = LayerType extends Layer.Layer<infer ROut, infer _Err, infer _RIn>
+  ? ROut
+  : never
+type LayerError<LayerType> = LayerType extends Layer.Layer<infer _ROut, infer Err, infer _RIn>
+  ? Err
+  : never
+type LayerRequirements<LayerType> = LayerType extends Layer.Layer<infer _ROut, infer _Err, infer RIn>
+  ? RIn
+  : never
 type ModuleOutput<Modules extends ModuleList> = LayerOutput<Modules[number]['layers']>
 type ModuleError<Modules extends ModuleList> = LayerError<Modules[number]['layers']>
+type ModuleLayerRequirements<Modules extends ModuleList> = LayerRequirements<Modules[number]['layers']>
+type ModuleQa<Module> = Module extends { readonly qa?: infer Qa } ? NonNullable<Qa> : never
+
+type NamespaceOperations<Namespace> = Namespace extends {
+  readonly observe: infer Observe extends object
+  readonly command: infer Command extends object
+}
+  ? Observe[keyof Observe] | Command[keyof Command]
+  : never
+type QaOperationError<Operation> = Operation extends {
+  readonly run: (input: never) => Effect.Effect<unknown, infer Error, infer _Requirements>
+}
+  ? Error
+  : never
+type QaOperationRequirements<Operation> = Operation extends {
+  readonly input: infer Input
+  readonly output: infer Output
+  readonly run: (input: never) => Effect.Effect<unknown, infer _Error, infer Requirements>
+}
+  ? Requirements | CodecDecodingRequirements<Input> | CodecEncodingRequirements<Output>
+  : never
+type CodecDecodingRequirements<Codec> = Codec extends { readonly DecodingServices: infer Requirements }
+  ? Requirements
+  : never
+type CodecEncodingRequirements<Codec> = Codec extends { readonly EncodingServices: infer Requirements }
+  ? Requirements
+  : never
+type QaOperationErrorsOfModules<Modules extends ReadonlyArray<unknown>> = QaOperationError<
+  NamespaceOperations<ModuleQa<Modules[number]>>
+>
+type QaOperationRequirementsOfModules<Modules extends ReadonlyArray<unknown>> = QaOperationRequirements<
+  NamespaceOperations<ModuleQa<Modules[number]>>
+>
+type RegistrationRequirements<Module> = typeof registrationRequirements extends keyof Module
+  ? NonNullable<Module[typeof registrationRequirements]>
+  : never
+type ModuleRegistrationRequirements<Modules extends ReadonlyArray<unknown>> =
+  RegistrationRequirements<Modules[number]>
+type ModuleCompositionRequirements<Modules extends ModuleList> =
+  | ModuleLayerRequirements<Modules>
+  | QaOperationRequirementsOfModules<Modules>
+  | ModuleRegistrationRequirements<Modules>
+
+type DuplicateModuleContractFields = {
+  readonly kind: typeof ModuleContractKindSchema
+  readonly id: typeof ModuleContractIdSchema
+}
+
+type DuplicateModuleContractTagged = Schema.TaggedStruct<
+  'DuplicateModuleContract',
+  DuplicateModuleContractFields
+>
+
+export interface DuplicateModuleContractSelf extends Cause.YieldableError {
+  readonly _tag: 'DuplicateModuleContract'
+  readonly kind: Schema.Schema.Type<typeof ModuleContractKindSchema>
+  readonly id: Schema.Schema.Type<typeof ModuleContractIdSchema>
+}
+
+const DuplicateModuleContractBase: Schema.Class<
+  DuplicateModuleContractSelf,
+  DuplicateModuleContractTagged,
+  Cause.YieldableError
+> = Schema.TaggedError<DuplicateModuleContractSelf>()(
+  'DuplicateModuleContract',
+  {
+    kind: ModuleContractKindSchema,
+    id: ModuleContractIdSchema,
+  },
+)
+export class DuplicateModuleContract extends DuplicateModuleContractBase {}
+
+type ComposeOptionsErrorFields = {
+  readonly field: Schema.Literals<readonly ['options', 'skeleton']>
+}
+
+type ComposeOptionsErrorTagged = Schema.TaggedStruct<'ComposeOptionsError', ComposeOptionsErrorFields>
+
+export interface ComposeOptionsErrorSelf extends Cause.YieldableError {
+  readonly _tag: 'ComposeOptionsError'
+  readonly field: 'options' | 'skeleton'
+}
+
+const ComposeOptionsErrorBase: Schema.Class<
+  ComposeOptionsErrorSelf,
+  ComposeOptionsErrorTagged,
+  Cause.YieldableError
+> = Schema.TaggedError<ComposeOptionsErrorSelf>()('ComposeOptionsError', {
+  field: Schema.Literals(['options', 'skeleton']),
+})
+export class ComposeOptionsError extends ComposeOptionsErrorBase {}
+
+type ModuleContractKindInput = Schema.Codec.Encoded<typeof ModuleContractKindSchema>
+
+const duplicateModuleContract = (kind: ModuleContractKindInput, id: unknown) =>
+  Effect.gen(function* () {
+    const decodedKind = yield* Schema.decodeUnknownEffect(ModuleContractKindSchema)(kind)
+    const decodedId = yield* Schema.decodeUnknownEffect(ModuleContractIdSchema)(id)
+    return yield* Effect.fail(new DuplicateModuleContract({ kind: decodedKind, id: decodedId }))
+  })
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isSchemaCodec = (value: unknown): value is Schema.Codec<unknown> =>
+  typeof value === 'function' && Schema.isSchema(value)
+
+const validateQaOperationMap = (
+  namespace: Schema.Schema.Type<typeof QaNamespaceNameSchema>,
+  operationMap: unknown,
+  seenOperations: Set<string>,
+) =>
+  Effect.gen(function* () {
+    if (!isRecord(operationMap)) {
+      return yield* duplicateModuleContract('qa-operation', `${namespace}.<map>`)
+    }
+
+    for (const [key, value] of Object.entries(operationMap)) {
+      if (!isRecord(value)) {
+        return yield* duplicateModuleContract('qa-operation', `${namespace}.${key}`)
+      }
+      const name = yield* Schema.decodeUnknownEffect(QaOperationNameSchema)(value['name'])
+      if (
+        key !== name ||
+        typeof value['run'] !== 'function' ||
+        !isSchemaCodec(value['input']) ||
+        !isSchemaCodec(value['output'])
+      ) {
+        return yield* duplicateModuleContract('qa-operation', `${namespace}.${key}`)
+      }
+      if (seenOperations.has(name)) {
+        return yield* duplicateModuleContract('qa-operation', `${namespace}.${name}`)
+      }
+      seenOperations.add(name)
+    }
+  })
+
+const validateModuleContracts = (modules: ReadonlyArray<ModuleList[number]>) =>
+  Effect.gen(function* () {
+    const seenNamespaces = new Set<string>()
+    const seenSlices = new Set<string>()
+
+    for (const module of modules) {
+      if (Object.hasOwn(module, 'qa')) {
+        const qa = module.qa
+        if (!isRecord(qa)) {
+          return yield* duplicateModuleContract('qa-namespace', module.name)
+        }
+        const parsedQa = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            name: QaNamespaceNameSchema,
+            observe: Schema.Unknown,
+            command: Schema.Unknown,
+          }),
+        )(qa)
+        const name = parsedQa.name
+        if (seenNamespaces.has(name)) {
+          return yield* duplicateModuleContract('qa-namespace', name)
+        }
+        seenNamespaces.add(name)
+
+        const seenOperations = new Set<string>()
+        yield* validateQaOperationMap(name, parsedQa.observe, seenOperations)
+        yield* validateQaOperationMap(name, parsedQa.command, seenOperations)
+      }
+
+      if (Object.hasOwn(module, 'saveSlices')) {
+        if (!Array.isArray(module.saveSlices)) {
+          return yield* duplicateModuleContract('save-slice', module.name)
+        }
+        for (const value of module.saveSlices) {
+          const slice = isRecord(value) ? value : {}
+          const id = yield* Schema.decodeUnknownEffect(SaveSliceIdSchema)(slice['id'])
+          yield* Schema.decodeUnknownEffect(SaveVersionSchema)(slice['version'])
+          if (seenSlices.has(id)) {
+            return yield* duplicateModuleContract('save-slice', id)
+          }
+          seenSlices.add(id)
+        }
+      }
+    }
+  })
+
+type DynamicQaOperation<OperationErrors, Requirements> = {
+  readonly input: Schema.Codec<unknown>
+  readonly output: Schema.Codec<unknown>
+  readonly run: (input: unknown) => Effect.Effect<unknown, OperationErrors, Requirements>
+}
+
+const makeQaBridge = <OperationErrors, Requirements>(
+  namespaces: ReadonlyArray<KernelQaNamespace>,
+): QaBridgeApi<OperationErrors, Requirements> => {
+  const registry = new Map<string, Map<string, DynamicQaOperation<OperationErrors, Requirements>>>()
+  for (const namespace of namespaces) {
+    const operations = new Map<string, DynamicQaOperation<OperationErrors, Requirements>>()
+    for (const operationMap of [namespace.observe, namespace.command]) {
+      for (const [key, value] of Object.entries(operationMap)) {
+        operations.set(key, value)
+      }
+    }
+    registry.set(namespace.name, operations)
+  }
+
+  return {
+    run: (namespace, operation, inputJson) => {
+      const decodedNamespace = Schema.decodeUnknownEffect(QaNamespaceNameSchema)(namespace)
+      const decodedOperation = Schema.decodeUnknownEffect(QaOperationNameSchema)(operation)
+      return Effect.gen(function* dispatchQaOperation() {
+        const validNamespace = yield* decodedNamespace
+        const validOperation = yield* decodedOperation
+        const registered = registry.get(validNamespace)?.get(validOperation)
+        if (typeof registered === 'undefined') {
+          return yield* Effect.fail(new QaOperationNotFound({ namespace: validNamespace, operation: validOperation }))
+        }
+        const json = yield* Schema.decodeUnknownEffect(Schema.Json)(inputJson)
+        const input = yield* Schema.decodeUnknownEffect(registered.input)(json)
+        const output = yield* registered.run(input)
+        const encoded = yield* Schema.encodeUnknownEffect(registered.output)(output)
+        return yield* Schema.decodeUnknownEffect(Schema.Json)(encoded)
+      })
+    },
+  }
+}
 
 export const mergeModuleLayers = <const Modules extends ModuleList>(
   modules: Modules,
-): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, never> => {
+): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>> => {
   // Seeded with EMPTY_MODULE_LAYER; see that constant for why `Layer.empty`
   // Cannot be used directly.
   //
-  let merged: ModuleLayer = EMPTY_MODULE_LAYER
+  let merged: Layer.Layer<unknown, unknown, unknown> = EMPTY_MODULE_LAYER as unknown as Layer.Layer<
+    unknown,
+    unknown,
+    unknown
+  >
   for (const module of modules) {
-    merged = Layer.merge(merged, module.layers)
+    merged = Layer.merge(merged, module.layers) as unknown as Layer.Layer<unknown, unknown, unknown>
   }
-  return merged as unknown as Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, never>
+  return merged as unknown as Layer.Layer<
+    ModuleOutput<Modules>,
+    ModuleError<Modules>,
+    ModuleLayerRequirements<Modules>
+  >
 }
 
 /** Every module's stages, flattened. Order here is irrelevant — the resolver sorts. */
-export const collectStages = (modules: ReadonlyArray<GameModule>): ReadonlyArray<StageRegistration> =>
+export const collectStages = (modules: ReadonlyArray<ModuleList[number]>): ReadonlyArray<StageRegistration> =>
   modules.flatMap((module) => [...module.frameStages])
 
 const asConstraint = (registration: StageRegistration): StageConstraint => {
@@ -266,48 +540,99 @@ const asConstraint = (registration: StageRegistration): StageConstraint => {
   return { after: registration.after, id: registration.id }
 }
 
+const collectQaNamespaces = (
+  modules: ReadonlyArray<ModuleList[number]>,
+): ReadonlyArray<KernelQaNamespace> => {
+  const namespaces: Array<KernelQaNamespace> = []
+  for (const module of modules) {
+    const namespace = module.qa
+    if (typeof namespace !== 'undefined') {
+      namespaces.push(namespace)
+    }
+  }
+  return namespaces
+}
+
+const collectSaveSlices = (
+  modules: ReadonlyArray<ModuleList[number]>,
+): ReadonlyArray<SaveSliceRegistration> => {
+  const saveSlices: Array<SaveSliceRegistration> = []
+  for (const module of modules) {
+    const moduleSaveSlices = module.saveSlices
+    if (typeof moduleSaveSlices === 'undefined') {
+      continue
+    }
+    for (const slice of moduleSaveSlices) {
+      saveSlices.push(slice)
+    }
+  }
+  return saveSlices
+}
+
+const composeSuccessfulGame = <const Modules extends ModuleList>(
+  modules: Modules,
+  plan: StageOrderPlan,
+): ComposedGame<Modules> => {
+  const stages = collectStages(modules)
+  const byId = new Map(stages.map((stage) => [stage.id, stage] as const))
+  // `plan.order` is a permutation of these stages, after the resolver has
+  // confirmed that stage ids are unique.
+  const ordered = plan.order.map((id) => byId.get(id)!)
+  const qaNamespaces = collectQaNamespaces(modules)
+  const saveSlices = collectSaveSlices(modules)
+  const mergedLayers: Layer.Layer<
+    ModuleOutput<Modules>,
+    ModuleError<Modules>,
+    ModuleCompositionRequirements<Modules>
+  > = mergeModuleLayers(modules)
+  const qaBridge = makeQaBridge<
+    QaOperationErrorsOfModules<Modules>,
+    QaOperationRequirementsOfModules<Modules>
+  >(qaNamespaces)
+  const runFrame = (dt: DeltaTimeSecs): Effect.Effect<void, never, FrameServices> =>
+    Effect.forEach(ordered, (stage) => stage.run(dt), { discard: true })
+
+  return {
+    layers: mergedLayers,
+    layer: mergedLayers,
+    moduleNames: modules.map((module) => module.name),
+    modules,
+    plan,
+    qaBridge,
+    qaNamespaces,
+    runFrame,
+    runFrameWith: (services) => (dt) => Effect.provide(runFrame(dt), services),
+    saveSlices,
+    warnings: describeStagePlanWarnings(plan),
+  }
+}
+
 /**
- * Compose modules into a runnable game.
- *
- * Fails only for reasons that make a frame impossible to define: a duplicate
- * stage id, or a cycle. Everything else — a dangling `after`, a module with no
- * stages, an empty module list — is legal and reported rather than rejected.
+ * Compose modules, validating their QA namespaces and save-slice registrations
+ * before exposing the composed runtime.
  */
 export const composeGame = <const Modules extends ModuleList>(
   modules: Modules,
   options: ComposeOptions = {},
-): Result.Result<ComposedGame<ModuleOutput<Modules>, ModuleError<Modules>>, StageOrderError> => {
+): Effect.Effect<
+  ComposedGame<Modules>,
+  DuplicateModuleContract | ComposeOptionsError | Schema.SchemaError | StageOrderError
+> => {
+  if (typeof options !== 'object' || options === null) {
+    return Effect.fail(new ComposeOptionsError({ field: 'options' }))
+  }
+  const hasSkeleton = Object.hasOwn(options, 'skeleton')
+  const skeleton = hasSkeleton ? options.skeleton : STANDARD_STAGE_SKELETON
+  if (!Array.isArray(skeleton)) {
+    return Effect.fail(new ComposeOptionsError({ field: 'skeleton' }))
+  }
+
   const stages = collectStages(modules)
-  const skeleton = options.skeleton ?? STANDARD_STAGE_SKELETON
-
-  return Result.map(
-    resolveStageOrder(stages.map(asConstraint), { skeleton }),
-    (plan): ComposedGame<ModuleOutput<Modules>, ModuleError<Modules>> => {
-      const byId = new Map(stages.map((stage) => [stage.id, stage] as const))
-      // Non-null: `plan.order` is a permutation of `registered`, which
-      // `resolveStageOrder` built from exactly these `stages`' ids — and this
-      // Callback only runs on `Result.Success`, i.e. only once
-      // `collectRegistered` has already confirmed those ids are unique. So
-      // Every id `plan.order` yields is present in `byId`, built from the
-      // Same `stages` array.
-      const ordered = plan.order.map((id) => byId.get(id)!)
-
-      // Note what is NOT here: no try/catch, no per-stage timing, no
-      // Conditional skip, no budget. Adding any of them would be adding
-      // Behaviour to the composition layer. Frame budgeting, if it is ever
-      // Wanted, is a stage like any other and belongs to the module that
-      // Owns the frame clock.
-      const runFrame = (dt: DeltaTimeSecs): Effect.Effect<void, never, FrameServices> =>
-        Effect.forEach(ordered, (stage) => stage.run(dt), { discard: true })
-
-      return {
-        layer: mergeModuleLayers(modules),
-        moduleNames: modules.map((module) => module.name),
-        plan,
-        runFrame,
-        runFrameWith: (services) => (dt) => Effect.provide(runFrame(dt), services),
-        warnings: describeStagePlanWarnings(plan),
-      }
-    },
-  )
+  return Effect.flatMap(validateModuleContracts(modules), () => {
+    const order = resolveStageOrder(stages.map(asConstraint), { skeleton })
+    if (Result.isFailure(order)) {
+      return Effect.fail(order.failure)
+    }
+    return Effect.succeed(composeSuccessfulGame(modules, order.success))
+  })
 }
