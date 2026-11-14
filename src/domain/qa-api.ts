@@ -21,8 +21,10 @@
  */
 import { QaNamespaceNameSchema, QaOperationNameSchema } from '@nerima-games/mc-kernel'
 import type { QaNamespaceName, QaOperationName } from '@nerima-games/mc-kernel'
-import { Context, Effect, Result, Schema } from 'effect'
-import type { Cause } from 'effect'
+import { type Cause, Context, Effect, Result, Schema } from 'effect'
+
+const schemaTaggedError = Schema.TaggedError
+const contextService = Context.Service
 
 /**
  * The property name the QA API is published under.
@@ -204,7 +206,7 @@ const QaOperationNotFoundBase: Schema.Class<
   QaOperationNotFoundSelf,
   QaOperationNotFoundTagged,
   Cause.YieldableError
-> = Schema.TaggedError<QaOperationNotFoundSelf>()('QaOperationNotFound', {
+> = schemaTaggedError<QaOperationNotFoundSelf>()('QaOperationNotFound', {
   namespace: QaNamespaceNameSchema,
   operation: QaOperationNameSchema,
 })
@@ -214,4 +216,4 @@ export class QaOperationNotFound extends QaOperationNotFoundBase {}
 export const QaBridge = <Requirements = never>(): Context.Service<
   QaBridgeApi<unknown, Requirements>,
   QaBridgeApi<unknown, Requirements>
-> => Context.Service<QaBridgeApi<unknown, Requirements>>('mc-compose/domain/QaBridge')
+> => contextService<QaBridgeApi<unknown, Requirements>>('mc-compose/domain/QaBridge')
