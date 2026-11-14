@@ -602,7 +602,7 @@ describe('C1 module contracts', () => {
       const game = yield* composeGame([registered])
 
       expect(game.qaNamespaces.map((namespace) => namespace.name)).toStrictEqual([qa.name])
-      expect(game.saveSlices.map((slice) => slice.id)).toStrictEqual([slices[0].id])
+      expect(game.saveSlices.map((slice) => slice.id)).toStrictEqual([saveSliceId('registered-state')])
     }),
   )
 
