@@ -5,7 +5,7 @@ import {
   type GameModule,
   composeGame,
 } from './composition'
-import { Effect, Either, Ref } from 'effect'
+import { Effect, Ref, Result } from 'effect'
 import type { StageOrderError } from './stage-order'
 
 /**
@@ -56,9 +56,9 @@ const stopRuntimes = (
     const failures: Array<BrowserRuntimeStopFailure> = []
 
     for (const runtime of [...runtimes].reverse()) {
-      const result = yield* Effect.either(runtime.stop)
-      if (Either.isLeft(result)) {
-        failures.push({ cause: result.left, moduleName: runtime.name })
+      const result = yield* Effect.result(runtime.stop)
+      if (Result.isFailure(result)) {
+        failures.push({ cause: result.failure, moduleName: runtime.name })
       }
     }
 
@@ -104,18 +104,18 @@ const startRuntimes = (
     const modules: Array<GameModule> = []
 
     for (const runtime of runtimes) {
-      const result = yield* Effect.either(runtime.start)
-      if (Either.isLeft(result)) {
+      const result = yield* Effect.result(runtime.start)
+      if (Result.isFailure(result)) {
         return yield* rollbackAndFail({
           _tag: 'BrowserSessionStartError',
-          cause: result.left,
+          cause: result.failure,
           moduleName: runtime.name,
           phase: 'start',
         })
       }
 
       started.push(runtime)
-      modules.push(result.right)
+      modules.push(result.success)
     }
 
     return { modules }
@@ -150,10 +150,10 @@ export const startBrowserSession = (
         const { modules } = yield* startRuntimes(runtimes, started, rollbackAndFail)
 
         const composed = composeGame(modules, options.compose)
-        if (Either.isLeft(composed)) {
+        if (Result.isFailure(composed)) {
           return yield* rollbackAndFail({
             _tag: 'BrowserSessionStartError',
-            cause: composed.left,
+            cause: composed.failure,
             moduleName: unattributedModule(),
             phase: 'compose',
           })
@@ -174,7 +174,7 @@ export const startBrowserSession = (
           }
         })
 
-        return { game: composed.right, stop }
+        return { game: composed.success, stop }
       }).pipe(Effect.onInterrupt(() => Effect.asVoid(rollback)))
     })
   })

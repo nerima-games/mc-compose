@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { Result } from 'effect'
+import { equipmentItem, itemStack } from '@nerima-games/mc-sim'
 
 import {
   armorDamageWithEnchantments,
+  armorPointsForEquipment,
   bowDamageWithEnchantments,
   decodeEnchantedItemSnapshot,
   durabilityWearWithEnchantments,
@@ -45,10 +48,20 @@ describe('enchantment effects', () => {
       { current: 240, max: 240 },
       [{ id: 'protection', level: 4 }],
     )
+    const armorPoints = armorPointsForEquipment({
+      slots: {
+        head: Result.getOrThrow(Result.flatMap(itemStack('iron_helmet', 1), equipmentItem)),
+        chest: Result.getOrThrow(Result.flatMap(itemStack('iron_chestplate', 1), equipmentItem)),
+        legs: Result.getOrThrow(Result.flatMap(itemStack('iron_leggings', 1), equipmentItem)),
+        feet: Result.getOrThrow(Result.flatMap(itemStack('iron_boots', 1), equipmentItem)),
+        offhand: null,
+      },
+    })
 
+    expect(armorPoints).toBe(15)
     expect(
-      armorDamageWithEnchantments({ amount: 10, cause: 'generic' }, 15, [chestplate]),
-    ).toEqual({ amount: 3.36, cause: 'generic' })
+      armorDamageWithEnchantments({ amount: 10, cause: 'mob' }, armorPoints, [chestplate]),
+    ).toEqual({ amount: 5.04, cause: 'mob' })
   })
 
   it('applies Efficiency V to mining speed', () => {
@@ -61,15 +74,19 @@ describe('enchantment effects', () => {
     expect(miningSpeedWithEnchantments(2, pickaxe)).toBe(28)
   })
 
-  it('uses the Fortune III fractional boundary', () => {
+  it('uses the Fortune III integer multiplier boundaries', () => {
     const pickaxe = enchantedItem(
       'diamond_pickaxe',
       { current: 1561, max: 1561 },
       [{ id: 'fortune', level: 3 }],
     )
 
+    expect(fortuneDropCountWithEnchantments(2, pickaxe, 0.399999999)).toBe(2)
+    expect(fortuneDropCountWithEnchantments(2, pickaxe, 0.4)).toBe(4)
     expect(fortuneDropCountWithEnchantments(2, pickaxe, 0.499)).toBe(4)
-    expect(fortuneDropCountWithEnchantments(2, pickaxe, 0.5)).toBe(3)
+    expect(fortuneDropCountWithEnchantments(2, pickaxe, 0.5)).toBe(4)
+    expect(fortuneDropCountWithEnchantments(2, pickaxe, 0.599999999)).toBe(4)
+    expect(fortuneDropCountWithEnchantments(2, pickaxe, 0.6)).toBe(6)
   })
 
   it('counts boundary and invalid Unbreaking II rolls as wear', () => {
@@ -99,7 +116,7 @@ describe('enchanted item snapshots', () => {
     expect(encoded).toEqual({
       ok: true,
       encoded:
-        '{"item":"diamond_pickaxe","durability":{"current":1500,"max":1561},"enchantments":[{"id":"efficiency","level":5},{"id":"unbreaking","level":2},{"id":"fortune","level":3}]}',
+        '{"item":"diamond_pickaxe","durability":{"current":1500,"max":1561},"enchantments":[{"id":"efficiency","level":5},{"id":"fortune","level":3},{"id":"unbreaking","level":2}]}',
     })
     if (!encoded.ok) throw new Error('expected the enchanted item to encode')
 
@@ -110,8 +127,8 @@ describe('enchanted item snapshots', () => {
         durability: { current: 1500, max: 1561 },
         enchantments: [
           { id: 'efficiency', level: 5 },
-          { id: 'unbreaking', level: 2 },
           { id: 'fortune', level: 3 },
+          { id: 'unbreaking', level: 2 },
         ],
       },
     })

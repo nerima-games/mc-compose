@@ -48,7 +48,7 @@
  * resolver only knows ids and edges; it has never heard of a block, a player or
  * a chunk, and it must stay that way.
  */
-import { Either } from 'effect'
+import { Result } from 'effect'
 import { type StageId } from '@nerima-games/mc-kernel'
 
 /**
@@ -372,15 +372,15 @@ const findCycle = (
 /** --- 1. Registrations must be unique ------------------------------------- */
 const collectRegistered = (
   constraints: ReadonlyArray<StageConstraint>,
-): Either.Either<ReadonlySet<StageId>, StageOrderError> => {
+): Result.Result<ReadonlySet<StageId>, StageOrderError> => {
   const registered = new Set<StageId>()
   for (const constraint of constraints) {
     if (registered.has(constraint.id)) {
-      return Either.left({ _tag: 'DuplicateStage', id: constraint.id })
+      return Result.fail({ _tag: 'DuplicateStage', id: constraint.id })
     }
     registered.add(constraint.id)
   }
-  return Either.right(registered)
+  return Result.succeed(registered)
 }
 
 /** The `successors`/`indegree` graph that steps 2-4 build and consume. */
@@ -589,10 +589,10 @@ const unmatchedPhaseStages = (
 export const resolveStageOrder = (
   constraints: ReadonlyArray<StageConstraint>,
   options: ResolveOptions = {},
-): Either.Either<StageOrderPlan, StageOrderError> => {
+): Result.Result<StageOrderPlan, StageOrderError> => {
   const skeleton = options.skeleton ?? []
 
-  return Either.flatMap(collectRegistered(constraints), (registered) => {
+  return Result.flatMap(collectRegistered(constraints), (registered) => {
     const graph = initializeGraph(registered)
     const dangling = collectDeclaredEdges(constraints, registered, graph)
     addSkeletonChainEdges(registered, skeleton, graph)
@@ -601,14 +601,14 @@ export const resolveStageOrder = (
     const order = kahnOrder(registered, graph, compare)
 
     if (order.length !== registered.size) {
-      return Either.left({
+      return Result.fail({
         _tag: 'StageCycle' as const,
         cycle: findStageCycle(order, graph, { compare, registered }),
       })
     }
 
     const unmatchedPhase = unmatchedPhaseStages(skeleton, registered)
-    return Either.right({ dangling, order, unmatchedPhase })
+    return Result.succeed({ dangling, order, unmatchedPhase })
   })
 }
 
