@@ -92,3 +92,201 @@ jobs:
         uses: nerima-games/.github/conformance/ast-grep@f594176eb568341ab31babbfef16a260979f75f2
         with:
           public-api-baseline: .github/conformance/public-api-baseline.json
+
+  roster-conformance:
+    name: Roster manifest conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout mc-compose
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Read exact sibling package pins
+        id: pins
+        run: |
+          node <<'NODE' >> "$GITHUB_OUTPUT"
+          const fs = require('node:fs')
+          const manifest = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+          const dependencies = {
+            ...manifest.dependencies,
+            ...manifest.devDependencies,
+          }
+          const expected = [
+            'mc-kernel',
+            'mc-render',
+            'mc-save',
+            'mc-sim',
+            'mc-worldgen',
+            'mx-gameplay',
+            'mx-multiplayer',
+            'mx-redstone',
+            'mx-ui',
+          ]
+          const actual = Object.keys(dependencies)
+            .filter((name) => name.startsWith('@nerima-games/'))
+            .map((name) => name.slice('@nerima-games/'.length))
+            .sort()
+
+          if (actual.join('\n') !== [...expected].sort().join('\n')) {
+            throw new Error('Update the roster checkout steps to match package.json sibling dependencies.')
+          }
+
+          for (const repository of expected) {
+            const version = dependencies[`@nerima-games/${repository}`]
+            if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) {
+              throw new Error(`@nerima-games/${repository} must use an exact version pin.`)
+            }
+            process.stdout.write(`${repository.replaceAll('-', '_')}=${version}\n`)
+          }
+          NODE
+
+      - name: Checkout mc-kernel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mc-kernel
+          ref: v${{ steps.pins.outputs.mc_kernel }}
+          path: roster/mc-kernel
+          persist-credentials: false
+
+      - name: Checkout mc-render
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mc-render
+          ref: v${{ steps.pins.outputs.mc_render }}
+          path: roster/mc-render
+          persist-credentials: false
+
+      - name: Checkout mc-save
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mc-save
+          ref: v${{ steps.pins.outputs.mc_save }}
+          path: roster/mc-save
+          persist-credentials: false
+
+      - name: Checkout mc-sim
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mc-sim
+          ref: v${{ steps.pins.outputs.mc_sim }}
+          path: roster/mc-sim
+          persist-credentials: false
+
+      - name: Checkout mc-worldgen
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mc-worldgen
+          ref: v${{ steps.pins.outputs.mc_worldgen }}
+          path: roster/mc-worldgen
+          persist-credentials: false
+
+      - name: Checkout mx-gameplay
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mx-gameplay
+          ref: v${{ steps.pins.outputs.mx_gameplay }}
+          path: roster/mx-gameplay
+          persist-credentials: false
+
+      - name: Checkout mx-multiplayer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mx-multiplayer
+          ref: v${{ steps.pins.outputs.mx_multiplayer }}
+          path: roster/mx-multiplayer
+          persist-credentials: false
+
+      - name: Checkout mx-redstone
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mx-redstone
+          ref: v${{ steps.pins.outputs.mx_redstone }}
+          path: roster/mx-redstone
+          persist-credentials: false
+
+      - name: Checkout mx-ui
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mx-ui
+          ref: v${{ steps.pins.outputs.mx_ui }}
+          path: roster/mx-ui
+          persist-credentials: false
+
+      # This roster-only sibling is not a direct mc-compose package dependency.
+      - name: Checkout mc-playground-kit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: nerima-games/mc-playground-kit
+          ref: v0.4.0
+          path: roster/mc-playground-kit
+          persist-credentials: false
+
+      - name: Report checked out repositories and tags
+        env:
+          MC_KERNEL_VERSION: ${{ steps.pins.outputs.mc_kernel }}
+          MC_RENDER_VERSION: ${{ steps.pins.outputs.mc_render }}
+          MC_SAVE_VERSION: ${{ steps.pins.outputs.mc_save }}
+          MC_SIM_VERSION: ${{ steps.pins.outputs.mc_sim }}
+          MC_WORLDGEN_VERSION: ${{ steps.pins.outputs.mc_worldgen }}
+          MX_GAMEPLAY_VERSION: ${{ steps.pins.outputs.mx_gameplay }}
+          MX_MULTIPLAYER_VERSION: ${{ steps.pins.outputs.mx_multiplayer }}
+          MX_REDSTONE_VERSION: ${{ steps.pins.outputs.mx_redstone }}
+          MX_UI_VERSION: ${{ steps.pins.outputs.mx_ui }}
+        run: |
+          set -euo pipefail
+          report_checkout() {
+            local repository="$1"
+            local expected_tag="v$2"
+            local actual_tag
+            actual_tag="$(git -C "roster/$repository" describe --tags --exact-match)"
+            if [[ "$actual_tag" != "$expected_tag" ]]; then
+              printf 'Expected %s at %s, checked out %s\n' "$repository" "$expected_tag" "$actual_tag" >&2
+              return 1
+            fi
+            printf 'Checked out nerima-games/%s at %s\n' "$repository" "$actual_tag"
+          }
+          report_checkout mc-kernel "$MC_KERNEL_VERSION"
+          report_checkout mc-render "$MC_RENDER_VERSION"
+          report_checkout mc-save "$MC_SAVE_VERSION"
+          report_checkout mc-sim "$MC_SIM_VERSION"
+          report_checkout mc-worldgen "$MC_WORLDGEN_VERSION"
+          report_checkout mx-gameplay "$MX_GAMEPLAY_VERSION"
+          report_checkout mx-multiplayer "$MX_MULTIPLAYER_VERSION"
+          report_checkout mx-redstone "$MX_REDSTONE_VERSION"
+          report_checkout mx-ui "$MX_UI_VERSION"
+          printf 'Checked out nerima-games/mc-playground-kit at %s\n' \
+            "$(git -C roster/mc-playground-kit describe --tags --exact-match)"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          cache: "pnpm"
+
+      - name: Set up Nix
+        uses: ./.github/actions/nix-setup
+        with:
+          cachix-cache: ${{ vars.CACHIX_CACHE }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Configure GitHub Packages authentication
+        run: pnpm config set --location=global //npm.pkg.github.com/:_authToken "$NODE_AUTH_TOKEN"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: nix develop --command pnpm install --frozen-lockfile
+
+      - name: Check roster manifest
+        run: nix develop --command pnpm check:roster
+        env:
+          MC_ROSTER_ROOT: ${{ github.workspace }}/roster
