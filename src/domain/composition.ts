@@ -573,11 +573,11 @@ export function mergeModuleLayers<const Modules extends ModuleList>(
   modules: Modules,
 ): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>>
 export function mergeModuleLayers(modules: ModuleList): Layer.Layer<never, unknown, unknown> {
-  const [first, ...rest] = modules
-  if (typeof first === 'undefined') {
+  if (!modules.length) {
     return Layer.empty
   }
-  return Layer.mergeAll(first.layers, ...rest.map(({ layers }) => layers))
+  const [first, ...rest] = modules
+  return Layer.mergeAll(first!.layers, ...rest.map(({ layers }) => layers))
 }
 
 /** Every module's stages, flattened. Order here is irrelevant — the resolver sorts. */
