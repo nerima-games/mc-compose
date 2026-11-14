@@ -19,9 +19,13 @@
  * install path untestable without a DOM. The browser entry point passes
  * `globalThis` in; a test passes a plain object.
  */
-import { QaNamespaceNameSchema, QaOperationNameSchema } from '@nerima-games/mc-kernel'
-import type { QaNamespaceName, QaOperationName } from '@nerima-games/mc-kernel'
 import { type Cause, Context, Effect, Result, Schema } from 'effect'
+import {
+  type QaNamespaceName,
+  type QaOperationName,
+  QaNamespaceNameSchema,
+  QaOperationNameSchema,
+} from '@nerima-games/mc-kernel'
 
 const schemaTaggedError = Schema.TaggedError
 const contextService = Context.Service

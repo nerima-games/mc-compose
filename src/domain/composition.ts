@@ -27,29 +27,29 @@
  * whether one should run. A stage that should sometimes not run contains that
  * decision inside its own `run`, in the repository that owns it.
  */
+import { type Cause, Effect, Layer, Result, Schema } from 'effect'
 import {
   type DeltaTimeSecs,
   type FrameServices,
   type GameModule as KernelGameModule,
+  type QaNamespace as KernelQaNamespace,
+  type StageRegistration as KernelStageRegistration,
   ModuleContractIdSchema,
   ModuleContractKindSchema,
-  type QaNamespace as KernelQaNamespace,
   QaNamespaceNameSchema,
   QaOperationNameSchema,
   SaveSliceIdSchema,
   type SaveSliceRegistration,
   SaveVersionSchema,
-  type StageRegistration as KernelStageRegistration,
 } from '@nerima-games/mc-kernel'
-import { type Cause, Effect, Layer, Result, Schema } from 'effect'
 import { type QaBridgeApi, QaOperationNotFound } from './qa-api'
 import {
-  describeStagePlanWarnings,
-  resolveStageOrder,
   type StageConstraint,
   type StageOrderError,
   type StageOrderPlan,
   type StagePhase,
+  describeStagePlanWarnings,
+  resolveStageOrder,
 } from './stage-order'
 import { STANDARD_STAGE_SKELETON } from './stage-skeleton'
 
@@ -401,12 +401,14 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isSchemaCodec = (value: unknown): value is Schema.Codec<unknown> =>
   typeof value === 'function' && Schema.isSchema(value)
 
-const validateQaOperation = (
-  namespace: Schema.Schema.Type<typeof QaNamespaceNameSchema>,
-  key: string,
-  value: unknown,
-  seenOperations: Set<string>,
-) =>
+type QaOperationValidation = {
+  readonly key: string
+  readonly namespace: Schema.Schema.Type<typeof QaNamespaceNameSchema>
+  readonly seenOperations: Set<string>
+  readonly value: unknown
+}
+
+const validateQaOperation = ({ key, namespace, seenOperations, value }: QaOperationValidation) =>
   Effect.gen(function* validateQaOperationGen() {
     if (!isRecord(value)) {
       return yield* duplicateModuleContract('qa-operation', `${namespace}.${key}`)
@@ -432,7 +434,7 @@ const validateQaOperationMap = (
       return yield* duplicateModuleContract('qa-operation', `${namespace}.<map>`)
     }
     for (const [key, value] of Object.entries(operationMap)) {
-      yield* validateQaOperation(namespace, key, value, seenOperations)
+      yield* validateQaOperation({ key, namespace, seenOperations, value })
     }
   })
 
@@ -447,27 +449,49 @@ const SaveSliceContractSchema = schemaStruct({
   version: SaveVersionSchema,
 })
 
-const validateModuleQa = (
-  module: ModuleList[number],
-  seenNamespaces: Set<string>,
-) =>
-  Effect.gen(function* validateModuleQaGen() {
-    const { qa } = module
-    if (!Object.hasOwn(module, 'qa')) {
-      return
-    }
-    if (!isRecord(qa)) {
-      return yield* duplicateModuleContract('qa-namespace', module.name)
-    }
-    const parsedQa = yield* Schema.decodeUnknownEffect(QaNamespaceRegistrationSchema)(qa)
-    const { command, name, observe } = parsedQa
+const validateQaNamespaceName = (name: string, seenNamespaces: Set<string>) =>
+  Effect.gen(function* validateQaNamespaceNameGen() {
     if (seenNamespaces.has(name)) {
       return yield* duplicateModuleContract('qa-namespace', name)
     }
     seenNamespaces.add(name)
+  })
+
+const validateQaOperations = (
+  namespace: Schema.Schema.Type<typeof QaNamespaceNameSchema>,
+  observe: unknown,
+  command: unknown,
+) =>
+  Effect.gen(function* validateQaOperationsGen() {
     const seenOperations = new Set<string>()
-    yield* validateQaOperationMap(name, observe, seenOperations)
-    yield* validateQaOperationMap(name, command, seenOperations)
+    yield* validateQaOperationMap(namespace, observe, seenOperations)
+    yield* validateQaOperationMap(namespace, command, seenOperations)
+  })
+
+type QaNamespaceValidation = {
+  readonly moduleName: string
+  readonly qa: unknown
+  readonly seenNamespaces: Set<string>
+}
+
+const validateQaNamespace = ({ moduleName, qa, seenNamespaces }: QaNamespaceValidation) =>
+  Effect.gen(function* validateQaNamespaceGen() {
+    if (!isRecord(qa)) {
+      return yield* duplicateModuleContract('qa-namespace', moduleName)
+    }
+    const parsedQa = yield* Schema.decodeUnknownEffect(QaNamespaceRegistrationSchema)(qa)
+    const { command, name, observe } = parsedQa
+    yield* validateQaNamespaceName(name, seenNamespaces)
+    yield* validateQaOperations(name, observe, command)
+  })
+
+const validateModuleQa = (module: ModuleList[number], seenNamespaces: Set<string>) =>
+  Effect.gen(function* validateModuleQaGen() {
+    const { name: moduleName, qa } = module
+    if (!Object.hasOwn(module, 'qa')) {
+      return
+    }
+    yield* validateQaNamespace({ moduleName, qa, seenNamespaces })
   })
 
 const validateSaveSlice = (value: unknown, seenSlices: Set<string>) =>
@@ -613,7 +637,7 @@ const composeSuccessfulGame = <const Modules extends ModuleList>(
   const stages = collectStages(modules)
   const byId = new Map(stages.map((stage) => [stage.id, stage] as const))
   // The order in plan.order is a permutation of these stages after the resolver has
-  // confirmed that stage ids are unique.
+  // The resolver confirmed that stage ids are unique.
   const ordered = plan.order.map((id) => byId.get(id)!)
   const qaNamespaces = collectQaNamespaces(modules)
   const saveSlices = collectSaveSlices(modules)
