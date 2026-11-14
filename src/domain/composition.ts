@@ -636,8 +636,7 @@ const composeSuccessfulGame = <const Modules extends ModuleList>(
 ): ComposedGame<Modules> => {
   const stages = collectStages(modules)
   const byId = new Map(stages.map((stage) => [stage.id, stage] as const))
-  // The order in plan.order is a permutation of these stages after the resolver has
-  // The resolver confirmed that stage ids are unique.
+  // The resolver confirms these stage ids are unique and plan.order is their permutation.
   const ordered = plan.order.map((id) => byId.get(id)!)
   const qaNamespaces = collectQaNamespaces(modules)
   const saveSlices = collectSaveSlices(modules)
