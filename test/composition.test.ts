@@ -7,6 +7,7 @@ import { Context, Effect, Layer, Ref, Schema } from 'effect'
 import {
   collectStages,
   composeGame,
+  ComposeOptionsError,
   DeltaTimeSecs,
   DuplicateModuleContract,
   EMPTY_MODULE_LAYER,
@@ -655,6 +656,58 @@ describe('C1 module contracts', () => {
       expect(error).toBeInstanceOf(DuplicateModuleContract)
       expect(error).toMatchObject({ _tag: 'DuplicateModuleContract', kind: 'save-slice', id: 'player' })
       expect(error).not.toHaveProperty('saveSlices')
+    }),
+  )
+
+  it.effect('rejects a present QA namespace with a non-record value', () =>
+    Effect.gen(function* () {
+      const malformed = moduleOf('broken-qa', [])
+      Object.defineProperty(malformed, 'qa', { enumerable: true, value: undefined })
+
+      const error = yield* Effect.flip(composeGame([malformed]))
+
+      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toMatchObject({
+        _tag: 'DuplicateModuleContract',
+        kind: 'qa-namespace',
+        id: 'broken-qa',
+      })
+    }),
+  )
+
+  it.effect('rejects a present save slice collection that is not an array', () =>
+    Effect.gen(function* () {
+      const malformed = moduleOf('broken-slices', [])
+      Object.defineProperty(malformed, 'saveSlices', {
+        enumerable: true,
+        value: { id: 'player' },
+      })
+
+      const error = yield* Effect.flip(composeGame([malformed]))
+
+      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toMatchObject({
+        _tag: 'DuplicateModuleContract',
+        kind: 'save-slice',
+        id: 'broken-slices',
+      })
+    }),
+  )
+
+  it.effect('rejects malformed options and skeletons with field-specific errors', () =>
+    Effect.sync(() => {
+      // @ts-expect-error Runtime validation also guards callers without TypeScript checks.
+      const nullOptions = composeGame([], null)
+      // @ts-expect-error Runtime validation also guards callers without TypeScript checks.
+      const nullSkeleton = composeGame([], { skeleton: null })
+
+      const optionsError = failure(nullOptions)
+      const skeletonError = failure(nullSkeleton)
+
+      expect(optionsError).toBeInstanceOf(ComposeOptionsError)
+      expect(optionsError).toMatchObject({ _tag: 'ComposeOptionsError', field: 'options' })
+      expect(skeletonError).toBeInstanceOf(ComposeOptionsError)
+      expect(skeletonError).toMatchObject({ _tag: 'ComposeOptionsError', field: 'skeleton' })
     }),
   )
 
