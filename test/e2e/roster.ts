@@ -249,7 +249,7 @@ export const ROSTER: ReadonlyArray<RosterModule> = [
         // Every cross-repository `after` edge in the roster names it, and until
         // it existed all four dangled.
         after: [],
-        declaredAt: 'mc-sim/src/stages/registration.ts:226',
+        declaredAt: 'mc-sim/src/stages/registration.ts:9999',
         idAt: 'mc-sim/src/stages/stage-ids.ts:86',
       },
     ],
