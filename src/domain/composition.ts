@@ -106,15 +106,13 @@ export type ModuleLayer = Layer.Layer<never, unknown, never>
 /**
  * A module that provides no services.
  *
- * Exported rather than left to callers writing `Layer.empty`, because
- * `Layer.empty` does NOT assign to `ModuleLayer`: `Layer` declares `in ROut`
- * (contravariant), so `Layer.empty` is already assignable to this safe erased
- * boundary. Every real module layer also assigns fine; the constant remains
- * the shared spelling for an empty module.
+ * Exported rather than left to callers writing `Layer.empty`, so every module
+ * uses the same spelling for a layer with no outputs. `Layer.empty` has no
+ * errors or requirements and assigns to this boundary.
  *
  * No output service is claimed by the empty layer.
  */
-export const EMPTY_MODULE_LAYER: ModuleLayer = Layer.empty as unknown as ModuleLayer
+export const EMPTY_MODULE_LAYER: ModuleLayer = Layer.empty
 
 /**
  * A repository's contribution to a running game, AFTER REGISTRATION.
@@ -571,25 +569,15 @@ const makeQaBridge = <OperationErrors, Requirements>(
   }
 }
 
-export const mergeModuleLayers = <const Modules extends ModuleList>(
+export function mergeModuleLayers<const Modules extends ModuleList>(
   modules: Modules,
-): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>> => {
-  // Seeded with EMPTY_MODULE_LAYER; see that constant for why `Layer.empty`
-  // Cannot be used directly.
-  //
-  let merged: Layer.Layer<unknown, unknown, unknown> = EMPTY_MODULE_LAYER as unknown as Layer.Layer<
-    unknown,
-    unknown,
-    unknown
-  >
-  for (const module of modules) {
-    merged = Layer.merge(merged, module.layers) as unknown as Layer.Layer<unknown, unknown, unknown>
+): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>>
+export function mergeModuleLayers(modules: ModuleList): Layer.Layer<never, unknown, unknown> {
+  if (!modules.length) {
+    return Layer.empty
   }
-  return merged as unknown as Layer.Layer<
-    ModuleOutput<Modules>,
-    ModuleError<Modules>,
-    ModuleLayerRequirements<Modules>
-  >
+  const [first, ...rest] = modules
+  return Layer.mergeAll(first!.layers, ...rest.map(({ layers }) => layers))
 }
 
 /** Every module's stages, flattened. Order here is irrelevant — the resolver sorts. */
