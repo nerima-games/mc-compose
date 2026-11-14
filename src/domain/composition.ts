@@ -27,34 +27,35 @@
  * whether one should run. A stage that should sometimes not run contains that
  * decision inside its own `run`, in the repository that owns it.
  */
-import type {
-  DeltaTimeSecs,
-  FrameServices,
-  GameModule as KernelGameModule,
-  QaNamespace as KernelQaNamespace,
-  SaveSliceRegistration,
-  StageRegistration as KernelStageRegistration,
-} from '@nerima-games/mc-kernel'
 import {
+  type DeltaTimeSecs,
+  type FrameServices,
+  type GameModule as KernelGameModule,
   ModuleContractIdSchema,
   ModuleContractKindSchema,
+  type QaNamespace as KernelQaNamespace,
   QaNamespaceNameSchema,
   QaOperationNameSchema,
   SaveSliceIdSchema,
+  type SaveSliceRegistration,
   SaveVersionSchema,
+  type StageRegistration as KernelStageRegistration,
 } from '@nerima-games/mc-kernel'
-import { Effect, Layer, Result, Schema } from 'effect'
-import type { Cause } from 'effect'
-import { QaOperationNotFound, type QaBridgeApi } from './qa-api'
+import { type Cause, Effect, Layer, Result, Schema } from 'effect'
+import { type QaBridgeApi, QaOperationNotFound } from './qa-api'
 import {
+  describeStagePlanWarnings,
+  resolveStageOrder,
   type StageConstraint,
   type StageOrderError,
   type StageOrderPlan,
   type StagePhase,
-  describeStagePlanWarnings,
-  resolveStageOrder,
 } from './stage-order'
 import { STANDARD_STAGE_SKELETON } from './stage-skeleton'
+
+const schemaStruct = Schema.Struct
+const schemaTaggedError = Schema.TaggedError
+const schemaLiterals = Schema.Literals
 
 /**
  * Seconds since the previous frame, BRANDED, exactly as kernel brands it.
@@ -187,13 +188,22 @@ export const registerModule = <
 >(
   module: RegisterableGameModule<ROut, Err, RIn, RRegister, Qa, Slices>,
 ): Effect.Effect<GameModule<ROut, Err, RIn, Qa, Slices, RRegister>, never, RRegister> =>
-  Effect.map(module.frameStages, (frameStages) => ({
-    frameStages,
-    layers: module.layers,
-    name: module.name,
-    ...(typeof module.qa === 'undefined' ? {} : { qa: module.qa }),
-    ...(typeof module.saveSlices === 'undefined' ? {} : { saveSlices: module.saveSlices }),
-  }))
+  Effect.map(module.frameStages, (frameStages) => {
+    const { layers, name, qa, saveSlices } = module
+    const optional: { qa?: Qa; saveSlices?: Slices } = {}
+    if (typeof qa !== 'undefined') {
+      optional.qa = qa
+    }
+    if (typeof saveSlices !== 'undefined') {
+      optional.saveSlices = saveSlices
+    }
+    return {
+      frameStages,
+      layers,
+      name,
+      ...optional,
+    }
+  })
 
 type ModuleList = ReadonlyArray<
   GameModule<never, unknown, unknown, KernelQaNamespace, ReadonlyArray<SaveSliceRegistration>, unknown>
@@ -328,8 +338,8 @@ type ModuleCompositionRequirements<Modules extends ModuleList> =
   | ModuleRegistrationRequirements<Modules>
 
 type DuplicateModuleContractFields = {
-  readonly kind: typeof ModuleContractKindSchema
   readonly id: typeof ModuleContractIdSchema
+  readonly kind: typeof ModuleContractKindSchema
 }
 
 type DuplicateModuleContractTagged = Schema.TaggedStruct<
@@ -347,11 +357,11 @@ const DuplicateModuleContractBase: Schema.Class<
   DuplicateModuleContractSelf,
   DuplicateModuleContractTagged,
   Cause.YieldableError
-> = Schema.TaggedError<DuplicateModuleContractSelf>()(
+> = schemaTaggedError<DuplicateModuleContractSelf>()(
   'DuplicateModuleContract',
   {
-    kind: ModuleContractKindSchema,
     id: ModuleContractIdSchema,
+    kind: ModuleContractKindSchema,
   },
 )
 export class DuplicateModuleContract extends DuplicateModuleContractBase {}
@@ -371,18 +381,18 @@ const ComposeOptionsErrorBase: Schema.Class<
   ComposeOptionsErrorSelf,
   ComposeOptionsErrorTagged,
   Cause.YieldableError
-> = Schema.TaggedError<ComposeOptionsErrorSelf>()('ComposeOptionsError', {
-  field: Schema.Literals(['options', 'skeleton']),
+> = schemaTaggedError<ComposeOptionsErrorSelf>()('ComposeOptionsError', {
+  field: schemaLiterals(['options', 'skeleton']),
 })
 export class ComposeOptionsError extends ComposeOptionsErrorBase {}
 
 type ModuleContractKindInput = Schema.Codec.Encoded<typeof ModuleContractKindSchema>
 
 const duplicateModuleContract = (kind: ModuleContractKindInput, id: unknown) =>
-  Effect.gen(function* () {
+  Effect.gen(function* duplicateModuleContractGen() {
     const decodedKind = yield* Schema.decodeUnknownEffect(ModuleContractKindSchema)(kind)
     const decodedId = yield* Schema.decodeUnknownEffect(ModuleContractIdSchema)(id)
-    return yield* Effect.fail(new DuplicateModuleContract({ kind: decodedKind, id: decodedId }))
+    return yield* Effect.fail(new DuplicateModuleContract({ id: decodedId, kind: decodedKind }))
   })
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -391,79 +401,108 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isSchemaCodec = (value: unknown): value is Schema.Codec<unknown> =>
   typeof value === 'function' && Schema.isSchema(value)
 
+const validateQaOperation = (
+  namespace: Schema.Schema.Type<typeof QaNamespaceNameSchema>,
+  key: string,
+  value: unknown,
+  seenOperations: Set<string>,
+) =>
+  Effect.gen(function* validateQaOperationGen() {
+    if (!isRecord(value)) {
+      return yield* duplicateModuleContract('qa-operation', `${namespace}.${key}`)
+    }
+    const { input, name: encodedName, output, run } = value
+    const name = yield* Schema.decodeUnknownEffect(QaOperationNameSchema)(encodedName)
+    if (key !== name || typeof run !== 'function' || !isSchemaCodec(input) || !isSchemaCodec(output)) {
+      return yield* duplicateModuleContract('qa-operation', `${namespace}.${key}`)
+    }
+    if (seenOperations.has(name)) {
+      return yield* duplicateModuleContract('qa-operation', `${namespace}.${name}`)
+    }
+    seenOperations.add(name)
+  })
+
 const validateQaOperationMap = (
   namespace: Schema.Schema.Type<typeof QaNamespaceNameSchema>,
   operationMap: unknown,
   seenOperations: Set<string>,
 ) =>
-  Effect.gen(function* () {
+  Effect.gen(function* validateQaOperationMapGen() {
     if (!isRecord(operationMap)) {
       return yield* duplicateModuleContract('qa-operation', `${namespace}.<map>`)
     }
-
     for (const [key, value] of Object.entries(operationMap)) {
-      if (!isRecord(value)) {
-        return yield* duplicateModuleContract('qa-operation', `${namespace}.${key}`)
-      }
-      const name = yield* Schema.decodeUnknownEffect(QaOperationNameSchema)(value['name'])
-      if (
-        key !== name ||
-        typeof value['run'] !== 'function' ||
-        !isSchemaCodec(value['input']) ||
-        !isSchemaCodec(value['output'])
-      ) {
-        return yield* duplicateModuleContract('qa-operation', `${namespace}.${key}`)
-      }
-      if (seenOperations.has(name)) {
-        return yield* duplicateModuleContract('qa-operation', `${namespace}.${name}`)
-      }
-      seenOperations.add(name)
+      yield* validateQaOperation(namespace, key, value, seenOperations)
+    }
+  })
+
+const QaNamespaceRegistrationSchema = schemaStruct({
+  command: Schema.Unknown,
+  name: QaNamespaceNameSchema,
+  observe: Schema.Unknown,
+})
+
+const SaveSliceContractSchema = schemaStruct({
+  id: SaveSliceIdSchema,
+  version: SaveVersionSchema,
+})
+
+const validateModuleQa = (
+  module: ModuleList[number],
+  seenNamespaces: Set<string>,
+) =>
+  Effect.gen(function* validateModuleQaGen() {
+    const { qa } = module
+    if (!Object.hasOwn(module, 'qa')) {
+      return
+    }
+    if (!isRecord(qa)) {
+      return yield* duplicateModuleContract('qa-namespace', module.name)
+    }
+    const parsedQa = yield* Schema.decodeUnknownEffect(QaNamespaceRegistrationSchema)(qa)
+    const { command, name, observe } = parsedQa
+    if (seenNamespaces.has(name)) {
+      return yield* duplicateModuleContract('qa-namespace', name)
+    }
+    seenNamespaces.add(name)
+    const seenOperations = new Set<string>()
+    yield* validateQaOperationMap(name, observe, seenOperations)
+    yield* validateQaOperationMap(name, command, seenOperations)
+  })
+
+const validateSaveSlice = (value: unknown, seenSlices: Set<string>) =>
+  Effect.gen(function* validateSaveSliceGen() {
+    const { id } = yield* Schema.decodeUnknownEffect(SaveSliceContractSchema)(value)
+    if (seenSlices.has(id)) {
+      return yield* duplicateModuleContract('save-slice', id)
+    }
+    seenSlices.add(id)
+  })
+
+const validateModuleSaveSlices = (
+  module: ModuleList[number],
+  seenSlices: Set<string>,
+) =>
+  Effect.gen(function* validateModuleSaveSlicesGen() {
+    const { saveSlices } = module
+    if (!Object.hasOwn(module, 'saveSlices')) {
+      return
+    }
+    if (!Array.isArray(saveSlices)) {
+      return yield* duplicateModuleContract('save-slice', module.name)
+    }
+    for (const slice of saveSlices) {
+      yield* validateSaveSlice(slice, seenSlices)
     }
   })
 
 const validateModuleContracts = (modules: ReadonlyArray<ModuleList[number]>) =>
-  Effect.gen(function* () {
+  Effect.gen(function* validateModuleContractsGen() {
     const seenNamespaces = new Set<string>()
     const seenSlices = new Set<string>()
-
     for (const module of modules) {
-      if (Object.hasOwn(module, 'qa')) {
-        const qa = module.qa
-        if (!isRecord(qa)) {
-          return yield* duplicateModuleContract('qa-namespace', module.name)
-        }
-        const parsedQa = yield* Schema.decodeUnknownEffect(
-          Schema.Struct({
-            name: QaNamespaceNameSchema,
-            observe: Schema.Unknown,
-            command: Schema.Unknown,
-          }),
-        )(qa)
-        const name = parsedQa.name
-        if (seenNamespaces.has(name)) {
-          return yield* duplicateModuleContract('qa-namespace', name)
-        }
-        seenNamespaces.add(name)
-
-        const seenOperations = new Set<string>()
-        yield* validateQaOperationMap(name, parsedQa.observe, seenOperations)
-        yield* validateQaOperationMap(name, parsedQa.command, seenOperations)
-      }
-
-      if (Object.hasOwn(module, 'saveSlices')) {
-        if (!Array.isArray(module.saveSlices)) {
-          return yield* duplicateModuleContract('save-slice', module.name)
-        }
-        for (const value of module.saveSlices) {
-          const slice = isRecord(value) ? value : {}
-          const id = yield* Schema.decodeUnknownEffect(SaveSliceIdSchema)(slice['id'])
-          yield* Schema.decodeUnknownEffect(SaveVersionSchema)(slice['version'])
-          if (seenSlices.has(id)) {
-            return yield* duplicateModuleContract('save-slice', id)
-          }
-          seenSlices.add(id)
-        }
-      }
+      yield* validateModuleQa(module, seenNamespaces)
+      yield* validateModuleSaveSlices(module, seenSlices)
     }
   })
 
@@ -477,14 +516,14 @@ const makeQaBridge = <OperationErrors, Requirements>(
   namespaces: ReadonlyArray<KernelQaNamespace>,
 ): QaBridgeApi<OperationErrors, Requirements> => {
   const registry = new Map<string, Map<string, DynamicQaOperation<OperationErrors, Requirements>>>()
-  for (const namespace of namespaces) {
+  for (const { command, name, observe } of namespaces) {
     const operations = new Map<string, DynamicQaOperation<OperationErrors, Requirements>>()
-    for (const operationMap of [namespace.observe, namespace.command]) {
+    for (const operationMap of [observe, command]) {
       for (const [key, value] of Object.entries(operationMap)) {
         operations.set(key, value)
       }
     }
-    registry.set(namespace.name, operations)
+    registry.set(name, operations)
   }
 
   return {
@@ -531,21 +570,21 @@ export const mergeModuleLayers = <const Modules extends ModuleList>(
 
 /** Every module's stages, flattened. Order here is irrelevant — the resolver sorts. */
 export const collectStages = (modules: ReadonlyArray<ModuleList[number]>): ReadonlyArray<StageRegistration> =>
-  modules.flatMap((module) => [...module.frameStages])
+  modules.flatMap(({ frameStages }) => [...frameStages])
 
 const asConstraint = (registration: StageRegistration): StageConstraint => {
-  if (typeof registration.after === 'undefined') {
-    return { id: registration.id }
+  const { after, id } = registration
+  if (typeof after === 'undefined') {
+    return { id }
   }
-  return { after: registration.after, id: registration.id }
+  return { after, id }
 }
 
 const collectQaNamespaces = (
   modules: ReadonlyArray<ModuleList[number]>,
 ): ReadonlyArray<KernelQaNamespace> => {
   const namespaces: Array<KernelQaNamespace> = []
-  for (const module of modules) {
-    const namespace = module.qa
+  for (const { qa: namespace } of modules) {
     if (typeof namespace !== 'undefined') {
       namespaces.push(namespace)
     }
@@ -557,13 +596,11 @@ const collectSaveSlices = (
   modules: ReadonlyArray<ModuleList[number]>,
 ): ReadonlyArray<SaveSliceRegistration> => {
   const saveSlices: Array<SaveSliceRegistration> = []
-  for (const module of modules) {
-    const moduleSaveSlices = module.saveSlices
-    if (typeof moduleSaveSlices === 'undefined') {
-      continue
-    }
-    for (const slice of moduleSaveSlices) {
-      saveSlices.push(slice)
+  for (const { saveSlices: moduleSaveSlices } of modules) {
+    if (typeof moduleSaveSlices !== 'undefined') {
+      for (const slice of moduleSaveSlices) {
+        saveSlices.push(slice)
+      }
     }
   }
   return saveSlices
@@ -575,7 +612,7 @@ const composeSuccessfulGame = <const Modules extends ModuleList>(
 ): ComposedGame<Modules> => {
   const stages = collectStages(modules)
   const byId = new Map(stages.map((stage) => [stage.id, stage] as const))
-  // `plan.order` is a permutation of these stages, after the resolver has
+  // The order in plan.order is a permutation of these stages after the resolver has
   // confirmed that stage ids are unique.
   const ordered = plan.order.map((id) => byId.get(id)!)
   const qaNamespaces = collectQaNamespaces(modules)
@@ -593,9 +630,9 @@ const composeSuccessfulGame = <const Modules extends ModuleList>(
     Effect.forEach(ordered, (stage) => stage.run(dt), { discard: true })
 
   return {
-    layers: mergedLayers,
     layer: mergedLayers,
-    moduleNames: modules.map((module) => module.name),
+    layers: mergedLayers,
+    moduleNames: modules.map(({ name }) => name),
     modules,
     plan,
     qaBridge,
@@ -621,10 +658,13 @@ export const composeGame = <const Modules extends ModuleList>(
   if (typeof options !== 'object' || options === null) {
     return Effect.fail(new ComposeOptionsError({ field: 'options' }))
   }
-  const hasSkeleton = Object.hasOwn(options, 'skeleton')
-  const skeleton = hasSkeleton ? options.skeleton : STANDARD_STAGE_SKELETON
-  if (!Array.isArray(skeleton)) {
-    return Effect.fail(new ComposeOptionsError({ field: 'skeleton' }))
+  const { skeleton: providedSkeleton } = options
+  let skeleton: ReadonlyArray<StagePhase> = STANDARD_STAGE_SKELETON
+  if (Object.hasOwn(options, 'skeleton')) {
+    if (!Array.isArray(providedSkeleton)) {
+      return Effect.fail(new ComposeOptionsError({ field: 'skeleton' }))
+    }
+    skeleton = providedSkeleton
   }
 
   const stages = collectStages(modules)
