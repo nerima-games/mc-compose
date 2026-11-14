@@ -47,8 +47,8 @@ describe('enchantment effects', () => {
     )
 
     expect(
-      armorDamageWithEnchantments({ amount: 10, cause: 'generic' }, 15, [chestplate]),
-    ).toEqual({ amount: 3.36, cause: 'generic' })
+      armorDamageWithEnchantments({ amount: 10, cause: 'mob' }, 15, [chestplate]),
+    ).toEqual({ amount: 5.04, cause: 'mob' })
   })
 
   it('applies Efficiency V to mining speed', () => {

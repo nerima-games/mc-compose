@@ -30,7 +30,7 @@
  * impossible to express.
  */
 import type { GameModule, StageRegistration } from './composition'
-import { Either } from 'effect'
+import { Result } from 'effect'
 import { StageId } from './stage-order'
 
 /**
@@ -118,13 +118,13 @@ const violatesNamespace = (modId: string, registration: StageRegistration): bool
  * dropped edge as dangling. Rejecting it here would make mods depend on the
  * build's module set.
  */
-export const acceptMod = (manifest: ModManifest): Either.Either<GameModule, ModdingError> => {
+export const acceptMod = (manifest: ModManifest): Result.Result<GameModule, ModdingError> => {
   if (!MOD_ID_PATTERN.test(manifest.id)) {
-    return Either.left({ _tag: 'InvalidModId', id: manifest.id })
+    return Result.fail({ _tag: 'InvalidModId', id: manifest.id })
   }
 
   if (manifest.apiVersion !== MODDING_API_VERSION) {
-    return Either.left({
+    return Result.fail({
       _tag: 'UnsupportedApiVersion',
       declared: manifest.apiVersion,
       id: manifest.id,
@@ -134,11 +134,11 @@ export const acceptMod = (manifest: ModManifest): Either.Either<GameModule, Modd
 
   for (const registration of manifest.module.frameStages) {
     if (violatesNamespace(manifest.id, registration)) {
-      return Either.left({ _tag: 'ReservedStageNamespace', id: manifest.id, stage: registration.id })
+      return Result.fail({ _tag: 'ReservedStageNamespace', id: manifest.id, stage: registration.id })
     }
   }
 
-  return Either.right(manifest.module)
+  return Result.succeed(manifest.module)
 }
 
 /**
@@ -150,9 +150,9 @@ export const acceptMod = (manifest: ModManifest): Either.Either<GameModule, Modd
 const acceptUnseenMod = (
   manifest: ModManifest,
   seen: Set<string>,
-): Either.Either<GameModule, ModdingError> => {
+): Result.Result<GameModule, ModdingError> => {
   if (seen.has(manifest.id)) {
-    return Either.left({ _tag: 'DuplicateModId', id: manifest.id })
+    return Result.fail({ _tag: 'DuplicateModId', id: manifest.id })
   }
   seen.add(manifest.id)
   return acceptMod(manifest)
@@ -161,19 +161,19 @@ const acceptUnseenMod = (
 /** Validate a set of mods, rejecting duplicate ids. Order is preserved. */
 export const acceptMods = (
   manifests: ReadonlyArray<ModManifest>,
-): Either.Either<ReadonlyArray<GameModule>, ModdingError> => {
+): Result.Result<ReadonlyArray<GameModule>, ModdingError> => {
   const seen = new Set<string>()
   const accepted: Array<GameModule> = []
 
   for (const manifest of manifests) {
     const result = acceptUnseenMod(manifest, seen)
-    if (Either.isLeft(result)) {
-      return Either.left(result.left)
+    if (Result.isFailure(result)) {
+      return Result.fail(result.failure)
     }
-    accepted.push(result.right)
+    accepted.push(result.success)
   }
 
-  return Either.right(accepted)
+  return Result.succeed(accepted)
 }
 
 export const describeModdingError = (error: ModdingError): string => {
