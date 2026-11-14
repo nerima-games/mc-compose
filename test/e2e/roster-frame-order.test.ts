@@ -44,12 +44,11 @@
  * and stay green forever.
  */
 import { describe, expect, it } from '@effect/vitest'
-import { Effect, Layer, Option, Ref, Result } from 'effect'
+import { Effect, Layer, Ref } from 'effect'
 import {
   composeGame,
   DeltaTimeSecs,
   EMPTY_MODULE_LAYER,
-  type ComposedGame,
   type GameModule,
 } from '../../src/domain/composition'
 import {
@@ -63,7 +62,6 @@ import {
   phaseOf,
   StageId,
   stagePhase,
-  type StageOrderError,
 } from '../../src/domain/stage-order'
 import { STANDARD_STAGE_SKELETON } from '../../src/domain/stage-skeleton'
 import {
@@ -89,17 +87,14 @@ const composeRoster = (
     readonly skeleton?: ReadonlyArray<(typeof STANDARD_STAGE_SKELETON)[number]>
     readonly modules?: ReadonlyArray<GameModule>
   } = {},
-): Effect.Effect<{
-  readonly game: ComposedGame
-  readonly log: Ref.Ref<ReadonlyArray<string>>
-}> =>
+) =>
   Effect.gen(function* () {
     const log = yield* Ref.make<ReadonlyArray<string>>([])
     const modules = options.modules ?? rosterModules(log)
-    const result = composeGame(modules, {
+    const game = yield* composeGame(modules, {
       skeleton: options.skeleton ?? STANDARD_STAGE_SKELETON,
     })
-    return { game: Result.getOrThrow(result), log }
+    return { game, log }
   })
 
 const positionIn = (order: ReadonlyArray<string>, id: string): number => {
@@ -187,9 +182,7 @@ describe('the roster resolves into plan.md §4.2’s frame', () => {
           stages: [...module.stages].reverse(),
         })),
       )
-      const backwards = Result.getOrThrow(
-        composeGame(reversedModules, { skeleton: STANDARD_STAGE_SKELETON }),
-      )
+      const backwards = yield* composeGame(reversedModules, { skeleton: STANDARD_STAGE_SKELETON })
 
       expect(backwards.plan.order).toStrictEqual(forwards.game.plan.order)
     }),
@@ -405,10 +398,11 @@ describe('network I/O: the phases §4.2 does not have', () => {
       // Before physics: UNSATISFIABLE, and the failure carries the path.
       const log = yield* Ref.make<ReadonlyArray<string>>([])
       const beforePhysics = composeGame(rosterModules(log), { skeleton: withNamespaceAt(1) })
-      const error = Option.getOrUndefined(Result.getFailure(beforePhysics))
+      const error = yield* Effect.flip(beforePhysics)
 
-      expect(error?._tag).toBe('StageCycle')
-      expect(error === undefined ? '' : describeStageOrderError(error)).toContain(
+      expect(error._tag).toBe('StageCycle')
+      const rendered = error._tag === 'StageCycle' ? describeStageOrderError(error) : ''
+      expect(rendered).toContain(
         'multiplayer:outbound -> sim:physics -> multiplayer:outbound',
       )
 
@@ -756,10 +750,6 @@ describe('what the roster does not register', () => {
 })
 
 describe('composition failures the roster could actually produce', () => {
-  const failure = (
-    result: Result.Result<ComposedGame, StageOrderError>,
-  ): StageOrderError | undefined => Option.getOrUndefined(Result.getFailure(result))
-
   // A mod, or a second module, claiming an id mc-render already owns. Which of
   // the two would run is arbitrary, so the composition fails and names the id.
   it.effect('rejects a second module claiming render:draw, and names it', () =>
@@ -771,11 +761,11 @@ describe('composition failures the roster could actually produce', () => {
         frameStages: [{ id: StageId('render:draw'), run: () => Effect.void }],
       }
 
-      const result = composeGame([...rosterModules(log), impostor], {
+      const error = yield* Effect.flip(composeGame([...rosterModules(log), impostor], {
         skeleton: STANDARD_STAGE_SKELETON,
-      })
+      }))
 
-      expect(failure(result)).toStrictEqual({ _tag: 'DuplicateStage', id: 'render:draw' })
+      expect(error).toStrictEqual({ _tag: 'DuplicateStage', id: 'render:draw' })
       expect(describeStageOrderError({ _tag: 'DuplicateStage', id: StageId('render:draw') })).toContain(
         'render:draw',
       )
@@ -807,11 +797,10 @@ describe('composition failures the roster could actually produce', () => {
             },
       )
 
-      const result = composeGame(tempted, { skeleton: STANDARD_STAGE_SKELETON })
-      const error = failure(result)
+      const error = yield* Effect.flip(composeGame(tempted, { skeleton: STANDARD_STAGE_SKELETON }))
 
-      expect(error?._tag).toBe('StageCycle')
-      const rendered = error === undefined ? '' : describeStageOrderError(error)
+      expect(error._tag).toBe('StageCycle')
+      const rendered = error._tag === 'StageCycle' ? describeStageOrderError(error) : ''
       expect(rendered).toContain('gameplay:interactions')
       expect(rendered).toContain('ui:hud-sync')
     }),

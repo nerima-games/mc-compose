@@ -1,5 +1,12 @@
 import { describe, expect, it } from '@effect/vitest'
-import { Effect, Option, Result } from 'effect'
+import {
+  QaNamespaceNameSchema,
+  QaOperationNameSchema,
+  type QaNamespace as KernelQaNamespace,
+} from '@nerima-games/mc-kernel'
+import { Effect, Option, Result, Schema } from 'effect'
+import * as fc from 'fast-check'
+import { composeGame, EMPTY_MODULE_LAYER } from '../src/domain/composition'
 import {
   buildQaRegistry,
   describeQaApiError,
@@ -25,6 +32,20 @@ const registryOf = (namespaces: ReadonlyArray<QaNamespace>): QaRegistry =>
 const failure = (
   result: Result.Result<QaRegistry, QaApiError>,
 ): QaApiError | undefined => Option.getOrUndefined(Result.getFailure(result))
+
+const namespaceName = (value: string) => Schema.decodeUnknownSync(QaNamespaceNameSchema)(value)
+
+const operationName = (value: string) => Schema.decodeUnknownSync(QaOperationNameSchema)(value)
+
+const moduleWithQa = <const Qa extends KernelQaNamespace>(qa: Qa) => ({
+  name: 'qa-test-module',
+  layers: EMPTY_MODULE_LAYER,
+  frameStages: [],
+  qa,
+})
+
+const failedValue = <A, E>(result: Result.Result<A, E>): E | undefined =>
+  Option.getOrUndefined(Result.getFailure(result))
 
 describe('building the QA surface', () => {
   it.effect('publishes each command under namespace.command', () =>
@@ -214,6 +235,191 @@ describe('installation', () => {
       const target: Record<string, unknown> = {}
       installQaApi(target, registryOf([]))
       expect(readInstalledQaApi(target)).toStrictEqual({})
+    }),
+  )
+})
+
+describe('QaBridge', () => {
+  it.effect('decodes JSON input, runs the namespaced operation, and encodes JSON output', () =>
+    Effect.gen(function* () {
+      const inspect = {
+        name: operationName('inspect'),
+        input: Schema.Struct({ block: Schema.String }),
+        output: Schema.Struct({ exists: Schema.Boolean }),
+        run: ({ block }: { readonly block: string }) => Effect.succeed({ exists: block === 'stone' }),
+      }
+      const qa = {
+        name: namespaceName('gameplay'),
+        observe: { inspect },
+        command: {},
+      }
+      const game = yield* composeGame([moduleWithQa(qa)])
+
+      const output = yield* game.qaBridge.run(qa.name, inspect.name, { block: 'stone' })
+
+      expect(output).toStrictEqual({ exists: true })
+    }),
+  )
+
+  it.effect('returns a typed SchemaError when input JSON does not decode', () =>
+    Effect.gen(function* () {
+      const calls = yield* Effect.sync(() => ({ count: 0 }))
+      const inspect = {
+        name: operationName('inspect'),
+        input: Schema.Struct({ block: Schema.String }),
+        output: Schema.Boolean,
+        run: () =>
+          Effect.sync(() => {
+            calls.count += 1
+            return true
+          }),
+      }
+      const qa = {
+        name: namespaceName('gameplay'),
+        observe: { inspect },
+        command: {},
+      }
+      const game = yield* composeGame([moduleWithQa(qa)])
+      const result = yield* Effect.result(game.qaBridge.run(qa.name, inspect.name, { block: 4 }))
+
+      expect(failedValue(result)?._tag).toBe('SchemaError')
+      expect(calls.count).toBe(0)
+    }),
+  )
+
+  it.effect('returns a typed SchemaError when the output cannot be encoded', () =>
+    Effect.gen(function* () {
+      const inspect = {
+        name: operationName('inspect'),
+        input: Schema.Struct({}),
+        output: Schema.Finite,
+        run: () => Effect.succeed(Number.NaN),
+      }
+      const qa = {
+        name: namespaceName('gameplay'),
+        observe: { inspect },
+        command: {},
+      }
+      const game = yield* composeGame([moduleWithQa(qa)])
+      const result = yield* Effect.result(game.qaBridge.run(qa.name, inspect.name, {}))
+
+      expect(failedValue(result)?._tag).toBe('SchemaError')
+    }),
+  )
+
+  it.effect('returns QaOperationNotFound for a namespace operation that was not registered', () =>
+    Effect.gen(function* () {
+      const inspect = {
+        name: operationName('inspect'),
+        input: Schema.Struct({}),
+        output: Schema.Boolean,
+        run: () => Effect.succeed(true),
+      }
+      const qa = {
+        name: namespaceName('gameplay'),
+        observe: { inspect },
+        command: {},
+      }
+      const game = yield* composeGame([moduleWithQa(qa)])
+      const result = yield* Effect.result(game.qaBridge.run(qa.name, operationName('missing'), {}))
+
+      expect(failedValue(result)?._tag).toBe('QaOperationNotFound')
+    }),
+  )
+
+  it.effect('returns QaOperationNotFound for an unknown namespace with a known operation name', () =>
+    Effect.gen(function* () {
+      const inspect = {
+        name: operationName('inspect'),
+        input: Schema.Struct({}),
+        output: Schema.Boolean,
+        run: () => Effect.succeed(true),
+      }
+      const qa = {
+        name: namespaceName('gameplay'),
+        observe: { inspect },
+        command: {},
+      }
+      const game = yield* composeGame([moduleWithQa(qa)])
+      const result = yield* Effect.result(game.qaBridge.run(namespaceName('unknown'), inspect.name, {}))
+
+      expect(failedValue(result)?._tag).toBe('QaOperationNotFound')
+    }),
+  )
+
+  it.effect('preserves the registered operation error without wrapping it', () =>
+    Effect.gen(function* () {
+      const expected = { _tag: 'QaOperationRejected', reason: 'occupied' } as const
+      const inspect = {
+        name: operationName('inspect'),
+        input: Schema.Struct({}),
+        output: Schema.Boolean,
+        run: () => Effect.fail(expected),
+      }
+      const qa = {
+        name: namespaceName('gameplay'),
+        observe: { inspect },
+        command: {},
+      }
+      const game = yield* composeGame([moduleWithQa(qa)])
+      const result = yield* Effect.result(game.qaBridge.run(qa.name, inspect.name, {}))
+
+      expect(failedValue(result)).toStrictEqual(expected)
+    }),
+  )
+
+  it.effect('keeps the existing flat QA output while returning the same JSON from an empty-input operation', () =>
+    Effect.gen(function* () {
+      const expected = { active: true, blocks: ['stone', 'dirt'] }
+      const legacy = registryOf([
+        {
+          namespace: 'gameplay',
+          commands: { inspect: () => expected },
+        },
+      ])
+      const operation = {
+        name: operationName('inspect'),
+        input: Schema.Struct({}),
+        output: Schema.Json,
+        run: () => Effect.succeed(expected),
+      }
+      const qa = {
+        name: namespaceName('gameplay'),
+        observe: { inspect: operation },
+        command: {},
+      }
+      const game = yield* composeGame([moduleWithQa(qa)])
+      const newOutput = yield* game.qaBridge.run(qa.name, operation.name, {})
+      const oldOutput = legacy.get(qaKey('gameplay', 'inspect'))?.()
+
+      expect(oldOutput).toStrictEqual({ active: true, blocks: ['stone', 'dirt'] })
+      expect(newOutput).toStrictEqual({ active: true, blocks: ['stone', 'dirt'] })
+      expect(JSON.stringify(newOutput)).toBe(JSON.stringify(oldOutput))
+    }),
+  )
+
+  it.effect('round-trips arbitrary JSON values through the namespaced JSON boundary', () =>
+    Effect.gen(function* () {
+      const roundTrip = {
+        name: operationName('roundTrip'),
+        input: Schema.Json,
+        output: Schema.Json,
+        run: (value: Schema.Json) => Effect.succeed(value),
+      }
+      const qa = {
+        name: namespaceName('test'),
+        observe: { roundTrip },
+        command: {},
+      }
+      const game = yield* composeGame([moduleWithQa(qa)])
+
+      fc.assert(
+        fc.property(fc.jsonValue(), (input) => {
+          const output = Effect.runSync(game.qaBridge.run(qa.name, roundTrip.name, input))
+          expect(output).toStrictEqual(input)
+          return true
+        }),
+      )
     }),
   )
 })

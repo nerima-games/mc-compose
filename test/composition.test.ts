@@ -2,15 +2,16 @@
 
 import { describe, expect, it } from '@effect/vitest'
 import { makeUiFrameState, uiStages } from '@nerima-games/mx-ui'
-import { Context, Effect, Layer, Option, Ref, Result } from 'effect'
+import * as fc from 'fast-check'
+import { Context, Effect, Layer, Ref, Schema } from 'effect'
 import {
   collectStages,
   composeGame,
   DeltaTimeSecs,
+  DuplicateModuleContract,
   EMPTY_MODULE_LAYER,
   mergeModuleLayers,
   registerModule,
-  type ComposedGame,
   type GameModule,
   type StageRegistration,
 } from '../src/domain/composition'
@@ -20,8 +21,15 @@ import {
   monotonicSecs,
   MonotonicTimeSecs,
   type FrameServices,
+  QaNamespaceNameSchema,
+  QaOperationNameSchema,
+  SaveSliceIdSchema,
+  SaveVersionSchema,
+  type QaNamespace as KernelQaNamespace,
+  type SaveSliceRegistration,
 } from '@nerima-games/mc-kernel'
-import { StageId, type StageOrderError, type StagePhase } from '../src/domain/stage-order'
+import { StageId, type StagePhase } from '../src/domain/stage-order'
+import { QaBridge } from '../src/domain/qa-api'
 import { STAGE_HUD_SYNC, STAGE_INPUT, STAGE_RENDER, STANDARD_STAGE_SKELETON } from '../src/domain/stage-skeleton'
 
 const id = (value: string): StageId => StageId(value)
@@ -54,14 +62,55 @@ const moduleOf = (name: string, frameStages: ReadonlyArray<StageRegistration>): 
   frameStages,
 })
 
-const composed = <const Modules extends ReadonlyArray<GameModule<never, unknown>>>(
+const composed = <
+  const Modules extends ReadonlyArray<
+    GameModule<never, unknown, never, KernelQaNamespace, ReadonlyArray<SaveSliceRegistration>, unknown>
+  >,
+>(
   modules: Modules,
   skeleton: ReadonlyArray<StagePhase> = [],
-) => Result.getOrThrow(composeGame(modules, { skeleton }))
+) => Effect.runSync(composeGame(modules, { skeleton }))
 
-const failure = (
-  result: Result.Result<ComposedGame, StageOrderError>,
-): StageOrderError | undefined => Option.getOrUndefined(Result.getFailure(result))
+const failure = <A, E>(effect: Effect.Effect<A, E>): E => Effect.runSync(Effect.flip(effect))
+
+const namespaceName = (value: string) => Schema.decodeUnknownSync(QaNamespaceNameSchema)(value)
+
+const operationName = (value: string) => Schema.decodeUnknownSync(QaOperationNameSchema)(value)
+
+const saveSliceId = (value: string) => Schema.decodeUnknownSync(SaveSliceIdSchema)(value)
+
+const saveVersion = Schema.decodeUnknownSync(SaveVersionSchema)(1)
+
+const qaNamespace = <const Observe extends object, const Command extends object>(
+  name: string,
+  observe: Observe,
+  command: Command,
+) => ({ name: namespaceName(name), observe, command })
+
+const moduleWithQa = <
+  const Qa extends KernelQaNamespace,
+  LayerOut,
+  LayerError,
+  LayerRequirements,
+>(
+  name: string,
+  qa: Qa,
+  layers: Layer.Layer<LayerOut, LayerError, LayerRequirements>,
+) => ({ name, qa, layers, frameStages: [] as ReadonlyArray<StageRegistration> })
+
+const saveSlice = (id: string) => ({
+  id: saveSliceId(id),
+  version: saveVersion,
+  schema: Schema.String,
+  snapshot: Effect.succeed(`snapshot:${id}`),
+  restore: (_state: string) => Effect.void,
+  migrations: [],
+})
+
+const moduleWithSaveSlices = <const Slices extends ReadonlyArray<SaveSliceRegistration>>(
+  name: string,
+  saveSlices: Slices,
+) => ({ name, layers: EMPTY_MODULE_LAYER, frameStages: [], saveSlices })
 
 describe('composeGame', () => {
   it.effect('runs every stage exactly once, in the resolved total order', () =>
@@ -195,7 +244,7 @@ describe('composeGame', () => {
 
   it.effect('uses the standard skeleton when none is given', () =>
     Effect.sync(() => {
-      const game = Result.getOrThrow(
+      const game = Effect.runSync(
         composeGame([
           moduleOf('mx-ui', [{ id: STAGE_HUD_SYNC, run: () => Effect.void }]),
           moduleOf('mc-render', [{ id: STAGE_RENDER, run: () => Effect.void }]),
@@ -404,7 +453,7 @@ describe('Layer merge', () => {
   it.effect('exposes the merged Layer on the composed game', () =>
     Effect.gen(function* () {
       const game = composed([alphaModule, betaModule])
-      const value = yield* Effect.map(Beta, (beta) => beta.value).pipe(Effect.provide(game.layer))
+      const value = yield* Effect.map(Beta, (beta) => beta.value).pipe(Effect.provide(game.layers))
       expect(value).toBe(2)
     }),
   )
@@ -423,40 +472,14 @@ describe('collectStages', () => {
   )
 })
 
-describe('ModuleLayer — what it now checks, and what it still cannot', () => {
+describe('composed layer service boundary', () => {
   class Missing extends Context.Service<Missing, { readonly value: number }>()('test/Missing') {}
-  class Provided extends Context.Service<Provided, { readonly value: number }>()('test/Provided') {}
-
-  // REGRESSION: `ModuleLayer` used to be `Layer<any, any, any>`, so a module
-  // arriving with an UNSATISFIED requirement was accepted silently. `Layer`
-  // declares `out RIn`, so pinning the third parameter to `never` makes that a
-  // compile error instead. Modules are peers (plan.md §2.3-1): one whose Layer
-  // still needs something has not been assembled yet, and assembling it is the
-  // host's job, where the type to do so still exists.
-  it.effect('rejects a module whose Layer still needs a service, at compile time', () =>
-    Effect.sync(() => {
-      const needsSomething: Layer.Layer<Provided, never, Missing> = Layer.effect(
-        Provided,
-        Effect.map(Missing, (missing) => ({ value: missing.value })),
-      )
-
-      // @ts-expect-error RIn is `never` on ModuleLayer: an unmet requirement
-      // cannot be smuggled into a composed game any more.
-      const smuggled: GameModule = { name: 'bad', layers: needsSomething, frameStages: [] }
-      expect(smuggled.name).toBe('bad')
-
-      // Satisfying it first is all that is asked, and then it composes.
-      const satisfied = Layer.provide(needsSomething, Layer.succeed(Missing, { value: 7 }))
-      const good: GameModule = { name: 'good', layers: satisfied, frameStages: [] }
-      expect(good.name).toBe('good')
-    }),
-  )
 
   it('does not claim that a composed layer provides erased services', () => {
     const game = composed([moduleOf('provides-nothing', [])])
     const missing: Effect.Effect<number, never, Missing> = Effect.map(Missing, (service) => service.value)
     // @ts-expect-error An empty composed layer cannot discharge Missing.
-    const runnable: Effect.Effect<number, never, never> = Effect.provide(game.layer)(missing)
+    const runnable: Effect.Effect<number, never, never> = Effect.provide(game.layers)(missing)
     expect(runnable).toBeDefined()
   })
 })
@@ -484,7 +507,7 @@ describe('warnings — what the resolver used to swallow', () => {
   // stays schedulable — and it is also exactly what `render:daw` looks like.
   it.effect('surfaces a stage the skeleton does not recognise, without rejecting it', () =>
     Effect.sync(() => {
-      const game = Result.getOrThrow(
+      const game = Effect.runSync(
         composeGame([
           moduleOf('mc-render', [{ id: STAGE_RENDER, run: () => Effect.void }]),
           moduleOf('typo', [{ id: id('render:daw'), run: () => Effect.void }]),
@@ -501,7 +524,7 @@ describe('warnings — what the resolver used to swallow', () => {
 
   it.effect('says nothing when there is nothing to say, so a host can print it unconditionally', () =>
     Effect.sync(() => {
-      const game = Result.getOrThrow(
+      const game = Effect.runSync(
         composeGame([moduleOf('mc-render', [{ id: STAGE_RENDER, run: () => Effect.void }])]),
       )
 
@@ -518,6 +541,266 @@ describe('warnings — what the resolver used to swallow', () => {
     Effect.sync(() => {
       const game = composed([moduleOf('m', [{ id: id('whatever'), run: () => Effect.void }])])
       expect([...game.plan.unmatchedPhase]).toStrictEqual([])
+    }),
+  )
+})
+
+describe('C1 module contracts', () => {
+  it.effect('collects module QA namespaces and save slices', () =>
+    Effect.gen(function* () {
+      const health = {
+        name: operationName('health'),
+        input: Schema.Struct({}),
+        output: Schema.String,
+        run: () => Effect.succeed('healthy'),
+      }
+      const power = {
+        name: operationName('power'),
+        input: Schema.Struct({}),
+        output: Schema.Number,
+        run: () => Effect.succeed(15),
+      }
+      const gameplay = moduleWithQa(
+        'mx-gameplay',
+        qaNamespace('gameplay', { health }, {}),
+        EMPTY_MODULE_LAYER,
+      )
+      const redstone = moduleWithQa(
+        'mx-redstone',
+        qaNamespace('redstone', { power }, {}),
+        EMPTY_MODULE_LAYER,
+      )
+      const player = moduleWithSaveSlices('mc-sim-player', [saveSlice('player')])
+      const time = moduleWithSaveSlices('mc-sim-time', [saveSlice('time')])
+
+      const game = yield* composeGame([gameplay, redstone, player, time])
+
+      expect(game.qaNamespaces.map((namespace) => namespace.name)).toStrictEqual([
+        namespaceName('gameplay'),
+        namespaceName('redstone'),
+      ])
+      expect(game.saveSlices.map((slice) => slice.id)).toStrictEqual([
+        saveSliceId('player'),
+        saveSliceId('time'),
+      ])
+      expect(game.qaBridge).toHaveProperty('run')
+    }),
+  )
+
+  it.effect('rejects duplicate namespaces without exposing a partial registry', () =>
+    Effect.gen(function* () {
+      const shared = qaNamespace('gameplay', {}, {})
+      const error = yield* Effect.flip(
+        composeGame([
+          moduleWithQa('first', shared, EMPTY_MODULE_LAYER),
+          moduleWithQa('second', shared, EMPTY_MODULE_LAYER),
+        ]),
+      )
+
+      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toMatchObject({ _tag: 'DuplicateModuleContract', kind: 'qa-namespace', id: 'gameplay' })
+      expect(error).not.toHaveProperty('qaNamespaces')
+    }),
+  )
+
+  it.effect('rejects an observe/command name collision', () =>
+    Effect.gen(function* () {
+      const operation = {
+        name: operationName('reset'),
+        input: Schema.Struct({}),
+        output: Schema.Boolean,
+        run: () => Effect.succeed(true),
+      }
+      const namespace = qaNamespace('gameplay', { reset: operation }, { reset: operation })
+      const error = yield* Effect.flip(
+        composeGame([moduleWithQa('gameplay', namespace, EMPTY_MODULE_LAYER)]),
+      )
+
+      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toMatchObject({ _tag: 'DuplicateModuleContract', kind: 'qa-operation', id: 'gameplay.reset' })
+    }),
+  )
+
+  it.effect('rejects a QA map key that differs from the operation name', () =>
+    Effect.gen(function* () {
+      const operation = {
+        name: operationName('actualName'),
+        input: Schema.Struct({}),
+        output: Schema.Boolean,
+        run: () => Effect.succeed(true),
+      }
+      const namespace = qaNamespace('gameplay', { declaredName: operation }, {})
+      const error = yield* Effect.flip(
+        composeGame([moduleWithQa('gameplay', namespace, EMPTY_MODULE_LAYER)]),
+      )
+
+      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toMatchObject({
+        _tag: 'DuplicateModuleContract',
+        kind: 'qa-operation',
+        id: 'gameplay.declaredName',
+      })
+    }),
+  )
+
+  it.effect('rejects duplicate save slice IDs without returning a partial slice set', () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        composeGame([
+          moduleWithSaveSlices('first', [saveSlice('player')]),
+          moduleWithSaveSlices('second', [saveSlice('player')]),
+        ]),
+      )
+
+      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toMatchObject({ _tag: 'DuplicateModuleContract', kind: 'save-slice', id: 'player' })
+      expect(error).not.toHaveProperty('saveSlices')
+    }),
+  )
+
+  it.effect('rejects duplicate namespace, operation, and slice IDs for every non-empty name', () =>
+    Effect.sync(() =>
+      fc.assert(
+        fc.property(fc.string({ minLength: 1 }), (name) => {
+          const shared = qaNamespace(name, {}, {})
+          const namespaceError = failure(
+            composeGame([
+              moduleWithQa('first', shared, EMPTY_MODULE_LAYER),
+              moduleWithQa('second', shared, EMPTY_MODULE_LAYER),
+            ]),
+          )
+
+          const operation = {
+            name: operationName(name),
+            input: Schema.Struct({}),
+            output: Schema.Boolean,
+            run: () => Effect.succeed(true),
+          }
+          const operationError = failure(
+            composeGame([
+              moduleWithQa(
+                'gameplay',
+                qaNamespace('gameplay', { [name]: operation }, { [name]: operation }),
+                EMPTY_MODULE_LAYER,
+              ),
+            ]),
+          )
+          const sliceError = failure(
+            composeGame([
+              moduleWithSaveSlices('first', [saveSlice(name)]),
+              moduleWithSaveSlices('second', [saveSlice(name)]),
+            ]),
+          )
+
+          expect(namespaceError).toMatchObject({
+            _tag: 'DuplicateModuleContract',
+            kind: 'qa-namespace',
+            id: name,
+          })
+          expect(operationError).toMatchObject({
+            _tag: 'DuplicateModuleContract',
+            kind: 'qa-operation',
+            id: `gameplay.${name}`,
+          })
+          expect(sliceError).toMatchObject({
+            _tag: 'DuplicateModuleContract',
+            kind: 'save-slice',
+            id: name,
+          })
+        }),
+      ),
+    ),
+  )
+
+  it.effect('dispatches through QaBridge and provides the operation service from composed layers', () =>
+    Effect.gen(function* () {
+      class QaState extends Context.Service<QaState, { readonly value: string }>()('test/QaState') {}
+
+      const readState = {
+        name: operationName('readState'),
+        input: Schema.Struct({}),
+        output: Schema.String,
+        run: () => Effect.map(QaState, (state) => state.value),
+      }
+      const qa = qaNamespace('gameplay', { readState }, {})
+      const game = yield* composeGame([
+        moduleWithQa('gameplay', qa, Layer.succeed(QaState, { value: 'provided by composed layers' })),
+      ])
+      const qaBridge = QaBridge<QaState>()
+      const program = Effect.gen(function* () {
+        return yield* qaBridge
+      })
+      const api = yield* Effect.provideService(program, qaBridge, game.qaBridge)
+
+      const dispatch = Effect.provide(api.run(qa.name, readState.name, {}), game.layers)
+      const dispatchWithQaState: Effect.Effect<unknown, unknown, QaState> = dispatch
+
+      // @ts-expect-error the QA operation requirement remains on the provided Effect
+      const incorrectlyDischarged: Effect.Effect<unknown, unknown, never> = dispatch
+      expect(incorrectlyDischarged).toBeDefined()
+
+      const output = yield* Effect.provideService(
+        dispatchWithQaState,
+        QaState,
+        { value: 'external fallback' },
+      )
+
+      expect(output).toBe('provided by composed layers')
+    }),
+  )
+
+  it.effect('retains module layer requirements on the composed layers', () =>
+    Effect.gen(function* () {
+      class Required extends Context.Service<Required, { readonly value: number }>()('test/Required') {}
+      class Provided extends Context.Service<Provided, { readonly value: number }>()('test/Provided') {}
+
+      const dependentLayer: Layer.Layer<Provided, never, Required> = Layer.effect(
+        Provided,
+        Effect.map(Required, (required) => ({ value: required.value + 1 })),
+      )
+      const game = yield* composeGame([
+        { name: 'dependent', layers: dependentLayer, frameStages: [] },
+      ])
+      const provided: Effect.Effect<number, never, Required> = Effect.map(
+        Provided,
+        (service) => service.value,
+      ).pipe(Effect.provide(game.layers))
+
+      expect(yield* Effect.provideService(provided, Required, { value: 8 })).toBe(9)
+    }),
+  )
+
+  it.effect('retains registerModule frame-stage requirements on the composed layers', () =>
+    Effect.gen(function* () {
+      class RegistrationInput extends Context.Service<
+        RegistrationInput,
+        { readonly suffix: string }
+      >()('test/RegistrationInput') {}
+
+      const registered = yield* Effect.provideService(
+        registerModule({
+          name: 'registers-with-input',
+          layers: EMPTY_MODULE_LAYER,
+          frameStages: Effect.gen(function* () {
+            const input = yield* RegistrationInput
+            return [{ id: id(`registered:${input.suffix}`), run: () => Effect.void }]
+          }),
+        }),
+        RegistrationInput,
+        { suffix: 'tick' },
+      )
+      const game = yield* composeGame([registered])
+      const retainedRequirement: Effect.Effect<string, unknown, RegistrationInput> = Effect.provide(
+        Effect.succeed('composed'),
+        game.layers,
+      )
+
+      // @ts-expect-error the registration requirement is still part of the composed layer contract
+      const incorrectlyDischarged: Effect.Effect<string, unknown, never> = retainedRequirement
+      expect(incorrectlyDischarged).toBeDefined()
+      expect(yield* Effect.provideService(retainedRequirement, RegistrationInput, { suffix: 'external' })).toBe(
+        'composed',
+      )
     }),
   )
 })
