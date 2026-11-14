@@ -19,7 +19,16 @@
  * install path untestable without a DOM. The browser entry point passes
  * `globalThis` in; a test passes a plain object.
  */
-import { Result } from 'effect'
+import { type Cause, Context, Effect, Result, Schema } from 'effect'
+import {
+  type QaNamespaceName,
+  QaNamespaceNameSchema,
+  type QaOperationName,
+  QaOperationNameSchema,
+} from '@nerima-games/mc-kernel'
+
+const schemaTaggedError = Schema.TaggedError
+const contextService = Context.Service
 
 /**
  * The property name the QA API is published under.
@@ -170,3 +179,45 @@ export const describeQaApiError = (error: QaApiError): string => {
       return `unknown QA API error: ${JSON.stringify(error)}`
   }
 }
+
+/** A typed dispatcher over the QA operations registered by composed modules. */
+export interface QaBridgeApi<OperationErrors, Requirements = never> {
+  readonly run: (
+    namespace: QaNamespaceName,
+    operation: QaOperationName,
+    inputJson: unknown,
+  ) => Effect.Effect<
+    unknown,
+    Schema.SchemaError | QaOperationNotFound | OperationErrors,
+    Requirements
+  >
+}
+
+type QaOperationNotFoundFields = {
+  readonly namespace: typeof QaNamespaceNameSchema
+  readonly operation: typeof QaOperationNameSchema
+}
+
+type QaOperationNotFoundTagged = Schema.TaggedStruct<'QaOperationNotFound', QaOperationNotFoundFields>
+
+export interface QaOperationNotFoundSelf extends Cause.YieldableError {
+  readonly _tag: 'QaOperationNotFound'
+  readonly namespace: QaNamespaceName
+  readonly operation: QaOperationName
+}
+
+const QaOperationNotFoundBase: Schema.Class<
+  QaOperationNotFoundSelf,
+  QaOperationNotFoundTagged,
+  Cause.YieldableError
+> = schemaTaggedError<QaOperationNotFoundSelf>()('QaOperationNotFound', {
+  namespace: QaNamespaceNameSchema,
+  operation: QaOperationNameSchema,
+})
+export class QaOperationNotFound extends QaOperationNotFoundBase {}
+
+/** Context service installed by a host for its composed QA transport. */
+export const QaBridge = <Requirements = never>(): Context.Service<
+  QaBridgeApi<unknown, Requirements>,
+  QaBridgeApi<unknown, Requirements>
+> => contextService<QaBridgeApi<unknown, Requirements>>('mc-compose/domain/QaBridge')
