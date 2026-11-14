@@ -569,16 +569,15 @@ const makeQaBridge = <OperationErrors, Requirements>(
   }
 }
 
-export const mergeModuleLayers = <const Modules extends ModuleList>(
+export function mergeModuleLayers<const Modules extends ModuleList>(
   modules: Modules,
-): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>> => {
-  if (modules.length === 0) {
+): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>>
+export function mergeModuleLayers(modules: ModuleList): Layer.Layer<never, unknown, unknown> {
+  const [first, ...rest] = modules
+  if (typeof first === 'undefined') {
     return Layer.empty
   }
-  return Layer.mergeAll(
-    modules[0]!.layers,
-    ...Array.from(modules.slice(1), ({ layers }) => layers),
-  )
+  return Layer.mergeAll(first.layers, ...rest.map(({ layers }) => layers))
 }
 
 /** Every module's stages, flattened. Order here is irrelevant — the resolver sorts. */
