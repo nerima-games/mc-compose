@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
-import { Effect, Either, Option } from 'effect'
+import { Effect, Option, Result } from 'effect'
 import {
   buildQaRegistry,
   describeQaApiError,
@@ -20,11 +20,11 @@ const namespace = (name: string, ...commands: ReadonlyArray<string>): QaNamespac
 })
 
 const registryOf = (namespaces: ReadonlyArray<QaNamespace>): QaRegistry =>
-  Either.getOrThrow(buildQaRegistry(namespaces))
+  Result.getOrThrow(buildQaRegistry(namespaces))
 
 const failure = (
-  result: Either.Either<QaRegistry, QaApiError>,
-): QaApiError | undefined => Option.getOrUndefined(Either.getLeft(result))
+  result: Result.Result<QaRegistry, QaApiError>,
+): QaApiError | undefined => Option.getOrUndefined(Result.getFailure(result))
 
 describe('building the QA surface', () => {
   it.effect('publishes each command under namespace.command', () =>
@@ -136,7 +136,7 @@ describe('name shape', () => {
   it.effect('accepts the shapes modules are expected to use', () =>
     Effect.sync(() => {
       expect(
-        Either.isRight(
+        Result.isSuccess(
           buildQaRegistry([
             namespace('gameplay', 'breakBlock', 'giveItem2'),
             namespace('mx-ui', 'openInventory'),

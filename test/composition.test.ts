@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from '@effect/vitest'
 import { makeUiFrameState, uiStages } from '@nerima-games/mx-ui'
-import { Context, Effect, Either, Layer, Option, Ref } from 'effect'
+import { Context, Effect, Layer, Option, Ref, Result } from 'effect'
 import {
   collectStages,
   composeGame,
@@ -57,11 +57,11 @@ const moduleOf = (name: string, frameStages: ReadonlyArray<StageRegistration>): 
 const composed = <const Modules extends ReadonlyArray<GameModule<never, unknown>>>(
   modules: Modules,
   skeleton: ReadonlyArray<StagePhase> = [],
-) => Either.getOrThrow(composeGame(modules, { skeleton }))
+) => Result.getOrThrow(composeGame(modules, { skeleton }))
 
 const failure = (
-  result: Either.Either<ComposedGame, StageOrderError>,
-): StageOrderError | undefined => Option.getOrUndefined(Either.getLeft(result))
+  result: Result.Result<ComposedGame, StageOrderError>,
+): StageOrderError | undefined => Option.getOrUndefined(Result.getFailure(result))
 
 describe('composeGame', () => {
   it.effect('runs every stage exactly once, in the resolved total order', () =>
@@ -195,7 +195,7 @@ describe('composeGame', () => {
 
   it.effect('uses the standard skeleton when none is given', () =>
     Effect.sync(() => {
-      const game = Either.getOrThrow(
+      const game = Result.getOrThrow(
         composeGame([
           moduleOf('mx-ui', [{ id: STAGE_HUD_SYNC, run: () => Effect.void }]),
           moduleOf('mc-render', [{ id: STAGE_RENDER, run: () => Effect.void }]),
@@ -305,7 +305,7 @@ describe('registerModule — the bridge to kernel’s GameModule', () => {
   // a service in order to BUILD a stage. This is that, end to end.
   it.effect('runs a module’s registration Effect and keeps its requirement in the type', () =>
     Effect.gen(function* () {
-      class Bindings extends Context.Tag('test/Bindings')<Bindings, { readonly jump: string }>() {}
+      class Bindings extends Context.Service<Bindings, { readonly jump: string }>()('test/Bindings') {}
 
       const seen = yield* Ref.make<ReadonlyArray<string>>([])
 
@@ -351,8 +351,8 @@ describe('registerModule — the bridge to kernel’s GameModule', () => {
 })
 
 describe('Layer merge', () => {
-  class Alpha extends Context.Tag('test/Alpha')<Alpha, { readonly value: string }>() {}
-  class Beta extends Context.Tag('test/Beta')<Beta, { readonly value: number }>() {}
+  class Alpha extends Context.Service<Alpha, { readonly value: string }>()('test/Alpha') {}
+  class Beta extends Context.Service<Beta, { readonly value: number }>()('test/Beta') {}
 
   const alphaModule = {
     name: 'alpha',
@@ -424,8 +424,8 @@ describe('collectStages', () => {
 })
 
 describe('ModuleLayer — what it now checks, and what it still cannot', () => {
-  class Missing extends Context.Tag('test/Missing')<Missing, { readonly value: number }>() {}
-  class Provided extends Context.Tag('test/Provided')<Provided, { readonly value: number }>() {}
+  class Missing extends Context.Service<Missing, { readonly value: number }>()('test/Missing') {}
+  class Provided extends Context.Service<Provided, { readonly value: number }>()('test/Provided') {}
 
   // REGRESSION: `ModuleLayer` used to be `Layer<any, any, any>`, so a module
   // arriving with an UNSATISFIED requirement was accepted silently. `Layer`
@@ -484,7 +484,7 @@ describe('warnings — what the resolver used to swallow', () => {
   // stays schedulable — and it is also exactly what `render:daw` looks like.
   it.effect('surfaces a stage the skeleton does not recognise, without rejecting it', () =>
     Effect.sync(() => {
-      const game = Either.getOrThrow(
+      const game = Result.getOrThrow(
         composeGame([
           moduleOf('mc-render', [{ id: STAGE_RENDER, run: () => Effect.void }]),
           moduleOf('typo', [{ id: id('render:daw'), run: () => Effect.void }]),
@@ -501,7 +501,7 @@ describe('warnings — what the resolver used to swallow', () => {
 
   it.effect('says nothing when there is nothing to say, so a host can print it unconditionally', () =>
     Effect.sync(() => {
-      const game = Either.getOrThrow(
+      const game = Result.getOrThrow(
         composeGame([moduleOf('mc-render', [{ id: STAGE_RENDER, run: () => Effect.void }])]),
       )
 

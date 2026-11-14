@@ -33,7 +33,7 @@ import type {
   GameModule as KernelGameModule,
   StageRegistration as KernelStageRegistration,
 } from '@nerima-games/mc-kernel'
-import { Effect, Either, Layer } from 'effect'
+import { Effect, Layer, Result } from 'effect'
 import {
   type StageConstraint,
   type StageOrderError,
@@ -133,7 +133,7 @@ export const EMPTY_MODULE_LAYER: ModuleLayer = Layer.empty as unknown as ModuleL
  * That Effect runs ONCE, at startup, and `composeGame` runs after it. So the
  * type this repository composes is kernel's with `frameStages` already
  * evaluated. Keeping the boundary there is what lets `composeGame` stay a pure
- * `Either` — resolving a total order is a calculation over ids and edges, and
+ * `Result` — resolving a total order is a calculation over ids and edges, and
  * making it an `Effect` because of somebody else's constructor would be
  * borrowing a fibre to do arithmetic.
  *
@@ -276,17 +276,17 @@ const asConstraint = (registration: StageRegistration): StageConstraint => {
 export const composeGame = <const Modules extends ModuleList>(
   modules: Modules,
   options: ComposeOptions = {},
-): Either.Either<ComposedGame<ModuleOutput<Modules>, ModuleError<Modules>>, StageOrderError> => {
+): Result.Result<ComposedGame<ModuleOutput<Modules>, ModuleError<Modules>>, StageOrderError> => {
   const stages = collectStages(modules)
   const skeleton = options.skeleton ?? STANDARD_STAGE_SKELETON
 
-  return Either.map(
+  return Result.map(
     resolveStageOrder(stages.map(asConstraint), { skeleton }),
     (plan): ComposedGame<ModuleOutput<Modules>, ModuleError<Modules>> => {
       const byId = new Map(stages.map((stage) => [stage.id, stage] as const))
       // Non-null: `plan.order` is a permutation of `registered`, which
       // `resolveStageOrder` built from exactly these `stages`' ids — and this
-      // Callback only runs on `Either.Right`, i.e. only once
+      // Callback only runs on `Result.Success`, i.e. only once
       // `collectRegistered` has already confirmed those ids are unique. So
       // Every id `plan.order` yields is present in `byId`, built from the
       // Same `stages` array.

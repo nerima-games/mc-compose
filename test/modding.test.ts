@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
-import { Effect, Either, Option, Ref } from 'effect'
+import { Effect, Option, Ref, Result } from 'effect'
 import {
   composeGame,
   DeltaTimeSecs,
@@ -50,21 +50,21 @@ const stage = (id: StageId, after?: ReadonlyArray<StageId>): StageRegistration =
   run: () => Effect.void,
 })
 
-const failure = <A>(result: Either.Either<A, ModdingError>): ModdingError | undefined =>
-  Option.getOrUndefined(Either.getLeft(result))
+const failure = <A>(result: Result.Result<A, ModdingError>): ModdingError | undefined =>
+  Option.getOrUndefined(Result.getFailure(result))
 
 describe('accepting a mod', () => {
   it.effect('accepts a well-formed mod and hands back a plain GameModule', () =>
     Effect.sync(() => {
       const result = acceptMod(manifest('extra-ores', [stage(modStageId('extra-ores', 'tick'))]))
-      expect(Either.isRight(result)).toBe(true)
-      expect(Either.getOrThrow(result).frameStages).toHaveLength(1)
+      expect(Result.isSuccess(result)).toBe(true)
+      expect(Result.getOrThrow(result).frameStages).toHaveLength(1)
     }),
   )
 
   it.effect('accepts a mod that contributes only Layers', () =>
     Effect.sync(() => {
-      expect(Either.isRight(acceptMod(manifest('quiet-mod')))).toBe(true)
+      expect(Result.isSuccess(acceptMod(manifest('quiet-mod')))).toBe(true)
     }),
   )
 
@@ -102,7 +102,7 @@ describe('accepting a mod', () => {
 
   it.effect('preserves order when accepting several mods', () =>
     Effect.sync(() => {
-      const accepted = Either.getOrThrow(
+      const accepted = Result.getOrThrow(
         acceptMods([
           manifest('alpha', [stage(modStageId('alpha', 'tick'))]),
           manifest('bravo', [stage(modStageId('bravo', 'tick'))]),
@@ -253,7 +253,7 @@ describe('a mod is not a second-class module', () => {
       const log = yield* Ref.make<ReadonlyArray<string>>([])
       const record = (name: string) => () => Ref.update(log, (previous) => [...previous, name])
 
-      const mod = Either.getOrThrow(
+      const mod = Result.getOrThrow(
         acceptMod(
           manifest('extra-ores', [
             { id: modStageId('extra-ores', 'tick'), after: [STAGE_INPUT], run: record('mod') },
@@ -261,7 +261,7 @@ describe('a mod is not a second-class module', () => {
         ),
       )
 
-      const game = Either.getOrThrow(
+      const game = Result.getOrThrow(
         composeGame([
           { name: 'mc-render', layers: EMPTY_MODULE_LAYER, frameStages: [{ id: STAGE_INPUT, run: record('input') }] },
           mod,
@@ -284,7 +284,7 @@ describe('a mod is not a second-class module', () => {
   // Rejecting it would make mods depend on the build's module set.
   it.effect('lets a mod declare an after-edge on a stage the build does not load', () =>
     Effect.sync(() => {
-      const mod = Either.getOrThrow(
+      const mod = Result.getOrThrow(
         acceptMod(
           manifest('extra-ores', [
             stage(modStageId('extra-ores', 'tick'), [StageId('simulation:redstone')]),
@@ -292,7 +292,7 @@ describe('a mod is not a second-class module', () => {
         ),
       )
 
-      const game = Either.getOrThrow(composeGame([mod]))
+      const game = Result.getOrThrow(composeGame([mod]))
       expect([...game.plan.order]).toStrictEqual(['mod:extra-ores:tick'])
       expect([...game.plan.dangling]).toStrictEqual([
         { stage: 'mod:extra-ores:tick', missing: 'simulation:redstone' },
@@ -302,7 +302,7 @@ describe('a mod is not a second-class module', () => {
 
   it.effect('surfaces a cycle between two mods like any other cycle', () =>
     Effect.sync(() => {
-      const mods = Either.getOrThrow(
+      const mods = Result.getOrThrow(
         acceptMods([
           manifest('alpha', [stage(modStageId('alpha', 'tick'), [modStageId('bravo', 'tick')])]),
           manifest('bravo', [stage(modStageId('bravo', 'tick'), [modStageId('alpha', 'tick')])]),
@@ -310,7 +310,7 @@ describe('a mod is not a second-class module', () => {
       )
 
       const result = composeGame(mods)
-      expect(Either.isLeft(result)).toBe(true)
+      expect(Result.isFailure(result)).toBe(true)
     }),
   )
 })
