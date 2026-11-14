@@ -22,8 +22,8 @@
 import { type Cause, Context, Effect, Result, Schema } from 'effect'
 import {
   type QaNamespaceName,
-  type QaOperationName,
   QaNamespaceNameSchema,
+  type QaOperationName,
   QaOperationNameSchema,
 } from '@nerima-games/mc-kernel'
 
