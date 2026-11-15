@@ -146,7 +146,7 @@ It validates the compose-owned ordering contract without starting a browser.
 **このリポジトリの中心。** [responsibility.md](./responsibility.md) §1.1 と
 [public-api.md](./public-api.md) §1 を参照。
 
-順序表(`STANDARD_STAGE_SKELETON`)は **14 個のフェーズの列**である。
+順序表(`STANDARD_STAGE_SKELETON`)はフェーズの列である。
 stage id のリストではない。フェーズは「フレーム内の位置」と「そこに入る仕事の種類」を名指し、
 stage id は自分の**名前部分**(最後の `:` より後ろ)でそこへの所属を宣言する
 (`members` の要素が `:` で終わるときだけ、名前空間まるごとが一致する)。
@@ -158,9 +158,12 @@ stage id は自分の**名前部分**(最後の `:` より後ろ)でそこへの
 フェーズ                     ← 所属を宣言する実 id
 input                        ← render:input
 network:inbound          ★   ← multiplayer:inbound
-simulation:physics           ← sim:physics
-simulation:interactions      ← gameplay:interactions
+simulation:physics           ← sim:physics, gameplay:vehicles
+simulation:interactions      ← gameplay:interactions, gameplay:brewing-advance
+simulation:fire              ← gameplay:fire
+simulation:survival-hunger   ← gameplay:survival-hunger
 simulation:entities          ← gameplay:entities
+simulation:ender-dragon      ← gameplay:ender-dragon
 simulation:fluids            ← gameplay:fluids
 simulation:redstone          ← redstone:power, redstone:effects   （名前空間一致）
 simulation:time-weather      ← gameplay:time-weather
@@ -172,7 +175,10 @@ render                       ← render:draw
 hud-sync                     ← ui:hud-sync, ui:overlay-sync       （名前空間一致）
 ```
 
-右の列は**例ではなく、6 リポジトリが実際に登録している 16 本**である
+`vehicles`は`after sim:physics`に従い、乗り物が運ぶplayerの位置をinteractionsが読む前に動かすため、`simulation:physics`に含める。
+`brewing-advance`は`after interactions`に従い、醸造台の処理をblock操作に続けるため、`simulation:interactions`に含める。
+
+右の列は、各リポジトリが実際に登録しているstageである
 (`test/e2e/roster.ts`、`pnpm check:roster` が兄弟のソースと 1 行ずつ照合する)。
 **空のフェーズは 1 つも無い。** かつて `simulation:physics` だけが空で、それは
 「4 リポジトリが `after` で名指ししている stage を誰も登録していない」という欠陥の姿だった

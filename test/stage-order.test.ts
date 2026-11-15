@@ -606,7 +606,9 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
         // No longer empty: mc-sim registers `sim:physics`. This line used to be
         // a comment explaining that the phase closed over rather than breaking
         // the chain.
+        'gameplay:vehicles',
         'sim:physics',
+        'gameplay:brewing-advance',
         'gameplay:interactions',
         'gameplay:fire',
         'gameplay:survival-hunger',
@@ -707,10 +709,25 @@ describe('the skeleton constrains a REAL build, not just its own canonical ids',
       expect(positionIn(resolved, 'ui:hud-sync')).toBeLessThan(
         positionIn(resolved, 'ui:overlay-sync'),
       )
+      expect(resolved.slice(2, 7)).toStrictEqual([
+        'sim:physics',
+        'gameplay:vehicles',
+        'gameplay:interactions',
+        'gameplay:brewing-advance',
+        'gameplay:fire',
+      ])
       // ...and the phases still hold everything else in place. mc-sim now
       // registers `sim:physics`, so the cross-module edges resolve against it.
       expect(resolved[0]).toBe('render:input')
       expect(resolved[resolved.length - 1]).toBe('ui:overlay-sync')
+    }),
+  )
+
+  it.effect('keeps an unclaimed stage after the HUD and reports its id', () =>
+    Effect.sync(() => {
+      const resolved = plan([...realBuild, stage('mod:unclaimed')], STANDARD_STAGE_SKELETON)
+      expect(resolved.order.slice(-2)).toStrictEqual(['ui:overlay-sync', 'mod:unclaimed'])
+      expect(resolved.unmatchedPhase).toStrictEqual(['mod:unclaimed'])
     }),
   )
 

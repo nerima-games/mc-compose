@@ -148,15 +148,22 @@ export const STAGE_PHASE_NETWORK_INBOUND: StagePhase = stagePhase('network:inbou
  * `step()` — reordering that pair is what makes things float. The same class of
  * bug at frame scale is running interactions against last frame's positions.
  *
+ * Vehicles carry the player, so `vehicles` shares this phase: its `after sim:physics`
+ * edge places movement before interactions read the player's position.
  * mc-sim registers `sim:physics`; the member below is the stage NAME, so the
  * owning repository's prefix is free to be anything.
  */
-export const STAGE_PHASE_SIM_PHYSICS: StagePhase = stagePhase('simulation:physics', 'physics')
+export const STAGE_PHASE_SIM_PHYSICS: StagePhase = stagePhase('simulation:physics', 'physics', 'vehicles')
 
-/** Player-initiated actions: mining, placing, item use. mx-gameplay's `gameplay:interactions`. */
+/**
+ * Player-initiated actions: mining, placing, item use. mx-gameplay's `gameplay:interactions`.
+ * `brewing-advance` follows its declared `after interactions` edge in this phase,
+ * because brewing continues the block interaction before the fire phase begins.
+ */
 export const STAGE_PHASE_SIM_INTERACTIONS: StagePhase = stagePhase(
   'simulation:interactions',
   'interactions',
+  'brewing-advance',
 )
 
 /** Fire spread and block ignition after player interactions have settled. */
