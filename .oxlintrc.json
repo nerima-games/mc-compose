@@ -96,7 +96,10 @@
     // oxlint binary: `capIsNewExceptions` matches by the called identifier's own
     // name, so a member-expression call like `Context.Tag(...)` is matched by `Tag`, not
     // `Context.Tag`.
-    "new-cap": ["warn", { "capIsNewExceptions": ["StageId", "Tag"] }],
+    // Effect's Schema.Struct, TaggedError, Literals and Context.Service are also
+    // factories. Calling them directly reports new-cap warnings without these
+    // named exceptions; adding `new` would not implement their curried APIs.
+    "new-cap": ["warn", { "capIsNewExceptions": ["StageId", "Tag", "Struct", "TaggedError", "Literals", "Service"] }],
 
     // Restriction
     "default-case": "warn",

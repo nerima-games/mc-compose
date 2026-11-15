@@ -11,6 +11,7 @@ import {
   DeltaTimeSecs,
   DuplicateModuleContract,
   EMPTY_MODULE_LAYER,
+  InvalidModuleContract,
   mergeModuleLayers,
   registerModule,
   type GameModule,
@@ -653,9 +654,9 @@ describe('C1 module contracts', () => {
         composeGame([moduleWithQa('gameplay', namespace, EMPTY_MODULE_LAYER)]),
       )
 
-      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toBeInstanceOf(InvalidModuleContract)
       expect(error).toMatchObject({
-        _tag: 'DuplicateModuleContract',
+        _tag: 'InvalidModuleContract',
         kind: 'qa-operation',
         id: 'gameplay.declaredName',
       })
@@ -672,9 +673,9 @@ describe('C1 module contracts', () => {
           composeGame([moduleWithQa('gameplay', namespace, EMPTY_MODULE_LAYER)]),
         )
 
-        expect(error).toBeInstanceOf(DuplicateModuleContract)
+        expect(error).toBeInstanceOf(InvalidModuleContract)
         expect(error).toMatchObject({
-          _tag: 'DuplicateModuleContract',
+          _tag: 'InvalidModuleContract',
           kind: 'qa-operation',
           id: 'gameplay.<map>',
         })
@@ -697,9 +698,9 @@ describe('C1 module contracts', () => {
         composeGame([moduleWithQa('gameplay', namespace, EMPTY_MODULE_LAYER)]),
       )
 
-      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toBeInstanceOf(InvalidModuleContract)
       expect(error).toMatchObject({
-        _tag: 'DuplicateModuleContract',
+        _tag: 'InvalidModuleContract',
         kind: 'qa-operation',
         id: 'gameplay.status',
       })
@@ -728,9 +729,9 @@ describe('C1 module contracts', () => {
 
       const error = yield* Effect.flip(composeGame([malformed]))
 
-      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toBeInstanceOf(InvalidModuleContract)
       expect(error).toMatchObject({
-        _tag: 'DuplicateModuleContract',
+        _tag: 'InvalidModuleContract',
         kind: 'qa-namespace',
         id: 'broken-qa',
       })
@@ -747,9 +748,9 @@ describe('C1 module contracts', () => {
 
       const error = yield* Effect.flip(composeGame([malformed]))
 
-      expect(error).toBeInstanceOf(DuplicateModuleContract)
+      expect(error).toBeInstanceOf(InvalidModuleContract)
       expect(error).toMatchObject({
-        _tag: 'DuplicateModuleContract',
+        _tag: 'InvalidModuleContract',
         kind: 'save-slice',
         id: 'broken-slices',
       })
@@ -841,24 +842,17 @@ describe('C1 module contracts', () => {
       const game = yield* composeGame([
         moduleWithQa('gameplay', qa, Layer.succeed(QaState, { value: 'provided by composed layers' })),
       ])
-      const qaBridge = QaBridge<QaState>()
-      const program = Effect.gen(function* () {
-        return yield* qaBridge
-      })
-      const api = yield* Effect.provideService(program, qaBridge, game.qaBridge)
+      // @ts-expect-error the value retains its QA requirement until the host provides the layer
+      const prematurelyClosed: Effect.Effect<unknown, unknown, never> = game.qaBridge.run(qa.name, readState.name, {})
+      expect(prematurelyClosed).toBeDefined()
 
-      const dispatch = Effect.provide(api.run(qa.name, readState.name, {}), game.layers)
-      const dispatchWithQaState: Effect.Effect<unknown, unknown, QaState> = dispatch
-
-      // @ts-expect-error the QA operation requirement remains on the provided Effect
-      const incorrectlyDischarged: Effect.Effect<unknown, unknown, never> = dispatch
-      expect(incorrectlyDischarged).toBeDefined()
-
-      const output = yield* Effect.provideService(
-        dispatchWithQaState,
-        QaState,
-        { value: 'external fallback' },
-      )
+      const bridge = {
+        run: (...args: Parameters<typeof game.qaBridge.run>) =>
+          Effect.provide(game.qaBridge.run(...args), game.layers),
+      }
+      const api = yield* Effect.provideService(QaBridge, QaBridge, bridge)
+      const dispatch: Effect.Effect<unknown, unknown, never> = api.run(qa.name, readState.name, {})
+      const output = yield* dispatch
 
       expect(output).toBe('provided by composed layers')
     }),
@@ -876,10 +870,14 @@ describe('C1 module contracts', () => {
       const game = yield* composeGame([
         { name: 'dependent', layers: dependentLayer, frameStages: [] },
       ])
-      const provided: Effect.Effect<number, never, Required> = Effect.map(
+      const provided = Effect.map(
         Provided,
         (service) => service.value,
       ).pipe(Effect.provide(game.layers))
+
+      // @ts-expect-error the inferred composed layer still requires Required
+      const incorrectlyDischarged: Effect.Effect<number, never, never> = provided
+      expect(incorrectlyDischarged).toBeDefined()
 
       expect(yield* Effect.provideService(provided, Required, { value: 8 })).toBe(9)
     }),
@@ -905,7 +903,7 @@ describe('C1 module contracts', () => {
         { suffix: 'tick' },
       )
       const game = yield* composeGame([registered])
-      const retainedRequirement: Effect.Effect<string, unknown, RegistrationInput> = Effect.provide(
+      const retainedRequirement = Effect.provide(
         Effect.succeed('composed'),
         game.layers,
       )

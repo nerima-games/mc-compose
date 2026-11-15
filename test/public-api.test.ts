@@ -55,6 +55,9 @@ describe('public API surface', () => {
         'mergeModuleLayers',
         'EMPTY_MODULE_LAYER',
         'collectStages',
+        'DuplicateModuleContract',
+        'InvalidModuleContract',
+        'ComposeOptionsError',
         // the bridge from kernel's `GameModule` (whose `frameStages` is an
         // Effect) to the post-registration module this repository composes
         'registerModule',
@@ -79,6 +82,8 @@ describe('public API surface', () => {
         'readInstalledQaApi',
         'qaKey',
         'describeQaApiError',
+        'QaBridge',
+        'QaOperationNotFound',
         // modding
         'MODDING_API_VERSION',
         'RESERVED_STAGE_PREFIXES',

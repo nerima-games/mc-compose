@@ -53,10 +53,6 @@ import {
 } from './stage-order'
 import { STANDARD_STAGE_SKELETON } from './stage-skeleton'
 
-const schemaStruct = Schema.Struct
-const schemaTaggedError = Schema.TaggedError
-const schemaLiterals = Schema.Literals
-
 /**
  * Seconds since the previous frame, BRANDED, exactly as kernel brands it.
  *
@@ -334,8 +330,10 @@ type ModuleRegistrationRequirements<Modules extends ReadonlyArray<unknown>> =
   RegistrationRequirements<Modules[number]>
 type ModuleCompositionRequirements<Modules extends ModuleList> =
   | ModuleLayerRequirements<Modules>
-  | QaOperationRequirementsOfModules<Modules>
-  | ModuleRegistrationRequirements<Modules>
+  | Exclude<
+    QaOperationRequirementsOfModules<Modules> | ModuleRegistrationRequirements<Modules>,
+    ModuleOutput<Modules>
+  >
 
 type DuplicateModuleContractFields = {
   readonly id: typeof ModuleContractIdSchema
@@ -357,7 +355,7 @@ const DuplicateModuleContractBase: Schema.Class<
   DuplicateModuleContractSelf,
   DuplicateModuleContractTagged,
   Cause.YieldableError
-> = schemaTaggedError<DuplicateModuleContractSelf>()(
+> = Schema.TaggedError<DuplicateModuleContractSelf>()(
   'DuplicateModuleContract',
   {
     id: ModuleContractIdSchema,
@@ -365,6 +363,27 @@ const DuplicateModuleContractBase: Schema.Class<
   },
 )
 export class DuplicateModuleContract extends DuplicateModuleContractBase {}
+
+type InvalidModuleContractTagged = Schema.TaggedStruct<
+  'InvalidModuleContract',
+  DuplicateModuleContractFields
+>
+
+export interface InvalidModuleContractSelf extends Cause.YieldableError {
+  readonly _tag: 'InvalidModuleContract'
+  readonly kind: Schema.Schema.Type<typeof ModuleContractKindSchema>
+  readonly id: Schema.Schema.Type<typeof ModuleContractIdSchema>
+}
+
+const InvalidModuleContractBase: Schema.Class<
+  InvalidModuleContractSelf,
+  InvalidModuleContractTagged,
+  Cause.YieldableError
+> = Schema.TaggedError<InvalidModuleContractSelf>()('InvalidModuleContract', {
+  id: ModuleContractIdSchema,
+  kind: ModuleContractKindSchema,
+})
+export class InvalidModuleContract extends InvalidModuleContractBase {}
 
 type ComposeOptionsErrorFields = {
   readonly field: Schema.Literals<readonly ['options', 'skeleton']>
@@ -381,8 +400,8 @@ const ComposeOptionsErrorBase: Schema.Class<
   ComposeOptionsErrorSelf,
   ComposeOptionsErrorTagged,
   Cause.YieldableError
-> = schemaTaggedError<ComposeOptionsErrorSelf>()('ComposeOptionsError', {
-  field: schemaLiterals(['options', 'skeleton']),
+> = Schema.TaggedError<ComposeOptionsErrorSelf>()('ComposeOptionsError', {
+  field: Schema.Literals(['options', 'skeleton']),
 })
 export class ComposeOptionsError extends ComposeOptionsErrorBase {}
 
@@ -393,6 +412,13 @@ const duplicateModuleContract = (kind: ModuleContractKindInput, id: unknown) =>
     const decodedKind = yield* Schema.decodeUnknownEffect(ModuleContractKindSchema)(kind)
     const decodedId = yield* Schema.decodeUnknownEffect(ModuleContractIdSchema)(id)
     return yield* Effect.fail(new DuplicateModuleContract({ id: decodedId, kind: decodedKind }))
+  })
+
+const invalidModuleContract = (kind: ModuleContractKindInput, id: unknown) =>
+  Effect.gen(function* invalidModuleContractGen() {
+    const decodedKind = yield* Schema.decodeUnknownEffect(ModuleContractKindSchema)(kind)
+    const decodedId = yield* Schema.decodeUnknownEffect(ModuleContractIdSchema)(id)
+    return yield* Effect.fail(new InvalidModuleContract({ id: decodedId, kind: decodedKind }))
   })
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -411,12 +437,12 @@ type QaOperationValidation = {
 const validateQaOperation = ({ key, namespace, seenOperations, value }: QaOperationValidation) =>
   Effect.gen(function* validateQaOperationGen() {
     if (!isRecord(value)) {
-      return yield* duplicateModuleContract('qa-operation', `${namespace}.${key}`)
+      return yield* invalidModuleContract('qa-operation', `${namespace}.${key}`)
     }
     const { input, name: encodedName, output, run } = value
     const name = yield* Schema.decodeUnknownEffect(QaOperationNameSchema)(encodedName)
     if (key !== name || typeof run !== 'function' || !isSchemaCodec(input) || !isSchemaCodec(output)) {
-      return yield* duplicateModuleContract('qa-operation', `${namespace}.${key}`)
+      return yield* invalidModuleContract('qa-operation', `${namespace}.${key}`)
     }
     if (seenOperations.has(name)) {
       return yield* duplicateModuleContract('qa-operation', `${namespace}.${name}`)
@@ -431,20 +457,20 @@ const validateQaOperationMap = (
 ) =>
   Effect.gen(function* validateQaOperationMapGen() {
     if (!isRecord(operationMap)) {
-      return yield* duplicateModuleContract('qa-operation', `${namespace}.<map>`)
+      return yield* invalidModuleContract('qa-operation', `${namespace}.<map>`)
     }
     for (const [key, value] of Object.entries(operationMap)) {
       yield* validateQaOperation({ key, namespace, seenOperations, value })
     }
   })
 
-const QaNamespaceRegistrationSchema = schemaStruct({
+const QaNamespaceRegistrationSchema = Schema.Struct({
   command: Schema.Unknown,
   name: QaNamespaceNameSchema,
   observe: Schema.Unknown,
 })
 
-const SaveSliceContractSchema = schemaStruct({
+const SaveSliceContractSchema = Schema.Struct({
   id: SaveSliceIdSchema,
   version: SaveVersionSchema,
 })
@@ -477,7 +503,7 @@ type QaNamespaceValidation = {
 const validateQaNamespace = ({ moduleName, qa, seenNamespaces }: QaNamespaceValidation) =>
   Effect.gen(function* validateQaNamespaceGen() {
     if (!isRecord(qa)) {
-      return yield* duplicateModuleContract('qa-namespace', moduleName)
+      return yield* invalidModuleContract('qa-namespace', moduleName)
     }
     const parsedQa = yield* Schema.decodeUnknownEffect(QaNamespaceRegistrationSchema)(qa)
     const { command, name, observe } = parsedQa
@@ -513,7 +539,7 @@ const validateModuleSaveSlices = (
       return
     }
     if (!Array.isArray(saveSlices)) {
-      return yield* duplicateModuleContract('save-slice', module.name)
+      return yield* invalidModuleContract('save-slice', module.name)
     }
     for (const slice of saveSlices) {
       yield* validateSaveSlice(slice, seenSlices)
@@ -676,7 +702,7 @@ export const composeGame = <const Modules extends ModuleList>(
   options: ComposeOptions = {},
 ): Effect.Effect<
   ComposedGame<Modules>,
-  DuplicateModuleContract | ComposeOptionsError | Schema.SchemaError | StageOrderError
+  DuplicateModuleContract | InvalidModuleContract | ComposeOptionsError | Schema.SchemaError | StageOrderError
 > => {
   if (typeof options !== 'object' || options === null) {
     return Effect.fail(new ComposeOptionsError({ field: 'options' }))
