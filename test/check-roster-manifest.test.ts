@@ -30,7 +30,7 @@ import { ROSTER, ROSTER_REGISTERS_NOTHING, type RosterModule } from './e2e/roste
 // Fixtures — shaped exactly like the siblings' real files
 // ---------------------------------------------------------------------------
 
-const STAGE_IDS_SOURCE = `import { StageId } from '../domain/frame-contract'
+const STAGE_IDS_SOURCE = `import { StageId } from '@nerima-games/mc-kernel'
 
 export const GAMEPLAY_STAGE_IDS = {
   /** doc */
@@ -93,6 +93,20 @@ const FILES: Readonly<Record<string, string>> = {
 // ---------------------------------------------------------------------------
 
 describe('parsing a sibling’s stage ids', () => {
+  it.effect('follows constructor import aliases, const aliases and object spreads to the minting line', () =>
+    Effect.sync(() => {
+      const ids = parseStageIds('stage-ids.ts', `import { StageId as makeStageId } from '@nerima-games/mc-kernel'
+const stageId = makeStageId
+const FIRST = { first: stageId('sample:first') } as const
+const SECOND = { second: makeStageId('sample:second') } as const
+export const STAGES = { ...FIRST, ...SECOND } as const
+export const SINGLE = stageId('sample:single')
+`)
+      expect(ids.get('STAGES.first')).toStrictEqual({ id: 'sample:first', line: 3 })
+      expect(ids.get('STAGES.second')).toStrictEqual({ id: 'sample:second', line: 4 })
+      expect(ids.get('SINGLE')).toStrictEqual({ id: 'sample:single', line: 6 })
+    }),
+  )
   it.effect('resolves every `NAME.prop` reference to the literal it was minted from', () =>
     Effect.sync(() => {
       const ids = parseStageIds('stage-ids.ts', STAGE_IDS_SOURCE)
@@ -111,6 +125,113 @@ describe('parsing a sibling’s stage ids', () => {
       expect(ids.get('GAMEPLAY_STAGE_IDS.interactions')?.line).toBe(5)
       expect(ids.get('GAMEPLAY_STAGE_IDS.entities')?.line).toBe(6)
       expect(ids.get('UPSTREAM_STAGE_IDS.simPhysics')?.line).toBe(10)
+    }),
+  )
+})
+
+describe('following registered stage factories', () => {
+  const root = '/roster/sample/src/stages'
+  const entry = `${root}/registration.ts`
+  const idsSource = `import { StageId } from '@nerima-games/mc-kernel'
+export const STAGES = { first: StageId('sample:first'), second: StageId('sample:second') }
+export const EXTRA = StageId('sample:extra')
+`
+  const registration = `import { assembled } from './composition.js'
+export const sampleModule = { frameStages: Effect.gen(function* () { return yield* assembled() }) }
+export const preview = () => ({ frameStages: Effect.succeed([{ id: StageId('preview:only'), run: () => Effect.void }]) })
+`
+  const factory = `import { STAGES, EXTRA } from './registration-core.js'
+export const second = () => ({ id: STAGES.second, after: [STAGES.first], run: () => Effect.void })
+export const extra = () => { const stage = { id: EXTRA, after: [STAGES.second], run: () => Effect.void }; return { stage } }
+export const unused = () => ({ id: StageId('unused:helper'), run: () => Effect.void })
+`
+  const composition = `import { STAGES } from './stage-ids.js'
+import { second, extra } from './factory.js'
+const core = () => [{ id: STAGES.first, run: () => Effect.void }, second()]
+export const assembled = () => Effect.gen(function* () {
+  const stages = core()
+  const api = yield* extra()
+  return [...stages, api.stage]
+})
+`
+  const files = {
+    [entry]: registration,
+    [`${root}/stage-ids.ts`]: idsSource,
+    [`${root}/registration-core.ts`]: "export { STAGES, EXTRA } from './stage-ids.js'",
+    [`${root}/factory.ts`]: factory,
+    [`${root}/composition.ts`]: composition,
+  }
+  const parse = (overrides: Readonly<Record<string, string>> = {}) =>
+    parseRegistrations(entry, registration, parseStageIds(`${root}/stage-ids.ts`, idsSource), ioOf({ ...files, ...overrides }))
+
+  it.effect('follows mixed inline and imported factories, array spreads and returned stage properties', () =>
+    Effect.sync(() => {
+      const result = parse()
+      expect(result.unresolved).toStrictEqual([])
+      expect(result.stages).toStrictEqual([
+        { id: 'sample:first', after: [], declaredAtLine: 3, declaredAtFile: `${root}/composition.ts` },
+        { id: 'sample:second', after: ['sample:first'], declaredAtLine: 2, declaredAtFile: `${root}/factory.ts` },
+        { id: 'sample:extra', after: ['sample:second'], declaredAtLine: 3, declaredAtFile: `${root}/factory.ts` },
+      ])
+    }),
+  )
+
+  it.effect('reports an unresolved factory beside an inline registration', () =>
+    Effect.sync(() => {
+      const result = parse({ [`${root}/composition.ts`]: composition.replace('second()]', 'unknownFactory()]') })
+      expect(result.unresolved).toHaveLength(1)
+      expect(result.unresolved[0]).toContain('unknownFactory')
+    }),
+  )
+
+  it.effect('reports unknown ids reached through a factory', () =>
+    Effect.sync(() => {
+      const result = parse({ [`${root}/factory.ts`]: factory.replace('id: STAGES.second', 'id: STAGES.missing') })
+      expect(result.unresolved).toHaveLength(1)
+      expect(result.unresolved[0]).toContain('missing')
+    }),
+  )
+
+  it.effect('requires factory ids to follow an imported constructor', () =>
+    Effect.sync(() => {
+      const result = parse({ [`${root}/factory.ts`]: factory.replace('id: STAGES.second', "id: StageId('sample:second')") })
+      expect(result.unresolved).toHaveLength(1)
+      expect(result.unresolved[0]).toContain('cannot resolve symbol StageId')
+    }),
+  )
+
+  it.effect('reports an imported source that is absent', () =>
+    Effect.sync(() => {
+      const result = parse({ [`${root}/composition.ts`]: composition.replace('./factory.js', './missing.js') })
+      expect(result.unresolved).toHaveLength(1)
+      expect(result.unresolved[0]).toContain('cannot read imported source')
+    }),
+  )
+
+  it.effect('reports factory cycles instead of recursing indefinitely', () =>
+    Effect.sync(() => {
+      const result = parse({ [`${root}/composition.ts`]: 'export const assembled = () => assembled()' })
+      expect(result.unresolved).toHaveLength(1)
+      expect(result.unresolved[0]).toContain('cyclic')
+    }),
+  )
+
+  it.effect('requires both Option branches to resolve to the same registrations', () =>
+    Effect.sync(() => {
+      const branchSource = `import { STAGES } from './stage-ids.js'
+const core = () => [{ id: STAGES.first, run: () => Effect.void }]
+const other = () => [{ id: STAGES.second, run: () => Effect.void }]
+export const assembled = () => Effect.flatMap(source, Option.match({
+  onNone: () => Effect.map(source, core),
+  onSome: () => Effect.map(source, core),
+})).pipe(Effect.orDie)
+`
+      const accepted = parse({ [`${root}/composition.ts`]: branchSource })
+      expect(accepted.unresolved).toStrictEqual([])
+      expect(accepted.stages.map((stage) => stage.id)).toStrictEqual(['sample:first'])
+      const rejected = parse({ [`${root}/composition.ts`]: branchSource.replace('onSome: () => Effect.map(source, core)', 'onSome: () => Effect.map(source, other)') })
+      expect(rejected.unresolved).toHaveLength(1)
+      expect(rejected.unresolved[0]).toContain('different registrations')
     }),
   )
 })
@@ -161,14 +282,16 @@ describe('parsing a sibling’s registrations', () => {
   // resolve must be a reported problem, never a skipped row.
   it.effect('reports an id it cannot resolve instead of dropping the stage', () =>
     Effect.sync(() => {
-      const parsed = parseRegistrations(
-        'registration.ts',
-        `const s = [{ id: SOMETHING_ELSE.mystery, run: () => Effect.void }]\n`,
-        ids,
-      )
-      expect(parsed.stages).toStrictEqual([])
-      expect(parsed.unresolved).toHaveLength(1)
-      expect(parsed.unresolved[0]).toContain('cannot resolve the `id`')
+      for (const expression of ['SOMETHING_ELSE.mystery', '123', '`dynamic:id`', 'chooseId()']) {
+        const parsed = parseRegistrations(
+          'registration.ts',
+          `const s = [{ id: ${expression}, run: () => Effect.void }]\n`,
+          ids,
+        )
+        expect(parsed.stages).toStrictEqual([])
+        expect(parsed.unresolved).toHaveLength(1)
+        expect(parsed.unresolved[0]).toContain('cannot resolve the `id`')
+      }
     }),
   )
 
@@ -253,6 +376,17 @@ describe('comparing the manifest against the source', () => {
 })
 
 describe('the repositories that register nothing', () => {
+  it.effect('reports unresolved registrations in a supposedly silent repository', () =>
+    Effect.sync(() => {
+      const files = ioOf({
+        '/roster/sample/src/stages/registration.ts': 'const stages = [{ id: UNKNOWN.stage, run: () => Effect.void }]',
+      })
+      const problems = compareSilentModule('/roster', { name: 'sample' }, files)
+      expect(problems).toHaveLength(1)
+      expect(problems[0]).toContain('cannot resolve the `id`')
+    }),
+  )
+
   it.effect('is satisfied while they have no stages directory', () =>
     Effect.sync(() => {
       for (const entry of ROSTER_REGISTERS_NOTHING) {
@@ -279,7 +413,8 @@ describe('the repositories that register nothing', () => {
   it.effect('fails loudly the day a silent repository registers a stage', () =>
     Effect.sync(() => {
       const withPhysics = ioOf({
-        '/roster/mc-sim/src/stages/stage-ids.ts': `export const SIM_STAGE_IDS = { physics: StageId('sim:physics') } as const\n`,
+        '/roster/mc-sim/src/stages/stage-ids.ts': `import { StageId } from '@nerima-games/mc-kernel'
+export const SIM_STAGE_IDS = { physics: StageId('sim:physics') } as const\n`,
         '/roster/mc-sim/src/stages/registration.ts': `const s = [{ id: SIM_STAGE_IDS.physics, run: () => Effect.void }]\n`,
       })
       const problems = compareSilentModule('/roster', { name: 'mc-sim' }, withPhysics)
@@ -335,7 +470,7 @@ describe('finding the checkouts', () => {
     Effect.sync(() => {
       const { problems, stageCount } = run('/nowhere', ioOf({}))
       expect(problems).toHaveLength(ROSTER.length)
-      expect(stageCount).toBe(19)
+      expect(stageCount).toBe(21)
     }),
   )
 })

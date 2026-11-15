@@ -138,10 +138,10 @@ describe('the roster resolves into plan.md §4.2’s frame', () => {
     }),
   )
 
-  it.effect('composes all nineteen registrations and drops none of them', () =>
+  it.effect('composes every pinned registration and drops none of them', () =>
     Effect.gen(function* () {
       const { game } = yield* composeRoster()
-      expect(game.plan.order).toHaveLength(19)
+      expect(game.plan.order).toHaveLength(21)
       expect([...game.plan.order].sort()).toStrictEqual([...ROSTER_STAGE_IDS].sort())
       expect(game.moduleNames).toStrictEqual([
         'mx-gameplay',
@@ -150,6 +150,24 @@ describe('the roster resolves into plan.md §4.2’s frame', () => {
         'mc-render',
         'mc-sim',
         'mx-multiplayer',
+      ])
+    }),
+  )
+
+  it.effect('moves vehicles before interactions and advances brewing before fire', () =>
+    Effect.gen(function* () {
+      const { game } = yield* composeRoster()
+      expect(game.plan.order.slice(2, 7)).toStrictEqual([
+        'sim:physics',
+        'gameplay:vehicles',
+        'gameplay:interactions',
+        'gameplay:brewing-advance',
+        'gameplay:fire',
+      ])
+      expect(game.plan.order.slice(16, 19)).toStrictEqual([
+        'render:chunk-sync',
+        'render:post-fx',
+        'render:draw',
       ])
     }),
   )
@@ -469,15 +487,9 @@ describe('the cross-repository edges — every one of them now binds', () => {
   )
 
   /**
-   * Computed rather than listed, so it stays true as the roster grows — which
-   * it just did. Of the thirteen `after` edges the six repositories declare,
-   * eight are intra-module (a repository ordering its own stages) and FIVE cross
-   * a repository boundary. All five name `sim:physics`, and all five now resolve.
-   *
-   * The fifth is new: `multiplayer:outbound after sim:physics`. It is worth
-   * noticing that the roster's cross-repository ordering is still a star with
-   * mc-sim at the centre — no experience module orders itself against another,
-   * which is §2.3-1 holding.
+   * Cross-repository edges still name only `sim:physics`, including the vehicle
+   * stage's dependency. Compute the counts from the pinned roster so new edges
+   * cannot disappear from this audit.
    */
   it.effect('binds every cross-repository edge, and they all point at mc-sim', () =>
     Effect.gen(function* () {
@@ -495,9 +507,9 @@ describe('the cross-repository edges — every one of them now binds', () => {
         (edge) => namespaceOf(edge.stage) === namespaceOf(edge.missing),
       )
 
-      expect(declared).toHaveLength(16)
-      expect(intraModule).toHaveLength(11)
-      expect(crossModule).toHaveLength(5)
+      expect(declared).toHaveLength(18)
+      expect(intraModule).toHaveLength(12)
+      expect(crossModule).toHaveLength(6)
       expect(new Set(crossModule.map((edge) => edge.missing))).toStrictEqual(
         new Set(['sim:physics']),
       )
@@ -535,7 +547,7 @@ describe('the cross-repository edges — every one of them now binds', () => {
    * `multiplayer:inbound`, which is where the original prediction was made), and
    * the other stages keep their order exactly. The frame did not move.
    */
-  it.effect('binding mc-sim’s four edges did not move any other stage', () =>
+  it.effect('binding mc-sim’s edges did not move any other stage', () =>
     Effect.gen(function* () {
       const log = yield* Ref.make<ReadonlyArray<string>>([])
       const withoutSim = rosterModules(
@@ -545,8 +557,9 @@ describe('the cross-repository edges — every one of them now binds', () => {
       const before = (yield* composeRoster({ modules: withoutSim })).game
       const after = (yield* composeRoster()).game
 
-      // Before: the four edges name a stage nobody registers, and are dropped.
+      // Before: every edge to physics names a stage nobody registers, and is dropped.
       expect(before.plan.dangling).toStrictEqual([
+        { stage: 'gameplay:vehicles', missing: 'sim:physics' },
         { stage: 'gameplay:interactions', missing: 'sim:physics' },
         { stage: 'redstone:power', missing: 'sim:physics' },
         { stage: 'ui:hud-sync', missing: 'sim:physics' },
@@ -570,15 +583,16 @@ describe('the cross-repository edges — every one of them now binds', () => {
    * repository's table and the modules' stated requirements were dropped on the
    * way in and satisfied by coincidence. Now they are declared AND arranged, and
    * the difference shows up the moment the table is taken away — without the
-   * skeleton, the four edges are the only thing keeping physics ahead of the
+   * skeleton, the declared edges are the only thing keeping physics ahead of the
    * stages that read it.
    */
-  it.effect('keeps physics ahead of its four readers even with no skeleton at all', () =>
+  it.effect('keeps physics ahead of its readers even with no skeleton at all', () =>
     Effect.gen(function* () {
       const { game } = yield* composeRoster({ skeleton: [] })
       const at = (id: string): number => positionIn(game.plan.order, id)
 
       for (const reader of [
+        'gameplay:vehicles',
         'gameplay:interactions',
         'redstone:power',
         'ui:hud-sync',
@@ -678,6 +692,20 @@ describe('the skeleton is what produces the frame — measured, not asserted', (
 })
 
 describe('what the roster does not register', () => {
+  it.effect('runs an unclaimed stage after the HUD and reports its id', () =>
+    Effect.gen(function* () {
+      const log = yield* Ref.make<ReadonlyArray<string>>([])
+      const unclaimed: GameModule = {
+        name: 'unclaimed-stage-module',
+        layers: EMPTY_MODULE_LAYER,
+        frameStages: [{ id: StageId('mod:unclaimed'), run: () => Effect.void }],
+      }
+      const { game } = yield* composeRoster({ modules: [...rosterModules(log), unclaimed] })
+      expect(game.plan.order.slice(-2)).toStrictEqual(['ui:overlay-sync', 'mod:unclaimed'])
+      expect(game.plan.unmatchedPhase).toStrictEqual(['mod:unclaimed'])
+    }),
+  )
+
   it.effect('states every repository that contributes no stage, so an absence is deliberate', () =>
     Effect.sync(() => {
       expect(ROSTER_REGISTERS_NOTHING.map((entry) => entry.name)).toStrictEqual([
@@ -723,10 +751,10 @@ describe('what the roster does not register', () => {
         'multiplayer:inbound',
         'multiplayer:outbound',
       ])
-      // The indices mx-multiplayer measured from its side and wrote down at
-      // `stages/stage-ids.ts:38-39`, reproduced here against the real resolver.
-      expect(positionIn(game.plan.order, 'multiplayer:inbound')).toBe(17)
-      expect(positionIn(game.plan.order, 'multiplayer:outbound')).toBe(18)
+      // In the current roster, the two stages fall after the HUD when the
+      // network phases are absent, reproducing the ordering defect above.
+      expect(positionIn(game.plan.order, 'multiplayer:inbound')).toBe(19)
+      expect(positionIn(game.plan.order, 'multiplayer:outbound')).toBe(20)
 
       // The two defects, stated as orderings rather than as indices.
       expect(

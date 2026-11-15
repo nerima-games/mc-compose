@@ -71,15 +71,12 @@
  * the org settled on: ast-grep, already Nix-pinned and stable, shelled out to
  * per file via `ast-grep scan --inline-rules ... --json=compact --stdin`.
  *
- * The CONTRACT is unchanged from the compiler-API version: same manifest
- * comparison semantics, same failure conditions (an id, an `after` edge, or a
- * `file:line` citation disagreeing), the same root-discovery order and printed
- * root, and it is still not part of `pnpm verify`. `parseStageIds` and
- * `parseRegistrations` keep their original signatures and return shapes so
- * `test/check-roster-manifest.test.ts` and `compareModule`/`compareSilentModule`
- * did not need to change on the calling side.
+ * Manifest comparison still checks ids, `after` edges and source citations.
+ * `parseRegistrations` accepts an optional source reader for following local
+ * imports and factory returns from a module's `frameStages` field. Factory
+ * registrations retain the file and line of their actual `id:` property.
  *
- * Extraction runs as ast-grep RELATIONAL rules (see `AST_GREP_RULES` below),
+ * Direct-object extraction runs as ast-grep relational rules,
  * matched against each file's TEXT over stdin — not a rebuilt filesystem read,
  * so the function signatures `(filePath, text)` stay exactly what they were.
  * Each rule captures a metavariable named `$REGOBJ` for the enclosing
@@ -90,16 +87,11 @@
  * `after` elements, and the `run`-sibling requirement live in independent
  * rules instead of one large one.
  *
- * `resolve()`'s three recognised forms — `StageId('literal')`,
- * a bare string literal, and `NAME.prop` — are three separate rules each
- * (one for `id:`, three for `after: [...]` elements, matching the original
- * one-for-one) rather than one generic "any expression" rule: ast-grep
- * requires a `kind` to match against, and tree-sitter's TS grammar gives
- * array elements no field name to select on generically. A bare identifier
- * reference (`after: [someVar]`) is also matched explicitly, because the
- * original `resolve()` never recognised one either (it requires a property
- * access, not just an identifier) — that shape has to still report as
- * unresolved, with a precise line, rather than silently vanish.
+ * The source graph follows named local imports/re-exports, constant aliases,
+ * object/array spreads and static factory returns. Constructor aliases resolve
+ * to the kernel's `StageId` import; spread aliases retain the minting line.
+ * Text-only callers retain direct-object parsing, including ids looked up by
+ * either a bare constant name or `NAME.prop`.
  *
  * What is NOT expressible this way — a template literal, a spread, a
  * parenthesized or computed expression inside `after: [...]` — is caught by
@@ -159,8 +151,9 @@ export const findRosterRoot = (
 export type ParsedStage = {
   readonly id: string
   readonly after: ReadonlyArray<string>
-  /** 1-based line of the `id:` property inside `stages/registration.ts`. */
+  /** 1-based line of the `id:` property, including registrations returned by factories. */
   readonly declaredAtLine: number
+  readonly declaredAtFile?: string
 }
 
 type AstGrepPosition = { readonly line: number; readonly column: number }
@@ -175,7 +168,10 @@ type AstGrepMatch = {
   readonly ruleId: string
   readonly text: string
   readonly range: AstGrepRange
-  readonly metaVariables: { readonly single: Readonly<Record<string, AstGrepMetaVar>> }
+  readonly metaVariables: {
+    readonly single: Readonly<Record<string, AstGrepMetaVar>>
+    readonly multi: Readonly<Record<string, ReadonlyArray<AstGrepMetaVar>>>
+  }
 }
 
 const AST_GREP_TIMEOUT_MS = 30_000
@@ -217,31 +213,239 @@ const byteRangeKey = (range: AstGrepByteRange): string => `${String(range.start)
 /**
  * `stages/stage-ids.ts` -> `{ "GAMEPLAY_STAGE_IDS.fluids": { id, line } }`.
  *
- * Every repository in the roster writes its ids the same way — one exported
- * `const X_STAGE_IDS = { name: StageId('...'), ... } as const` — so this is a
- * shape check rather than an evaluation. Matches `unwrap`'s original scope
- * exactly: only a direct `as`/parenthesized wrapper is looked through (never a
- * `satisfies` expression), because the one repository that writes
- * `{} as const satisfies ...` keeps it empty by design (`UPSTREAM_STAGE_IDS`)
- * and the original compiler-API version never unwrapped `satisfies` either.
+ * Static source matching follows constructor aliases and object spreads while
+ * keeping each id's original minting line. It does not execute sibling code.
  */
-const STAGE_ID_RULE = `
-id: stage-id-property
-language: TypeScript
-rule:
-  pattern:
-    context: "const X = { $KEY: StageId($ARG) }"
-    selector: pair
-  inside:
-    kind: object
-    stopBy: end
-    inside:
-      kind: variable_declarator
-      stopBy: end
-      has:
-        field: name
-        pattern: $CONSTNAME
-`
+const fieldRule = (kind: string, fields: Readonly<Record<string, string>>) => ({
+  all: [
+    { kind },
+    ...Object.entries(fields).map(([field, capture]) => ({
+      has: { field, pattern: `$${capture}` },
+    })),
+  ],
+})
+
+const SOURCE_RULES = [
+  ['binding', fieldRule('variable_declarator', { name: 'NAME', value: 'VALUE' })],
+  ['pair', fieldRule('pair', { key: 'KEY', value: 'VALUE' })],
+  ['call', fieldRule('call_expression', { function: 'CALLEE', arguments: 'ARGS' })],
+  ['member', fieldRule('member_expression', { object: 'OBJECT', property: 'PROPERTY' })],
+  ['function', fieldRule('arrow_function', { body: 'BODY' })],
+  ['function', fieldRule('function_expression', { body: 'BODY' })],
+  ['function', fieldRule('generator_function', { body: 'BODY' })],
+  ['declaration', fieldRule('function_declaration', { name: 'NAME', body: 'BODY' })],
+  ['import', fieldRule('import_statement', { source: 'SOURCE' })],
+  ['export', fieldRule('export_statement', { source: 'SOURCE' })],
+  ['return', { pattern: 'return $VALUE' }],
+  ['array', { pattern: '[$$$ITEMS]' }],
+  ['object', { pattern: { context: 'const X = { $$$ITEMS }', selector: 'object' } }],
+  ['arguments', { pattern: { context: 'f($$$ITEMS)', selector: 'arguments' } }],
+  ['unwrap', { pattern: { context: 'const X = ($VALUE)', selector: 'parenthesized_expression' } }],
+  ['unwrap', { pattern: { context: 'const X = $VALUE as $TYPE', selector: 'as_expression' } }],
+  ['unwrap', { pattern: { context: 'const X = $VALUE as const', selector: 'as_expression' } }],
+  ['unwrap', { pattern: { context: 'function* f() { yield* $VALUE }', selector: 'yield_expression' } }],
+  ['spread', { pattern: { context: 'const X = [...$VALUE]', selector: 'spread_element' } }],
+].map(([id, rule], index) => JSON.stringify({ id: `${String(id)}-${String(index)}`, language: 'TypeScript', rule }))
+  .join('\n---\n')
+
+type Source = {
+  readonly file: string
+  readonly nodes: ReadonlyArray<AstGrepMatch>
+}
+type Expression = { readonly source: Source; readonly ref: AstGrepMetaVar }
+type SourceReader = (file: string) => Source
+type MintedId = { readonly id: string; readonly line: number }
+
+const kindOf = (node: AstGrepMatch | undefined): string => node?.ruleId.split('-')[0] ?? ''
+const contains = (outer: AstGrepMetaVar, inner: AstGrepMetaVar): boolean =>
+  outer.range.byteOffset.start <= inner.range.byteOffset.start &&
+  outer.range.byteOffset.end >= inner.range.byteOffset.end
+const child = (expression: Expression, name: string): Expression => {
+  const node = expression.source.nodes.find((item) => byteRangeKey(item.range.byteOffset) === byteRangeKey(expression.ref.range.byteOffset))
+  const ref = node?.metaVariables.single[name]
+  if (ref === undefined) throw new Error(`unsupported expression: ${expression.ref.text}`)
+  return { source: expression.source, ref }
+}
+const nodeOf = (expression: Expression): AstGrepMatch | undefined =>
+  expression.source.nodes.find((node) => byteRangeKey(node.range.byteOffset) === byteRangeKey(expression.ref.range.byteOffset))
+const itemsOf = (expression: Expression): ReadonlyArray<Expression> =>
+  (nodeOf(expression)?.metaVariables.multi['ITEMS'] ?? [])
+    .filter((ref) => ref.text !== ',' && !ref.text.startsWith('//') && !ref.text.startsWith('/*'))
+    .map((ref) => ({ source: expression.source, ref }))
+const sourceReader = (readFile: (file: string) => string | undefined): SourceReader => {
+  const sources = new Map<string, Source>()
+  return (file) => {
+    const cached = sources.get(file)
+    if (cached !== undefined) return cached
+    const text = readFile(file)
+    if (text === undefined) throw new Error(`cannot read imported source ${file}`)
+    const source = { file, nodes: runAstGrep(SOURCE_RULES, text) }
+    sources.set(file, source)
+    return source
+  }
+}
+
+const importedSource = (source: Source, specifier: string, read: SourceReader): Source => {
+  if (!specifier.startsWith('./') && !specifier.startsWith('../')) {
+    throw new Error(`cannot follow external import ${specifier}`)
+  }
+  return read(path.resolve(path.dirname(source.file), specifier.replace(/\.js$/u, '.ts')))
+}
+
+const namedBindings = (text: string): ReadonlyArray<readonly [string, string]> => {
+  const names = /\{([^}]+)\}/u.exec(text)?.[1]
+  return (names ?? '').split(',').flatMap((entry) => {
+    if (entry.trim().startsWith('type ')) return []
+    const match = /^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/u.exec(entry)
+    return match?.[1] === undefined ? [] : [[match[1], match[2] ?? match[1]] as const]
+  })
+}
+
+const enclosingFunction = (source: Source, ref: AstGrepMetaVar): AstGrepMatch | undefined =>
+  source.nodes.filter((node) => ['function', 'declaration'].includes(kindOf(node)) && contains(node, ref))
+    .sort((left, right) => left.text.length - right.text.length)[0]
+
+const symbol = (expression: Expression, read: SourceReader): Expression | 'StageId' => {
+  const { source, ref } = expression
+  const bindings = source.nodes.filter((node) => {
+    if (!['binding', 'declaration'].includes(kindOf(node)) || node.metaVariables.single['NAME']?.text !== ref.text) return false
+    const scope = enclosingFunction(source, node)
+    return scope === undefined || contains(scope, ref)
+  }).sort((left, right) =>
+    (enclosingFunction(source, left)?.text.length ?? Infinity) -
+    (enclosingFunction(source, right)?.text.length ?? Infinity),
+  )
+  const binding = bindings[0]
+  if (binding !== undefined) {
+    return kindOf(binding) === 'declaration'
+      ? { source, ref: binding }
+      : { source, ref: binding.metaVariables.single['VALUE']! }
+  }
+  for (const node of source.nodes.filter((item) => ['import', 'export'].includes(kindOf(item)))) {
+    const specifier = unquote(node.metaVariables.single['SOURCE']!.text)
+    const named = namedBindings(node.text).find(([, local]) => local === ref.text)
+    if (named !== undefined) {
+      if (kindOf(node) === 'import' && specifier === '@nerima-games/mc-kernel' && named[0] === 'StageId') return 'StageId'
+      const target = importedSource(source, specifier, read)
+      return { source: target, ref: { ...ref, text: named[0], range: { ...ref.range, byteOffset: { start: -1, end: -1 } } } }
+    }
+    if (kindOf(node) === 'export' && /^export\s+\*\s+from/u.test(node.text)) {
+      const target = importedSource(source, specifier, read)
+      if (target.nodes.some((item) => item.metaVariables.single['NAME']?.text === ref.text || namedBindings(item.text).some(([, name]) => name === ref.text))) {
+        return { source: target, ref: { ...ref, range: { ...ref.range, byteOffset: { start: -1, end: -1 } } } }
+      }
+    }
+  }
+  throw new Error(`cannot resolve symbol ${ref.text} in ${source.file}`)
+}
+
+const expressionKey = ({ source, ref }: Expression): string =>
+  `${source.file}:${byteRangeKey(ref.range.byteOffset)}:${ref.text}`
+
+const resolveExpression = (
+  expression: Expression,
+  read: SourceReader,
+  visited: ReadonlySet<string> = new Set(),
+): Expression | 'StageId' => {
+  const key = expressionKey(expression)
+  if (visited.has(key)) throw new Error(`cyclic reference: ${expression.ref.text}`)
+  const next = new Set([...visited, key])
+  const node = nodeOf(expression)
+  if (kindOf(node) === 'unwrap' || kindOf(node) === 'spread') {
+    return resolveExpression(child(expression, 'VALUE'), read, next)
+  }
+  if (/^[A-Za-z_$][\w$]*$/u.test(expression.ref.text)) {
+    const target = symbol(expression, read)
+    return target === 'StageId' ? target : resolveExpression(target, read, next)
+  }
+  if (node !== undefined && kindOf(node) === 'member') {
+    const object = resolveExpression(child(expression, 'OBJECT'), read, next)
+    if (object === 'StageId') throw new Error('cannot read a property of StageId')
+    const returned = factoryResult(object, read, next)
+    return resolveExpression(objectProperty(returned, child(expression, 'PROPERTY').ref.text, read, next), read, next)
+  }
+  return expression
+}
+
+const objectProperties = (expression: Expression, read: SourceReader, visited: ReadonlySet<string>): ReadonlyMap<string, Expression> => {
+  const resolved = resolveExpression(expression, read, visited)
+  if (resolved === 'StageId' || kindOf(nodeOf(resolved)) !== 'object') throw new Error('expected an object literal')
+  const properties = new Map<string, Expression>()
+  for (const item of itemsOf(resolved)) {
+    if (kindOf(nodeOf(item)) === 'spread') {
+      for (const [name, value] of objectProperties(child(item, 'VALUE'), read, new Set([...visited, expressionKey(resolved)]))) properties.set(name, value)
+    } else if (/^[A-Za-z_$][\w$]*$/u.test(item.ref.text)) {
+      properties.set(item.ref.text, item)
+    } else {
+      const name = child(item, 'KEY').ref.text
+      properties.set(name, child(item, 'VALUE'))
+    }
+  }
+  return properties
+}
+
+const objectProperty = (expression: Expression, name: string, read: SourceReader, visited: ReadonlySet<string>): Expression => {
+  const property = objectProperties(expression, read, visited).get(name)
+  if (property === undefined) throw new Error(`cannot resolve property ${name}`)
+  return property
+}
+
+const returnedExpression = (expression: Expression, read: SourceReader, visited: ReadonlySet<string>): Expression => {
+  const callee = child(expression, 'CALLEE')
+  const args = itemsOf(child(expression, 'ARGS'))
+  if (callee.ref.text === 'Effect.succeed' && args.length === 1) return args[0]!
+  if (kindOf(nodeOf(callee)) === 'member' && child(callee, 'PROPERTY').ref.text === 'pipe') {
+    if (args.length === 0 || args.some((arg) => arg.ref.text !== 'Effect.orDie')) throw new Error('unsupported stage factory pipe')
+    return child(callee, 'OBJECT')
+  }
+  if (callee.ref.text === 'Effect.flatMap') {
+    const callback = args[1]
+    if (callback === undefined || kindOf(nodeOf(callback)) !== 'call' || child(callback, 'CALLEE').ref.text !== 'Option.match') throw new Error('unsupported stage factory branch')
+    const cases = itemsOf(child(callback, 'ARGS'))[0]
+    if (cases === undefined) throw new Error('missing Option.match branches')
+    const branches = ['onNone', 'onSome'].map((name) => {
+      const fn = resolveExpression(objectProperty(cases, name, read, visited), read, visited)
+      if (fn === 'StageId') throw new Error('invalid Option.match branch')
+      return factoryResult(functionReturn(fn), read, visited)
+    })
+    if (expressionKey(branches[0]!) !== expressionKey(branches[1]!)) throw new Error('stage factory branches return different registrations')
+    return branches[0]!
+  }
+  const fn = callee.ref.text === 'Effect.gen'
+    ? args[0]
+    : callee.ref.text === 'Effect.map'
+      ? (args[1] === undefined ? undefined : resolveExpression(args[1], read, visited))
+      : resolveExpression(callee, read, visited)
+  if (fn === undefined || fn === 'StageId') throw new Error(`unsupported factory ${callee.ref.text}`)
+  return functionReturn(fn)
+}
+
+const functionReturn = (fn: Expression): Expression => {
+  const body = child(fn, 'BODY')
+  if (!body.ref.text.startsWith('{')) return body
+  const returns = fn.source.nodes.filter((node) => kindOf(node) === 'return' && contains(body.ref, node) && enclosingFunction(fn.source, node) === nodeOf(fn))
+  if (returns.length !== 1) throw new Error('factory must have one static return')
+  return { source: fn.source, ref: returns[0]!.metaVariables.single['VALUE']! }
+}
+
+const factoryResult = (expression: Expression, read: SourceReader, visited: ReadonlySet<string>): Expression => {
+  const resolved = resolveExpression(expression, read, visited)
+  if (resolved === 'StageId') throw new Error('expected a stage factory result')
+  if (kindOf(nodeOf(resolved)) !== 'call') return resolved
+  const key = expressionKey(resolved)
+  if (visited.has(key)) throw new Error(`cyclic factory: ${resolved.ref.text}`)
+  return factoryResult(returnedExpression(resolved, read, visited), read, new Set([...visited, key]))
+}
+
+const mintedId = (expression: Expression, read: SourceReader): MintedId => {
+  const resolved = resolveExpression(expression, read)
+  if (resolved === 'StageId' || kindOf(nodeOf(resolved)) !== 'call') throw new Error(`cannot resolve the id ${expression.ref.text}`)
+  if (resolveExpression(child(resolved, 'CALLEE'), read) !== 'StageId') throw new Error(`id is not minted by StageId: ${expression.ref.text}`)
+  const args = itemsOf(child(resolved, 'ARGS'))
+  const arg = args[0]?.ref.text
+  if (args.length !== 1 || arg === undefined || !/^(['"]).*\1$/u.test(arg)) throw new Error('StageId requires a string literal')
+  return { id: unquote(arg), line: oneBasedLine(resolved.ref) }
+}
 
 const unquote = (literal: string): string => literal.slice(1, -1)
 
@@ -250,35 +454,28 @@ export const parseStageIds = (
   text: string,
 ): ReadonlyMap<string, { readonly id: string; readonly line: number }> => {
   const found = new Map<string, { readonly id: string; readonly line: number }>()
-  for (const match of runAstGrep(STAGE_ID_RULE, text)) {
-    const constName = match.metaVariables.single['CONSTNAME']?.text
-    const key = match.metaVariables.single['KEY']?.text
-    const arg = match.metaVariables.single['ARG']?.text
-    if (constName === undefined || key === undefined || arg === undefined) continue
-    // `$ARG` matches any single expression; only a string literal argument to
-    // `StageId(...)` mints an id, matching `ts.isStringLiteralLike` in the
-    // original `stageIdLiteral`.
-    if (!/^(['"]).*\1$/u.test(arg)) continue
-    found.set(`${constName}.${key}`, { id: unquote(arg), line: oneBasedLine(match) })
+  const read = sourceReader((file) => file === filePath ? text : undefined)
+  const source = read(filePath)
+  for (const binding of source.nodes.filter((node) => kindOf(node) === 'binding' && enclosingFunction(source, node) === undefined)) {
+    const name = binding.metaVariables.single['NAME']!.text
+    const expression = { source, ref: binding.metaVariables.single['VALUE']! }
+    try {
+      const resolved = resolveExpression(expression, read)
+      if (resolved !== 'StageId' && kindOf(nodeOf(resolved)) === 'object') {
+        for (const [property, value] of objectProperties(resolved, read, new Set())) {
+          try { found.set(`${name}.${property}`, mintedId(value, read)) } catch { /* A referenced unresolved value is diagnosed at its registration. */ }
+        }
+      } else {
+        found.set(name, mintedId(expression, read))
+      }
+    } catch { /* Non-id constants do not mint stage ids. */ }
   }
-  void filePath
   return found
 }
 
-/**
- * The four forms `resolve()` recognised for an `id:` value or an `after:`
- * array element, run against the object literal identified by `$REGOBJ` (any
- * `{ ..., run, ... }` object, order-independent — the "has both `id` and
- * `run`" filter the original used to keep `UPSTREAM_STAGE_IDS`-style
- * documentation examples out of the answer). Each rule is written out in
- * full, rather than assembled from a shared string fragment: YAML rejects a
- * mapping with two `inside:` keys, and every one of these rules already has
- * an `inside` chain of its own (registration id: one level; `after` element:
- * two, array then the `after:` pair) that a spliced-in fragment would
- * collide with at whichever depth it landed.
- */
+/** Match every direct `id:` shape beside `run`, so unsupported values are diagnosed. */
 const ID_RULES = `
-id: registration-id-call
+id: registration-id
 language: TypeScript
 rule:
   all:
@@ -286,70 +483,7 @@ rule:
     - has: { field: key, regex: "^id$" }
     - has:
         field: value
-        pattern:
-          context: "const X = StageId($ARG)"
-          selector: call_expression
-  inside:
-    all:
-      - kind: object
-      - pattern: $REGOBJ
-    stopBy: neighbor
-    has:
-      kind: pair
-      stopBy: neighbor
-      has:
-        field: key
-        regex: "^run$"
----
-id: registration-id-string
-language: TypeScript
-rule:
-  all:
-    - kind: pair
-    - has: { field: key, regex: "^id$" }
-    - has: { field: value, kind: string }
-  inside:
-    all:
-      - kind: object
-      - pattern: $REGOBJ
-    stopBy: neighbor
-    has:
-      kind: pair
-      stopBy: neighbor
-      has:
-        field: key
-        regex: "^run$"
----
-id: registration-id-propaccess
-language: TypeScript
-rule:
-  all:
-    - kind: pair
-    - has: { field: key, regex: "^id$" }
-    - has:
-        field: value
-        pattern:
-          context: "const X = $OBJ.$PROP"
-          selector: member_expression
-  inside:
-    all:
-      - kind: object
-      - pattern: $REGOBJ
-    stopBy: neighbor
-    has:
-      kind: pair
-      stopBy: neighbor
-      has:
-        field: key
-        regex: "^run$"
----
-id: registration-id-identifier
-language: TypeScript
-rule:
-  all:
-    - kind: pair
-    - has: { field: key, regex: "^id$" }
-    - has: { field: value, kind: identifier }
+        pattern: $VALUE
   inside:
     all:
       - kind: object
@@ -519,25 +653,25 @@ const resolveMatch = (
   ids: ReadonlyMap<string, { readonly id: string }>,
 ): string | undefined => {
   switch (match.ruleId) {
-    case 'registration-id-call':
+    case 'registration-id': {
+      const value = match.metaVariables.single['VALUE']?.text
+      if (value === undefined) return undefined
+      const literal = /^StageId\(\s*((['"]).*\2)\s*\)$/u.exec(value)?.[1] ?? value
+      return /^(['"]).*\1$/u.test(literal) ? unquote(literal) : ids.get(value)?.id
+    }
     case 'after-element-call': {
       const arg = match.metaVariables.single['ARG']?.text
       return arg !== undefined && /^(['"]).*\1$/u.test(arg) ? unquote(arg) : undefined
     }
-    case 'registration-id-string':
     case 'after-element-string':
       return unquote(match.text)
-    case 'registration-id-propaccess':
     case 'after-element-propaccess': {
       const obj = match.metaVariables.single['OBJ']?.text
       const prop = match.metaVariables.single['PROP']?.text
       return obj === undefined || prop === undefined ? undefined : ids.get(`${obj}.${prop}`)?.id
     }
-    case 'registration-id-identifier':
     case 'after-element-identifier':
-      // `resolve()` never accepted a bare identifier (it requires a property
-      // access), so this always reports unresolved — but with a real line.
-      return undefined
+      return ids.get(match.text)?.id
     default:
       return undefined
   }
@@ -555,7 +689,12 @@ export const parseRegistrations = (
   filePath: string,
   text: string,
   ids: ReadonlyMap<string, { readonly id: string }>,
+  io?: Pick<Io, 'readFile'>,
 ): { readonly stages: ReadonlyArray<ParsedStage>; readonly unresolved: ReadonlyArray<string> } => {
+  if (io !== undefined) {
+    const factoryParsed = parseFactoryRegistrations(filePath, text, io)
+    if (factoryParsed !== undefined) return factoryParsed
+  }
   const idMatches = runAstGrep(ID_RULES, text)
   const afterElementMatches = runAstGrep(AFTER_ELEMENT_RULES, text)
   const afterArrayMatches = runAstGrep(AFTER_ARRAY_RULE, text)
@@ -636,6 +775,52 @@ export const parseRegistrations = (
   return { stages, unresolved }
 }
 
+const parseFactoryRegistrations = (
+  filePath: string,
+  text: string,
+  io: Pick<Io, 'readFile'>,
+): { readonly stages: ReadonlyArray<ParsedStage>; readonly unresolved: ReadonlyArray<string> } | undefined => {
+  const read = sourceReader((file) => file === filePath ? text : io.readFile(file))
+  const source = read(filePath)
+  const candidates = source.nodes.filter((node) => kindOf(node) === 'pair' && node.metaVariables.single['KEY']?.text === 'frameStages')
+  const moduleRoots = candidates.filter((node) => source.nodes.some((binding) => kindOf(binding) === 'binding' && /Module$/u.test(binding.metaVariables.single['NAME']?.text ?? '') && contains(binding, node)))
+  const roots = moduleRoots.length === 0 ? candidates : moduleRoots
+  if (roots.length === 0) return undefined
+  if (roots.length !== 1) return { stages: [], unresolved: [`${filePath} - cannot identify one module frameStages root`] }
+  const stages: Array<ParsedStage> = []
+  const unresolved: Array<string> = []
+  const visit = (expression: Expression, visited: ReadonlySet<string>): void => {
+    const result = factoryResult(expression, read, visited)
+    const key = expressionKey(result)
+    if (visited.has(key)) throw new Error(`cyclic stage array: ${result.ref.text}`)
+    const next = new Set([...visited, key])
+    if (kindOf(nodeOf(result)) === 'array') {
+      for (const item of itemsOf(result)) visit(item, next)
+      return
+    }
+    const properties = objectProperties(result, read, visited)
+    const idExpression = properties.get('id')
+    if (idExpression === undefined || !properties.has('run')) throw new Error('factory does not return a stage registration')
+    const id = mintedId(idExpression, read).id
+    const after: Array<string> = []
+    const afterExpression = properties.get('after')
+    if (afterExpression !== undefined) {
+      const edges = resolveExpression(afterExpression, read)
+      if (edges === 'StageId' || kindOf(nodeOf(edges)) !== 'array') throw new Error('cannot resolve an `after` array')
+      for (const edge of itemsOf(edges)) after.push(mintedId(edge, read).id)
+    }
+    stages.push({ id, after, declaredAtLine: oneBasedLine(idExpression.ref), declaredAtFile: idExpression.source.file })
+  }
+  for (const root of roots) {
+    try {
+      visit({ source, ref: root.metaVariables.single['VALUE']! }, new Set())
+    } catch (cause) {
+      unresolved.push(`${filePath}:${String(oneBasedLine(root))} - cannot resolve stage factory: ${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }
+  return { stages, unresolved }
+}
+
 // ---------------------------------------------------------------------------
 // Comparison
 // ---------------------------------------------------------------------------
@@ -669,7 +854,7 @@ export const compareModule = (
   }
 
   const ids = parseStageIds(idsPath, idsText)
-  const parsed = parseRegistrations(registrationPath, registrationText, ids)
+  const parsed = parseRegistrations(registrationPath, registrationText, ids, io)
   const problems: Array<string> = [...parsed.unresolved]
 
   const expected = module.stages.map(describeStage)
@@ -691,7 +876,10 @@ export const compareModule = (
     const mintedAt = ids.get(
       [...ids.entries()].find(([, value]) => value.id === stage.id)?.[0] ?? '',
     )
-    const expectedDeclared = `${module.name}/src/stages/registration.ts:${String(onDisk?.declaredAtLine ?? 0)}`
+    const declaredFile = onDisk?.declaredAtFile === undefined
+      ? `${module.name}/src/stages/registration.ts`
+      : path.relative(root, onDisk.declaredAtFile).split(path.sep).join('/')
+    const expectedDeclared = `${declaredFile}:${String(onDisk?.declaredAtLine ?? 0)}`
     const expectedMinted = `${module.name}/src/stages/stage-ids.ts:${String(mintedAt?.line ?? 0)}`
 
     if (stage.declaredAt !== expectedDeclared) {
@@ -739,14 +927,16 @@ export const compareSilentModule = (
     registrationPath,
     text,
     parseStageIds(path.join(root, entry.name, 'src', 'stages', 'stage-ids.ts'), idsText),
+    io,
   )
-  return parsed.stages.length === 0
-    ? []
-    : [
+  return [
+    ...parsed.unresolved,
+    ...(parsed.stages.length === 0 ? [] : [
         `${entry.name}: the manifest lists it under ROSTER_REGISTERS_NOTHING, but it now registers ` +
           `${parsed.stages.map((stage) => stage.id).join(', ')}. The frame has changed — re-read ` +
           'test/e2e/roster.ts and docs/testing.md §3.',
-      ]
+      ]),
+  ]
 }
 
 // ---------------------------------------------------------------------------
