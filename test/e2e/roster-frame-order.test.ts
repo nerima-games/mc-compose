@@ -44,7 +44,7 @@
  * and stay green forever.
  */
 import { describe, expect, it } from '@effect/vitest'
-import { Effect, Either, Layer, Option, Ref } from 'effect'
+import { Effect, Layer, Option, Ref, Result } from 'effect'
 import {
   composeGame,
   DeltaTimeSecs,
@@ -99,7 +99,7 @@ const composeRoster = (
     const result = composeGame(modules, {
       skeleton: options.skeleton ?? STANDARD_STAGE_SKELETON,
     })
-    return { game: Either.getOrThrow(result), log }
+    return { game: Result.getOrThrow(result), log }
   })
 
 const positionIn = (order: ReadonlyArray<string>, id: string): number => {
@@ -187,7 +187,7 @@ describe('the roster resolves into plan.md §4.2’s frame', () => {
           stages: [...module.stages].reverse(),
         })),
       )
-      const backwards = Either.getOrThrow(
+      const backwards = Result.getOrThrow(
         composeGame(reversedModules, { skeleton: STANDARD_STAGE_SKELETON }),
       )
 
@@ -405,7 +405,7 @@ describe('network I/O: the phases §4.2 does not have', () => {
       // Before physics: UNSATISFIABLE, and the failure carries the path.
       const log = yield* Ref.make<ReadonlyArray<string>>([])
       const beforePhysics = composeGame(rosterModules(log), { skeleton: withNamespaceAt(1) })
-      const error = Option.getOrUndefined(Either.getLeft(beforePhysics))
+      const error = Option.getOrUndefined(Result.getFailure(beforePhysics))
 
       expect(error?._tag).toBe('StageCycle')
       expect(error === undefined ? '' : describeStageOrderError(error)).toContain(
@@ -757,8 +757,8 @@ describe('what the roster does not register', () => {
 
 describe('composition failures the roster could actually produce', () => {
   const failure = (
-    result: Either.Either<ComposedGame, StageOrderError>,
-  ): StageOrderError | undefined => Option.getOrUndefined(Either.getLeft(result))
+    result: Result.Result<ComposedGame, StageOrderError>,
+  ): StageOrderError | undefined => Option.getOrUndefined(Result.getFailure(result))
 
   // A mod, or a second module, claiming an id mc-render already owns. Which of
   // the two would run is arbitrary, so the composition fails and names the id.

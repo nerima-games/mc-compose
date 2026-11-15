@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
-import { Effect, Either, Option } from 'effect'
+import { Effect, Option, Result } from 'effect'
 import {
   describeStageOrderError,
   describeStagePlanWarnings,
@@ -50,7 +50,7 @@ const stage = (name: string, ...after: ReadonlyArray<string>): StageConstraint =
 const plan = (
   constraints: ReadonlyArray<StageConstraint>,
   skeleton?: ReadonlyArray<StagePhase>,
-): StageOrderPlan => Either.getOrThrow(resolveStageOrder(constraints, skeleton ? { skeleton } : {}))
+): StageOrderPlan => Result.getOrThrow(resolveStageOrder(constraints, skeleton ? { skeleton } : {}))
 
 const order = (
   constraints: ReadonlyArray<StageConstraint>,
@@ -58,8 +58,8 @@ const order = (
 ): ReadonlyArray<string> => [...plan(constraints, skeleton).order]
 
 const failure = (
-  result: Either.Either<StageOrderPlan, StageOrderError>,
-): StageOrderError | undefined => Option.getOrUndefined(Either.getLeft(result))
+  result: Result.Result<StageOrderPlan, StageOrderError>,
+): StageOrderError | undefined => Option.getOrUndefined(Result.getFailure(result))
 
 /** Index of a stage in a resolved order. -1 if absent. */
 const positionIn = (resolved: ReadonlyArray<string>, name: string): number => resolved.indexOf(name)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
-import { Deferred, Effect, Either, Fiber } from 'effect'
+import { Deferred, Effect, Fiber, Result } from 'effect'
 import {
   EMPTY_MODULE_LAYER,
   StageId,
@@ -60,15 +60,15 @@ describe('startBrowserSession', () => {
   it.effect('rolls back successful starts when a later runtime fails', () =>
     Effect.gen(function* () {
       const log: Array<string> = []
-      const result = yield* Effect.either(startBrowserSession([
+      const result = yield* Effect.result(startBrowserSession([
         runtime('sim', log),
         runtime('render', log, { startError: 'no-webgl' }),
         runtime('ui', log),
       ]))
 
-      expect(Either.isLeft(result)).toBe(true)
-      if (Either.isRight(result)) return
-      expect(result.left).toMatchObject({
+      expect(Result.isFailure(result)).toBe(true)
+      if (Result.isSuccess(result)) return
+      expect(result.failure).toMatchObject({
         phase: 'start',
         moduleName: 'render',
         cause: 'no-webgl',
@@ -94,7 +94,7 @@ describe('startBrowserSession', () => {
           log.push('stop:render')
         }),
       }
-      const fiber = yield* Effect.fork(startBrowserSession([
+      const fiber = yield* Effect.forkChild(startBrowserSession([
         runtime('sim', log),
         blockedRuntime,
       ], { compose: { skeleton: [] } }))
@@ -123,16 +123,17 @@ describe('startBrowserSession', () => {
           yield* Deferred.await(releaseStop)
         }),
       }
-      const fiber = yield* Effect.fork(startBrowserSession([
+      const fiber = yield* Effect.forkChild(startBrowserSession([
         rollbackRuntime,
         runtime('render', log, { startError: 'no-render' }),
       ]))
 
       yield* Deferred.await(stopEntered)
-      yield* Fiber.interruptFork(fiber)
-      yield* Effect.yieldNow()
+      const interruptFiber = yield* Effect.forkChild(Fiber.interrupt(fiber))
+      yield* Effect.yieldNow
       yield* Deferred.succeed(releaseStop, undefined)
       yield* Fiber.await(fiber)
+      yield* Fiber.await(interruptFiber)
 
       expect(log).toStrictEqual(['start:sim', 'start:render', 'stop:sim'])
     }),
@@ -151,15 +152,15 @@ describe('startBrowserSession', () => {
           log.push(`stop:${name}`)
         }),
       })
-      const result = yield* Effect.either(startBrowserSession([
+      const result = yield* Effect.result(startBrowserSession([
         duplicate('sim'),
         duplicate('render'),
       ]))
 
-      expect(Either.isLeft(result)).toBe(true)
-      if (Either.isRight(result)) return
-      expect(result.left.phase).toBe('compose')
-      expect(result.left.rollbackFailures).toStrictEqual([])
+      expect(Result.isFailure(result)).toBe(true)
+      if (Result.isSuccess(result)) return
+      expect(result.failure.phase).toBe('compose')
+      expect(result.failure.rollbackFailures).toStrictEqual([])
       expect(log).toStrictEqual(['start:sim', 'start:render', 'stop:render', 'stop:sim'])
     }),
   )
@@ -172,11 +173,11 @@ describe('startBrowserSession', () => {
         runtime('render', log),
         runtime('ui', log, { stopError: 'ui-stop' }),
       ], { compose: { skeleton: [] } })
-      const result = yield* Effect.either(session.stop)
+      const result = yield* Effect.result(session.stop)
 
-      expect(Either.isLeft(result)).toBe(true)
-      if (Either.isRight(result)) return
-      expect(result.left.failures).toStrictEqual([
+      expect(Result.isFailure(result)).toBe(true)
+      if (Result.isSuccess(result)) return
+      expect(result.failure.failures).toStrictEqual([
         { moduleName: 'ui', cause: 'ui-stop' },
         { moduleName: 'sim', cause: 'sim-stop' },
       ])
@@ -190,15 +191,15 @@ describe('startBrowserSession', () => {
   it.effect('preserves rollback failures alongside the startup cause', () =>
     Effect.gen(function* () {
       const log: Array<string> = []
-      const result = yield* Effect.either(startBrowserSession([
+      const result = yield* Effect.result(startBrowserSession([
         runtime('sim', log, { stopError: 'rollback-failed' }),
         runtime('render', log, { startError: 'start-failed' }),
       ]))
 
-      expect(Either.isLeft(result)).toBe(true)
-      if (Either.isRight(result)) return
-      expect(result.left.cause).toBe('start-failed')
-      expect(result.left.rollbackFailures).toStrictEqual([
+      expect(Result.isFailure(result)).toBe(true)
+      if (Result.isSuccess(result)) return
+      expect(result.failure.cause).toBe('start-failed')
+      expect(result.failure.rollbackFailures).toStrictEqual([
         { moduleName: 'sim', cause: 'rollback-failed' },
       ])
     }),

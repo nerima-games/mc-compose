@@ -19,7 +19,7 @@
  * install path untestable without a DOM. The browser entry point passes
  * `globalThis` in; a test passes a plain object.
  */
-import { Either } from 'effect'
+import { Result } from 'effect'
 
 /**
  * The property name the QA API is published under.
@@ -109,18 +109,18 @@ const mergeNamespaceEntry = (
  */
 export const buildQaRegistry = (
   namespaces: ReadonlyArray<QaNamespace>,
-): Either.Either<QaRegistry, QaApiError> => {
+): Result.Result<QaRegistry, QaApiError> => {
   const seenNamespaces = new Set<string>()
   const registry = new Map<string, QaCommand>()
 
   for (const entry of namespaces) {
     const error = mergeNamespaceEntry(entry, seenNamespaces, registry)
     if (typeof error !== 'undefined') {
-      return Either.left(error)
+      return Result.fail(error)
     }
   }
 
-  return Either.right(registry)
+  return Result.succeed(registry)
 }
 
 /**
