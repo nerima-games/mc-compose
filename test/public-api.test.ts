@@ -194,8 +194,8 @@ describe('the prime directive, as a surface check', () => {
         // runs a frame late. Turning either of these into `['multiplayer:']`
         // breaks that test, which is the point of pinning membership here.
         ['network:inbound', ['inbound']],
-        ['simulation:physics', ['physics']],
-        ['simulation:interactions', ['interactions']],
+        ['simulation:physics', ['physics', 'vehicles']],
+        ['simulation:interactions', ['interactions', 'brewing-advance']],
         ['simulation:fire', ['fire']],
         ['simulation:survival-hunger', ['survival-hunger']],
         ['simulation:entities', ['entities']],
@@ -227,7 +227,7 @@ describe('the prime directive, as a surface check', () => {
     Effect.sync(() => {
       const registeredToday = ROSTER_STAGE_IDS
 
-      expect(registeredToday).toHaveLength(19)
+      expect(registeredToday).toHaveLength(21)
 
       for (const stageId of registeredToday) {
         expect(
