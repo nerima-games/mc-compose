@@ -30,7 +30,7 @@ const phaseOf: (skeleton: ReadonlyArray<StagePhase>, id: StageId) => StagePhase 
 const resolveStageOrder: (
   constraints: ReadonlyArray<StageConstraint>,
   options?: { readonly skeleton?: ReadonlyArray<StagePhase> },
-) => Either<StageOrderPlan, StageOrderError>
+) => Result.Result<StageOrderPlan, StageOrderError>
 
 const describeStageOrderError: (error: StageOrderError) => string
 ```
@@ -213,7 +213,7 @@ type ComposedGame = {
   readonly warnings: ReadonlyArray<string>
 }
 
-const composeGame: (modules, options?) => Either<ComposedGame, StageOrderError>
+const composeGame: (modules, options?) => Result.Result<ComposedGame, StageOrderError>
 const mergeModuleLayers: (modules) => ModuleLayer
 const collectStages: (modules) => ReadonlyArray<StageRegistration>
 const registerModule: <RRegister>(module) => Effect<GameModule, never, RRegister>
@@ -269,7 +269,7 @@ mc-kernel `docs/freeze-checklist.md` (b)）。
 
 その Effect は起動時に 1 回だけ走り、`composeGame` はその後に走る。
 だからこのリポジトリが合成する型は kernel のそれの `frameStages` を評価済みにしたものである。
-境界をそこに置いてあるのは `composeGame` を純粋な `Either` のまま保つためで、
+境界をそこに置いてあるのは `composeGame` を純粋な `Result.Result` のまま保つためで、
 全順序の解決は id とエッジに対する計算であり、他人のコンストラクタの都合で
 ファイバを借りて算術をするのは筋が悪い。
 
@@ -400,7 +400,7 @@ type QaCommand = (...args: ReadonlyArray<never>) => unknown
 type QaNamespace = { readonly namespace: string; readonly commands: Record<string, QaCommand> }
 type QaRegistry = ReadonlyMap<string, QaCommand>   // 'namespace.command' -> command
 
-const buildQaRegistry: (namespaces) => Either<QaRegistry, QaApiError>
+const buildQaRegistry: (namespaces) => Result.Result<QaRegistry, QaApiError>
 const installQaApi: (target: Record<string, unknown>, registry: QaRegistry) => void
 const readInstalledQaApi: (target) => Record<string, QaCommand> | undefined
 const qaKey: (namespace, command) => string
@@ -422,8 +422,8 @@ const MODDING_API_VERSION = 1
 const RESERVED_STAGE_PREFIXES: ReadonlyArray<string>
 
 type ModManifest = { id, displayName, apiVersion, module: GameModule }
-const acceptMod:  (manifest) => Either<GameModule, ModdingError>
-const acceptMods: (manifests) => Either<ReadonlyArray<GameModule>, ModdingError>
+const acceptMod:  (manifest) => Result.Result<GameModule, ModdingError>
+const acceptMods: (manifests) => Result.Result<ReadonlyArray<GameModule>, ModdingError>
 const modStagePrefix: (modId) => string      // 'mod:<modId>:'
 const modStageId: (modId, stage) => StageId  // 'mod:<modId>:<stage>'
 const describeModdingError: (error) => string
