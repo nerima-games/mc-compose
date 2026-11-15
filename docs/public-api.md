@@ -269,12 +269,12 @@ const program = Effect.gen(function* () {
 ここで示す `GameModule.qa` と `QaBridge` は後述する `buildQaRegistry` の flat registry API とは別の API である。既存の flat registry はホストの `QaBridge` 移行が終わるまで互換のために残る。
 
 `QaBridge`は単一の`Context.Service<QaBridge, QaBridgeApi<unknown>>`である。
-`isolatedDeclarations`でclassのextends式を型推論できないため、実装では型を明記した基底定数を使う。
 `ComposedGame.qaBridge`の値はoperationの要求型を保持する。
 ホストは`game.layers`を提供して要求を満たしたAPIをserviceへ登録する。
 未提供の要求が残る値は登録できないため、同じservice keyを別の型引数で読み直して要求を消す経路はない。
 
 ```typescript
+// This example assumes game.layers requires no input services.
 const bridge: QaBridgeApi<unknown> = {
   run: (namespace, operation, inputJson) =>
     Effect.provide(game.qaBridge.run(namespace, operation, inputJson), game.layers),
