@@ -198,26 +198,91 @@ type StageRegistration = {
 type ModuleLayer = Layer<never, unknown, never>         // erased module boundary
 const EMPTY_MODULE_LAYER: ModuleLayer
 
-type GameModule = {
+type GameModule<
+  ROut = never,
+  Err = unknown,
+  RIn = never,
+  Qa extends KernelQaNamespace = KernelQaNamespace,
+  Slices extends ReadonlyArray<SaveSliceRegistration> = ReadonlyArray<SaveSliceRegistration>,
+  RRegister = never
+> = {
   readonly name: string          // 診断用。分岐に使わない
-  readonly layers: ModuleLayer
+  readonly layers: Layer<ROut, Err, RIn>
   readonly frameStages: ReadonlyArray<StageRegistration>   // 登録**済み**
+  readonly qa?: Qa
+  readonly saveSlices?: Slices
+  readonly [registrationRequirements]?: RRegister // Internal type information retained by registerModule
 }
 
-type ComposedGame = {
+type ComposedGame<Modules> = {
+  readonly modules: Modules
   readonly plan: StageOrderPlan
-  readonly layer: ModuleLayer
+  readonly layers: Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleCompositionRequirements<Modules>>
+  readonly layer: Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleCompositionRequirements<Modules>> // U5-1 compatibility alias
+  readonly qaNamespaces: ReadonlyArray<KernelQaNamespace>
+  readonly saveSlices: ReadonlyArray<SaveSliceRegistration>
+  readonly qaBridge: QaBridgeApi<
+    QaOperationErrorsOfModules<Modules>,
+    QaOperationRequirementsOfModules<Modules>
+  >
   readonly runFrame: (dt: DeltaTimeSecs) => Effect<void, never, FrameServices>
   readonly runFrameWith: (services: Layer<FrameServices>) => (dt: DeltaTimeSecs) => Effect<void>
   readonly moduleNames: ReadonlyArray<string>
   readonly warnings: ReadonlyArray<string>
 }
 
-const composeGame: (modules, options?) => Result.Result<ComposedGame, StageOrderError>
-const mergeModuleLayers: (modules) => ModuleLayer
+export type ComposeOptions = { readonly skeleton?: ReadonlyArray<StagePhase> }
+
+const composeGame: <const Modules extends ModuleList>(
+  modules: Modules,
+  options?: ComposeOptions
+) => Effect.Effect<
+  ComposedGame<Modules>,
+  DuplicateModuleContract | InvalidModuleContract | ComposeOptionsError | Schema.SchemaError | StageOrderError
+>
+const mergeModuleLayers: <const Modules extends ModuleList>(modules: Modules) =>
+  Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>>
 const collectStages: (modules) => ReadonlyArray<StageRegistration>
-const registerModule: <RRegister>(module) => Effect<GameModule, never, RRegister>
+const registerModule: <RRegister, ROut, Err, RIn, Qa, Slices>(module) =>
+  Effect<GameModule<ROut, Err, RIn, Qa, Slices, RRegister>, never, RRegister>
 ```
+
+### `composeGame` は Effect と型付き失敗を返す
+
+`composeGame` は旧 API の同期 `Result` を返さない。戻り値は実行環境 `R` を要求しない `Effect` である。`options` は省略でき、`skeleton` の省略時は標準 stage skeleton を使う。`Effect.gen` では `yield*` して合成結果を受け取り、失敗チャネル `E` を呼び出し元へ伝播させる。
+
+```typescript
+const program = Effect.gen(function* () {
+  const game = yield* composeGame(modules, options)
+  return game
+})
+```
+
+失敗をその場で扱う場合は `yield* Effect.result(composeGame(modules, options))` で `Result` に変換し、Failure のときは `result.failure._tag` で分岐する。失敗チャネルは次の型からなる。
+
+- `DuplicateModuleContract`: QA namespace、operation、save slice の識別子が重複している
+- `InvalidModuleContract`: QA namespace、operation、save slice の集まりの形が不正である。`kind`で対象を区別し、`id`で対象の識別子またはmodule名を示す
+- `ComposeOptionsError`: options が object でない、または指定した `skeleton` が配列でない
+- `Schema.SchemaError` (`_tag: 'SchemaError'`): module contract の schema 検証に失敗
+- `StageOrderError`: duplicate stage ID または循環があり、stage の順序を解決できない
+
+ここで示す `GameModule.qa` と `QaBridge` は後述する `buildQaRegistry` の flat registry API とは別の API である。既存の flat registry はホストの `QaBridge` 移行が終わるまで互換のために残る。
+
+`QaBridge`は単一の`Context.Service<QaBridge, QaBridgeApi<unknown>>`である。
+`ComposedGame.qaBridge`の値はoperationの要求型を保持する。
+ホストは`game.layers`を提供して要求を満たしたAPIをserviceへ登録する。
+未提供の要求が残る値は登録できないため、同じservice keyを別の型引数で読み直して要求を消す経路はない。
+
+```typescript
+// This example assumes game.layers requires no input services.
+const bridge: QaBridgeApi<unknown> = {
+  run: (namespace, operation, inputJson) =>
+    Effect.provide(game.qaBridge.run(namespace, operation, inputJson), game.layers),
+}
+const installed = Effect.provideService(hostQaProgram, QaBridge, bridge)
+```
+
+新しい公開exportは`DuplicateModuleContract`、`InvalidModuleContract`、`ComposeOptionsError`、`QaOperationNotFound`、`QaBridge`、`QaBridgeApi`である。
 
 ### `run` が R チャネルを運ぶ（旧: `Effect<void>`）
 
@@ -268,19 +333,18 @@ kernel の `GameModule.frameStages` は配列ではなく
 mc-kernel `docs/freeze-checklist.md` (b)）。
 
 その Effect は起動時に 1 回だけ走り、`composeGame` はその後に走る。
-だからこのリポジトリが合成する型は kernel のそれの `frameStages` を評価済みにしたものである。
-境界をそこに置いてあるのは `composeGame` を純粋な `Result.Result` のまま保つためで、
-全順序の解決は id とエッジに対する計算であり、他人のコンストラクタの都合で
-ファイバを借りて算術をするのは筋が悪い。
+このリポジトリが合成する型では、kernel の `frameStages` は評価済みである。
+`composeGame` 自体は Effect を返す。QA namespace、save slice、options、stage order を検証し、失敗を型付きで `E` に返すためである。
 
-`registerModule` は 3 行のアダプタで、`RRegister` が現れる唯一の場所である。
-そこで消去していないのは意図的で、discharge するのはホストであり、ホストはその型を持っているからである。
+`registerModule`は登録Effectを評価し、`RRegister`を登録済みmoduleの型へ引き継ぐ。
+ホストは登録時の要求を提供し、合成後のLayerにも残る要求は実行時に提供する。
 
-### `composeGame` がやることは 3 つだけ
+### `composeGame` が合成するもの
 
-1. モジュールの Layer をマージする
-2. stage 全順序を解決する(`resolveStageOrder` に委譲)
-3. その順序で stage を走らせる Effect を返す
+1. module contract を検証し、QA namespace と save slice を集約する
+2. モジュールの Layer をマージし、`QaBridge` を作る
+3. stage 全順序を解決する(`resolveStageOrder` に委譲)
+4. その順序で stage を走らせる Effect を返す
 
 **stage を覗かない。条件で包まない。走るべきかを判断しない。**
 条件付きで走らない stage は、その判断を自分の `run` の中に持つ。
@@ -299,25 +363,17 @@ delta はクランプせずそのまま渡す
 実モジュールの Layer はすべて問題なく代入できる。空 Layer だけが例外であり、
 この定数がその例外の封じ込め場所である。
 
-### `ModuleLayer` の `RIn` は `never`。合成時は提供サービスの union を保持する
+### `GameModule`はLayerの入力要求を保持する
 
-以前は `Layer<any, any, any>` だった。`RIn` が `any` だと `Effect.provide(game.layer)` は
-要求を **discharge するのではなく消去する** — どのモジュールも提供していないサービスを要求する
-Effect が型検査を通り、実行時に `Service not found` で落ちる。
-`tsc` はこれを `exactOptionalPropertyTypes` 経由で偶発的にしか捕まえない。
+`ModuleLayer = Layer<never, unknown, never>`は従来の消去済み型である。
+`GameModule<ROut, Err, RIn, Qa, Slices, RRegister>`は実際のLayer型とQA、save slice、登録時の要求を保持する。
+`registerModule`はkernelの登録Effectを評価し、これらの型引数を登録済みmoduleへ引き継ぐ。
 
-`Layer` の `RIn` は共変(`out RIn`)なので、`Layer<X, E, R>` が `Layer<never, unknown, never>` に
-代入できるのは `R` が `never` のときだけである。つまり**モジュールは自己完結して届かなければならない**。
-これは新しい規則ではない。モジュールは対等であり(`Layer.merge`、`Layer.provide` ではない)、
-他モジュールのサービスを構築に要求するモジュールは plan.md §2.3-1 が禁じる依存エッジそのものである。
-プラットフォームハンドルを要求するモジュールは、`composeGame` に渡す**前に**それを受け取る
-——ホスト側にはまだそれを満たす型がある。
-
-`composeGame` は const generic の異種配列から提供サービスの union を推論する。
-型を保持した `GameModule<ROut>` を渡せば `Effect.provide(game.layer)` はその union を要求から
-除去し、未提供のサービスは型検査に残る。`GameModule` として明示的に消去された配列だけは
-`ROut = never` となる。**フレームの経路にも穴は無い** — `runFrame` は `FrameServices` を自分の型に
-書いており、`runFrameWith` は正確に型付けされた Layer に対して discharge する。
+`composeGame`はconst genericの異種配列から提供サービスのunionを推論する。
+`ComposedGame.layers`と互換名`layer`の入力要求は、Layer自身の`RIn`と、moduleの提供サービスで満たせないQAおよび登録時の要求である。
+Layerは`Layer.merge`で並べて合成するため、あるmoduleの出力が別moduleのLayer入力を満たすことはない。
+QAの実行時にはホストが`Effect.provide(game.qaBridge.run(...), game.layers)`で出力サービスを提供する。
+Layerの入力要求が残る場合は、ホストがそれも提供してから`QaBridge`へ登録する。
 
 ## 4. ブラウザ composition root(`domain/browser-session.ts`)
 
@@ -329,7 +385,7 @@ type BrowserRuntimeModule = {
 }
 
 type BrowserSession = {
-  readonly game: ComposedGame
+  readonly game: ComposedGame<ReadonlyArray<GameModule>>
   readonly stop: Effect<void, BrowserSessionStopError>
 }
 
@@ -350,7 +406,7 @@ mc-compose はそれらを `BrowserRuntimeModule` として受け取り、ブラ
 | --- | --- |
 | start | 入力配列の宣言順に直列実行する。各 runtime が返す登録済み `GameModule` を `composeGame` に渡す |
 | start 失敗 | その時点までに `start` が完了した runtime を逆順ですべて rollback する |
-| compose 失敗 | 成功した runtime を逆順ですべて rollback し、`StageOrderError` を保持する |
+| compose 失敗 | 成功した runtime を逆順ですべて rollback し、`BrowserSessionStartError.cause` に元の compose failure を保持する |
 | stop | 成功した runtime を逆順ですべて停止する。複数の停止失敗を集約し、残りの停止を妨げない |
 | stop 再実行 | 最初の呼び出しだけが teardown を所有し、以後は成功する no-op になる |
 

@@ -261,13 +261,19 @@ describe('a mod is not a second-class module', () => {
         ),
       )
 
-      const game = Result.getOrThrow(
-        composeGame([
-          { name: 'mc-render', layers: EMPTY_MODULE_LAYER, frameStages: [{ id: STAGE_INPUT, run: record('input') }] },
-          mod,
-          { name: 'mc-render:draw', layers: EMPTY_MODULE_LAYER, frameStages: [{ id: STAGE_RENDER, run: record('render') }] },
-        ]),
-      )
+      const game = yield* composeGame([
+        {
+          name: 'mc-render',
+          layers: EMPTY_MODULE_LAYER,
+          frameStages: [{ id: STAGE_INPUT, run: record('input') }],
+        },
+        mod,
+        {
+          name: 'mc-render:draw',
+          layers: EMPTY_MODULE_LAYER,
+          frameStages: [{ id: STAGE_RENDER, run: record('render') }],
+        },
+      ])
 
       yield* game.runFrameWith(
         FixedClockLayer({
@@ -283,7 +289,7 @@ describe('a mod is not a second-class module', () => {
   // — a mod that runs after redstone in a build with no redstone is fine.
   // Rejecting it would make mods depend on the build's module set.
   it.effect('lets a mod declare an after-edge on a stage the build does not load', () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const mod = Result.getOrThrow(
         acceptMod(
           manifest('extra-ores', [
@@ -292,7 +298,7 @@ describe('a mod is not a second-class module', () => {
         ),
       )
 
-      const game = Result.getOrThrow(composeGame([mod]))
+      const game = yield* composeGame([mod])
       expect([...game.plan.order]).toStrictEqual(['mod:extra-ores:tick'])
       expect([...game.plan.dangling]).toStrictEqual([
         { stage: 'mod:extra-ores:tick', missing: 'simulation:redstone' },
@@ -301,7 +307,7 @@ describe('a mod is not a second-class module', () => {
   )
 
   it.effect('surfaces a cycle between two mods like any other cycle', () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const mods = Result.getOrThrow(
         acceptMods([
           manifest('alpha', [stage(modStageId('alpha', 'tick'), [modStageId('bravo', 'tick')])]),
@@ -309,8 +315,8 @@ describe('a mod is not a second-class module', () => {
         ]),
       )
 
-      const result = composeGame(mods)
-      expect(Result.isFailure(result)).toBe(true)
+      const error = yield* Effect.flip(composeGame(mods))
+      expect(error._tag).toBe('StageCycle')
     }),
   )
 })
