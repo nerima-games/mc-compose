@@ -1,5 +1,55 @@
 # @nerima-games/mc-compose
 
+## 0.3.0
+
+### Minor Changes
+
+- [#108](https://github.com/nerima-games/mc-compose/pull/108) [`07928c2`](https://github.com/nerima-games/mc-compose/commit/07928c20caa95a18f22854d96f3b385233034f1a) Thanks [@takeokunn](https://github.com/takeokunn)! - Align published runtime dependency pins with `main`:
+  
+  - `@nerima-games/mc-kernel`: `0.7.1` → `0.17.0`
+  - `@nerima-games/mc-render`: `0.7.0` → `0.11.0`
+  - `@nerima-games/mc-save`: `0.4.2` → `0.8.0`
+  - `@nerima-games/mc-sim`: `0.4.2` → `0.11.1`
+  - `@nerima-games/mc-worldgen`: `0.3.2` → `0.9.1`
+  - `@nerima-games/mx-gameplay`: `0.6.0` → `0.11.0`
+  - `@nerima-games/mx-multiplayer`: `0.11.0` → `0.17.0`
+  - `@nerima-games/mx-redstone`: `0.3.3` → `0.7.1`
+  - `@nerima-games/mx-ui`: `0.5.3` → `0.10.0`
+  - `effect`: `3.22.1` → `4.0.5`
+  
+  Remove the direct dependencies `@nerima-games/mc-audio` (`0.2.8`), `@nerima-games/mc-physics` (`0.2.2`), and `@nerima-games/mc-playground-kit` (`0.3.1`). The published `v0.2.13` source did not import these three packages, so removing them does not affect consumers' source code.
+
+- [#99](https://github.com/nerima-games/mc-compose/pull/99) [`b056619`](https://github.com/nerima-games/mc-compose/commit/b0566197e6a3e9c7bf3c62a65b0ef32b2e4f99bb) Thanks [@takeokunn](https://github.com/takeokunn)! - Upgrade Effect to 4.0.5. Migrate `acceptMod`, `acceptMods`, `buildQaRegistry`, and `resolveStageOrder` from `Either` to Effect 4 `Result`; `composeGame` returns an `Effect` to validate module contracts.
+
+- [#100](https://github.com/nerima-games/mc-compose/pull/100) [`25a4132`](https://github.com/nerima-games/mc-compose/commit/25a41329504518d1ecc6684067cda8740bfcfec8) Thanks [@takeokunn](https://github.com/takeokunn)! - Add C1 module QA namespace composition, save-slice aggregation, and typed QA dispatch.
+  
+  This changes public composition contracts. Because the package is still 0.x, Changesets records it as a minor release.
+  
+  - `GameModule` accepts `RIn`, QA namespace, save-slice and registration requirement type parameters. `registerModule` preserves these types when evaluating frame-stage registration.
+  - `ComposedGame<Modules>` retains the module tuple and exposes `modules`, `qaNamespaces`, `saveSlices`, `qaBridge` and `layers`. `layer` remains a compatibility alias. Layer inputs remain requirements; QA and registration requirements supplied by module outputs are removed from the composed layer's input requirements.
+  - `BrowserSession.game` is typed as `ComposedGame<ReadonlyArray<GameModule>>`.
+  - New exports are `DuplicateModuleContract`, `InvalidModuleContract`, `ComposeOptionsError`, `QaOperationNotFound`, `QaBridge` and `QaBridgeApi`. Malformed QA or save-slice collections produce `InvalidModuleContract`; identifier collisions produce `DuplicateModuleContract`.
+  - `QaBridge` is a single context service. Requirements stay on the `QaBridgeApi` value until the host provides `game.layers`; the host installs the resulting API without requirements in the service.
+  
+  Migrate callers by sequencing composition inside an Effect workflow:
+  
+  ```ts
+  const program = Effect.gen(function* () {
+    const game = yield* composeGame(modules, options)
+    return game
+  })
+  ```
+  
+  The second `ComposeOptions` argument is optional; omitting it keeps the standard stage skeleton. Handle failures in the Effect error channel, or use `yield* Effect.result(composeGame(modules, options))` and branch on the failure tag for `DuplicateModuleContract`, `InvalidModuleContract`, `ComposeOptionsError`, `Schema.SchemaError`, and `StageOrderError`.
+
+### Patch Changes
+
+- [#101](https://github.com/nerima-games/mc-compose/pull/101) [`4fecca4`](https://github.com/nerima-games/mc-compose/commit/4fecca4beef03a6785cc09239697f18f3464498e) Thanks [@takeokunn](https://github.com/takeokunn)! - Make the `mergeModuleLayers` tuple boundary explicit with one type assertion because TypeScript widens the module tuple during iteration and cannot recover its output, error, and requirement types from the accumulator. The assertion records this unchecked boundary; it does not prove those unions through implementation type checking. Each module layer is merged once, and an empty tuple returns `Layer.empty` without a non-null assertion.
+  
+  The public signature carries module requirements. `EMPTY_MODULE_LAYER` is `Layer.empty` and needs no cast.
+
+- [#102](https://github.com/nerima-games/mc-compose/pull/102) [`94b79c9`](https://github.com/nerima-games/mc-compose/commit/94b79c90a03b9375f63d1e4949527be6143b9cdf) Thanks [@takeokunn](https://github.com/takeokunn)! - Place published gameplay vehicle and brewing stages in the existing physics and interactions phases so they run before interactions and fire, respectively.
+
 ## 0.2.13
 
 ### Patch Changes
