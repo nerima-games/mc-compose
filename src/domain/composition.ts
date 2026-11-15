@@ -595,15 +595,18 @@ const makeQaBridge = <OperationErrors, Requirements>(
   }
 }
 
-export function mergeModuleLayers<const Modules extends ModuleList>(
+export const mergeModuleLayers = <const Modules extends ModuleList>(
   modules: Modules,
-): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>>
-export function mergeModuleLayers(modules: ModuleList): Layer.Layer<never, unknown, unknown> {
-  if (!modules.length) {
-    return Layer.empty
+): Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>> => {
+  let merged: Layer.Layer<never, unknown, unknown> = Layer.empty
+  for (const { layers } of modules) {
+    merged = Layer.merge(merged, layers)
   }
-  const [first, ...rest] = modules
-  return Layer.mergeAll(first!.layers, ...rest.map(({ layers }) => layers))
+  /* An empty tuple keeps Layer.empty. Iteration widens a heterogeneous tuple to
+   * ModuleList, so TypeScript cannot recover its output, error and input unions
+   * from the accumulator. Each module is merged exactly once; this single
+   * boundary restores those tuple-derived types. */
+  return merged as Layer.Layer<ModuleOutput<Modules>, ModuleError<Modules>, ModuleLayerRequirements<Modules>>
 }
 
 /** Every module's stages, flattened. Order here is irrelevant — the resolver sorts. */

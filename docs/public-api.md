@@ -357,11 +357,12 @@ delta はクランプせずそのまま渡す
 
 ### `EMPTY_MODULE_LAYER` が必要な理由
 
-`Layer` は `in ROut`(反変)で宣言されているため、`Layer<never, ...>` は
-`Layer<any, ...>` に代入できない(`any` が `never` に代入できる必要があり、
-`never` は `any` が代入できない唯一の型である)。
-実モジュールの Layer はすべて問題なく代入できる。空 Layer だけが例外であり、
-この定数がその例外の封じ込め場所である。
+`EMPTY_MODULE_LAYER`はサービスを提供しないmoduleで使う共通名で、値は`Layer.empty`である。
+出力、エラー、入力要求がいずれも`never`のため、`ModuleLayer`へcastなしで代入できる。
+
+`mergeModuleLayers`には、moduleの異種tupleから出力、エラー、入力要求のunionを復元する型境界が1か所ある。
+TypeScriptは反復中にtupleの各要素の型を保持できないため、実装は各Layerを1回ずつ合成した結果を単一の型assertionで返す。
+この境界でのunionは型検査による証明ではなく、合成手順に基づく約束である。
 
 ### `GameModule`はLayerの入力要求を保持する
 
