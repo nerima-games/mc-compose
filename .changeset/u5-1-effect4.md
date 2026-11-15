@@ -2,4 +2,4 @@
 "@nerima-games/mc-compose": minor
 ---
 
-Migrate composition APIs from Effect 3 Either values to Effect 4 Result values and update the exact dependency pins.
+Upgrade Effect to 4.0.5. Migrate `acceptMod`, `acceptMods`, `buildQaRegistry`, and `resolveStageOrder` from `Either` to Effect 4 `Result`; `composeGame` returns an `Effect` to validate module contracts.
