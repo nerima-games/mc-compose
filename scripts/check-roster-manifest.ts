@@ -251,7 +251,6 @@ const SOURCE_RULES = [
 type Source = {
   readonly file: string
   readonly nodes: ReadonlyArray<AstGrepMatch>
-  readonly allowBareConstructor: boolean
 }
 type Expression = { readonly source: Source; readonly ref: AstGrepMetaVar }
 type SourceReader = (file: string) => Source
@@ -273,14 +272,14 @@ const itemsOf = (expression: Expression): ReadonlyArray<Expression> =>
   (nodeOf(expression)?.metaVariables.multi['ITEMS'] ?? [])
     .filter((ref) => ref.text !== ',' && !ref.text.startsWith('//') && !ref.text.startsWith('/*'))
     .map((ref) => ({ source: expression.source, ref }))
-const sourceReader = (readFile: (file: string) => string | undefined, allowBareConstructor = false): SourceReader => {
+const sourceReader = (readFile: (file: string) => string | undefined): SourceReader => {
   const sources = new Map<string, Source>()
   return (file) => {
     const cached = sources.get(file)
     if (cached !== undefined) return cached
     const text = readFile(file)
     if (text === undefined) throw new Error(`cannot read imported source ${file}`)
-    const source = { file, nodes: runAstGrep(SOURCE_RULES, text), allowBareConstructor }
+    const source = { file, nodes: runAstGrep(SOURCE_RULES, text) }
     sources.set(file, source)
     return source
   }
@@ -337,8 +336,6 @@ const symbol = (expression: Expression, read: SourceReader): Expression | 'Stage
       }
     }
   }
-  // The text-only API historically accepts snippets without an import declaration.
-  if (source.allowBareConstructor && ref.text === 'StageId') return 'StageId'
   throw new Error(`cannot resolve symbol ${ref.text} in ${source.file}`)
 }
 
@@ -457,7 +454,7 @@ export const parseStageIds = (
   text: string,
 ): ReadonlyMap<string, { readonly id: string; readonly line: number }> => {
   const found = new Map<string, { readonly id: string; readonly line: number }>()
-  const read = sourceReader((file) => file === filePath ? text : undefined, true)
+  const read = sourceReader((file) => file === filePath ? text : undefined)
   const source = read(filePath)
   for (const binding of source.nodes.filter((node) => kindOf(node) === 'binding' && enclosingFunction(source, node) === undefined)) {
     const name = binding.metaVariables.single['NAME']!.text

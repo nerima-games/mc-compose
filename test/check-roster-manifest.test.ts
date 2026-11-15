@@ -413,7 +413,8 @@ describe('the repositories that register nothing', () => {
   it.effect('fails loudly the day a silent repository registers a stage', () =>
     Effect.sync(() => {
       const withPhysics = ioOf({
-        '/roster/mc-sim/src/stages/stage-ids.ts': `export const SIM_STAGE_IDS = { physics: StageId('sim:physics') } as const\n`,
+        '/roster/mc-sim/src/stages/stage-ids.ts': `import { StageId } from '@nerima-games/mc-kernel'
+export const SIM_STAGE_IDS = { physics: StageId('sim:physics') } as const\n`,
         '/roster/mc-sim/src/stages/registration.ts': `const s = [{ id: SIM_STAGE_IDS.physics, run: () => Effect.void }]\n`,
       })
       const problems = compareSilentModule('/roster', { name: 'mc-sim' }, withPhysics)
