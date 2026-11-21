@@ -56,7 +56,7 @@
     "@nerima-games/mc-kernel": "0.17.0",
     "@nerima-games/mc-render": "0.11.0",
     "@nerima-games/mc-save": "0.8.0",
-    "@nerima-games/mc-sim": "0.11.1",
+    "@nerima-games/mc-sim": "0.12.0",
     "@nerima-games/mc-worldgen": "0.9.1",
     "@nerima-games/mx-gameplay": "0.11.0",
     "@nerima-games/mx-multiplayer": "0.17.0",
