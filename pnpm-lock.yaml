@@ -198,8 +198,8 @@ importers:
         specifier: 0.7.1
         version: 0.7.1
       '@nerima-games/mx-ui':
-        specifier: 0.10.0
-        version: 0.10.0
+        specifier: 0.11.0
+        version: 0.11.0
       effect:
         specifier: 4.0.5
         version: 4.0.5
@@ -589,8 +589,8 @@ packages:
     resolution: {integrity: sha512-+OVZW4c8ja9I9HaRTXMwVRWec/RJYWaEXLV81NuXLXd1JgJMnIoE77oA+xb6nj2wgDoEqILQU5pEBsCu/rjgpw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-redstone/0.7.1/6a7595336be1159928b62b9e3f3a01a1ac7a126f}
     engines: {node: '>=24.0.0', pnpm: '>=11.24.0'}
 
-  '@nerima-games/mx-ui@0.10.0':
-    resolution: {integrity: sha512-A76T7gHf8YIA6xUL8ucWy6UpQLeLQPEXYGHpWsp5+lCAV3Q8L1OR5R2Qdk4Zdf+jr+X60Sj/R7NJWuvwYH73vw==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-ui/0.10.0/56d1f60fde18abaa537a2a43cb09742df47afc3a}
+  '@nerima-games/mx-ui@0.11.0':
+    resolution: {integrity: sha512-tpsj2j1k2SJwVRvGxcRlU0O6MeMHqjEbuNMIQiL/RLo50PYD2AuvckN8bdN/3HTBZzI5tJI94Pqci1DY/9ahPg==, tarball: https://npm.pkg.github.com/download/@nerima-games/mx-ui/0.11.0/b743c06880368e9ae252534fd7883a21474b4aa1}
     engines: {node: '>=24.0.0', pnpm: '>=12.14.0'}
 
   '@oxc-parser/binding-android-arm-eabi@0.154.0':
@@ -1863,7 +1863,7 @@ snapshots:
       '@nerima-games/mc-worldgen': 0.9.1
       effect: 4.0.5
 
-  '@nerima-games/mx-ui@0.10.0':
+  '@nerima-games/mx-ui@0.11.0':
     dependencies:
       '@nerima-games/mc-audio': 0.6.0
       '@nerima-games/mc-kernel': 0.17.0
