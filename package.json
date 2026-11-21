@@ -61,7 +61,7 @@
     "@nerima-games/mx-gameplay": "0.11.0",
     "@nerima-games/mx-multiplayer": "0.17.0",
     "@nerima-games/mx-redstone": "0.7.1",
-    "@nerima-games/mx-ui": "0.10.0",
+    "@nerima-games/mx-ui": "0.11.0",
     "effect": "4.0.5"
   },
   "devDependencies": {
