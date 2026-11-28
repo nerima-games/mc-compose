@@ -19,7 +19,15 @@
  *     recently measured one speaks for it, so an old pass cannot hide a newer
  *     failure.
  */
-import { DOD_IDS, DOD_REQUIREMENTS, classifyCheck, type CoverageRequirement, type DodId, type Registration } from './registry'
+import {
+  DOD_IDS,
+  DOD_REQUIREMENTS,
+  classifyCheck,
+  isPublishedBy,
+  type CoverageRequirement,
+  type DodId,
+  type Registration,
+} from './registry'
 import type { Check, StatusRun } from './schema'
 
 /** The five displays of 55 §4.2. */
@@ -68,20 +76,16 @@ export type StaleReason = 'age' | 'future' | 'commit' | 'version'
 export type DodIssue =
   | { readonly code: 'absent'; readonly id: string }
   | { readonly code: 'check'; readonly id: string; readonly verdict: Exclude<DodVerdict, 'pass'> }
-  | {
-      readonly code: 'coverage'
-      readonly prefix: string
-      readonly found: number
-      readonly min: number
-      readonly missingKeys: ReadonlyArray<string>
-    }
+  | { readonly code: 'coverage'; readonly prefix: string; readonly found: number; readonly min: number }
   | { readonly code: 'qa-state-changes'; readonly id: string; readonly count: number }
   | { readonly code: 'no-video'; readonly id: string }
+  | { readonly code: 'unauthorized-publisher'; readonly id: string; readonly repo: string; readonly workflow: string }
   | { readonly code: 'no-acceptance-environment' }
   | { readonly code: 'no-candidate-version' }
   | { readonly code: 'no-decision'; readonly version: string }
   | { readonly code: 'decision-for-other-version'; readonly version: string }
   | { readonly code: 'rejected'; readonly version: string; readonly decidedBy: string }
+  | { readonly code: 'unreadable-decision-time'; readonly version: string; readonly decidedBy: string }
 
 export type DodResult = {
   readonly dod: DodId
@@ -100,29 +104,63 @@ export type CheckEntry = {
 
 const emptyCounts = (): Record<DodVerdict, number> => ({ pass: 0, fail: 0, missing: 0, unmeasurable: 0, stale: 0 })
 
-const timestamp = (iso: string): number => Date.parse(iso)
-
-/** Later measurement first; the run's finish time and ID break a tie so the choice does not depend on input order. */
-const isNewer = (candidate: CheckEntry, incumbent: CheckEntry): boolean => {
-  const byMeasured = timestamp(candidate.check.measuredAt) - timestamp(incumbent.check.measuredAt)
-  if (byMeasured !== 0) return byMeasured > 0
-  const byFinished = timestamp(candidate.run.finishedAt) - timestamp(incumbent.run.finishedAt)
-  if (byFinished !== 0) return byFinished > 0
-  return candidate.run.runId > incumbent.run.runId
+/** An unreadable time sorts as the oldest instant, so comparing it never yields NaN and the order stays total. */
+const timestamp = (iso: string): number => {
+  const parsed = Date.parse(iso)
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY
 }
 
-const latestByCheckId = (runs: ReadonlyArray<StatusRun>): ReadonlyMap<string, CheckEntry> => {
+const compareNumbers = (a: number, b: number): number => (a < b ? -1 : a > b ? 1 : 0)
+
+const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
+/** From the best outcome to the worst: the order the card uses to pick one verdict for a DoD. */
+const SEVERITY: Readonly<Record<DodVerdict, number>> = { pass: 0, stale: 1, unmeasurable: 2, missing: 3, fail: 4 }
+
+/**
+ * A positive result means `candidate` speaks for the check ID. The later
+ * measurement wins; the run's finish time and ID come next. When all three
+ * tie, the worse outcome wins, so the choice never depends on input order:
+ * a displayed verdict, then more QA state changes, then no recording, and
+ * finally the run's own labels, which decide nothing a DoD reads.
+ */
+const compareEntries = (candidate: CheckEntry, incumbent: CheckEntry, currency: Currency): number =>
+  compareNumbers(timestamp(candidate.check.measuredAt), timestamp(incumbent.check.measuredAt)) ||
+  compareNumbers(timestamp(candidate.run.finishedAt), timestamp(incumbent.run.finishedAt)) ||
+  compareNumbers(candidate.run.runId, incumbent.run.runId) ||
+  compareNumbers(SEVERITY[displayedVerdict(candidate, currency)], SEVERITY[displayedVerdict(incumbent, currency)]) ||
+  compareNumbers(candidate.run.stateChangingQaCommands, incumbent.run.stateChangingQaCommands) ||
+  compareNumbers(Number(!hasVideo(candidate)), Number(!hasVideo(incumbent))) ||
+  compareText(candidate.run.repo, incumbent.run.repo) ||
+  compareText(candidate.run.workflow, incumbent.run.workflow) ||
+  compareText(candidate.run.commit, incumbent.run.commit) ||
+  compareText(candidate.run.version, incumbent.run.version)
+
+const hasVideo = (entry: CheckEntry): boolean => entry.check.evidence.some((item) => item.kind === 'video')
+
+type Sifted = {
+  readonly latest: ReadonlyMap<string, CheckEntry>
+  /** Results the registry knows but whose publisher the spec does not allow, in input order, one per source and ID. */
+  readonly ignored: ReadonlyArray<CheckEntry>
+}
+
+const sift = (runs: ReadonlyArray<StatusRun>, currency: Currency): Sifted => {
   const latest = new Map<string, CheckEntry>()
+  const ignored = new Map<string, CheckEntry>()
   for (const run of runs) {
     for (const check of run.checks) {
       const classification = classifyCheck(check)
       if (classification.kind !== 'registered') continue
       const entry: CheckEntry = { run, check, registration: classification.registration }
+      if (!isPublishedBy(check.id, run)) {
+        ignored.set(`${check.id}\u0000${run.repo}\u0000${run.workflow}`, entry)
+        continue
+      }
       const incumbent = latest.get(check.id)
-      if (incumbent === undefined || isNewer(entry, incumbent)) latest.set(check.id, entry)
+      if (incumbent === undefined || compareEntries(entry, incumbent, currency) > 0) latest.set(check.id, entry)
     }
   }
-  return latest
+  return { latest, ignored: [...ignored.values()] }
 }
 
 /**
@@ -161,11 +199,8 @@ const worst = (counts: Readonly<Record<DodVerdict, number>>, otherwiseFail: bool
 type CoverageIssue = Extract<DodIssue, { readonly code: 'coverage' }>
 
 const coverageIssue = (requirement: CoverageRequirement, entries: ReadonlyArray<CheckEntry>): CoverageIssue | undefined => {
-  const under = entries.filter((entry) => entry.check.id.startsWith(requirement.prefix))
-  const present = new Set(under.map((entry) => entry.check.id.slice(requirement.prefix.length).split('/')[0]))
-  const missingKeys = (requirement.keys ?? []).filter((key) => !present.has(key))
-  if (under.length >= requirement.min && missingKeys.length === 0) return undefined
-  return { code: 'coverage', prefix: requirement.prefix, found: under.length, min: requirement.min, missingKeys }
+  const found = entries.filter((entry) => entry.check.id.startsWith(requirement.prefix)).length
+  return found >= requirement.min ? undefined : { code: 'coverage', prefix: requirement.prefix, found, min: requirement.min }
 }
 
 const JOURNEY_FULL_ID = 'journey/full'
@@ -177,13 +212,14 @@ const journeyIssues = (entry: CheckEntry | undefined): ReadonlyArray<DodIssue> =
     ...(entry.run.stateChangingQaCommands === 0
       ? []
       : [{ code: 'qa-state-changes', id: entry.check.id, count: entry.run.stateChangingQaCommands } satisfies DodIssue]),
-    ...(entry.check.evidence.some((item) => item.kind === 'video')
+    ...(hasVideo(entry)
       ? []
       : [{ code: 'no-video', id: entry.check.id } satisfies DodIssue]),
   ]
 }
 
-const evaluateChecks = (dod: DodId, latest: ReadonlyMap<string, CheckEntry>, currency: Currency): DodResult => {
+const evaluateChecks = (dod: DodId, sifted: Sifted, currency: Currency): DodResult => {
+  const { latest, ignored } = sifted
   const requirement = DOD_REQUIREMENTS[dod]
   const contributing = [...latest.values()].filter((entry) => entry.registration.dods.includes(dod))
   const counts = emptyCounts()
@@ -204,8 +240,12 @@ const evaluateChecks = (dod: DodId, latest: ReadonlyMap<string, CheckEntry>, cur
     const issue = coverageIssue(item, contributing)
     if (issue === undefined) continue
     // Each result still owed counts as missing, so a card never reads "0 of 0" while it waits for results.
-    counts.missing += Math.max(1, issue.missingKeys.length, issue.min - issue.found)
+    counts.missing += issue.min - issue.found
     issues.push(issue)
+  }
+  for (const entry of ignored) {
+    if (!entry.registration.dods.includes(dod)) continue
+    issues.push({ code: 'unauthorized-publisher', id: entry.check.id, repo: entry.run.repo, workflow: entry.run.workflow })
   }
   const journey = dod === 4 ? journeyIssues(latest.get(JOURNEY_FULL_ID)) : []
   issues.push(...journey)
@@ -229,27 +269,34 @@ const acceptanceResult = (acceptance: ReleaseAcceptance | undefined): DodResult 
     return result('missing', [{ code: 'no-acceptance-environment' }])
   }
   const { candidateVersion, decisions } = acceptance
-  if (candidateVersion === undefined) return result('missing', [{ code: 'no-candidate-version' }])
+  // A decision whose time cannot be read cannot be ordered against the others, so it is set aside
+  // (like an unreadable measurement time, which is stale) and reported instead of deciding by input order.
+  const readable = decisions.filter((decision) => Number.isFinite(timestamp(decision.decidedAt)))
+  const unreadable: ReadonlyArray<DodIssue> = decisions
+    .filter((decision) => !readable.includes(decision))
+    .map((decision) => ({ code: 'unreadable-decision-time', version: decision.version, decidedBy: decision.decidedBy }))
+  const outcome = (verdict: DodVerdict, issues: ReadonlyArray<DodIssue>): DodResult => result(verdict, [...issues, ...unreadable])
+  if (candidateVersion === undefined) return outcome('missing', [{ code: 'no-candidate-version' }])
 
-  const forCandidate = decisions.filter((decision) => decision.version === candidateVersion)
+  const forCandidate = readable.filter((decision) => decision.version === candidateVersion)
   // The latest decision stands, and a rejection wins a tie: acceptance must not rest on an ordering accident.
   const decisive = [...forCandidate].sort((a, b) => {
-    const byTime = timestamp(b.decidedAt) - timestamp(a.decidedAt)
+    const byTime = compareNumbers(timestamp(b.decidedAt), timestamp(a.decidedAt))
     if (byTime !== 0) return byTime
     return Number(b.state === 'rejected') - Number(a.state === 'rejected')
   })[0]
-  if (decisive?.state === 'approved') return result('pass', [])
+  if (decisive?.state === 'approved') return outcome('pass', [])
   if (decisive?.state === 'rejected') {
-    return result('fail', [{ code: 'rejected', version: decisive.version, decidedBy: decisive.decidedBy }])
+    return outcome('fail', [{ code: 'rejected', version: decisive.version, decidedBy: decisive.decidedBy }])
   }
-  const other = decisions.find((decision) => decision.state === 'approved')
+  const other = readable.find((decision) => decision.state === 'approved')
   return other === undefined
-    ? result('missing', [{ code: 'no-decision', version: candidateVersion }])
-    : result('stale', [{ code: 'decision-for-other-version', version: other.version }])
+    ? outcome('missing', [{ code: 'no-decision', version: candidateVersion }])
+    : outcome('stale', [{ code: 'decision-for-other-version', version: other.version }])
 }
 
 /** All thirteen results, in DoD order, even when `runs` is empty. */
 export const evaluateDods = (input: DodInput): ReadonlyArray<DodResult> => {
-  const latest = latestByCheckId(input.runs)
-  return DOD_IDS.map((dod) => (dod === 9 ? acceptanceResult(input.acceptance) : evaluateChecks(dod, latest, input.currency)))
+  const sifted = sift(input.runs, input.currency)
+  return DOD_IDS.map((dod) => (dod === 9 ? acceptanceResult(input.acceptance) : evaluateChecks(dod, sifted, input.currency)))
 }

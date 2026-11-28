@@ -237,19 +237,52 @@ export const StatusRunSchema: Schema.Codec<StatusRun> = Schema.Struct({
   }),
 )
 
-/**
- * Effect decodes every array element before it applies the array's own length
- * rule, so `isMaxLength` on `checks` alone would reject an oversized file only
- * after decoding all of it. This first pass looks at the length and nothing else.
- * The caller still has to cap the bytes it downloads: the per-check caps on
- * `evidence` and `steps` fire after those arrays are decoded.
- */
-const ChecksBudget = Schema.Struct({
-  checks: Schema.Array(Schema.Unknown).check(Schema.isMaxLength(MAX_CHECKS_PER_RUN)),
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+type BudgetViolation = { readonly path: ReadonlyArray<PropertyKey>; readonly issue: string }
+
+const overLimit = (path: ReadonlyArray<PropertyKey>, length: number, limit: number): BudgetViolation => ({
+  path,
+  issue: `Expected at most ${limit} items, got ${length}`,
 })
+
+/**
+ * Looks only at the lengths of the three arrays a file contains: `checks`, and
+ * each check's `steps` and `evidence`. Reading `.length` costs the same for
+ * three items or three million, and no element is visited.
+ */
+const budgetViolation = (input: unknown): BudgetViolation | undefined => {
+  if (!isRecord(input)) return undefined
+  const checks = input['checks']
+  if (!Array.isArray(checks)) return undefined
+  if (checks.length > MAX_CHECKS_PER_RUN) return overLimit(['checks'], checks.length, MAX_CHECKS_PER_RUN)
+  for (let index = 0; index < checks.length; index += 1) {
+    const entry: unknown = checks[index]
+    if (!isRecord(entry)) continue
+    const steps = entry['steps']
+    if (Array.isArray(steps) && steps.length > MAX_STEPS_PER_CHECK) {
+      return overLimit(['checks', index, 'steps'], steps.length, MAX_STEPS_PER_CHECK)
+    }
+    const evidence = entry['evidence']
+    if (Array.isArray(evidence) && evidence.length > MAX_EVIDENCE_PER_CHECK) {
+      return overLimit(['checks', index, 'evidence'], evidence.length, MAX_EVIDENCE_PER_CHECK)
+    }
+  }
+  return undefined
+}
+
+/**
+ * Effect decodes every array element before it applies that array's own length
+ * rule, so `isMaxLength` on `checks`, `steps` or `evidence` alone would reject
+ * an oversized file only after decoding all of it. This pass runs first and
+ * rejects on length alone. The caller still has to cap the bytes it downloads:
+ * a file of many small, valid items is within these budgets.
+ */
+const Budget = Schema.Unknown.check(Schema.makeFilter(budgetViolation, { title: 'array size budget' }, true))
 
 /** Decodes parsed JSON. The error is the Schema's own, so the aggregator can print every violated rule. */
 export const decodeStatusRun = (input: unknown): Result.Result<StatusRun, Schema.SchemaError> => {
-  const budget = Schema.decodeUnknownResult(ChecksBudget)(input)
+  const budget = Schema.decodeUnknownResult(Budget)(input)
   return Result.isFailure(budget) ? Result.fail(budget.failure) : Schema.decodeUnknownResult(StatusRunSchema)(input)
 }

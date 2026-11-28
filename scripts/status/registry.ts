@@ -312,8 +312,76 @@ export const PROGRESSION_CHECK_IDS: ReadonlyArray<string> = [
   'hostile-damage-before-dusk',
 ].map((goal) => `progression/${goal}`)
 
-/** DoD-13 draws one screen check per S01–S34 (55 §5.3). */
-export const SCREEN_KEYS: ReadonlyArray<string> = numbered(34, (index) => `S${twoDigits(index)}`)
+/**
+ * The states each screen is photographed in (55 §5.3: "全状態 × 2 言語 × 2 大きさ").
+ * The authoritative list is `e2e/screens/catalog.ts` in mc-host-web, which does
+ * not exist yet; its names must equal the design boards' Tweaks. Until it
+ * does, this table is the provisional assignment: the names the screen docs
+ * give in backticks (docs/ux 10, 20, 30) where they exist, otherwise the
+ * board's Tweaks name, and `default` for a screen whose board has no Tweaks.
+ * Where a board has two Tweaks axes (S25, S31) the pairs are spelled out.
+ * Screens whose states the docs give only in Japanese prose (S03, S06, S11,
+ * S12, S17, S20, S28, S32) therefore rest on the boards alone.
+ */
+export const SCREEN_STATES: Readonly<Record<string, ReadonlyArray<string>>> = {
+  S01: ['firstRun', 'returning', 'returningNeedsRecovery', 'lockedElsewhere'],
+  S02: ['default'],
+  S03: ['default', 'showDelete'],
+  S04: ['default'],
+  S05: ['default'],
+  S06: ['mining', 'combat', 'dusk'],
+  S07: ['default', 'multiplayer', 'relockFailed'],
+  S08: ['default'],
+  S09: ['default'],
+  S10: ['default'],
+  S11: ['zombie', 'fall', 'drown', 'starve', 'lava'],
+  S12: ['pause', 'title'],
+  S13: ['default', 'saveFails'],
+  S14: ['failed', 'retrying', 'recovered'],
+  S15: ['idle', 'connecting', 'failed'],
+  S16: ['default'],
+  S17: ['chest', 'ender', 'shulker'],
+  S18: ['sleeping', 'blocked', 'waiting'],
+  S19: ['typing', 'playerList', 'unstable', 'disconnected'],
+  S20: ['log', 'stone', 'repeater', 'comparator', 'wheat', 'endFrame'],
+  S21: ['default'],
+  S22: ['default'],
+  S23: ['default'],
+  S24: ['default'],
+  S25: ['portalWait', 'travelNether', 'travelEnd', 'travelOverworld'],
+  S26: ['default'],
+  S27: ['default'],
+  S28: ['default', 'system'],
+  S29: ['default'],
+  S30: ['webgl', 'storage', 'crash', 'outdated', 'updated', 'framed'],
+  S31: ['hopper', 'hopperPowered', 'dispenser', 'dispenserPowered'],
+  S32: ['map', 'compass', 'clock', 'spyglass'],
+  S33: [
+    'wrongTool',
+    'longMining',
+    'bow',
+    'shield',
+    'shieldDisabled',
+    'riding',
+    'hungerNoSprint',
+    'absorption',
+    'damageDirection',
+    'fishing',
+  ],
+  S34: ['lure', 'love', 'cooldown', 'baby', 'shear'],
+}
+
+export const SCREEN_LANGUAGES: ReadonlyArray<string> = ['ja', 'en']
+
+/** 1280×720 and 844×390, written by width as in `screen/S09/recipeBook/ja/1280`. */
+export const SCREEN_WIDTHS: ReadonlyArray<string> = ['1280', '844']
+
+/** DoD-13 needs a baseline comparison for every state, language and size (55 §5.3). */
+export const SCREEN_CHECK_IDS: ReadonlyArray<string> = Object.entries(SCREEN_STATES).flatMap(([screen, states]) =>
+  states.flatMap((state) =>
+    SCREEN_LANGUAGES.flatMap((language) => SCREEN_WIDTHS.map((width) => `screen/${screen}/${state}/${language}/${width}`)),
+  ),
+)
 
 type ExactEntry = {
   readonly ids: ReadonlyArray<string>
@@ -336,6 +404,7 @@ const EXACT_ENTRIES: ReadonlyArray<ExactEntry> = [
   { ids: AUDIO_BGM_CHECK_IDS, group: 'audio', dods: [10] },
   { ids: UX_CHECK_IDS, group: 'ux', dods: [11] },
   { ids: PROGRESSION_CHECK_IDS, group: 'progression', dods: [12] },
+  { ids: SCREEN_CHECK_IDS, group: 'screen', dods: [13] },
   // V04 shows these; no DoD counts them.
   { ids: numbered(17, (index) => `perf/P${twoDigits(index)}`), group: 'perf', dods: [] },
   { ids: numbered(9, (index) => `compose/C${twoDigits(index)}`), group: 'compose', dods: [] },
@@ -348,8 +417,8 @@ type OpenNamespace = {
 }
 
 /**
- * Namespaces whose members are not enumerable here: the screen catalog is
- * `e2e/screens/catalog.ts` in mc-host-web, journeys and features grow with
+ * Namespaces whose members are not fully enumerable here: extra screen states,
+ * journeys and features grow with
  * 40 §3, and audio events and licenses follow the files mc-audio ships. Every
  * member counts toward the DoD named here, so one failing screen fails DoD-13.
  */
@@ -391,14 +460,60 @@ export const classifyCheck = (check: { readonly id: string; readonly group: Chec
 }
 
 // ---------------------------------------------------------------------------
+// Who may publish which check (55 §3.1)
+// ---------------------------------------------------------------------------
+
+export type Publisher = { readonly repo: string; readonly workflow: string }
+
+type PublisherRule = {
+  readonly matches: (id: string) => boolean
+  readonly publishers: ReadonlyArray<Publisher>
+}
+
+const host = (workflow: string): Publisher => ({ repo: fullName('mc-host-web'), workflow })
+const exactly = (ids: ReadonlyArray<string>) => (id: string): boolean => ids.includes(id)
+const under = (...prefixes: ReadonlyArray<string>) => (id: string): boolean => prefixes.some((prefix) => id.startsWith(prefix))
+
+/**
+ * The first matching rule decides, so a specific ID comes before its namespace.
+ * An ID that no rule matches (the ledger, content counts, the catalog, audit
+ * items and any audio check the table does not name) has no fixed publisher
+ * in 55 §3.1 and is accepted from any source in `SOURCES`.
+ *
+ * A result from another publisher is ignored, because a DoD that needs one
+ * repository's recording must not turn green on another repository's claim.
+ * T0 measurements are published by hand under `t0` (plan §9.3), so the
+ * performance results accept it as well.
+ */
+const PUBLISHER_RULES: ReadonlyArray<PublisherRule> = [
+  { matches: exactly(['journey/full']), publishers: [host('release')] },
+  { matches: exactly([...PERF_DOD5_CHECK_IDS, ...PERF_DOD7_CHECK_IDS]), publishers: [host('nightly'), host('release'), host('t0')] },
+  { matches: under('journey/', 'feature/', 'ux/', 'screen/'), publishers: [host('ci'), host('nightly'), host('release')] },
+  { matches: under('perf/'), publishers: [host('nightly'), host('release'), host('t0')] },
+  { matches: under('live/'), publishers: [host('deploy')] },
+  { matches: under('audio/recording/'), publishers: [host('nightly'), host('release')] },
+  { matches: under('audio/bgm/', 'audio/event/', 'audio/license/'), publishers: [{ repo: fullName('mc-audio'), workflow: 'ci' }] },
+  { matches: under('progression/'), publishers: [{ repo: fullName('mc-sim'), workflow: 'nightly' }] },
+  { matches: under('ci/', 'compose/'), publishers: [{ repo: fullName('mc-compose'), workflow: 'ci' }, { repo: fullName('mc-compose'), workflow: 'nightly' }] },
+]
+
+/** The sources 55 §3.1 allows to publish `id`, or `undefined` when it leaves the publisher open. */
+export const publishersOf = (id: string): ReadonlyArray<Publisher> | undefined =>
+  PUBLISHER_RULES.find((rule) => rule.matches(id))?.publishers
+
+export const isPublishedBy = (id: string, run: { readonly repo: string; readonly workflow: string }): boolean => {
+  const publishers = publishersOf(id)
+  return publishers === undefined || publishers.some((publisher) => publisher.repo === run.repo && publisher.workflow === run.workflow)
+}
+
+// ---------------------------------------------------------------------------
 // What each DoD needs to be present
 // ---------------------------------------------------------------------------
 
-/** At least `min` checks under `prefix`, and, when `keys` is given, one per key in the ID's second segment. */
+/** At least `min` checks under `prefix`, for a namespace whose members are not enumerable here. */
 export type CoverageRequirement = {
   readonly prefix: string
   readonly min: number
-  readonly keys?: ReadonlyArray<string>
 }
 
 export type DodRequirement = {
@@ -417,10 +532,8 @@ const COVERAGE: Readonly<Partial<Record<DodId, ReadonlyArray<CoverageRequirement
     { prefix: 'audio/license/', min: 1 },
     { prefix: 'audio/recording/', min: 1 },
   ],
-  13: [
-    { prefix: 'screen/', min: SCREEN_KEYS.length, keys: SCREEN_KEYS },
-    { prefix: 'audit/', min: 1 },
-  ],
+  // The screens are enumerated by SCREEN_CHECK_IDS; the plan's high-rated audit items are not.
+  13: [{ prefix: 'audit/', min: 1 }],
 }
 
 const requirement = (dod: DodId): DodRequirement => ({
