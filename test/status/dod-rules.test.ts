@@ -7,6 +7,7 @@
  * measured on an old commit, and an old pass sitting next to a newer failure.
  */
 import { describe, expect, it } from '@effect/vitest'
+import * as fc from 'fast-check'
 import {
   FUTURE_SKEW_MS,
   STALE_AFTER_MS,
@@ -19,9 +20,10 @@ import {
   type DodVerdict,
   type ReleaseAcceptance,
 } from '../../scripts/status/dod-rules'
-import { DOD_IDS, DOD_REQUIREMENTS, classifyCheck, type DodId } from '../../scripts/status/registry'
+import { DOD_IDS, DOD_REQUIREMENTS, SCREEN_STATES, classifyCheck, type DodId } from '../../scripts/status/registry'
 import type { Check, StatusRun } from '../../scripts/status/schema'
 import {
+  COMMIT,
   FRESH,
   HOUR_MS,
   NOW,
@@ -67,6 +69,8 @@ const withCheck = (id: string, replacement: Check | undefined): ReadonlyArray<St
     ...base,
     checks: base.checks.flatMap((existing) => (existing.id === id ? (replacement === undefined ? [] : [replacement]) : [existing])),
   }))
+
+type TieSpec = { readonly verdict: Check['verdict']; readonly qa: number; readonly commit: string; readonly video: boolean }
 
 const DOD_WITH_CHECKS = DOD_IDS.filter((dod) => dod !== 9)
 
@@ -124,14 +128,14 @@ describe('evaluateDods', () => {
     })
   })
 
-  it('treats every required ID as required: dropping any one makes its DoD missing', () => {
-    for (const dod of DOD_WITH_CHECKS) {
+  describe.each(DOD_WITH_CHECKS)('DoD-%i required IDs', (dod) => {
+    it('are all required: dropping any one makes the DoD missing', () => {
       for (const id of DOD_REQUIREMENTS[dod].requiredIds) {
         const result = resultOf(evaluateDods(input(withCheck(id, undefined))), dod)
         expect(result.verdict, `DoD-${dod} without ${id}`).toBe('missing')
         expect(result.issues).toContainEqual({ code: 'absent', id })
       }
-    }
+    })
   })
 
   it('shows a reported `missing` check as missing', () => {
@@ -201,6 +205,111 @@ describe('evaluateDods', () => {
       expect(verdictOf(input([...others, ...laterFinish]), 11)).toBe('pass')
       expect(verdictOf(input([...others, ...largerRunId]), 11)).toBe('fail')
       expect(verdictOf(input([...others, ...[...largerRunId].reverse()]), 11)).toBe('fail')
+    })
+  })
+
+  describe('results that tie on every ranking key', () => {
+    const tied = (verdict: Check['verdict'], runId = 1): StatusRun =>
+      run([check('ux/1', { verdict, measuredAt: FRESH })], { runId, finishedAt: FRESH })
+    const others = allPassingRuns().map((base) => ({ ...base, checks: base.checks.filter((existing) => existing.id !== 'ux/1') }))
+
+    it('picks the worse verdict, whichever run comes first', () => {
+      expect(verdictOf(input([...others, tied('pass'), tied('fail')]), 11)).toBe('fail')
+      expect(verdictOf(input([...others, tied('fail'), tied('pass')]), 11)).toBe('fail')
+      expect(verdictOf(input([...others, tied('pass'), tied('missing')]), 11)).toBe('missing')
+      expect(verdictOf(input([...others, tied('missing'), tied('pass')]), 11)).toBe('missing')
+    })
+
+    it('ranks fail above missing above unmeasurable above pass', () => {
+      const verdicts = ['pass', 'unmeasurable', 'missing', 'fail'] as const
+      const expected = { pass: 'pass', unmeasurable: 'unmeasurable', missing: 'missing', fail: 'fail' } as const
+      for (const [index, better] of verdicts.entries()) {
+        for (const worse of verdicts.slice(index + 1)) {
+          const pair = [tied(better), tied(worse)]
+          expect(verdictOf(input([...others, ...pair]), 11)).toBe(expected[worse])
+          expect(verdictOf(input([...others, ...[...pair].reverse()]), 11)).toBe(expected[worse])
+        }
+      }
+    })
+
+    it('gives the same results for every ordering of tied runs (property)', () => {
+      const spec = fc.record({
+        verdict: fc.constantFrom('pass', 'fail', 'missing', 'unmeasurable'),
+        qa: fc.integer({ min: 0, max: 2 }),
+        commit: fc.constantFrom(COMMIT, OTHER_COMMIT),
+        video: fc.boolean(),
+      })
+      const scenario = fc
+        .array(spec, { minLength: 2, maxLength: 5 })
+        .chain((specs) =>
+          fc
+            .shuffledSubarray(
+              specs.map((_unused, index) => index),
+              { minLength: specs.length, maxLength: specs.length },
+            )
+            .map((order) => ({ specs, order })),
+        )
+      const toRun = (item: TieSpec): StatusRun =>
+        run(
+          [
+            check('journey/full', {
+              verdict: item.verdict,
+              evidence: item.video ? [journeyVideo] : [],
+              measuredAt: FRESH,
+              ...(item.verdict === 'unmeasurable' ? { reason: 'x' } : {}),
+            }),
+          ],
+          { runId: 1, finishedAt: FRESH, stateChangingQaCommands: item.qa, commit: item.commit },
+        )
+      const base = withCheck('journey/full', undefined)
+
+      fc.assert(
+        fc.property(scenario, ({ specs, order }) => {
+          const forward = evaluateDods(input([...base, ...specs.map(toRun)]))
+          const shuffled = evaluateDods(input([...base, ...order.flatMap((index) => specs.slice(index, index + 1)).map(toRun)]))
+          expect(shuffled).toEqual(forward)
+        }),
+        { numRuns: 200 },
+      )
+    })
+  })
+
+  describe('results published by the wrong source', () => {
+    const audioRun = (checks: ReadonlyArray<Check>): StatusRun => run(checks, { repo: 'nerima-games/mc-audio', workflow: 'ci', runId: 21 })
+
+    it('does not count journey/full from mc-audio, and says it was ignored', () => {
+      const runs = [...withCheck('journey/full', undefined), audioRun([check('journey/full', { evidence: [journeyVideo] })])]
+      const result = resultOf(evaluateDods(input(runs)), 4)
+
+      expect(result.verdict).toBe('missing')
+      expect(result.issues).toContainEqual({ code: 'absent', id: 'journey/full' })
+      expect(result.issues).toContainEqual({
+        code: 'unauthorized-publisher',
+        id: 'journey/full',
+        repo: 'nerima-games/mc-audio',
+        workflow: 'ci',
+      })
+    })
+
+    it('does not count journey/full from another workflow of mc-host-web', () => {
+      const runs = [
+        ...withCheck('journey/full', undefined),
+        run([check('journey/full', { evidence: [journeyVideo] })], { workflow: 'nightly', runId: 22 }),
+      ]
+
+      expect(verdictOf(input(runs), 4)).toBe('missing')
+    })
+
+    it('lets an unauthorized failure neither fail nor complete a DoD', () => {
+      const runs = [...allPassingRuns(), audioRun([check('journey/full', { verdict: 'fail' })])]
+
+      expect(verdictOf(input(runs), 4)).toBe('pass')
+    })
+
+    it('does not let a newer unauthorized result replace an authorized one', () => {
+      const newer = audioRun([check('journey/full', { verdict: 'fail', evidence: [journeyVideo], measuredAt: isoAt(NOW - 60 * 1000) })])
+
+      expect(verdictOf(input([...allPassingRuns(), newer]), 4)).toBe('pass')
     })
   })
 
@@ -310,22 +419,34 @@ describe('evaluateDods', () => {
   })
 
   describe('DoD-10 and DoD-13 coverage', () => {
-    it('is missing when a screen key has no check, even though every reported screen passes', () => {
-      const lastScreen = 'screen/S34/default/ja/1280'
-      const result = resultOf(evaluateDods(input(withCheck(lastScreen, undefined))), 13)
+    it('is missing when one language and size of one state has no check', () => {
+      const lastShot = 'screen/S34/shear/en/844'
+      const result = resultOf(evaluateDods(input(withCheck(lastShot, undefined))), 13)
+
+      expect(result.verdict).toBe('missing')
+      expect(result.issues).toContainEqual({ code: 'absent', id: lastShot })
+    })
+
+    it('is missing when each screen has only its default Japanese 1280 photograph and an audit item passes', () => {
+      const onlyDefaults = [
+        ...Object.keys(SCREEN_STATES).map((screen) => passingCheck(`screen/${screen}/default/ja/1280`)),
+        passingCheck('audit/sample-0'),
+      ]
+      const result = resultOf(evaluateDods(input([run(onlyDefaults, { runId: 31 })])), 13)
+
+      expect(result.verdict).toBe('missing')
+      expect(result.counts.missing).toBeGreaterThan(Object.keys(SCREEN_STATES).length)
+    })
+
+    it('requires the audit coverage separately', () => {
+      const result = resultOf(evaluateDods(input(withCheck('audit/sample-0', undefined))), 13)
 
       expect(result.verdict).toBe('missing')
       expect(result.counts.missing).toBe(1)
-      expect(result.issues).toContainEqual({
-        code: 'coverage',
-        prefix: 'screen/',
-        found: 33,
-        min: 34,
-        missingKeys: ['S34'],
-      })
+      expect(result.issues).toContainEqual({ code: 'coverage', prefix: 'audit/', found: 0, min: 1 })
     })
 
-    it('accepts many states of one screen and still requires the other screens', () => {
+    it('accepts an extra state of one screen and still requires the listed ones', () => {
       const extra = run(['recipeBook', 'inventory'].map((state) => passingCheck(`screen/S09/${state}/ja/1280`)), { runId: 11 })
 
       expect(verdictOf(input([...allPassingRuns(), extra]), 13)).toBe('pass')
@@ -335,12 +456,6 @@ describe('evaluateDods', () => {
       const runs = [...allPassingRuns(), run([check('screen/S02/extra/en/844', { verdict: 'fail' })], { runId: 12 })]
 
       expect(verdictOf(input(runs), 13)).toBe('fail')
-    })
-
-    it('is missing when no audit check was reported', () => {
-      const result = resultOf(evaluateDods(input(withCheck('audit/sample-0', undefined))), 13)
-
-      expect(result.verdict).toBe('missing')
     })
 
     it('is missing when no audio recording check was reported', () => {
@@ -405,6 +520,25 @@ describe('evaluateDods', () => {
       expect(accept(acceptance([...approvedThenRejected].reverse()))).toBe('fail')
       expect(accept(acceptance(rejectedThenApproved))).toBe('pass')
       expect(accept(acceptance([...rejectedThenApproved].reverse()))).toBe('pass')
+    })
+
+    it('ignores a decision whose time cannot be read, in either order', () => {
+      const unreadable = decision({ decidedAt: 'bad' })
+      const rejection = decision({ state: 'rejected' })
+      const acceptance = (decisions: ReadonlyArray<AcceptanceDecision>): ReleaseAcceptance => ({
+        environment: 'present',
+        candidateVersion: VERSION,
+        decisions,
+      })
+
+      expect(accept(acceptance([unreadable, rejection]))).toBe('fail')
+      expect(accept(acceptance([rejection, unreadable]))).toBe('fail')
+      expect(accept(acceptance([unreadable]))).toBe('missing')
+      expect(resultOf(evaluateDods(input([], { acceptance: acceptance([unreadable]) })), 9).issues).toContainEqual({
+        code: 'unreadable-decision-time',
+        version: VERSION,
+        decidedBy: 'reviewer',
+      })
     })
 
     it('lets a rejection win when an approval and a rejection share a timestamp', () => {

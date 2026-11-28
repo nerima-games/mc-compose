@@ -300,6 +300,50 @@ describe('decodeStatusRun', () => {
     })
   })
 
+  describe('bounds nested arrays before decoding any element', () => {
+    /** An array whose elements throw when read: a decoder that visits them fails the test. */
+    const untouchable = (length: number): ReadonlyArray<unknown> => {
+      const items: unknown[] = new Array(length)
+      for (let index = 0; index < length; index += 1) {
+        Object.defineProperty(items, index, {
+          enumerable: true,
+          get: () => {
+            throw new Error(`element ${index} was decoded`)
+          },
+        })
+      }
+      return items
+    }
+    const withNested = (key: 'steps' | 'evidence', length: number): unknown => ({
+      ...run([]),
+      checks: [{ ...check('ux/1'), [key]: untouchable(length) }],
+    })
+
+    it('rejects too many steps without reading them', () => {
+      const decoded = decodeStatusRun(withNested('steps', MAX_STEPS_PER_CHECK + 1))
+
+      expect(Result.isFailure(decoded) && decoded.failure.message).toContain(`at most ${MAX_STEPS_PER_CHECK}`)
+    })
+
+    it('rejects too much evidence without reading it', () => {
+      const decoded = decodeStatusRun(withNested('evidence', MAX_EVIDENCE_PER_CHECK + 1))
+
+      expect(Result.isFailure(decoded) && decoded.failure.message).toContain(`at most ${MAX_EVIDENCE_PER_CHECK}`)
+    })
+
+    it('names the check whose array is too long', () => {
+      const decoded = decodeStatusRun({ ...run([]), checks: [check('ux/1'), { ...check('ux/2'), steps: untouchable(MAX_STEPS_PER_CHECK + 1) }] })
+
+      expect(Result.isFailure(decoded) && decoded.failure.message).toContain('["checks"][1]["steps"]')
+    })
+
+    it('rejects a million steps at once', () => {
+      const steps = Array.from({ length: 1_000_000 }, () => ({ id: 's', title: 't', atMs: 0, durationMs: 0, verdict: 'pass' }))
+
+      expect(rejects({ ...run([]), checks: [{ ...check('ux/1'), steps }] })).toBe(true)
+    })
+  })
+
   it('names the rule that a rejected file broke', () => {
     const decoded = decodeStatusRun({ ...run([]), commit: 'not-a-sha' })
 

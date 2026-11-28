@@ -3,7 +3,15 @@
  * so a test names only the field it breaks.
  */
 import type { Currency } from '../../scripts/status/dod-rules'
-import { DOD_IDS, DOD_REQUIREMENTS, ORGANIZATION, REPOSITORIES, type DodId } from '../../scripts/status/registry'
+import {
+  DOD_IDS,
+  DOD_REQUIREMENTS,
+  ORGANIZATION,
+  REPOSITORIES,
+  publishersOf,
+  type DodId,
+  type Publisher,
+} from '../../scripts/status/registry'
 import { CHECK_GROUPS, type Check, type CheckGroup, type StatusRun } from '../../scripts/status/schema'
 
 export const NOW: number = Date.parse('2026-12-01T12:00:00Z')
@@ -44,13 +52,25 @@ export const check = (id: string, overrides: Partial<Check> = {}): Check => ({
   ...overrides,
 })
 
+const HOST_NIGHTLY: Publisher = { repo: `${ORGANIZATION}/mc-host-web`, workflow: 'nightly' }
+
+/** The first source the registry allows for the first check that has a fixed publisher; otherwise the host's nightly job. */
+const publisherOf = (checks: ReadonlyArray<Check>): Publisher => {
+  for (const item of checks) {
+    const publisher = publishersOf(item.id)?.[0]
+    if (publisher !== undefined) return publisher
+  }
+  return HOST_NIGHTLY
+}
+
 export const run = (checks: ReadonlyArray<Check>, overrides: Partial<StatusRun> = {}): StatusRun => {
-  const repo = overrides.repo ?? `${ORGANIZATION}/mc-host-web`
+  const publisher = publisherOf(checks)
+  const repo = overrides.repo ?? publisher.repo
   const runId = overrides.runId ?? 100
   return {
     schema: 'status/v1',
     repo,
-    workflow: 'nightly',
+    workflow: publisher.workflow,
     runId,
     runUrl: `https://github.com/${repo}/actions/runs/${runId}`,
     commit: COMMIT,
@@ -65,15 +85,13 @@ export const run = (checks: ReadonlyArray<Check>, overrides: Partial<StatusRun> 
 }
 
 /**
- * Check IDs that satisfy `dod`'s presence rules: every required ID plus one
- * member for each coverage requirement (every screen key, at least one audit).
+ * Check IDs that satisfy `dod`'s presence rules: every required ID plus enough
+ * members for each coverage requirement (at least one audit item).
  */
 export const idsSatisfying = (dod: DodId): ReadonlyArray<string> => {
   const requirement = DOD_REQUIREMENTS[dod]
   const covering = requirement.coverage.flatMap((item) =>
-    item.keys === undefined
-      ? Array.from({ length: item.min }, (_unused, index) => `${item.prefix}sample-${index}`)
-      : item.keys.map((key) => `${item.prefix}${key}/default/ja/1280`),
+    Array.from({ length: item.min }, (_unused, index) => `${item.prefix}sample-${index}`),
   )
   return [...requirement.requiredIds, ...covering]
 }
@@ -84,7 +102,16 @@ export const journeyVideo = { kind: 'video', path: 'journey-full.webm' } as cons
 export const passingCheck = (id: string): Check =>
   check(id, id === 'journey/full' ? { evidence: [journeyVideo] } : {})
 
-/** Runs under which every one of the thirteen DoD passes. `live` checks carry the published version. */
-export const allPassingRuns = (): ReadonlyArray<StatusRun> => [
-  run(DOD_IDS.filter((dod) => dod !== 9).flatMap((dod) => idsSatisfying(dod)).map(passingCheck)),
-]
+/**
+ * Runs under which every one of the thirteen DoD passes, one per publisher the
+ * spec fixes. `live` checks carry the published version.
+ */
+export const allPassingRuns = (): ReadonlyArray<StatusRun> => {
+  const byPublisher = new Map<string, Check[]>()
+  for (const id of DOD_IDS.filter((dod) => dod !== 9).flatMap((dod) => idsSatisfying(dod))) {
+    const publisher = publisherOf([check(id)])
+    const key = `${publisher.repo}#${publisher.workflow}`
+    byPublisher.set(key, [...(byPublisher.get(key) ?? []), passingCheck(id)])
+  }
+  return [...byPublisher.values()].map((checks, index) => run(checks, { runId: 100 + index }))
+}

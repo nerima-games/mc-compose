@@ -12,8 +12,14 @@ import {
   LEDGER_OUT_OF_SCOPE_IDS,
   ORGANIZATION,
   REPOSITORIES,
+  SCREEN_CHECK_IDS,
+  SCREEN_LANGUAGES,
+  SCREEN_STATES,
+  SCREEN_WIDTHS,
   SOURCES,
   classifyCheck,
+  isPublishedBy,
+  publishersOf,
   isRunFromSource,
   type DodId,
 } from '../../scripts/status/registry'
@@ -96,7 +102,7 @@ describe('DOD_REQUIREMENTS', () => {
       10: 8,
       11: 12,
       12: 10,
-      13: 0,
+      13: SCREEN_CHECK_IDS.length,
     }
 
     for (const dod of DOD_IDS) expect(DOD_REQUIREMENTS[dod].requiredIds, `DoD-${dod}`).toHaveLength(counts[dod])
@@ -228,5 +234,89 @@ describe('isRunFromSource', () => {
   it('refuses a file that speaks for another repository or another workflow', () => {
     expect(isRunFromSource({ repo: `${ORGANIZATION}/mc-kernel`, workflow: source.workflow }, source)).toBe(false)
     expect(isRunFromSource({ repo: source.repo, workflow: 'other' }, source)).toBe(false)
+  })
+})
+
+describe('SCREEN_STATES', () => {
+  it('lists S01 to S34, each with at least one state', () => {
+    const screens = Array.from({ length: 34 }, (_unused, index) => `S${String(index + 1).padStart(2, '0')}`)
+
+    expect(Object.keys(SCREEN_STATES)).toEqual(screens)
+    for (const [screen, states] of Object.entries(SCREEN_STATES)) {
+      expect(states.length, screen).toBeGreaterThan(0)
+      expect(new Set(states).size, screen).toBe(states.length)
+      for (const state of states) expect(state, `${screen}/${state}`).toMatch(/^[A-Za-z][A-Za-z0-9]*$/)
+    }
+  })
+
+  it('expands to every state in both languages and both sizes, with no duplicate ID', () => {
+    const states = Object.values(SCREEN_STATES).flat().length
+
+    expect(SCREEN_LANGUAGES).toEqual(['ja', 'en'])
+    expect(SCREEN_WIDTHS).toEqual(['1280', '844'])
+    expect(SCREEN_CHECK_IDS).toHaveLength(states * 4)
+    expect(new Set(SCREEN_CHECK_IDS).size).toBe(SCREEN_CHECK_IDS.length)
+    expect(SCREEN_CHECK_IDS).toContain('screen/S09/default/ja/1280')
+    expect(SCREEN_CHECK_IDS).toContain('screen/S33/fishing/en/844')
+  })
+
+  it('pins the provisional state count, so adding or dropping a state is a visible change', () => {
+    expect(Object.values(SCREEN_STATES).flat()).toHaveLength(92)
+  })
+})
+
+describe('publishersOf', () => {
+  const host = (workflow: string): { repo: string; workflow: string } => ({ repo: `${ORGANIZATION}/mc-host-web`, workflow })
+
+  it('lets only the host release job publish journey/full', () => {
+    expect(publishersOf('journey/full')).toEqual([host('release')])
+    expect(isPublishedBy('journey/full', host('release'))).toBe(true)
+    expect(isPublishedBy('journey/full', host('nightly'))).toBe(false)
+    expect(isPublishedBy('journey/full', { repo: `${ORGANIZATION}/mc-audio`, workflow: 'ci' })).toBe(false)
+  })
+
+  it('decides a specific ID before its namespace', () => {
+    expect(publishersOf('journey/J7')).toContainEqual(host('nightly'))
+    expect(publishersOf('journey/J7')).not.toContainEqual(host('deploy'))
+  })
+
+  it('fixes the publisher of the checks that feed a DoD whose spec table names one', () => {
+    expect(publishersOf('live/smoke')).toEqual([host('deploy')])
+    expect(publishersOf('audio/bgm/night')).toEqual([{ repo: `${ORGANIZATION}/mc-audio`, workflow: 'ci' }])
+    expect(publishersOf('progression/first-iron')).toEqual([{ repo: `${ORGANIZATION}/mc-sim`, workflow: 'nightly' }])
+    expect(publishersOf('ci/mc-kernel/main')?.every((publisher) => publisher.repo === `${ORGANIZATION}/mc-compose`)).toBe(true)
+    expect(publishersOf('perf/R1')).toContainEqual(host('t0'))
+  })
+
+  it('leaves the publisher open where 55 §3.1 names none', () => {
+    for (const id of ['ledger/perf/fr-2.2', 'content/blocks', 'catalog/S01', 'audit/high-1', 'audio/oscillator/main-path']) {
+      expect(publishersOf(id), id).toBeUndefined()
+      expect(isPublishedBy(id, { repo: `${ORGANIZATION}/mc-kernel`, workflow: 'ci' }), id).toBe(true)
+    }
+  })
+
+  it('gives every fixed publisher a source that exists in SOURCES', () => {
+    const published = (repo: string, workflow: string): boolean =>
+      SOURCES.some((source) => source.repo === repo && source.workflow === workflow)
+    const ids = [
+      'journey/full',
+      'journey/J1',
+      'ux/1',
+      'screen/S01/firstRun/ja/1280',
+      'feature/G1',
+      'perf/R1',
+      'perf/P01',
+      'live/smoke',
+      'audio/recording/a',
+      'audio/bgm/day',
+      'progression/bed',
+      'compose/C01',
+    ]
+    for (const id of ids) {
+      for (const publisher of publishersOf(id) ?? []) {
+        // `ci/*` is built by the aggregator from the API, so its publisher has no file to fetch.
+        expect(published(publisher.repo, publisher.workflow), `${id} from ${publisher.repo}#${publisher.workflow}`).toBe(true)
+      }
+    }
   })
 })
